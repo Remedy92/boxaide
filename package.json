@@ -1,0 +1,52 @@
+{
+  "name": "mailmux",
+  "version": "0.1.0",
+  "description": "Free self-host multi-mailbox agentic inbox with web UI + MCP for any agent",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "mailmux": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js serve",
+    "dev": "tsx src/cli.ts serve",
+    "mcp": "tsx src/cli.ts mcp",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "mcp",
+    "email",
+    "imap",
+    "smtp",
+    "agent",
+    "inbox"
+  ],
+  "dependencies": {
+    "@hono/node-server": "^2.1.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "better-sqlite3": "^13.0.3",
+    "hono": "^4.13.1",
+    "imapflow": "^1.6.6",
+    "mailparser": "^3.9.15",
+    "nodemailer": "^9.0.5",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^26.2.0",
+    "@types/nodemailer": "^8.0.1",
+    "tsx": "^4.23.11",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true,
+    "esbuild@0.28.2": true
+  }
+}
