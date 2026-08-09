@@ -1,23 +1,36 @@
 import { ImapFlow } from "imapflow";
+import type { MessageStructureObject } from "imapflow";
 import nodemailer from "nodemailer";
-import { parseRfc822 } from "./mime.js";
+import { parseRfc822, formatAddress, stripHtml } from "./mime.js";
 import type {
   AccountCredentials,
   ConnectionTestResult,
   ListMessagesOpts,
+  MailFolder,
   MailMessage,
   MailMessageSummary,
   MailProvider,
+  ProviderAccount,
   SearchMessagesOpts,
   SendMessageInput,
   SendResult,
 } from "./types.js";
 
+/** Idle time before a pooled IMAP connection is logged out. */
+const IDLE_MS = 60_000;
+/** Guards against a hung server holding a request open forever. */
+const CONNECT_TIMEOUT_MS = 15_000;
+const GREETING_TIMEOUT_MS = 10_000;
+const SOCKET_TIMEOUT_MS = 60_000;
+/** Bytes of a body part fetched per message to build a list snippet. */
+const SNIPPET_BYTES = 1024;
+
 function makeId(accountId: string, folder: string, uid: number): string {
   return `${accountId}:${encodeURIComponent(folder)}:${uid}`;
 }
 
-function parseId(
+/** Exported for tests: the inverse of makeId, tolerant of a bare uid. */
+export function parseId(
   messageId: string,
   accountId: string,
 ): { folder: string; uid: number } | null {
@@ -38,40 +51,136 @@ function parseId(
   return { folder, uid };
 }
 
+/** Envelope address -> display string. Empty when absent. */
 function addr(value: unknown): string {
-  if (!value) return "";
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) {
-    return value
-      .map((v) => {
-        if (typeof v === "string") return v;
-        if (v && typeof v === "object" && "address" in v) {
-          const o = v as { name?: string; address?: string };
-          return o.name ? `${o.name} <${o.address}>` : (o.address ?? "");
-        }
-        return String(v);
-      })
-      .filter(Boolean)
-      .join(", ");
-  }
-  if (typeof value === "object" && value && "address" in value) {
-    const o = value as { name?: string; address?: string };
-    return o.name ? `${o.name} <${o.address}>` : (o.address ?? "");
-  }
-  return String(value);
+  return formatAddress(value) ?? "";
 }
 
-async function withImap<T>(
-  creds: AccountCredentials,
-  fn: (client: ImapFlow) => Promise<T>,
-): Promise<T> {
-  const client = new ImapFlow({
+// ---------------------------------------------------------------------------
+// Connection pool
+//
+// One authenticated ImapFlow client per account, reused across calls and
+// logged out after IDLE_MS of inactivity. Without this every operation paid a
+// full TCP + TLS + LOGIN, which a debounced search turns into a login storm
+// that Gmail throttles.
+// ---------------------------------------------------------------------------
+
+type Pooled = {
+  client: ImapFlow;
+  timer: ReturnType<typeof setTimeout> | null;
+  busy: number;
+};
+
+const pool = new Map<string, Pooled>();
+const connecting = new Map<string, Promise<Pooled>>();
+
+function newClient(creds: AccountCredentials): ImapFlow {
+  return new ImapFlow({
     host: creds.imapHost,
     port: creds.imapPort,
     secure: creds.imapSecure,
     auth: { user: creds.username, pass: creds.password },
     logger: false,
+    connectionTimeout: CONNECT_TIMEOUT_MS,
+    greetingTimeout: GREETING_TIMEOUT_MS,
+    socketTimeout: SOCKET_TIMEOUT_MS,
   });
+}
+
+function clearIdle(entry: Pooled): void {
+  if (entry.timer) {
+    clearTimeout(entry.timer);
+    entry.timer = null;
+  }
+}
+
+function scheduleIdle(key: string, entry: Pooled): void {
+  clearIdle(entry);
+  if (entry.busy > 0 || pool.get(key) !== entry) return;
+  entry.timer = setTimeout(() => {
+    if (entry.busy > 0 || pool.get(key) !== entry) return;
+    pool.delete(key);
+    entry.client.logout().catch(() => entry.client.close());
+  }, IDLE_MS);
+  entry.timer.unref?.();
+}
+
+function drop(key: string, entry: Pooled): void {
+  clearIdle(entry);
+  if (pool.get(key) === entry) pool.delete(key);
+  try {
+    entry.client.close();
+  } catch {
+    // already gone
+  }
+}
+
+async function acquire(
+  key: string,
+  creds: AccountCredentials,
+): Promise<Pooled> {
+  const existing = pool.get(key);
+  if (existing) {
+    if (existing.client.usable) return existing;
+    drop(key, existing);
+  }
+  const inFlight = connecting.get(key);
+  // Concurrent callers share one connect instead of opening a second session.
+  if (inFlight) return inFlight;
+  const started = (async () => {
+    const client = newClient(creds);
+    await client.connect();
+    const entry: Pooled = { client, timer: null, busy: 0 };
+    client.on("close", () => {
+      if (pool.get(key) === entry) pool.delete(key);
+      clearIdle(entry);
+    });
+    client.on("error", () => {
+      /* surfaced on the awaited command; keeps the process alive */
+    });
+    pool.set(key, entry);
+    return entry;
+  })().finally(() => {
+    connecting.delete(key);
+  });
+  connecting.set(key, started);
+  return started;
+}
+
+/** Run against the pooled client for `key`, reconnecting once if it dropped. */
+async function withImap<T>(
+  key: string,
+  creds: AccountCredentials,
+  fn: (client: ImapFlow) => Promise<T>,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const entry = await acquire(key, creds);
+    entry.busy += 1;
+    clearIdle(entry);
+    try {
+      return await fn(entry.client);
+    } catch (err) {
+      lastErr = err;
+      if (attempt === 0 && !entry.client.usable) {
+        drop(key, entry);
+        continue;
+      }
+      throw err;
+    } finally {
+      entry.busy -= 1;
+      scheduleIdle(key, entry);
+    }
+  }
+  throw lastErr;
+}
+
+/** One-shot connection for calls made before an account exists. */
+async function withTempImap<T>(
+  creds: AccountCredentials,
+  fn: (client: ImapFlow) => Promise<T>,
+): Promise<T> {
+  const client = newClient(creds);
   await client.connect();
   try {
     return await fn(client);
@@ -82,6 +191,136 @@ async function withImap<T>(
       client.close();
     }
   }
+}
+
+/** Close every pooled connection. Call on shutdown. */
+export async function closeAll(): Promise<void> {
+  const entries = [...pool.entries()];
+  pool.clear();
+  connecting.clear();
+  await Promise.all(
+    entries.map(async ([, entry]) => {
+      clearIdle(entry);
+      try {
+        await entry.client.logout();
+      } catch {
+        entry.client.close();
+      }
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Body structure helpers
+// ---------------------------------------------------------------------------
+
+type StructureNode = {
+  part?: string;
+  type?: string;
+  encoding?: string;
+  disposition?: string;
+  dispositionParameters?: Record<string, string>;
+  parameters?: Record<string, string>;
+  childNodes?: unknown[];
+};
+
+function asNodes(children: unknown): StructureNode[] {
+  return Array.isArray(children) ? (children as StructureNode[]) : [];
+}
+
+/**
+ * True only for real attachments. A plain text+html message has two child
+ * nodes and no attachment, so child count alone is meaningless.
+ */
+function structureHasAttachments(node: StructureNode | undefined): boolean {
+  if (!node) return false;
+  const disposition = node.disposition?.toLowerCase();
+  if (disposition === "attachment") return true;
+  const filename =
+    node.dispositionParameters?.filename ?? node.parameters?.name;
+  if (disposition === "inline" && filename) return true;
+  return asNodes(node.childNodes).some((child) =>
+    structureHasAttachments(child),
+  );
+}
+
+/** First displayable text part — text/plain wins, text/html is the fallback. */
+function pickTextPart(node: StructureNode | undefined): StructureNode | null {
+  if (!node) return null;
+  const children = asNodes(node.childNodes);
+  if (children.length === 0) {
+    const type = node.type?.toLowerCase() ?? "";
+    if (!type.startsWith("text/")) return null;
+    if (node.disposition?.toLowerCase() === "attachment") return null;
+    return node;
+  }
+  let html: StructureNode | null = null;
+  for (const child of children) {
+    const found = pickTextPart(child);
+    if (!found) continue;
+    if ((found.type?.toLowerCase() ?? "") === "text/plain") return found;
+    html = html ?? found;
+  }
+  return html;
+}
+
+function decodeQuotedPrintable(input: string): string {
+  return input
+    .replace(/=(?:\r\n|\n|\r)/g, "")
+    .replace(/=([0-9A-Fa-f]{2})/g, (_m, hex: string) =>
+      String.fromCharCode(parseInt(hex, 16)),
+    );
+}
+
+function bufferEncoding(charset?: string): BufferEncoding {
+  const cs = charset?.toLowerCase() ?? "";
+  if (cs === "iso-8859-1" || cs === "latin1" || cs === "windows-1252") {
+    return "latin1";
+  }
+  if (cs === "us-ascii" || cs === "ascii") return "ascii";
+  return "utf8";
+}
+
+
+/** Decode a truncated body part into a one-line preview. */
+function previewFromPart(
+  part: StructureNode,
+  raw: Buffer,
+  alreadyDecoded: boolean,
+): string {
+  const charset = bufferEncoding(part.parameters?.charset);
+  const encoding = part.encoding?.toLowerCase();
+  let text: string;
+  if (alreadyDecoded || !encoding || encoding === "7bit" || encoding === "8bit"
+    || encoding === "binary") {
+    text = raw.toString(charset);
+  } else if (encoding === "base64") {
+    // Truncated base64: drop the trailing partial quantum.
+    const clean = raw.toString("ascii").replace(/[^A-Za-z0-9+/=]/g, "");
+    const usable = clean.slice(0, clean.length - (clean.length % 4));
+    text = Buffer.from(usable, "base64").toString(charset);
+  } else if (encoding === "quoted-printable") {
+    text = decodeQuotedPrintable(raw.toString("ascii"));
+  } else {
+    text = raw.toString(charset);
+  }
+  if ((part.type?.toLowerCase() ?? "") === "text/html") text = stripHtml(text);
+  return text.replace(/\s+/g, " ").trim().slice(0, 140);
+}
+
+function lookupPart(
+  parts: Map<string, Buffer> | undefined,
+  key: string,
+): Buffer | undefined {
+  if (!parts) return undefined;
+  return (
+    parts.get(key) ?? parts.get(key.toLowerCase()) ?? parts.get(key.toUpperCase())
+  );
+}
+
+function partKey(part: StructureNode): string {
+  // A single-part message has no part number; BODY[1] is its text.
+  return part.part && part.part.length > 0 ? part.part : "1";
 }
 
 function envelopeToSummary(
@@ -100,11 +339,13 @@ function envelopeToSummary(
     bodyStructure?: { childNodes?: unknown[]; disposition?: string };
     source?: Buffer;
   },
+  snippetOverride?: string,
 ): MailMessageSummary {
   const env = source.envelope ?? {};
   const subject = env.subject ?? "(no subject)";
   const snippet =
-    source.source?.toString("utf8").replace(/\s+/g, " ").slice(0, 140) ??
+    snippetOverride ||
+    source.source?.toString("utf8").replace(/\s+/g, " ").slice(0, 140) ||
     subject;
   return {
     id: makeId(accountId, folder, source.uid),
@@ -120,11 +361,91 @@ function envelopeToSummary(
       : new Date().toISOString(),
     snippet,
     seen: source.flags?.has("\\Seen") ?? false,
-    hasAttachments: Boolean(
-      source.bodyStructure?.childNodes &&
-        (source.bodyStructure.childNodes as unknown[]).length > 1,
+    hasAttachments: structureHasAttachments(
+      source.bodyStructure as StructureNode | undefined,
     ),
   };
+}
+
+type FetchedHead = {
+  uid: number;
+  envelope?: {
+    messageId?: string;
+    from?: unknown;
+    to?: unknown;
+    subject?: string;
+    date?: Date | string;
+  };
+  flags?: Set<string>;
+  bodyStructure?: MessageStructureObject;
+};
+
+/**
+ * Second, bounded pass: fetch only the leading bytes of each message's text
+ * part so the list view shows a real snippet instead of the subject again.
+ */
+async function attachSnippets(
+  client: ImapFlow,
+  heads: FetchedHead[],
+): Promise<Map<number, string>> {
+  const snippets = new Map<number, string>();
+  const wanted = new Map<number, StructureNode>();
+  const keys = new Set<string>();
+  for (const head of heads) {
+    const part = pickTextPart(head.bodyStructure as StructureNode | undefined);
+    if (!part) continue;
+    wanted.set(head.uid, part);
+    keys.add(partKey(part));
+  }
+  if (wanted.size === 0) return snippets;
+  const uids = [...wanted.keys()];
+  for await (const msg of client.fetch(
+    uids,
+    {
+      uid: true,
+      bodyParts: [...keys].map((key) => ({ key, maxLength: SNIPPET_BYTES })),
+    },
+    { uid: true },
+  )) {
+    const part = wanted.get(msg.uid);
+    if (!part) continue;
+    const key = partKey(part);
+    const raw = lookupPart(msg.bodyParts, key);
+    if (!raw || raw.length === 0) continue;
+    const text = previewFromPart(part, raw, msg.binaryParts?.has(key) ?? false);
+    if (text) snippets.set(msg.uid, text);
+  }
+  return snippets;
+}
+
+/**
+ * Sequence-number window for the newest `limit` messages, skipping `offset`
+ * newer ones. Null when the window holds nothing — an empty mailbox, or an
+ * offset that has already walked past the oldest message.
+ */
+export function uidWindow(
+  exists: number,
+  limit: number,
+  offset = 0,
+): { start: number; end: number } | null {
+  if (exists <= 0 || limit <= 0) return null;
+  const end = exists - Math.max(0, offset);
+  if (end < 1) return null;
+  const start = Math.max(1, end - limit + 1);
+  return { start, end };
+}
+
+function sentMailboxPath(
+  boxes: { name: string; path: string; specialUse?: string }[],
+): string | null {
+  const special = boxes.find((b) => b.specialUse === "\\Sent");
+  if (special) return special.path;
+  const byName = boxes.find((b) =>
+    /^(sent|sent items|sent mail|sent messages|gesendet|envoy(é|e)s?)$/i.test(
+      b.name,
+    ),
+  );
+  return byName?.path ?? null;
 }
 
 export class ImapSmtpProvider implements MailProvider {
@@ -132,7 +453,7 @@ export class ImapSmtpProvider implements MailProvider {
     creds: AccountCredentials,
   ): Promise<ConnectionTestResult> {
     try {
-      await withImap(creds, async (client) => {
+      await withTempImap(creds, async (client) => {
         await client.mailboxOpen("INBOX", { readOnly: true });
       });
       return { ok: true };
@@ -145,22 +466,21 @@ export class ImapSmtpProvider implements MailProvider {
   }
 
   async listMessages(
-    accountId: string,
-    creds: AccountCredentials,
+    account: ProviderAccount,
     opts: ListMessagesOpts = {},
   ): Promise<MailMessageSummary[]> {
+    const accountId = account.id;
     const folder = opts.folder ?? "INBOX";
     const limit = opts.limit ?? 50;
-    return withImap(creds, async (client) => {
+    return withImap(accountId, account.creds, async (client) => {
       const lock = await client.getMailboxLock(folder, { readOnly: true });
       try {
         const mb = client.mailbox;
-        if (!mb || mb.exists === 0) return [];
-        const start = Math.max(1, mb.exists - limit - (opts.offset ?? 0) + 1);
-        const end = Math.max(1, mb.exists - (opts.offset ?? 0));
-        if (start > end) return [];
-        const range = `${start}:${end}`;
-        const out: MailMessageSummary[] = [];
+        if (!mb) return [];
+        const window = uidWindow(mb.exists, limit, opts.offset ?? 0);
+        if (!window) return [];
+        const range = `${window.start}:${window.end}`;
+        const heads: FetchedHead[] = [];
         for await (const msg of client.fetch(range, {
           uid: true,
           envelope: true,
@@ -168,9 +488,14 @@ export class ImapSmtpProvider implements MailProvider {
           bodyStructure: true,
         })) {
           if (opts.unreadOnly && msg.flags?.has("\\Seen")) continue;
-          out.push(envelopeToSummary(accountId, folder, msg));
+          heads.push(msg);
         }
-        return out.reverse();
+        const snippets = await attachSnippets(client, heads);
+        return heads
+          .map((msg) =>
+            envelopeToSummary(accountId, folder, msg, snippets.get(msg.uid)),
+          )
+          .reverse();
       } finally {
         lock.release();
       }
@@ -178,29 +503,38 @@ export class ImapSmtpProvider implements MailProvider {
   }
 
   async searchMessages(
-    accountId: string,
-    creds: AccountCredentials,
+    account: ProviderAccount,
     opts: SearchMessagesOpts,
   ): Promise<MailMessageSummary[]> {
+    const accountId = account.id;
     const folder = opts.folder ?? "INBOX";
     const limit = opts.limit ?? 50;
-    return withImap(creds, async (client) => {
+    return withImap(accountId, account.creds, async (client) => {
       const lock = await client.getMailboxLock(folder, { readOnly: true });
       try {
         // IMAP TEXT search — provider-dependent quality
         const uids = await client.search({ text: opts.query }, { uid: true });
         if (!uids || uids.length === 0) return [];
         const slice = uids.slice(-limit);
-        const out: MailMessageSummary[] = [];
-        for await (const msg of client.fetch(slice, {
-          uid: true,
-          envelope: true,
-          flags: true,
-          bodyStructure: true,
-        }, { uid: true })) {
-          out.push(envelopeToSummary(accountId, folder, msg));
+        const heads: FetchedHead[] = [];
+        for await (const msg of client.fetch(
+          slice,
+          {
+            uid: true,
+            envelope: true,
+            flags: true,
+            bodyStructure: true,
+          },
+          { uid: true },
+        )) {
+          heads.push(msg);
         }
-        return out.reverse();
+        const snippets = await attachSnippets(client, heads);
+        return heads
+          .map((msg) =>
+            envelopeToSummary(accountId, folder, msg, snippets.get(msg.uid)),
+          )
+          .reverse();
       } finally {
         lock.release();
       }
@@ -208,17 +542,17 @@ export class ImapSmtpProvider implements MailProvider {
   }
 
   async getMessage(
-    accountId: string,
-    creds: AccountCredentials,
+    account: ProviderAccount,
     messageId: string,
     folderHint?: string,
   ): Promise<MailMessage | null> {
+    const accountId = account.id;
     const parsed = parseId(messageId, accountId);
     const folder = parsed?.folder ?? folderHint ?? "INBOX";
     const uid = parsed?.uid;
     if (uid == null) return null;
 
-    return withImap(creds, async (client) => {
+    return withImap(accountId, account.creds, async (client) => {
       const lock = await client.getMailboxLock(folder, { readOnly: true });
       try {
         let found: MailMessage | null = null;
@@ -249,19 +583,14 @@ export class ImapSmtpProvider implements MailProvider {
   }
 
   async sendMessage(
-    accountId: string,
-    creds: AccountCredentials,
+    account: ProviderAccount,
     input: SendMessageInput,
   ): Promise<SendResult> {
-    void accountId;
-    const transport = nodemailer.createTransport({
-      host: creds.smtpHost,
-      port: creds.smtpPort,
-      secure: creds.smtpSecure,
-      auth: { user: creds.username, pass: creds.password },
-    });
-    const info = await transport.sendMail({
-      from: creds.username,
+    const creds = account.creds;
+    const mail = {
+      // The login name and the mailbox address differ on Fastmail and custom
+      // domains, so the account's own address is the only correct From.
+      from: account.email,
       to: input.to,
       cc: input.cc,
       bcc: input.bcc,
@@ -270,11 +599,85 @@ export class ImapSmtpProvider implements MailProvider {
       html: input.html,
       inReplyTo: input.inReplyTo,
       references: input.references,
+    };
+
+    // Compose once so the bytes that go over SMTP are the exact bytes we
+    // APPEND to Sent.
+    const composed = await nodemailer
+      .createTransport({ streamTransport: true, buffer: true, newline: "\r\n" })
+      .sendMail(mail);
+    const raw = Buffer.isBuffer(composed.message)
+      ? composed.message
+      : Buffer.from(String(composed.message));
+
+    const transport = nodemailer.createTransport({
+      host: creds.smtpHost,
+      port: creds.smtpPort,
+      secure: creds.smtpSecure,
+      auth: { user: creds.username, pass: creds.password },
     });
+    const info = await transport.sendMail({
+      envelope: composed.envelope,
+      raw,
+    });
+
+    // Gmail copies SMTP sends into Sent by itself; Fastmail and generic IMAP
+    // do not. A failed copy must never fail a delivered message.
+    await this.appendToSent(account, raw).catch((err: unknown) => {
+      console.warn(
+        `[imap] Sent copy failed for ${account.email}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+
     return {
-      messageId: info.messageId ?? "",
+      messageId: info.messageId ?? composed.messageId ?? "",
       accepted: (info.accepted ?? []).map(String),
     };
+  }
+
+  private async appendToSent(
+    account: ProviderAccount,
+    raw: Buffer,
+  ): Promise<void> {
+    await withImap(account.id, account.creds, async (client) => {
+      const boxes = await client.list();
+      const path = sentMailboxPath(boxes);
+      if (!path) throw new Error("no Sent mailbox found");
+      await client.append(path, raw, ["\\Seen"], new Date());
+    });
+  }
+
+  async markRead(
+    account: ProviderAccount,
+    messageId: string,
+    seen: boolean,
+  ): Promise<boolean> {
+    const parsed = parseId(messageId, account.id);
+    if (!parsed) return false;
+    return withImap(account.id, account.creds, async (client) => {
+      // Writable lock: flag changes need a read-write mailbox.
+      const lock = await client.getMailboxLock(parsed.folder);
+      try {
+        const uid = String(parsed.uid);
+        return seen
+          ? await client.messageFlagsAdd(uid, ["\\Seen"], { uid: true })
+          : await client.messageFlagsRemove(uid, ["\\Seen"], { uid: true });
+      } finally {
+        lock.release();
+      }
+    });
+  }
+
+  async listFolders(account: ProviderAccount): Promise<MailFolder[]> {
+    return withImap(account.id, account.creds, async (client) => {
+      const boxes = await client.list();
+      return boxes.map((b) => ({
+        name: b.name,
+        path: b.path,
+        specialUse: b.specialUse,
+      }));
+    });
   }
 }
 
@@ -345,5 +748,6 @@ export async function messageFromImapSource(
     messageId: summary.messageId || body.messageId,
     date: summary.date || body.date || new Date().toISOString(),
     snippet: body.bodyText.slice(0, 140) || summary.snippet,
+    references: body.references,
   };
 }

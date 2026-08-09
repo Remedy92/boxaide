@@ -8,13 +8,31 @@ import type { AppConfig } from "./config.js";
 import { loadConfig } from "./config.js";
 import { Store } from "./db/store.js";
 import { FixtureProvider } from "./provider/fixture.js";
-import { ImapSmtpProvider } from "./provider/imap-smtp.js";
+import { ImapSmtpProvider, closeAll } from "./provider/imap-smtp.js";
 import { MailService } from "./mail/service.js";
-import { createApi } from "./api/routes.js";
+import {
+  createApi,
+  authFailure,
+  isAllowedOrigin,
+  isLocalHostHeader,
+} from "./api/routes.js";
 import { handleMcpJsonRpc } from "./mcp/server.js";
 import type { MailProvider } from "./provider/types.js";
 
+export {
+  isLocalHostHeader,
+  isAllowedOrigin,
+  tokensMatch,
+} from "./api/routes.js";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+type JsonRpcMessage = {
+  jsonrpc?: string;
+  id?: string | number | null;
+  method?: string;
+  params?: unknown;
+};
 
 export type Runtime = {
   config: AppConfig;
@@ -57,12 +75,14 @@ export function createRuntime(
 
   // Localhost-only bootstrap so the web UI can pick up the token without copy-paste
   app.get("/api/local-bootstrap", (c) => {
-    const host = c.req.header("host") ?? "";
-    const isLocal =
-      host.startsWith("127.0.0.1") ||
-      host.startsWith("localhost") ||
-      host.startsWith("[::1]");
-    if (!isLocal) return c.json({ error: "localhost only" }, 403);
+    // This handler is registered before the /api/* auth middleware, so it
+    // carries its own Origin guard.
+    if (!isAllowedOrigin(c.req.header("origin"))) {
+      return c.json({ error: "forbidden origin" }, 403);
+    }
+    if (!isLocalHostHeader(c.req.header("host"))) {
+      return c.json({ error: "localhost only" }, 403);
+    }
     return c.json({
       token: config.bearerToken,
       fixture: config.fixtureMode,
@@ -76,13 +96,21 @@ export function createRuntime(
 
   // MCP over HTTP (JSON-RPC POST) — same auth as API
   app.post("/mcp", async (c) => {
-    const header = c.req.header("authorization") ?? "";
-    const bearer = header.startsWith("Bearer ") ? header.slice(7) : "";
-    const q = c.req.query("token") ?? "";
-    if (bearer !== config.bearerToken && q !== config.bearerToken) {
-      return c.json({ error: "unauthorized" }, 401);
+    const failure = authFailure(c, config.bearerToken);
+    if (failure) return failure;
+    let body: JsonRpcMessage | JsonRpcMessage[];
+    try {
+      body = await c.req.json<JsonRpcMessage | JsonRpcMessage[]>();
+    } catch {
+      return c.json(
+        {
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32700, message: "Parse error" },
+        },
+        400,
+      );
     }
-    const body = await c.req.json();
     const messages = Array.isArray(body) ? body : [body];
     const results = [];
     for (const msg of messages) {
@@ -95,12 +123,8 @@ export function createRuntime(
 
   // Agent connect snippet
   app.get("/api/agent-connect", (c) => {
-    const header = c.req.header("authorization") ?? "";
-    const bearer = header.startsWith("Bearer ") ? header.slice(7) : "";
-    const q = c.req.query("token") ?? "";
-    if (bearer !== config.bearerToken && q !== config.bearerToken) {
-      return c.json({ error: "unauthorized" }, 401);
-    }
+    const failure = authFailure(c, config.bearerToken);
+    if (failure) return failure;
     const base = `http://${config.host}:${config.port}`;
     return c.json({
       mcpHttp: {
@@ -167,7 +191,7 @@ function resolveWebRoot(): string {
 
 export async function startServer(
   overrides: Partial<AppConfig> = {},
-): Promise<{ runtime: Runtime; stop: () => void }> {
+): Promise<{ runtime: Runtime; stop: () => Promise<void> }> {
   const runtime = createRuntime(overrides);
   const server = serve({
     fetch: runtime.app.fetch,
@@ -176,9 +200,10 @@ export async function startServer(
   });
   return {
     runtime,
-    stop: () => {
+    stop: async () => {
       server.close();
       runtime.store.close();
+      await closeAll();
     },
   };
 }

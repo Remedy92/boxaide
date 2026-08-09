@@ -6,6 +6,11 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { MailService } from "../mail/service.js";
 
+const PROTOCOL_VERSION = "2024-11-05";
+
+const MESSAGE_ID_DESC =
+  "Message id from messages_list/messages_search, format 'accountId:folder:uid'.";
+
 const TOOLS = [
   {
     name: "accounts_list",
@@ -19,7 +24,7 @@ const TOOLS = [
   {
     name: "messages_list",
     description:
-      "List messages from one account (alias/id) or all accounts. Unified inbox when account is 'all'.",
+      "List message summaries from one account (alias/id) or all accounts. Unified inbox when account is 'all'. Returns { messages, errors }; a non-empty errors array means some accounts failed and the list is incomplete.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -29,7 +34,11 @@ const TOOLS = [
           default: "all",
         },
         limit: { type: "number", default: 25 },
-        folder: { type: "string", default: "INBOX" },
+        folder: {
+          type: "string",
+          description: "Folder path from folders_list.",
+          default: "INBOX",
+        },
         unreadOnly: { type: "boolean", default: false },
       },
       additionalProperties: false,
@@ -37,7 +46,8 @@ const TOOLS = [
   },
   {
     name: "messages_search",
-    description: "Search messages by free-text query across one or all accounts.",
+    description:
+      "Search message summaries by free-text query across one or all accounts. Returns { messages, errors }; a non-empty errors array means the result is incomplete.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -51,12 +61,12 @@ const TOOLS = [
   },
   {
     name: "message_get",
-    description: "Read a full message body by account and message id.",
+    description: "Read one full message, including body, by account and message id.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        account: { type: "string" },
-        messageId: { type: "string" },
+        account: { type: "string", description: "Account alias or id." },
+        messageId: { type: "string", description: MESSAGE_ID_DESC },
       },
       required: ["account", "messageId"],
       additionalProperties: false,
@@ -65,7 +75,7 @@ const TOOLS = [
   {
     name: "message_send",
     description:
-      "Send an email from a connected account. Requires explicit user confirmation in the agent client.",
+      "Send an email from a connected account. To reply in-thread, set inReplyTo and references from the Message-ID header of the message you answer. Requires explicit user confirmation in the agent client.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -76,12 +86,56 @@ const TOOLS = [
         html: { type: "string" },
         cc: { type: "string" },
         bcc: { type: "string" },
+        inReplyTo: {
+          type: "string",
+          description:
+            "Message-ID header of the message being replied to, e.g. '<abc@host>'. Not the accountId:folder:uid id.",
+        },
+        references: {
+          type: "string",
+          description:
+            "Space-separated Message-ID chain of the thread, oldest first.",
+        },
       },
       required: ["account", "to", "subject", "text"],
       additionalProperties: false,
     },
   },
+  {
+    name: "message_mark_read",
+    description:
+      "Set or clear the read (\\Seen) flag on one message. Returns { updated: false } when the message is gone.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        account: { type: "string", description: "Account alias or id." },
+        messageId: { type: "string", description: MESSAGE_ID_DESC },
+        seen: {
+          type: "boolean",
+          description: "true marks read, false marks unread.",
+          default: true,
+        },
+      },
+      required: ["account", "messageId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "folders_list",
+    description:
+      "List the mail folders of one account. Use a returned path as the folder argument of messages_list.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        account: { type: "string", description: "Account alias or id." },
+      },
+      required: ["account"],
+      additionalProperties: false,
+    },
+  },
 ];
+
+const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
 
 export function createMcpServer(mail: MailService): Server {
   const server = new Server(
@@ -127,24 +181,27 @@ async function dispatch(
   switch (name) {
     case "accounts_list":
       return { accounts: mail.listAccounts() };
-    case "messages_list":
-      return {
-        messages: await mail.listMessages(
-          String(args.account ?? "all"),
-          {
-            limit: Number(args.limit ?? 25),
-            folder: args.folder ? String(args.folder) : undefined,
-            unreadOnly: Boolean(args.unreadOnly),
-          },
-        ),
-      };
-    case "messages_search":
-      return {
-        messages: await mail.searchMessages(String(args.account ?? "all"), {
+    case "messages_list": {
+      const { messages, errors } = await mail.listMessages(
+        String(args.account ?? "all"),
+        {
+          limit: Number(args.limit ?? 25),
+          folder: args.folder ? String(args.folder) : undefined,
+          unreadOnly: Boolean(args.unreadOnly),
+        },
+      );
+      return errors.length ? { messages, errors } : { messages };
+    }
+    case "messages_search": {
+      const { messages, errors } = await mail.searchMessages(
+        String(args.account ?? "all"),
+        {
           query: String(args.query ?? ""),
           limit: Number(args.limit ?? 25),
-        }),
-      };
+        },
+      );
+      return errors.length ? { messages, errors } : { messages };
+    }
     case "message_get": {
       const message = await mail.getMessage(
         String(args.account),
@@ -162,8 +219,20 @@ async function dispatch(
           html: args.html ? String(args.html) : undefined,
           cc: args.cc ? String(args.cc) : undefined,
           bcc: args.bcc ? String(args.bcc) : undefined,
+          inReplyTo: args.inReplyTo ? String(args.inReplyTo) : undefined,
+          references: args.references ? String(args.references) : undefined,
         }),
       };
+    case "message_mark_read":
+      return {
+        updated: await mail.markRead(
+          String(args.account),
+          String(args.messageId),
+          args.seen === undefined ? true : Boolean(args.seen),
+        ),
+      };
+    case "folders_list":
+      return { folders: await mail.listFolders(String(args.account)) };
     default:
       throw new Error(`unknown tool: ${name}`);
   }
@@ -187,11 +256,14 @@ export async function handleMcpJsonRpc(
 ): Promise<unknown> {
   const id = message.id ?? null;
   if (message.method === "initialize") {
+    const requested = (message.params as { protocolVersion?: unknown } | undefined)
+      ?.protocolVersion;
     return {
       jsonrpc: "2.0",
       id,
       result: {
-        protocolVersion: "2024-11-05",
+        protocolVersion:
+          typeof requested === "string" && requested ? requested : PROTOCOL_VERSION,
         capabilities: { tools: {} },
         serverInfo: { name: "mailmux", version: "0.1.0" },
       },
@@ -199,6 +271,9 @@ export async function handleMcpJsonRpc(
   }
   if (message.method === "notifications/initialized") {
     return null;
+  }
+  if (message.method === "ping") {
+    return { jsonrpc: "2.0", id, result: {} };
   }
   if (message.method === "tools/list") {
     return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
@@ -208,6 +283,13 @@ export async function handleMcpJsonRpc(
       name: string;
       arguments?: Record<string, unknown>;
     };
+    if (!TOOL_NAMES.has(params.name)) {
+      return {
+        jsonrpc: "2.0",
+        id,
+        error: { code: -32602, message: `Unknown tool: ${params.name}` },
+      };
+    }
     try {
       const result = await dispatch(
         mail,

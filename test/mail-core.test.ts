@@ -84,8 +84,9 @@ describe("MailService connect/list/read/send (shipped path)", () => {
     expect(row?.passwordEnc).not.toContain("ok");
 
     const all = await mail.listMessages("all", { limit: 20 });
-    expect(all.length).toBeGreaterThanOrEqual(2);
-    const subjects = all.map((m) => m.subject);
+    expect(all.errors).toEqual([]);
+    expect(all.messages.length).toBeGreaterThanOrEqual(2);
+    const subjects = all.messages.map((m) => m.subject);
     expect(subjects).toEqual(
       expect.arrayContaining(["Personal note", "Work update"]),
     );
@@ -111,10 +112,11 @@ describe("MailService connect/list/read/send (shipped path)", () => {
     ]);
 
     const hits = await mail.searchMessages("personal", { query: "Boston" });
-    expect(hits).toHaveLength(1);
-    expect(hits[0].subject).toBe("Flight to Boston");
+    expect(hits.errors).toEqual([]);
+    expect(hits.messages).toHaveLength(1);
+    expect(hits.messages[0].subject).toBe("Flight to Boston");
 
-    const full = await mail.getMessage("personal", hits[0].id);
+    const full = await mail.getMessage("personal", hits.messages[0].id);
     expect(full?.bodyText).toContain("Boarding pass");
   });
 
@@ -228,6 +230,10 @@ describe("HTTP API via createRuntime (shipped app)", () => {
     const unauth = await runtime.app.request("/api/accounts");
     expect(unauth.status).toBe(401);
 
+    // query-param auth was removed: a valid token in ?token= must not work
+    const queryAuth = await runtime.app.request("/api/accounts?token=test-token");
+    expect(queryAuth.status).toBe(401);
+
     const headers = {
       Authorization: "Bearer test-token",
       "Content-Type": "application/json",
@@ -276,6 +282,14 @@ describe("HTTP API via createRuntime (shipped app)", () => {
     expect(list.status).toBe(200);
     const listBody = await list.json();
     expect(listBody.messages.length).toBeGreaterThan(0);
+    expect(listBody.errors).toEqual([]);
+
+    // a non-numeric limit is rejected, not silently coerced into an empty list
+    const badLimit = await runtime.app.request(
+      "/api/messages?account=all&limit=abc",
+      { headers },
+    );
+    expect(badLimit.status).toBe(400);
 
     const send = await runtime.app.request("/api/messages/send", {
       method: "POST",

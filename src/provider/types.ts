@@ -9,6 +9,18 @@ export type AccountCredentials = {
   password: string;
 };
 
+/**
+ * Identity + credentials handed to every provider call.
+ * Providers need the account's own address (From headers, fixture fabrication),
+ * which `creds.username` does not reliably carry.
+ */
+export type ProviderAccount = {
+  id: string;
+  alias: string;
+  email: string;
+  creds: AccountCredentials;
+};
+
 export type MailAccountMeta = {
   id: string;
   alias: string;
@@ -36,6 +48,8 @@ export type MailMessage = MailMessageSummary & {
   bodyHtml?: string;
   cc?: string;
   bcc?: string;
+  /** Space-separated References chain, for replying in-thread. */
+  references?: string;
 };
 
 export type ListMessagesOpts = {
@@ -72,28 +86,38 @@ export type ConnectionTestResult = {
   error?: string;
 };
 
+export type MailFolder = {
+  name: string;
+  path: string;
+  specialUse?: string;
+};
+
 /** Provider contract — IMAP and fixture both implement this. */
 export interface MailProvider {
+  /** Runs before an account exists, so it takes bare credentials. */
   testConnection(creds: AccountCredentials): Promise<ConnectionTestResult>;
   listMessages(
-    accountId: string,
-    creds: AccountCredentials,
+    account: ProviderAccount,
     opts?: ListMessagesOpts,
   ): Promise<MailMessageSummary[]>;
   searchMessages(
-    accountId: string,
-    creds: AccountCredentials,
+    account: ProviderAccount,
     opts: SearchMessagesOpts,
   ): Promise<MailMessageSummary[]>;
   getMessage(
-    accountId: string,
-    creds: AccountCredentials,
+    account: ProviderAccount,
     messageId: string,
     folder?: string,
   ): Promise<MailMessage | null>;
   sendMessage(
-    accountId: string,
-    creds: AccountCredentials,
+    account: ProviderAccount,
     input: SendMessageInput,
   ): Promise<SendResult>;
+  /** Set or clear the \Seen flag. Returns false when the message is gone. */
+  markRead(
+    account: ProviderAccount,
+    messageId: string,
+    seen: boolean,
+  ): Promise<boolean>;
+  listFolders(account: ProviderAccount): Promise<MailFolder[]>;
 }

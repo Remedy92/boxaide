@@ -17,7 +17,12 @@ async function main(): Promise<void> {
 
   if (cmd === "serve") {
     const fixture = rest.includes("--fixture") || process.env.MAILMUX_FIXTURE === "1";
-    const { runtime } = await startServer({ fixtureMode: fixture });
+    const { runtime, stop } = await startServer({ fixtureMode: fixture });
+    for (const signal of ["SIGINT", "SIGTERM"] as const) {
+      process.once(signal, () => {
+        void stop().then(() => process.exit(0));
+      });
+    }
     // Seed demo accounts in fixture mode for first-run UX
     if (fixture && runtime.provider instanceof FixtureProvider) {
       await seedFixtureDemo(runtime.mail, runtime.provider, runtime.store);

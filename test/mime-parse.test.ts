@@ -92,6 +92,38 @@ describe("parseRfc822 (shipped MIME path)", () => {
   });
 });
 
+describe("threading headers (reply chain)", () => {
+  const threaded = [
+    "From: alice@example.com",
+    "To: bob@example.com",
+    "Subject: Re: thread",
+    "Message-ID: <c@example.com>",
+    "In-Reply-To: <b@example.com>",
+    "References: <a@example.com> <b@example.com>",
+    "MIME-Version: 1.0",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "Third message in the thread.",
+  ].join("\r\n");
+
+  it("flattens the References chain into one string", async () => {
+    const p = await parseRfc822(threaded);
+    expect(p.references).toBe("<a@example.com> <b@example.com>");
+    expect(p.messageId).toBe("<c@example.com>");
+  });
+
+  it("exposes references on the assembled message so a reply can thread", async () => {
+    const msg = await messageFromImapSource("acct1", "INBOX", 9, threaded);
+    expect(msg.references).toBe("<a@example.com> <b@example.com>");
+    expect(msg.messageId).toBe("<c@example.com>");
+  });
+
+  it("leaves references undefined on a message that starts a thread", async () => {
+    const p = await parseRfc822(SAMPLES.sevenBit);
+    expect(p.references).toBeUndefined();
+  });
+});
+
 describe("messageFromImapSource (ImapSmtpProvider getMessage body path)", () => {
   it("returns decoded body for base64 RFC822 via shipped assembler", async () => {
     const msg = await messageFromImapSource(

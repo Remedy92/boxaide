@@ -46,6 +46,9 @@
           <select id="account-filter">
             <option value="all">All accounts</option>
           </select>
+          <select id="folder-filter" disabled>
+            <option value="">Inbox</option>
+          </select>
           <button id="btn-compose" class="btn primary">Compose</button>
           <button id="btn-refresh" class="btn ghost">Refresh</button>
         </div>
@@ -53,6 +56,7 @@
 
       <div class="workspace">
         <section class="inbox" id="inbox">
+          <div class="banner" id="inbox-banner" hidden></div>
           <div class="empty" id="inbox-empty">Connect a mailbox to see your unified inbox.</div>
           <ul id="message-list" class="message-list"></ul>
         </section>
@@ -84,10 +88,13 @@
         <button type="button" data-preset="outlook" class="btn ghost">Outlook</button>
         <button type="button" data-preset="icloud" class="btn ghost">iCloud</button>
       </div>
+      <p id="connect-hint" class="hint" hidden></p>
       <p id="connect-error" class="error" hidden></p>
+      <p id="connect-ok" class="ok" hidden></p>
       <div class="modal-actions">
-        <button value="cancel" class="btn ghost">Cancel</button>
-        <button id="btn-connect" value="default" class="btn primary">Connect</button>
+        <button type="button" id="connect-cancel" class="btn ghost">Cancel</button>
+        <button type="button" id="btn-test" class="btn ghost">Test connection</button>
+        <button type="submit" id="btn-connect" class="btn primary">Connect</button>
       </div>
     </form>
   </dialog>
@@ -104,8 +111,8 @@
       <label>Message<textarea name="text" rows="8" required></textarea></label>
       <p id="compose-error" class="error" hidden></p>
       <div class="modal-actions">
-        <button value="cancel" class="btn ghost">Cancel</button>
-        <button id="btn-send" value="default" class="btn primary">Send</button>
+        <button type="button" id="compose-cancel" class="btn ghost">Cancel</button>
+        <button type="submit" id="btn-send" class="btn primary">Send</button>
       </div>
     </form>
   </dialog>

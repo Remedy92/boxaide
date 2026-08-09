@@ -3,9 +3,11 @@ import type {
   AccountCredentials,
   ConnectionTestResult,
   ListMessagesOpts,
+  MailFolder,
   MailMessage,
   MailMessageSummary,
   MailProvider,
+  ProviderAccount,
   SearchMessagesOpts,
   SendMessageInput,
   SendResult,
@@ -100,14 +102,13 @@ export class FixtureProvider implements MailProvider {
   }
 
   async listMessages(
-    accountId: string,
-    creds: AccountCredentials,
+    account: ProviderAccount,
     opts: ListMessagesOpts = {},
   ): Promise<MailMessageSummary[]> {
     const folder = opts.folder ?? "INBOX";
     const limit = opts.limit ?? 50;
     const offset = opts.offset ?? 0;
-    let msgs = this.ensureBox(accountId, creds.username).filter(
+    let msgs = this.ensureBox(account.id, account.email).filter(
       (m) => m.folder === folder,
     );
     if (opts.unreadOnly) msgs = msgs.filter((m) => !m.seen);
@@ -118,14 +119,13 @@ export class FixtureProvider implements MailProvider {
   }
 
   async searchMessages(
-    accountId: string,
-    creds: AccountCredentials,
+    account: ProviderAccount,
     opts: SearchMessagesOpts,
   ): Promise<MailMessageSummary[]> {
     const q = opts.query.toLowerCase();
     const folder = opts.folder ?? "INBOX";
     const limit = opts.limit ?? 50;
-    const msgs = this.ensureBox(accountId, creds.username)
+    const msgs = this.ensureBox(account.id, account.email)
       .filter((m) => m.folder === folder)
       .filter((m) => {
         const hay = `${m.subject} ${m.from} ${m.to} ${m.bodyText}`.toLowerCase();
@@ -137,43 +137,39 @@ export class FixtureProvider implements MailProvider {
   }
 
   async getMessage(
-    accountId: string,
-    creds: AccountCredentials,
+    account: ProviderAccount,
     messageId: string,
     _folder?: string,
   ): Promise<MailMessage | null> {
-    const msgs = this.ensureBox(accountId, creds.username);
-    const found =
-      msgs.find((m) => m.id === messageId) ??
-      msgs.find((m) => String(m.uid) === messageId);
+    const found = this.find(account, messageId);
     if (!found) return null;
-    found.seen = true;
+    // Reading does NOT mark seen: the IMAP provider opens the mailbox
+    // read-only. Marking read goes through markRead().
     const { accountEmail: _, ...msg } = found;
     return msg;
   }
 
   async sendMessage(
-    accountId: string,
-    creds: AccountCredentials,
+    account: ProviderAccount,
     input: SendMessageInput,
   ): Promise<SendResult> {
     if (!input.to || !input.subject) {
       throw new Error("to and subject are required");
     }
     const messageId = `<${randomBytes(8).toString("hex")}@fixture.local>`;
-    this.sent.push({ ...input, accountId, messageId });
+    this.sent.push({ ...input, accountId: account.id, messageId });
 
     // Optional: drop a copy into Sent folder of the account
-    const uid = this.nextUid.get(accountId) ?? 1;
-    this.nextUid.set(accountId, uid + 1);
-    const box = this.ensureBox(accountId, creds.username);
+    const uid = this.nextUid.get(account.id) ?? 1;
+    this.nextUid.set(account.id, uid + 1);
+    const box = this.ensureBox(account.id, account.email);
     box.push({
-      id: makeId(accountId, uid),
-      accountId,
+      id: makeId(account.id, uid),
+      accountId: account.id,
       uid,
       messageId,
       folder: "Sent",
-      from: creds.username,
+      from: account.email,
       to: input.to,
       subject: input.subject,
       date: nowIso(),
@@ -182,13 +178,43 @@ export class FixtureProvider implements MailProvider {
       hasAttachments: false,
       bodyText: input.text,
       bodyHtml: input.html,
-      accountEmail: creds.username,
+      accountEmail: account.email,
     });
 
     return {
       messageId,
       accepted: input.to.split(",").map((s) => s.trim()),
     };
+  }
+
+  async markRead(
+    account: ProviderAccount,
+    messageId: string,
+    seen: boolean,
+  ): Promise<boolean> {
+    const found = this.find(account, messageId);
+    if (!found) return false;
+    found.seen = seen;
+    return true;
+  }
+
+  async listFolders(account: ProviderAccount): Promise<MailFolder[]> {
+    const box = this.ensureBox(account.id, account.email);
+    const names = new Set<string>(["INBOX"]);
+    for (const m of box) names.add(m.folder);
+    return [...names].map((name) => ({
+      name,
+      path: name,
+      specialUse: name === "Sent" ? "\\Sent" : undefined,
+    }));
+  }
+
+  private find(account: ProviderAccount, messageId: string): Stored | undefined {
+    const msgs = this.ensureBox(account.id, account.email);
+    return (
+      msgs.find((m) => m.id === messageId) ??
+      msgs.find((m) => String(m.uid) === messageId)
+    );
   }
 }
 

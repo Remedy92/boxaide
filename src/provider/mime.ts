@@ -9,6 +9,7 @@ export type ParsedMailBody = {
   cc?: string;
   date?: string;
   messageId?: string;
+  references?: string;
 };
 
 /**
@@ -36,10 +37,22 @@ export async function parseRfc822(raw: string | Buffer): Promise<ParsedMailBody>
     cc: formatAddress(parsed.cc as unknown),
     date: parsed.date ? parsed.date.toISOString() : undefined,
     messageId: parsed.messageId || undefined,
+    references: formatReferences(parsed.references),
   };
 }
 
-function formatAddress(value: unknown): string | undefined {
+/** Flatten the References header into a single space-separated chain. */
+function formatReferences(value: unknown): string | undefined {
+  if (!value) return undefined;
+  const list = Array.isArray(value) ? value : [value];
+  const chain = list
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => v.trim())
+    .filter(Boolean);
+  return chain.length ? chain.join(" ") : undefined;
+}
+
+export function formatAddress(value: unknown): string | undefined {
   if (!value) return undefined;
   if (Array.isArray(value)) {
     const parts = value
@@ -56,11 +69,17 @@ function formatAddress(value: unknown): string | undefined {
   return undefined;
 }
 
-function stripHtml(html: string): string {
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
+/** Strip tags and decode the handful of entities that show up in mail bodies. */
+export function stripHtml(input: string): string {
+  return input
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
     .replace(/\s+/g, " ")
     .trim();
 }
