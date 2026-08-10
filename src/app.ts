@@ -179,7 +179,7 @@ export function createRuntime(
   });
 
   // Static web UI
-  const webRoot = resolveWebRoot();
+  const webRoot = resolveWebRoot(config.webRoot);
   app.get("/", async (c) => {
     const index = join(webRoot, "index.html");
     if (!existsSync(index)) {
@@ -208,7 +208,8 @@ export function createRuntime(
  * There is no second UI to fall back to: when the export is absent, `/` says
  * so rather than serving a stale page.
  */
-function resolveWebRoot(): string {
+function resolveWebRoot(configured?: string): string {
+  if (configured) return configured;
   const candidates = [
     join(process.cwd(), "web-next"),
     join(__dirname, "..", "web-next"),

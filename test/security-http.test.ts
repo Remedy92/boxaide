@@ -11,6 +11,9 @@ import {
 } from "../src/app.js";
 import type { Runtime } from "../src/app.js";
 import { parseConnectCredentials } from "../src/api/routes.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const TOKEN = "test-token-abcdefghijklmnop";
 
@@ -603,5 +606,49 @@ describe("security response headers", () => {
       .map((d) => d.trim())
       .find((d) => d.startsWith("script-src"));
     expect(scriptSrc).toBe("script-src 'self' 'unsafe-inline'");
+  });
+});
+
+describe("web root resolution", () => {
+  // The UI is a build artifact. `/` must be honest in both states rather than
+  // serving a stale page, so both are asserted directly.
+  it("serves the export when one is present", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailmux-web-present-"));
+    writeFileSync(join(dir, "index.html"), "<title>mailmux</title>");
+    const runtime = createRuntime({
+      dataDir: ":memory:",
+      masterKey: randomBytes(32),
+      bearerToken: TOKEN,
+      host: "127.0.0.1",
+      port: 0,
+      fixtureMode: true,
+      store: new Store(randomBytes(32), ":memory:"),
+      provider: new FixtureProvider(),
+      webRoot: dir,
+    });
+    const res = await runtime.app.request("/");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("<title>mailmux</title>");
+    runtime.store.close();
+  });
+
+  it("names the build command when no export exists", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailmux-web-absent-"));
+    const runtime = createRuntime({
+      dataDir: ":memory:",
+      masterKey: randomBytes(32),
+      bearerToken: TOKEN,
+      host: "127.0.0.1",
+      port: 0,
+      fixtureMode: true,
+      store: new Store(randomBytes(32), ":memory:"),
+      provider: new FixtureProvider(),
+      webRoot: dir,
+    });
+    const res = await runtime.app.request("/");
+    expect(res.status).toBe(500);
+    // A user who hits this needs the command, not just the symptom.
+    expect(await res.text()).toContain("npm run build");
+    runtime.store.close();
   });
 });

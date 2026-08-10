@@ -8,7 +8,7 @@
     "mailmux": "./dist/cli.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "tsc && npm run web:build && npm run web:sync",
