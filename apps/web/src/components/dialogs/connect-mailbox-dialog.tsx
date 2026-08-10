@@ -3,7 +3,7 @@
 import * as React from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
-import { Spinner, StatusDot, TechnicalDetails } from "@/components/atoms";
+import { Field, Spinner, StatusDot, TechnicalDetails } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -14,7 +14,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { friendlyError } from "@/lib/api/errors";
 import {
   DEFAULT_IMAP_PORT,
@@ -188,7 +187,7 @@ export function ConnectMailboxDialog({
         }}
       >
         <DialogHeader>
-          <DialogTitle style={{ fontSize: "var(--text-display)" }}>
+          <DialogTitle className="title-15">
             Connect a mailbox
           </DialogTitle>
           <DialogDescription>
@@ -235,10 +234,11 @@ export function ConnectMailboxDialog({
               tabIndex={preset === entry.id ? 0 : -1}
               onClick={() => applyPreset(entry.id)}
               className={cn(
-                "h-8 rounded-[var(--radius-full)] border px-3 text-[13px]",
+                "h-8 rounded-[var(--radius-md)] border px-3 text-[13px]",
+                "transition-colors duration-[var(--dur-fast)]",
                 preset === entry.id
                   ? "border-accent bg-accent-subtle text-accent"
-                  : "border-border-control bg-surface-1 text-fg-secondary hover:border-[var(--text-secondary)]",
+                  : "border-border-control bg-surface-2 text-fg-secondary hover:bg-surface-hover hover:text-fg",
               )}
             >
               {entry.label}
@@ -476,26 +476,4 @@ export function ConnectMailboxDialog({
 /** The server normalises the alias exactly this way (service.ts:49). */
 function normalizeAlias(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, "-");
-}
-
-function Field({
-  id,
-  label,
-  helper,
-  children,
-}: {
-  id: string;
-  label: string;
-  helper?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="space-y-1">
-      <Label htmlFor={id} className="text-[12px] font-medium text-fg-secondary">
-        {label}
-      </Label>
-      {children}
-      {helper && <p className="text-[12px] leading-4 text-fg-tertiary">{helper}</p>}
-    </div>
-  );
 }

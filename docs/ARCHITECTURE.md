@@ -47,7 +47,7 @@ Ship **mailmux** as a single **Node 22+ / TypeScript** process:
 | **One route, selection in the URL hash** | `output: "export"` bans dynamic routes without `generateStaticParams`, and message ids are unknowable at build time. Selection is mirrored to `#/a/<accountId>/m/<messageId>` with `history.replaceState`. |
 | **Its own `package.json` and lockfile; no root `workspaces` key** | A workspace would hoist `better-sqlite3` into the front-end install and force a native build on every deploy. |
 | **`bodyHtml` is never rendered** | It is raw unsanitised sender HTML and there is no sanitiser in this codebase. The reader renders `bodyText` only; "View HTML source" shows it escaped inside a `<pre>`. `react/no-danger` is an ESLint **error**, so there is no `dangerouslySetInnerHTML` anywhere in the tree. |
-| **`/api/local-bootstrap` and `/api/agent-connect` are never called** | Both return the bearer token in a response body. The MCP snippet is built client-side from `localStorage` instead. |
+| **`/api/agent-connect` is never called; `/api/local-bootstrap` only same-origin from loopback** | agent-connect embeds the token, and the MCP snippet is built client-side from `localStorage` instead. local-bootstrap exists precisely so the server's own UI needs no token copy-paste: the wizard calls it only when the page origin equals the server address and is loopback, mirroring the guard the endpoint itself enforces. A remotely hosted UI still requires a human to paste the token. |
 
 Serving it from the Node process:
 

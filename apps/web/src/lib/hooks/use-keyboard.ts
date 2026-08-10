@@ -29,6 +29,7 @@ export type KeyboardHandlers = {
   shortcuts: () => void;
   goInbox: () => void;
   goUnread: () => void;
+  goDrafts: () => void;
   goAccount: (index: number) => void;
   goFolder: () => void;
   toggleRail: () => void;
@@ -106,6 +107,9 @@ export function useKeyboard(
         } else if (key === "u") {
           event.preventDefault();
           h.goUnread();
+        } else if (key === "d") {
+          event.preventDefault();
+          h.goDrafts();
         } else if (key === "f") {
           event.preventDefault();
           h.goFolder();

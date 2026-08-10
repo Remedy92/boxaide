@@ -5,6 +5,8 @@ import {
   imapErrorText,
   imapAuthOptions,
   smtpAuthOptions,
+  draftsMailboxPath,
+  draftFromImapSource,
 } from "../src/provider/imap-smtp.js";
 import type { AccountCredentials } from "../src/provider/types.js";
 
@@ -81,6 +83,85 @@ describe("uidWindow (listMessages sequence range)", () => {
   it("returns null once the offset walks past the oldest message", () => {
     expect(uidWindow(3, 25, 10)).toBeNull();
     expect(uidWindow(3, 25, 3)).toBeNull();
+  });
+});
+
+describe("draftsMailboxPath (where a draft gets appended)", () => {
+  it("prefers the SPECIAL-USE \\Drafts mailbox over any name", () => {
+    expect(
+      draftsMailboxPath([
+        { name: "Drafts", path: "Drafts" },
+        { name: "Concepten", path: "Concepten", specialUse: "\\Drafts" },
+      ]),
+    ).toBe("Concepten");
+  });
+
+  it("falls back to the Gmail path when no SPECIAL-USE is advertised", () => {
+    expect(
+      draftsMailboxPath([
+        { name: "INBOX", path: "INBOX" },
+        { name: "Drafts", path: "[Gmail]/Drafts" },
+      ]),
+    ).toBe("[Gmail]/Drafts");
+  });
+
+  it("falls back to a common name, case-insensitively", () => {
+    expect(
+      draftsMailboxPath([
+        { name: "INBOX", path: "INBOX" },
+        { name: "DRAFTS", path: "INBOX.DRAFTS" },
+      ]),
+    ).toBe("INBOX.DRAFTS");
+  });
+
+  it("never picks Sent or Trash by accident", () => {
+    expect(
+      draftsMailboxPath([
+        { name: "Sent", path: "Sent", specialUse: "\\Sent" },
+        { name: "Trash", path: "Trash", specialUse: "\\Trash" },
+      ]),
+    ).toBeNull();
+  });
+});
+
+describe("draftFromImapSource (draft body decode path)", () => {
+  const raw = [
+    "From: you@example.com",
+    "To: client@acme.test",
+    "Cc: cc@acme.test",
+    "Bcc: quiet@acme.test",
+    "Subject: Re: Contract",
+    "Message-ID: <draft-1@example.com>",
+    "In-Reply-To: <orig@acme.test>",
+    "References: <root@acme.test> <orig@acme.test>",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "Here is the answer.",
+  ].join("\r\n");
+
+  it("recovers the reply headers a draft must round-trip", async () => {
+    const draft = await draftFromImapSource("acct", "[Gmail]/Drafts", 12, raw);
+    expect(draft.id).toBe(`acct:${encodeURIComponent("[Gmail]/Drafts")}:12`);
+    expect(parseId(draft.id, "acct")).toEqual({
+      folder: "[Gmail]/Drafts",
+      uid: 12,
+    });
+    expect(draft.to).toBe("client@acme.test");
+    expect(draft.cc).toBe("cc@acme.test");
+    // Bcc survives only in the stored copy — no envelope carries it.
+    expect(draft.bcc).toBe("quiet@acme.test");
+    expect(draft.subject).toBe("Re: Contract");
+    expect(draft.inReplyTo).toBe("<orig@acme.test>");
+    expect(draft.references).toBe("<root@acme.test> <orig@acme.test>");
+    expect(draft.bodyText).toContain("Here is the answer.");
+  });
+
+  it("prefers the envelope when the fetch supplied one", async () => {
+    const draft = await draftFromImapSource("acct", "Drafts", 3, raw, {
+      envelope: { subject: "Envelope subject", messageId: "<env@x>" },
+    });
+    expect(draft.subject).toBe("Envelope subject");
+    expect(draft.messageId).toBe("<env@x>");
   });
 });
 

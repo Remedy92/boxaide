@@ -3,30 +3,32 @@
 import { Skeleton } from "@/components/ui/skeleton";
 
 /**
- * §6.3, tiered on the 300ms floor. The caller decides whether to render this at
- * all: 0–300ms shows nothing, because a skeleton that flashes for 200ms is
- * worse than no feedback. No shimmer — the blocks are static at full opacity.
+ * Tiered on the 300ms floor: the caller decides whether to render this at all,
+ * because a skeleton that flashes for 200ms is worse than no feedback.
+ *
+ * Skeletons, not a spinner — the shape of what is coming is more informative
+ * than a rotating circle, and it holds the scroll position steady when the rows
+ * arrive. The blocks pulse; nothing travels across them.
  */
 export function ListSkeleton({ rows }: { rows: number }) {
   return (
-    <ul aria-hidden="true" className="list-none">
+    <ul aria-hidden="true" className="mailmux-pulse list-none">
       {Array.from({ length: rows }, (_, index) => (
         <li
           key={index}
-          className="grid grid-cols-[3px_28px_minmax(0,1fr)_auto] items-center gap-2.5 px-3"
+          className="grid grid-cols-[18px_minmax(0,1fr)_auto] items-start gap-2.5 px-3"
           style={{
             height: "var(--row-h)",
-            paddingTop: "var(--row-pad-y)",
+            paddingTop: "calc(var(--row-pad-y) + 2px)",
             paddingBottom: "var(--row-pad-y)",
           }}
         >
-          <Skeleton className="h-full w-[3px] rounded-[var(--radius-full)]" />
-          <Skeleton className="size-6 rounded-[var(--radius-sm)]" />
-          <span className="min-w-0 space-y-1.5">
-            <Skeleton className="h-2.5 w-[40%]" />
-            <Skeleton className="h-2.5 w-[85%]" />
+          <Skeleton className="size-1.5 justify-self-center rounded-[var(--radius-full)]" />
+          <span className="min-w-0 space-y-2">
+            <Skeleton className="h-2 w-[34%]" />
+            <Skeleton className="h-2 w-[78%]" />
           </span>
-          <Skeleton className="h-2.5 w-8" />
+          <Skeleton className="h-2 w-7" />
         </li>
       ))}
     </ul>

@@ -21,16 +21,24 @@ export function ComposeButton({
   collapsed?: boolean;
   onClick: () => void;
 }) {
+  /* Secondary, not the accent fill. A full-width saturated block at the top of
+     the sidebar would be the loudest thing on screen, and the accent is spent
+     on selection, focus and the unread dot — the states that carry meaning. */
   const button = (
     <Button
       type="button"
-      size={collapsed ? "icon" : "lg"}
+      variant="secondary"
+      size={collapsed ? "icon" : "default"}
       aria-disabled={disabled || undefined}
       aria-label={collapsed ? "Compose" : undefined}
       onClick={disabled ? undefined : onClick}
-      className={collapsed ? "" : "w-full justify-center"}
+      className={collapsed ? "" : "w-full justify-start bg-surface-2 font-medium"}
     >
-      <PenLine aria-hidden="true" className="size-[15px]" strokeWidth={1.5} />
+      <PenLine
+        aria-hidden="true"
+        className="size-4 text-fg-tertiary"
+        strokeWidth={1.5}
+      />
       {!collapsed && "Compose"}
     </Button>
   );

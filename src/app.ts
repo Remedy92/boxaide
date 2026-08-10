@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
-import { serve } from "@hono/node-server";
+import { serve, type ServerType } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import type { AppConfig } from "./config.js";
 import { loadConfig } from "./config.js";
@@ -221,17 +221,35 @@ function resolveWebRoot(configured?: string): string {
   return join(process.cwd(), "web-next");
 }
 
+/**
+ * Start the HTTP server and resolve only once it is listening.
+ *
+ * Resolving on the `listening` callback rather than synchronously is what lets
+ * an embedder — the Electron shell in `apps/desktop` — open a window the moment
+ * this returns instead of polling. It also turns a busy port into a rejected
+ * promise the caller can report, rather than an unhandled `error` event.
+ */
 export async function startServer(
   overrides: Partial<AppConfig> = {},
-): Promise<{ runtime: Runtime; stop: () => Promise<void> }> {
+): Promise<{ runtime: Runtime; url: string; stop: () => Promise<void> }> {
   const runtime = createRuntime(overrides);
-  const server = serve({
-    fetch: runtime.app.fetch,
-    hostname: runtime.config.host,
-    port: runtime.config.port,
+  const server = await new Promise<ServerType>((resolve, reject) => {
+    const s = serve(
+      {
+        fetch: runtime.app.fetch,
+        hostname: runtime.config.host,
+        port: runtime.config.port,
+      },
+      () => {
+        s.off("error", reject);
+        resolve(s);
+      },
+    );
+    s.once("error", reject);
   });
   return {
     runtime,
+    url: `http://${runtime.config.host}:${runtime.config.port}`,
     stop: async () => {
       server.close();
       runtime.store.close();

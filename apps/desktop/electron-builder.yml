@@ -1,0 +1,48 @@
+appId: app.mailmux.desktop
+productName: mailmux
+copyright: MIT licensed
+
+directories:
+  output: release
+  buildResources: build
+
+# node_modules for production dependencies is added by electron-builder itself;
+# these entries only trim what else goes into the asar.
+files:
+  - "**/*"
+  - "!scripts/**"
+  - "!release/**"
+  - "!electron-builder.yml"
+  # The UI export is shipped unpacked, see extraResources below.
+  - "!server/web-next/**"
+
+# `serveStatic` reads the UI with plain fs calls. Keeping the export outside the
+# asar means it is a real directory on disk and never goes through Electron's
+# asar shim.
+extraResources:
+  - from: server/web-next
+    to: web-next
+
+asar: true
+# better-sqlite3 loads a .node binary, which cannot be read from inside an asar.
+asarUnpack:
+  - "**/node_modules/better-sqlite3/**"
+
+# Rebuilds better-sqlite3 against Electron's ABI while packaging.
+npmRebuild: true
+
+mac:
+  target: dmg
+  category: public.app-category.productivity
+
+win:
+  target: nsis
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  target: AppImage
+  category: Network

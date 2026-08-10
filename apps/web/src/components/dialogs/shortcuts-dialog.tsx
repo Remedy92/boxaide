@@ -28,6 +28,7 @@ const GROUPS: Array<[string, Array<[string, string[]]>]> = [
       ["Scroll the reader", ["Space"]],
       ["Inbox — all mailboxes", ["g", "i"]],
       ["Unread only", ["g", "u"]],
+      ["Drafts", ["g", "d"]],
       ["Switch mailbox", ["g", "1–9"]],
       ["Folder picker", ["g", "f"]],
       ["Toggle the sidebar", ["["]],
@@ -42,6 +43,7 @@ const GROUPS: Array<[string, Array<[string, string[]]>]> = [
       ["Forward", ["f"]],
       ["Compose", ["c"]],
       ["Send from the composer", ["⌘", "↵"]],
+      ["Save as draft", ["⌘", "S"]],
     ],
   ],
   [
@@ -63,9 +65,9 @@ export function ShortcutsDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-[640px] overflow-y-auto">
+      <DialogContent className="pane-scroll max-h-[86vh] max-w-[620px] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle style={{ fontSize: "var(--text-display)" }}>
+          <DialogTitle className="title-15">
             Keyboard shortcuts
           </DialogTitle>
           <DialogDescription>
@@ -99,7 +101,7 @@ export function ShortcutsDialog({
 
         <p className="text-[12px] leading-4 text-fg-tertiary">
           mailmux can&rsquo;t archive, delete, star, or snooze — so those keys do
-          nothing here.
+          nothing here. j and k walk drafts too when the Drafts view is open.
         </p>
       </DialogContent>
     </Dialog>

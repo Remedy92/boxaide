@@ -1,16 +1,19 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
+import { Inter } from "next/font/google";
 import { Providers } from "@/components/providers";
 import "./globals.css";
 
-const sans = IBM_Plex_Sans({
-  variable: "--font-plex-sans",
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-  display: "swap",
-});
-const mono = IBM_Plex_Mono({
-  variable: "--font-plex-mono",
+/**
+ * One family, four weights, self-hosted.
+ *
+ * next/font downloads Inter at BUILD time and emits the woff2 into
+ * `_next/static/media`, so the running page fetches nothing from a third-party
+ * origin — which the CSP (`font-src 'self' data:`) would block anyway. There is
+ * no second web font: code and tokens use the operating system's own monospace
+ * stack, declared in globals.css.
+ */
+const sans = Inter({
+  variable: "--font-inter",
   subsets: ["latin"],
   weight: ["400", "500", "600"],
   display: "swap",
@@ -27,7 +30,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     // suppressHydrationWarning silences exactly one thing: next-themes' blocking
     // script stamps class="dark" on <html> before hydration, which React would
     // otherwise report as a mismatch. It does not hide any other warning.
-    <html lang="en" suppressHydrationWarning className={`${sans.variable} ${mono.variable}`}>
+    <html lang="en" suppressHydrationWarning className={sans.variable}>
       <body>
         <Providers>{children}</Providers>
       </body>

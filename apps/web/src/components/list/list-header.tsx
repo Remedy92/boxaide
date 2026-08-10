@@ -67,7 +67,7 @@ export function ListHeader({
           two icon buttons inside a 380px pane: `flex-1` collapsed the search
           field to 89px, which truncated its own placeholder. Search owns the
           first row; the filters and actions sit under it. */}
-      <div className="flex h-12 items-center gap-2 px-3">
+      <div className="flex h-11 items-center gap-2 px-3">
         {showRailButton && (
           <Button
             type="button"
@@ -115,7 +115,7 @@ export function ListHeader({
         </div>
       </div>
 
-      <div className="flex h-10 items-center gap-1.5 border-b border-border-subtle px-3 pb-1.5">
+      <div className="flex h-9 items-center gap-1.5 border-b border-border-subtle px-3 pb-1.5">
         <Select
           value={app.account}
           onValueChange={(value) => app.setAccount(value)}
@@ -126,7 +126,7 @@ export function ListHeader({
           <SelectTrigger
             size="sm"
             aria-label="Filter by mailbox"
-            className="h-8 min-w-0 flex-1 text-[13px]"
+            className="h-7 min-w-0 flex-1"
           >
             <SelectValue />
           </SelectTrigger>
@@ -165,7 +165,7 @@ export function ListHeader({
                   aria-disabled="true"
                   aria-label="Filter by folder"
                   aria-describedby={FOLDER_NOTE_ID}
-                  className="h-8 min-w-0 flex-1 cursor-not-allowed justify-start text-[13px] text-fg-disabled"
+                  className="h-7 min-w-0 flex-1 cursor-not-allowed justify-start text-fg-disabled"
                 >
                   Folder
                 </Button>
@@ -186,7 +186,7 @@ export function ListHeader({
             <SelectTrigger
               size="sm"
               aria-label="Filter by folder"
-              className="h-8 min-w-0 flex-1 text-[13px]"
+              className="h-7 min-w-0 flex-1"
             >
               <SelectValue placeholder="Folder" />
             </SelectTrigger>

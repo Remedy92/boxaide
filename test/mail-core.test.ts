@@ -192,6 +192,108 @@ describe("MailService connect/list/read/send (shipped path)", () => {
   });
 });
 
+describe("MailService drafts (shipped path, no delivery)", () => {
+  let mail: MailService;
+  let provider: FixtureProvider;
+
+  beforeEach(async () => {
+    const s = makeService();
+    mail = s.mail;
+    provider = s.provider;
+    await mail.connectAccount({
+      alias: "work",
+      email: "you@work.test",
+      creds: {
+        ...baseCreds,
+        auth: { kind: "password", user: "you@work.test", pass: "ok" },
+      },
+    });
+  });
+
+  it("stores a draft without sending anything", async () => {
+    const draft = await mail.createDraft("work", {
+      to: "client@acme.test",
+      subject: "Proposal",
+      text: "Draft body",
+    });
+    expect(draft.id).toBeTruthy();
+    expect(draft.folder).toBe("Drafts");
+    expect(draft.messageId).toBeTruthy();
+    // The whole point of a draft: the send path was never touched.
+    expect(provider.getSent()).toHaveLength(0);
+
+    const drafts = await mail.listDrafts("work");
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].subject).toBe("Proposal");
+    expect(drafts[0].to).toBe("client@acme.test");
+    expect(drafts[0].bodyText).toBe("Draft body");
+  });
+
+  it("keeps reply headers on a drafted reply", async () => {
+    await mail.createDraft("work", {
+      to: "client@acme.test",
+      subject: "Re: Proposal",
+      text: "answering",
+      cc: "cc@acme.test",
+      bcc: "quiet@acme.test",
+      inReplyTo: "<orig@acme.test>",
+      references: "<root@acme.test> <orig@acme.test>",
+    });
+    const [drafted] = await mail.listDrafts("work");
+    expect(drafted.cc).toBe("cc@acme.test");
+    expect(drafted.bcc).toBe("quiet@acme.test");
+    expect(drafted.inReplyTo).toBe("<orig@acme.test>");
+    expect(drafted.references).toBe("<root@acme.test> <orig@acme.test>");
+  });
+
+  it("replaces content on update and retires the old id", async () => {
+    const first = await mail.createDraft("work", {
+      to: "client@acme.test",
+      subject: "Proposal",
+      text: "v1",
+    });
+    const second = await mail.updateDraft("work", first.id, {
+      to: "client@acme.test",
+      subject: "Proposal v2",
+      text: "v2",
+    });
+    expect(second.id).not.toBe(first.id);
+
+    const drafts = await mail.listDrafts("work");
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].subject).toBe("Proposal v2");
+    expect(drafts[0].bodyText).toBe("v2");
+    // The old id is dead: deleting it must not report success.
+    expect(await mail.deleteDraft("work", first.id)).toBe(false);
+  });
+
+  it("deletes a draft and reports false the second time", async () => {
+    const draft = await mail.createDraft("work", {
+      subject: "Half written",
+      text: "",
+    });
+    expect(await mail.deleteDraft("work", draft.id)).toBe(true);
+    expect(await mail.listDrafts("work")).toHaveLength(0);
+    expect(await mail.deleteDraft("work", draft.id)).toBe(false);
+  });
+
+  it("keeps drafts out of the inbox and names the folder \\Drafts", async () => {
+    await mail.createDraft("work", { subject: "Hidden", text: "not inbox" });
+    const inbox = await mail.listMessages("work", { limit: 20 });
+    expect(inbox.messages.map((m) => m.subject)).not.toContain("Hidden");
+    const folders = await mail.listFolders("work");
+    expect(folders.find((f) => f.name === "Drafts")?.specialUse).toBe(
+      "\\Drafts",
+    );
+  });
+
+  it("rejects a draft for an unknown account", async () => {
+    await expect(
+      mail.createDraft("nope", { subject: "x", text: "y" }),
+    ).rejects.toThrow(/account not found/i);
+  });
+});
+
 describe("MCP JSON-RPC on shipped handlers", () => {
   it("lists tools including read and send", async () => {
     const { mail, provider } = makeService();
@@ -351,6 +453,67 @@ describe("HTTP API via createRuntime (shipped app)", () => {
       }),
     });
     expect(send.status).toBe(201);
+
+    // Drafts: create -> list -> update -> delete, all over the same auth gate.
+    const draftsUnauth = await runtime.app.request("/api/drafts?account=personal");
+    expect(draftsUnauth.status).toBe(401);
+
+    const created = await runtime.app.request("/api/drafts", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        account: "personal",
+        to: "out@test.com",
+        subject: "HTTP draft",
+        text: "v1",
+      }),
+    });
+    expect(created.status).toBe(201);
+    const createdBody = await created.json();
+    expect(createdBody.draft.id).toBeTruthy();
+
+    const draftList = await runtime.app.request("/api/drafts?account=personal", {
+      headers,
+    });
+    expect(draftList.status).toBe(200);
+    const draftListBody = await draftList.json();
+    expect(draftListBody.drafts).toHaveLength(1);
+    expect(draftListBody.drafts[0].subject).toBe("HTTP draft");
+
+    // account=all is refused: a draft belongs to exactly one mailbox.
+    const draftsAll = await runtime.app.request("/api/drafts?account=all", {
+      headers,
+    });
+    expect(draftsAll.status).toBe(400);
+
+    const updated = await runtime.app.request(
+      `/api/drafts/personal/${encodeURIComponent(createdBody.draft.id)}`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          to: "out@test.com",
+          subject: "HTTP draft v2",
+          text: "v2",
+        }),
+      },
+    );
+    expect(updated.status).toBe(200);
+    const updatedBody = await updated.json();
+    expect(updatedBody.draft.id).not.toBe(createdBody.draft.id);
+
+    const removed = await runtime.app.request(
+      `/api/drafts/personal/${encodeURIComponent(updatedBody.draft.id)}`,
+      { method: "DELETE", headers },
+    );
+    expect(removed.status).toBe(200);
+    expect((await removed.json()).deleted).toBe(true);
+
+    const removedAgain = await runtime.app.request(
+      `/api/drafts/personal/${encodeURIComponent(updatedBody.draft.id)}`,
+      { method: "DELETE", headers },
+    );
+    expect(removedAgain.status).toBe(404);
 
     const home = await runtime.app.request("/");
     expect(home.status).toBe(200);

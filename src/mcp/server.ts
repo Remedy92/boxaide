@@ -5,11 +5,19 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { MailService } from "../mail/service.js";
+import type { DraftInput } from "../provider/types.js";
 
 const PROTOCOL_VERSION = "2024-11-05";
 
 const MESSAGE_ID_DESC =
   "Message id from messages_list/messages_search, format 'accountId:folder:uid'.";
+
+const DRAFT_ID_DESC =
+  "Draft id from drafts_list or from a draft_create/draft_update result, format 'accountId:folder:uid'.";
+
+/** Repeated verbatim on every draft tool so the safe default is unmissable. */
+const DRAFT_SAFETY =
+  "Drafting is the safe default: nothing is delivered and the user can edit or discard it in their own mail client. Prefer this over message_send, which is the explicit escalation and needs the user to say they want the mail sent.";
 
 const TOOLS = [
   {
@@ -75,7 +83,7 @@ const TOOLS = [
   {
     name: "message_send",
     description:
-      "Send an email from a connected account. To reply in-thread, set inReplyTo and references from the Message-ID header of the message you answer. Requires explicit user confirmation in the agent client.",
+      "Deliver an email from a connected account. This is the explicit escalation, not the default: it leaves the machine immediately and cannot be recalled, so use draft_create instead unless the user has asked for the mail to be sent. To reply in-thread, set inReplyTo and references from the Message-ID header of the message you answer. Requires explicit user confirmation in the agent client.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -117,6 +125,82 @@ const TOOLS = [
         },
       },
       required: ["account", "messageId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "draft_create",
+    description: `Save a new draft into an account's Drafts folder. ${DRAFT_SAFETY} Every field except account is optional, so a half-written draft is fine. To draft a reply in-thread, set inReplyTo and references from the Message-ID header of the message you answer.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        account: { type: "string", description: "Account alias or id." },
+        to: { type: "string" },
+        subject: { type: "string" },
+        text: { type: "string" },
+        html: { type: "string" },
+        cc: { type: "string" },
+        bcc: { type: "string" },
+        inReplyTo: {
+          type: "string",
+          description:
+            "Message-ID header of the message being replied to, e.g. '<abc@host>'. Not the accountId:folder:uid id.",
+        },
+        references: {
+          type: "string",
+          description:
+            "Space-separated Message-ID chain of the thread, oldest first.",
+        },
+      },
+      required: ["account"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "draft_update",
+    description: `Replace the content of an existing draft. ${DRAFT_SAFETY} The whole draft is replaced, so send every field you want kept — omitted fields are dropped, not merged. Returns a NEW draftId; the old one stops working.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        account: { type: "string", description: "Account alias or id." },
+        draftId: { type: "string", description: DRAFT_ID_DESC },
+        to: { type: "string" },
+        subject: { type: "string" },
+        text: { type: "string" },
+        html: { type: "string" },
+        cc: { type: "string" },
+        bcc: { type: "string" },
+        inReplyTo: { type: "string" },
+        references: { type: "string" },
+      },
+      required: ["account", "draftId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drafts_list",
+    description: `List the drafts of one account, newest first, with their full body text. Read this before draft_update so you keep the fields you are not changing. ${DRAFT_SAFETY}`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        account: { type: "string", description: "Account alias or id." },
+        limit: { type: "number", default: 25 },
+      },
+      required: ["account"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "draft_delete",
+    description:
+      "Discard one draft. Returns { deleted: false } when the draft is already gone. This removes unsent text only — it never touches delivered mail.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        account: { type: "string", description: "Account alias or id." },
+        draftId: { type: "string", description: DRAFT_ID_DESC },
+      },
+      required: ["account", "draftId"],
       additionalProperties: false,
     },
   },
@@ -171,6 +255,25 @@ export function createMcpServer(mail: MailService): Server {
   });
 
   return server;
+}
+
+/**
+ * Draft fields, each left undefined when absent. A draft is allowed to be
+ * half-written, so an empty string must not be coerced in for a missing field.
+ */
+function draftFields(args: Record<string, unknown>): DraftInput {
+  const str = (v: unknown): string | undefined =>
+    v === undefined || v === null ? undefined : String(v);
+  return {
+    to: str(args.to),
+    subject: str(args.subject),
+    text: str(args.text),
+    html: str(args.html),
+    cc: str(args.cc),
+    bcc: str(args.bcc),
+    inReplyTo: str(args.inReplyTo),
+    references: str(args.references),
+  };
 }
 
 async function dispatch(
@@ -229,6 +332,31 @@ async function dispatch(
           String(args.account),
           String(args.messageId),
           args.seen === undefined ? true : Boolean(args.seen),
+        ),
+      };
+    case "draft_create":
+      return {
+        draft: await mail.createDraft(String(args.account), draftFields(args)),
+      };
+    case "draft_update":
+      return {
+        draft: await mail.updateDraft(
+          String(args.account),
+          String(args.draftId),
+          draftFields(args),
+        ),
+      };
+    case "drafts_list":
+      return {
+        drafts: await mail.listDrafts(String(args.account), {
+          limit: Number(args.limit ?? 25),
+        }),
+      };
+    case "draft_delete":
+      return {
+        deleted: await mail.deleteDraft(
+          String(args.account),
+          String(args.draftId),
         ),
       };
     case "folders_list":

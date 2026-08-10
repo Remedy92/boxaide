@@ -21,6 +21,7 @@ import {
   Settings2,
   SunMoon,
   Trash2,
+  FilePen,
   Forward as ForwardIcon,
   Keyboard,
   PanelLeft,
@@ -44,6 +45,7 @@ import { useMarkRead } from "@/lib/hooks/use-mark-read";
 import { useMcpTools } from "@/lib/hooks/use-mcp-tools";
 import { useMessageNavigation } from "@/lib/hooks/use-selection";
 import { useSettings } from "@/lib/hooks/use-settings";
+import { genericMcpSnippet } from "@/lib/agent-config";
 import { rememberCommand } from "@/lib/settings";
 import { copyToClipboard } from "@/lib/utils";
 
@@ -123,21 +125,10 @@ function Palette({
     action();
   };
 
-  const endpoint = `${settings.baseUrl}/mcp`;
-  const snippet = JSON.stringify(
-    {
-      mcpServers: {
-        mailmux: {
-          url: endpoint,
-          headers: {
-            Authorization: `Bearer ${settings.token || "<your token>"}`,
-          },
-        },
-      },
-    },
-    null,
-    2,
-  );
+  const snippet = genericMcpSnippet({
+    baseUrl: settings.baseUrl,
+    token: settings.token,
+  });
 
   const commands: Array<{
     id: string;
@@ -221,6 +212,7 @@ function Palette({
       icon: <Inbox />,
       hint: "g i",
       action: () => {
+        app.setView("mail");
         app.setAccount("all");
         app.setUnreadOnly(false);
       },
@@ -231,7 +223,18 @@ function Palette({
       label: "Unread only",
       icon: <MailOpen />,
       hint: "g u",
-      action: () => app.setUnreadOnly(true),
+      action: () => {
+        app.setView("mail");
+        app.setUnreadOnly(true);
+      },
+    },
+    {
+      id: "go-drafts",
+      group: "Go to",
+      label: "Drafts",
+      icon: <FilePen />,
+      hint: "g d",
+      action: () => app.setView("drafts"),
     },
     ...list.map((account, index) => ({
       id: `go-account-${account.id}`,
@@ -279,6 +282,20 @@ function Palette({
       // Opens settings AND runs the /health → /api/health → /api/meta probe, so
       // the row does what it says instead of only navigating to the button.
       action: () => app.openSettings(null, true),
+    },
+    {
+      id: "connect-agent",
+      group: "Server",
+      label: "Connect your agent…",
+      icon: <Plug />,
+      action: () => app.openDialog("agent"),
+    },
+    {
+      id: "run-setup",
+      group: "Server",
+      label: "Run setup again",
+      icon: <Server />,
+      action: app.openWizard,
     },
     {
       id: "copy-mcp",
@@ -532,7 +549,7 @@ function Row({
       value={`${label} ${reason ?? ""}`}
       disabled={disabled}
       onSelect={onSelect}
-      className="h-9 text-[14px]"
+      className="h-8 text-[13px]"
     >
       <span className="text-fg-tertiary [&_svg]:size-4">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>

@@ -1,11 +1,16 @@
 import { ImapFlow } from "imapflow";
 import type { MessageStructureObject } from "imapflow";
 import nodemailer from "nodemailer";
+import type { SendMailOptions } from "nodemailer";
 import { parseRfc822, formatAddress, stripHtml } from "./mime.js";
 import type {
   AccountCredentials,
   ConnectionTestResult,
+  DraftInput,
+  DraftRef,
+  ListDraftsOpts,
   ListMessagesOpts,
+  MailDraft,
   MailFolder,
   MailMessage,
   MailMessageSummary,
@@ -24,6 +29,8 @@ const GREETING_TIMEOUT_MS = 10_000;
 const SOCKET_TIMEOUT_MS = 60_000;
 /** Bytes of a body part fetched per message to build a list snippet. */
 const SNIPPET_BYTES = 1024;
+/** Drafts read per listDrafts call. Each one costs a full source fetch. */
+const DRAFT_LIST_LIMIT = 25;
 
 function makeId(accountId: string, folder: string, uid: number): string {
   return `${accountId}:${encodeURIComponent(folder)}:${uid}`;
@@ -517,6 +524,81 @@ function sentMailboxPath(
   return byName?.path ?? null;
 }
 
+/**
+ * SPECIAL-USE \Drafts first; a server that does not advertise it falls back to
+ * the common names. Exported for tests: picking the wrong mailbox here writes a
+ * draft somewhere the user's own client will never show it.
+ */
+export function draftsMailboxPath(
+  boxes: { name: string; path: string; specialUse?: string }[],
+): string | null {
+  const special = boxes.find((b) => b.specialUse === "\\Drafts");
+  if (special) return special.path;
+  const byPath = boxes.find((b) => /^\[gmail\]\/drafts$/i.test(b.path));
+  if (byPath) return byPath.path;
+  const byName = boxes.find((b) =>
+    /^(drafts|draft|entw(ü|u)rfe|brouillons|borradores)$/i.test(b.name),
+  );
+  return byName?.path ?? null;
+}
+
+/**
+ * Compose to raw RFC822 bytes without sending anything. Both IMAP write paths
+ * go through it: sendMessage APPENDs to Sent the exact bytes it handed to
+ * SMTP, and the draft path APPENDs bytes that are never delivered at all.
+ */
+async function composeMime(mail: SendMailOptions) {
+  const composed = await nodemailer
+    .createTransport({ streamTransport: true, buffer: true, newline: "\r\n" })
+    .sendMail(mail);
+  const raw = Buffer.isBuffer(composed.message)
+    ? composed.message
+    : Buffer.from(String(composed.message));
+  return { raw, envelope: composed.envelope, messageId: composed.messageId };
+}
+
+/** A draft carries the account's own address as From, exactly like a send. */
+function draftMailOptions(
+  account: ProviderAccount,
+  input: DraftInput,
+): SendMailOptions {
+  return {
+    from: account.email,
+    to: input.to,
+    cc: input.cc,
+    bcc: input.bcc,
+    subject: input.subject,
+    // Never undefined: a message with no body part at all is not a message.
+    text: input.text ?? "",
+    html: input.html,
+    inReplyTo: input.inReplyTo,
+    references: input.references,
+  };
+}
+
+/**
+ * UIDPLUS hands the new uid straight back from APPEND. Without that extension
+ * the only way to name what was just written is to search for its Message-ID.
+ */
+async function appendedDraftUid(
+  client: ImapFlow,
+  path: string,
+  messageId: string,
+): Promise<number | null> {
+  if (!messageId) return null;
+  const lock = await client.getMailboxLock(path, { readOnly: true });
+  try {
+    const uids = await client.search(
+      { header: { "message-id": messageId } },
+      { uid: true },
+    );
+    if (!uids || uids.length === 0) return null;
+    return uids[uids.length - 1];
+  } finally {
+    lock.release();
+  }
+}
+
 export class ImapSmtpProvider implements MailProvider {
   async testConnection(
     creds: AccountCredentials,
@@ -672,12 +754,8 @@ export class ImapSmtpProvider implements MailProvider {
 
     // Compose once so the bytes that go over SMTP are the exact bytes we
     // APPEND to Sent.
-    const composed = await nodemailer
-      .createTransport({ streamTransport: true, buffer: true, newline: "\r\n" })
-      .sendMail(mail);
-    const raw = Buffer.isBuffer(composed.message)
-      ? composed.message
-      : Buffer.from(String(composed.message));
+    const composed = await composeMime(mail);
+    const raw = composed.raw;
 
     const transport = nodemailer.createTransport({
       host: creds.smtpHost,
@@ -748,6 +826,184 @@ export class ImapSmtpProvider implements MailProvider {
       }));
     });
   }
+
+  async createDraft(
+    account: ProviderAccount,
+    input: DraftInput,
+  ): Promise<DraftRef> {
+    const composed = await composeMime(draftMailOptions(account, input));
+    return this.appendDraft(account, composed.raw, composed.messageId ?? "");
+  }
+
+  async updateDraft(
+    account: ProviderAccount,
+    draftId: string,
+    input: DraftInput,
+  ): Promise<DraftRef> {
+    const target = parseId(draftId, account.id);
+    if (!target) throw new Error(`invalid draft id: ${draftId}`);
+    const composed = await composeMime(draftMailOptions(account, input));
+    // Append the new copy before removing the old one. A failure between the
+    // two leaves a duplicate, which the user can delete; the other order loses
+    // what they wrote.
+    const ref = await this.appendDraft(
+      account,
+      composed.raw,
+      composed.messageId ?? "",
+    );
+    await this.removeDraft(account, target).catch((err: unknown) => {
+      console.warn(
+        `[imap] stale draft ${draftId} left behind for ${account.email}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+    return ref;
+  }
+
+  async listDrafts(
+    account: ProviderAccount,
+    opts: ListDraftsOpts = {},
+  ): Promise<MailDraft[]> {
+    const limit = opts.limit ?? DRAFT_LIST_LIMIT;
+    return withImap(account.id, account.creds, async (client) => {
+      const path = draftsMailboxPath(await client.list());
+      if (!path) return [];
+      const lock = await client.getMailboxLock(path, { readOnly: true });
+      try {
+        const mb = client.mailbox;
+        if (!mb) return [];
+        const window = uidWindow(mb.exists, limit);
+        if (!window) return [];
+        const drafts: MailDraft[] = [];
+        for await (const msg of client.fetch(`${window.start}:${window.end}`, {
+          uid: true,
+          envelope: true,
+          source: true,
+        })) {
+          drafts.push(
+            await draftFromImapSource(
+              account.id,
+              path,
+              msg.uid,
+              msg.source ?? Buffer.from(""),
+              msg,
+            ),
+          );
+        }
+        return drafts.reverse();
+      } finally {
+        lock.release();
+      }
+    });
+  }
+
+  async deleteDraft(
+    account: ProviderAccount,
+    draftId: string,
+  ): Promise<boolean> {
+    const target = parseId(draftId, account.id);
+    if (!target) return false;
+    return this.removeDraft(account, target);
+  }
+
+  private async appendDraft(
+    account: ProviderAccount,
+    raw: Buffer,
+    messageId: string,
+  ): Promise<DraftRef> {
+    return withImap(account.id, account.creds, async (client) => {
+      const path = draftsMailboxPath(await client.list());
+      if (!path) throw new Error("no Drafts mailbox found");
+      // \Seen alongside \Draft: your own unfinished mail is not unread mail.
+      const res = await client.append(
+        path,
+        raw,
+        ["\\Draft", "\\Seen"],
+        new Date(),
+      );
+      if (!res) throw new Error("Drafts APPEND was rejected by the server");
+      const uid = res.uid ?? (await appendedDraftUid(client, path, messageId));
+      if (uid == null) {
+        throw new Error("draft was stored but its uid could not be resolved");
+      }
+      return {
+        id: makeId(account.id, path, uid),
+        accountId: account.id,
+        uid,
+        folder: path,
+        messageId,
+      };
+    });
+  }
+
+  private async removeDraft(
+    account: ProviderAccount,
+    target: { folder: string; uid: number },
+  ): Promise<boolean> {
+    return withImap(account.id, account.creds, async (client) => {
+      // The folder is re-checked against the Drafts mailbox on purpose.
+      // parseId resolves a bare uid to INBOX, so without this a malformed
+      // draft id would delete delivered mail — which is exactly what the
+      // draft tools promise never to touch.
+      const path = draftsMailboxPath(await client.list());
+      if (!path) throw new Error("no Drafts mailbox found");
+      if (target.folder !== path) {
+        throw new Error(
+          `refusing to delete outside the Drafts mailbox: ${target.folder}`,
+        );
+      }
+      // Writable lock: a delete needs a read-write mailbox.
+      const lock = await client.getMailboxLock(path);
+      try {
+        return await client.messageDelete(String(target.uid), { uid: true });
+      } finally {
+        lock.release();
+      }
+    });
+  }
+}
+
+/**
+ * Build a MailDraft from raw RFC822 (the body path listDrafts uses).
+ * Exported so tests exercise the real decode path without a live IMAP server.
+ */
+export async function draftFromImapSource(
+  accountId: string,
+  folder: string,
+  uid: number,
+  source: Buffer | string,
+  envelopeSource?: {
+    envelope?: {
+      messageId?: string;
+      to?: unknown;
+      cc?: unknown;
+      subject?: string;
+      date?: Date | string;
+    };
+  },
+): Promise<MailDraft> {
+  const body = await parseRfc822(source);
+  const env = envelopeSource?.envelope ?? {};
+  return {
+    id: makeId(accountId, folder, uid),
+    accountId,
+    uid,
+    folder,
+    messageId: env.messageId ?? body.messageId ?? "",
+    to: addr(env.to) || body.to || "",
+    cc: addr(env.cc) || body.cc || undefined,
+    // Bcc survives only in the stored copy; no envelope carries it.
+    bcc: body.bcc,
+    subject: env.subject || body.subject || "(no subject)",
+    date: env.date
+      ? new Date(env.date).toISOString()
+      : (body.date ?? new Date().toISOString()),
+    snippet: body.bodyText.slice(0, 140),
+    bodyText: body.bodyText,
+    bodyHtml: body.bodyHtml,
+    inReplyTo: body.inReplyTo,
+    references: body.references,
+  };
 }
 
 /**
