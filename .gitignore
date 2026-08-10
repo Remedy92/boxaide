@@ -6,3 +6,14 @@ dist/
 .env.*
 !.env.example
 coverage/
+
+# Next.js front end (apps/web keeps its own lockfile and its own install)
+apps/web/.next/
+apps/web/out/
+apps/web/node_modules/
+
+# `npm run web:sync` copies apps/web/out here for the self-hosted server.
+web-next/
+
+# Playwright MCP scratch
+.playwright-mcp/

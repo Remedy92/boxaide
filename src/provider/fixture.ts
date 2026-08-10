@@ -78,10 +78,19 @@ export class FixtureProvider implements MailProvider {
   async testConnection(
     creds: AccountCredentials,
   ): Promise<ConnectionTestResult> {
-    if (!creds.username || !creds.password) {
-      return { ok: false, error: "username and password required" };
+    if (creds.auth.kind === "password") {
+      if (!creds.auth.user || !creds.auth.pass) {
+        return { ok: false, error: "username and password required" };
+      }
+      if (creds.auth.pass === "bad") {
+        return { ok: false, error: "authentication failed" };
+      }
+      return { ok: true };
     }
-    if (creds.password === "bad") {
+    if (!creds.auth.user || !creds.auth.accessToken) {
+      return { ok: false, error: "username and access token required" };
+    }
+    if (creds.auth.accessToken === "bad") {
       return { ok: false, error: "authentication failed" };
     }
     return { ok: true };

@@ -74,12 +74,38 @@ type Pooled = {
 const pool = new Map<string, Pooled>();
 const connecting = new Map<string, Promise<Pooled>>();
 
+/** ImapFlow auth object for password or XOAUTH2. */
+export function imapAuthOptions(
+  creds: AccountCredentials,
+): { user: string; pass: string } | { user: string; accessToken: string } {
+  if (creds.auth.kind === "xoauth2") {
+    return { user: creds.auth.user, accessToken: creds.auth.accessToken };
+  }
+  return { user: creds.auth.user, pass: creds.auth.pass };
+}
+
+/** Nodemailer auth object for password or XOAUTH2. */
+export function smtpAuthOptions(
+  creds: AccountCredentials,
+):
+  | { user: string; pass: string }
+  | { type: "OAuth2"; user: string; accessToken: string } {
+  if (creds.auth.kind === "xoauth2") {
+    return {
+      type: "OAuth2",
+      user: creds.auth.user,
+      accessToken: creds.auth.accessToken,
+    };
+  }
+  return { user: creds.auth.user, pass: creds.auth.pass };
+}
+
 function newClient(creds: AccountCredentials): ImapFlow {
   return new ImapFlow({
     host: creds.imapHost,
     port: creds.imapPort,
     secure: creds.imapSecure,
-    auth: { user: creds.username, pass: creds.password },
+    auth: imapAuthOptions(creds),
     logger: false,
     connectionTimeout: CONNECT_TIMEOUT_MS,
     greetingTimeout: GREETING_TIMEOUT_MS,
@@ -129,14 +155,15 @@ async function acquire(
   if (inFlight) return inFlight;
   const started = (async () => {
     const client = newClient(creds);
+    // Attach before connect: a timeout during handshake must not crash Node.
+    client.on("error", () => {
+      /* surfaced on the awaited command; keeps the process alive */
+    });
     await client.connect();
     const entry: Pooled = { client, timer: null, busy: 0 };
     client.on("close", () => {
       if (pool.get(key) === entry) pool.delete(key);
       clearIdle(entry);
-    });
-    client.on("error", () => {
-      /* surfaced on the awaited command; keeps the process alive */
     });
     pool.set(key, entry);
     return entry;
@@ -175,20 +202,62 @@ async function withImap<T>(
   throw lastErr;
 }
 
+/**
+ * Human-readable IMAP error. ImapFlow often surfaces a bare "Command failed"
+ * while the useful text sits on responseText / authenticationFailed.
+ */
+export function imapErrorText(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const e = err as Error & {
+    responseText?: string;
+    authenticationFailed?: boolean;
+    code?: string;
+    serverResponseCode?: string;
+  };
+  const parts: string[] = [];
+  if (e.authenticationFailed || e.code === "EAUTH") {
+    parts.push("authentication failed");
+  }
+  if (e.responseText && e.responseText !== e.message) {
+    parts.push(e.responseText);
+  }
+  if (e.message && e.message !== "Command failed") {
+    parts.push(e.message);
+  } else if (e.message === "Command failed" && parts.length === 0) {
+    parts.push("IMAP command failed (check host, username, and app password)");
+  }
+  if (e.code && !parts.some((p) => p.includes(e.code!))) {
+    parts.push(e.code);
+  }
+  return parts.join(": ") || e.message || "IMAP error";
+}
+
 /** One-shot connection for calls made before an account exists. */
 async function withTempImap<T>(
   creds: AccountCredentials,
   fn: (client: ImapFlow) => Promise<T>,
 ): Promise<T> {
   const client = newClient(creds);
-  await client.connect();
+  // Same as pooled clients: a late socket timeout must not kill the process.
+  let lateError: Error | null = null;
+  client.on("error", (err: Error) => {
+    lateError = err;
+  });
   try {
+    await client.connect();
+    if (lateError) throw lateError;
     return await fn(client);
+  } catch (err) {
+    throw new Error(imapErrorText(err), { cause: err });
   } finally {
     try {
       await client.logout();
     } catch {
-      client.close();
+      try {
+        client.close();
+      } catch {
+        // already gone
+      }
     }
   }
 }
@@ -460,7 +529,7 @@ export class ImapSmtpProvider implements MailProvider {
     } catch (err) {
       return {
         ok: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: imapErrorText(err),
       };
     }
   }
@@ -614,7 +683,7 @@ export class ImapSmtpProvider implements MailProvider {
       host: creds.smtpHost,
       port: creds.smtpPort,
       secure: creds.smtpSecure,
-      auth: { user: creds.username, pass: creds.password },
+      auth: smtpAuthOptions(creds),
     });
     const info = await transport.sendMail({
       envelope: composed.envelope,

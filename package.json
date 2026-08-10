@@ -16,7 +16,9 @@
     "dev": "tsx src/cli.ts serve",
     "mcp": "tsx src/cli.ts mcp",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "web:build": "npm --prefix apps/web ci && npm --prefix apps/web run build",
+    "web:sync": "rm -rf web-next && cp -R apps/web/out web-next"
   },
   "keywords": [
     "mcp",

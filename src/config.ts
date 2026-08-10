@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { parseAllowedOrigins } from "./api/routes.js";
 
 export type AppConfig = {
   dataDir: string;
@@ -10,6 +11,11 @@ export type AppConfig = {
   masterKey: Buffer;
   bearerToken: string;
   fixtureMode: boolean;
+  /**
+   * Extra browser origins allowed to call the authenticated API, from
+   * MAILMUX_ALLOWED_ORIGINS. Empty by default: loopback only.
+   */
+  allowedOrigins: string[];
 };
 
 function expandHome(p: string): string {
@@ -67,5 +73,8 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       overrides.fixtureMode ??
       (process.env.MAILMUX_FIXTURE === "1" ||
         process.env.MAILMUX_FIXTURE === "true"),
+    allowedOrigins:
+      overrides.allowedOrigins ??
+      parseAllowedOrigins(process.env.MAILMUX_ALLOWED_ORIGINS),
   };
 }

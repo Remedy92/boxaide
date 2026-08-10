@@ -1,3 +1,11 @@
+/**
+ * How the mailbox authenticates. Password is today's path (app passwords).
+ * XOAUTH2 is prep for Microsoft/Google OAuth — not wired from the UI yet.
+ */
+export type MailAuth =
+  | { kind: "password"; user: string; pass: string }
+  | { kind: "xoauth2"; user: string; accessToken: string };
+
 export type AccountCredentials = {
   imapHost: string;
   imapPort: number;
@@ -5,14 +13,26 @@ export type AccountCredentials = {
   smtpHost: string;
   smtpPort: number;
   smtpSecure: boolean;
-  username: string;
-  password: string;
+  auth: MailAuth;
 };
+
+/** Login user from either auth kind. */
+export function authUser(creds: AccountCredentials): string {
+  return creds.auth.user;
+}
+
+/** Build password-auth credentials (REST connect form, fixtures, tests). */
+export function passwordCredentials(
+  base: Omit<AccountCredentials, "auth"> & { user: string; pass: string },
+): AccountCredentials {
+  const { user, pass, ...hosts } = base;
+  return { ...hosts, auth: { kind: "password", user, pass } };
+}
 
 /**
  * Identity + credentials handed to every provider call.
  * Providers need the account's own address (From headers, fixture fabrication),
- * which `creds.username` does not reliably carry.
+ * which `creds.auth.user` does not reliably carry.
  */
 export type ProviderAccount = {
   id: string;

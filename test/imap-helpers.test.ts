@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { parseId, uidWindow } from "../src/provider/imap-smtp.js";
+import {
+  parseId,
+  uidWindow,
+  imapErrorText,
+  imapAuthOptions,
+  smtpAuthOptions,
+} from "../src/provider/imap-smtp.js";
+import type { AccountCredentials } from "../src/provider/types.js";
 
 describe("parseId (imap message id round-trip)", () => {
   it("splits a well-formed accountId:folder:uid id", () => {
@@ -74,5 +81,69 @@ describe("uidWindow (listMessages sequence range)", () => {
   it("returns null once the offset walks past the oldest message", () => {
     expect(uidWindow(3, 25, 10)).toBeNull();
     expect(uidWindow(3, 25, 3)).toBeNull();
+  });
+});
+
+describe("imapErrorText", () => {
+  it("replaces bare Command failed with an actionable hint", () => {
+    const err = new Error("Command failed");
+    expect(imapErrorText(err)).toMatch(/app password/i);
+  });
+
+  it("prefers responseText and authentication flags", () => {
+    const err = Object.assign(new Error("Command failed"), {
+      authenticationFailed: true,
+      responseText: "Invalid credentials",
+      code: "EAUTH",
+    });
+    const text = imapErrorText(err);
+    expect(text).toMatch(/authentication failed/i);
+    expect(text).toMatch(/Invalid credentials/);
+  });
+});
+
+const hosts = {
+  imapHost: "imap.example.com",
+  imapPort: 993,
+  imapSecure: true,
+  smtpHost: "smtp.example.com",
+  smtpPort: 465,
+  smtpSecure: true,
+};
+
+describe("auth credential mapping (password | xoauth2)", () => {
+  it("maps password auth for ImapFlow and Nodemailer", () => {
+    const creds: AccountCredentials = {
+      ...hosts,
+      auth: { kind: "password", user: "u@x.com", pass: "secret" },
+    };
+    expect(imapAuthOptions(creds)).toEqual({
+      user: "u@x.com",
+      pass: "secret",
+    });
+    expect(smtpAuthOptions(creds)).toEqual({
+      user: "u@x.com",
+      pass: "secret",
+    });
+  });
+
+  it("maps xoauth2 auth for ImapFlow and Nodemailer", () => {
+    const creds: AccountCredentials = {
+      ...hosts,
+      auth: {
+        kind: "xoauth2",
+        user: "u@x.com",
+        accessToken: "ya29.token",
+      },
+    };
+    expect(imapAuthOptions(creds)).toEqual({
+      user: "u@x.com",
+      accessToken: "ya29.token",
+    });
+    expect(smtpAuthOptions(creds)).toEqual({
+      type: "OAuth2",
+      user: "u@x.com",
+      accessToken: "ya29.token",
+    });
   });
 });

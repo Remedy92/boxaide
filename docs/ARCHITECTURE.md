@@ -15,7 +15,7 @@ Ship **mailmux** as a single **Node 20+ / TypeScript** process:
 | Send | SMTP via **Nodemailer** |
 | State | SQLite (`better-sqlite3`) |
 | Secrets | AES-256-GCM, master key file / `MAILMUX_MASTER_KEY` |
-| Web | Static HTML/CSS/JS served by the same process |
+| Web | Two front ends, both static, both fully client-side: the bundled `web/` HTML/CSS/JS, and a Next.js App Router build in `apps/web` (see below) |
 | Tests | Vitest + in-process **FixtureProvider** (no live mail required) |
 
 ## Why not alternatives
@@ -32,6 +32,59 @@ Ship **mailmux** as a single **Node 20+ / TypeScript** process:
 3. **Provider interface** — real IMAP and fixture implement the same contract so tests call shipped code.
 4. **Local by default** — bind `127.0.0.1`; bearer token gates API + MCP.
 5. **MIT, zero paid SaaS** for core receive/send.
+
+## The Next.js front end (`apps/web`)
+
+**Date:** 2026-08-09 · **Status:** accepted
+
+`apps/web` is a Next.js App Router build that talks to the mailmux server the same way the bundled UI does: from the browser, over HTTP, with a bearer token. The backend is unchanged apart from the CORS gate below.
+
+| Decision | Reason |
+|---|---|
+| **`output: "export"` — a static export, no server** | The same artefact is deployable to a static host *and* servable by the Node process. It also makes the privacy claim structural rather than a policy: with no route handlers, no server actions and no proxy, a host physically cannot see the token, the mail credentials or a message body. |
+| **Every data component is a Client Component** | All fetching happens in the browser, directly against the user's own machine. `src/app/layout.tsx` is the only file without `"use client"`, and it fetches nothing. |
+| **Base URL and token in `localStorage` only** | No cookies, no env var carries a secret. `NEXT_PUBLIC_DEFAULT_API_BASE` sets only the pre-filled default (`http://127.0.0.1:8787`) and is public by definition. |
+| **One route, selection in the URL hash** | `output: "export"` bans dynamic routes without `generateStaticParams`, and message ids are unknowable at build time. Selection is mirrored to `#/a/<accountId>/m/<messageId>` with `history.replaceState`. |
+| **Its own `package.json` and lockfile; no root `workspaces` key** | A workspace would hoist `better-sqlite3` into the front-end install and force a native build on every deploy. |
+| **`bodyHtml` is never rendered** | It is raw unsanitised sender HTML and there is no sanitiser in this codebase. The reader renders `bodyText` only; "View HTML source" shows it escaped inside a `<pre>`. `react/no-danger` is an ESLint **error**, so there is no `dangerouslySetInnerHTML` anywhere in the tree. |
+| **`/api/local-bootstrap` and `/api/agent-connect` are never called** | Both return the bearer token in a response body. The MCP snippet is built client-side from `localStorage` instead. |
+
+Serving it from the Node process:
+
+```bash
+npm run web:build   # npm ci + next build inside apps/web
+npm run web:sync    # copy apps/web/out -> web-next/
+npm start
+```
+
+`resolveWebRoot()` (`src/app.ts`) prefers `web-next/` when it exists and falls back to `web/`. Served that way the page is same-origin with the API, so no allowlist entry, no preflight and no Local Network Access prompt applies — which is why it is the recommended path for Safari users (WebKit blocks an `https` page from reaching `127.0.0.1`, [bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934)).
+
+Deploying it to a static host (Vercel and equivalents): set the project's **Root Directory** to `apps/web`. Nothing in the repo can express that — it is a dashboard setting, and without it the platform builds the CLI package at the root instead. Then set `MAILMUX_ALLOWED_ORIGINS` on **your** machine to the deployed origin.
+
+## Cross-origin access (`MAILMUX_ALLOWED_ORIGINS`)
+
+**Date:** 2026-08-09 · **Status:** accepted
+
+A browser page served from anywhere other than the mailmux process itself cannot reach `/api/*` by default. The `Origin` header must be absent (curl, MCP clients) or loopback; anything else is `403 forbidden origin`, and no `Access-Control-*` header is emitted at all.
+
+`MAILMUX_ALLOWED_ORIGINS` adds exact origins to that gate so a separately hosted browser UI can call the local server directly. The decisions behind it:
+
+| Decision | Reason |
+|---|---|
+| **Default empty (closed)** | Unset means byte-identical behaviour to before the change. Opening a service that holds decrypted IMAP passwords must be a deliberate act. |
+| **Loopback stays implicitly allowed** | The bundled `web/` UI and any same-origin static build need no configuration. |
+| **`*` parsed and dropped, never honoured** | The origin check is the surviving defence against DNS rebinding against a loopback service. `*` deletes it, and turns a leaked token into something usable from any page the user visits. |
+| **`https:` only for non-loopback entries** | A plaintext allowlisted origin is trivially spoofed on a hostile network. |
+| **Echo the *parsed* origin, never `*` and never the raw header** | A per-origin allowlist is meaningless without an exact echo, and it is a prerequisite for the `Vary` contract. The value comes from `new URL(origin).origin`, because the WHATWG parser reads a backslash as a slash: `https://good.example\.evil.com` passes the allowlist as `https://good.example`, and echoing the raw string back would hand the response to the attacker's origin. |
+| **`Vary: Origin` on every response, including 401 and 403** | Without it a proxy, service worker or tunnel can serve one origin's answer to another. |
+| **`Access-Control-Allow-Credentials` never sent** | mailmux authenticates by header, never by cookie. Ambient credentials must stay impossible. |
+| **`Access-Control-Allow-Headers: authorization, content-type`** | Exactly what the client sends. Echoing the request's header list back would make the allowlist meaningless. |
+| **Preflight answered before the auth gate** | An `OPTIONS` preflight carries no `Authorization` by spec, so gating it on the token makes CORS impossible. The origin allowlist is the control that applies; a preflight runs no handler and returns an empty 204. |
+| **`/api/local-bootstrap` deliberately not widened** | It is unauthenticated and returns the bearer token in plaintext. It keeps the strict loopback-only `isAllowedOrigin` plus the `Host` check, and answers `Cache-Control: no-store` + `Vary: Origin` so neither the browser nor a local proxy retains the token. A remote UI must have its token pasted in by a human. |
+
+Residual risk: allowlisting a hostname means anyone who can serve a page there — a preview deployment on a shared team, a hijacked account — can reach the server **if they also hold the token**. Prefer a custom domain over a platform-assigned hostname, and keep the list short.
+
+Implementation: `parseAllowedOrigins` / `isApiOriginAllowed` / `applyCors` / `corsPreflight` in `src/api/routes.ts`, threaded through `AppConfig.allowedOrigins` (`src/config.ts`) into `createApi`, `/mcp` and `/health` (`src/app.ts`). Covered by `test/security-http.test.ts`.
 
 ## MVP surface
 

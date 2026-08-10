@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { join } from "node:path";
 import { encryptSecret, decryptSecret } from "../crypto/secrets.js";
-import type { AccountCredentials } from "../provider/types.js";
+import type { AccountCredentials, MailAuth } from "../provider/types.js";
 
 export type StoredAccount = {
   id: string;
@@ -14,7 +14,10 @@ export type StoredAccount = {
   smtpPort: number;
   smtpSecure: number;
   username: string;
+  /** Encrypted password (password auth) or access token (xoauth2). */
   passwordEnc: string;
+  /** `password` (default) or `xoauth2`. */
+  authKind: string;
   createdAt: string;
 };
 
@@ -51,6 +54,15 @@ export class Store {
         created_at TEXT NOT NULL
       );
     `);
+    // Older DBs lack auth_kind; default keeps every existing row on password auth.
+    const cols = this.db
+      .prepare(`PRAGMA table_info(accounts)`)
+      .all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "auth_kind")) {
+      this.db.exec(
+        `ALTER TABLE accounts ADD COLUMN auth_kind TEXT NOT NULL DEFAULT 'password'`,
+      );
+    }
   }
 
   listAccounts(): Array<{
@@ -78,7 +90,9 @@ export class Store {
         `SELECT id, alias, email,
           imap_host as imapHost, imap_port as imapPort, imap_secure as imapSecure,
           smtp_host as smtpHost, smtp_port as smtpPort, smtp_secure as smtpSecure,
-          username, password_enc as passwordEnc, created_at as createdAt
+          username, password_enc as passwordEnc,
+          COALESCE(auth_kind, 'password') as authKind,
+          created_at as createdAt
          FROM accounts WHERE id = ? OR alias = ?`,
       )
       .get(idOrAlias, idOrAlias) as StoredAccount | undefined;
@@ -86,6 +100,11 @@ export class Store {
   }
 
   credentialsFor(account: StoredAccount): AccountCredentials {
+    const secret = decryptSecret(this.masterKey, account.passwordEnc);
+    const auth: MailAuth =
+      account.authKind === "xoauth2"
+        ? { kind: "xoauth2", user: account.username, accessToken: secret }
+        : { kind: "password", user: account.username, pass: secret };
     return {
       imapHost: account.imapHost,
       imapPort: account.imapPort,
@@ -93,8 +112,7 @@ export class Store {
       smtpHost: account.smtpHost,
       smtpPort: account.smtpPort,
       smtpSecure: Boolean(account.smtpSecure),
-      username: account.username,
-      password: decryptSecret(this.masterKey, account.passwordEnc),
+      auth,
     };
   }
 
@@ -104,16 +122,19 @@ export class Store {
     email: string;
     creds: AccountCredentials;
   }): void {
-    const passwordEnc = encryptSecret(this.masterKey, input.creds.password);
+    const { auth } = input.creds;
+    const secret = auth.kind === "password" ? auth.pass : auth.accessToken;
+    const passwordEnc = encryptSecret(this.masterKey, secret);
+    const authKind = auth.kind;
     const createdAt = new Date().toISOString();
     this.db
       .prepare(
         `INSERT INTO accounts (
           id, alias, email, imap_host, imap_port, imap_secure,
-          smtp_host, smtp_port, smtp_secure, username, password_enc, created_at
+          smtp_host, smtp_port, smtp_secure, username, password_enc, auth_kind, created_at
         ) VALUES (
           @id, @alias, @email, @imapHost, @imapPort, @imapSecure,
-          @smtpHost, @smtpPort, @smtpSecure, @username, @passwordEnc, @createdAt
+          @smtpHost, @smtpPort, @smtpSecure, @username, @passwordEnc, @authKind, @createdAt
         )
         ON CONFLICT(id) DO UPDATE SET
           alias=excluded.alias,
@@ -125,7 +146,8 @@ export class Store {
           smtp_port=excluded.smtp_port,
           smtp_secure=excluded.smtp_secure,
           username=excluded.username,
-          password_enc=excluded.password_enc
+          password_enc=excluded.password_enc,
+          auth_kind=excluded.auth_kind
         `,
       )
       .run({
@@ -138,8 +160,9 @@ export class Store {
         smtpHost: input.creds.smtpHost,
         smtpPort: input.creds.smtpPort,
         smtpSecure: input.creds.smtpSecure ? 1 : 0,
-        username: input.creds.username,
+        username: auth.user,
         passwordEnc,
+        authKind,
         createdAt,
       });
   }

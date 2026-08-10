@@ -22,8 +22,7 @@ const baseCreds = {
   smtpHost: "fixture",
   smtpPort: 465,
   smtpSecure: true,
-  username: "p@test.com",
-  password: "ok",
+  auth: { kind: "password" as const, user: "p@test.com", pass: "ok" },
 };
 
 type ToolResult = { result: { content: Array<{ text: string }> } };

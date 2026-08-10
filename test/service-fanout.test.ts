@@ -25,8 +25,7 @@ const baseCreds: AccountCredentials = {
   smtpHost: "fixture",
   smtpPort: 465,
   smtpSecure: true,
-  username: "a@test.com",
-  password: "ok",
+  auth: { kind: "password", user: "a@test.com", pass: "ok" },
 };
 
 function summary(accountId: string, subject: string): MailMessageSummary {
@@ -99,12 +98,12 @@ async function connectPair(mail: MailService): Promise<void> {
   await mail.connectAccount({
     alias: "good",
     email: "good@test.com",
-    creds: { ...baseCreds, username: "good@test.com" },
+    creds: { ...baseCreds, auth: { kind: "password", user: "good@test.com", pass: "ok" } },
   });
   await mail.connectAccount({
     alias: "broken",
     email: "broken@test.com",
-    creds: { ...baseCreds, username: "broken@test.com" },
+    creds: { ...baseCreds, auth: { kind: "password", user: "broken@test.com", pass: "ok" } },
   });
 }
 
@@ -165,7 +164,7 @@ describe("read state: getMessage vs markRead (fixture/IMAP parity)", () => {
     const account = await mail.connectAccount({
       alias: "personal",
       email: "you@personal.test",
-      creds: { ...baseCreds, username: "you@personal.test" },
+      creds: { ...baseCreds, auth: { kind: "password", user: "you@personal.test", pass: "ok" } },
     });
     provider.seedAccount(account.id, "you@personal.test", [
       { subject: "Unread note", from: "friend@example.com", bodyText: "hi" },

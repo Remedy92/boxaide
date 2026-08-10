@@ -22,8 +22,7 @@ const baseCreds = {
   smtpHost: "fixture",
   smtpPort: 465,
   smtpSecure: true,
-  username: "a@test.com",
-  password: "ok",
+  auth: { kind: "password" as const, user: "a@test.com", pass: "ok" },
 };
 
 describe("crypto secrets", () => {
@@ -32,6 +31,35 @@ describe("crypto secrets", () => {
     const enc = encryptSecret(key, "app-password-secret");
     expect(enc).not.toContain("app-password-secret");
     expect(decryptSecret(key, enc)).toBe("app-password-secret");
+  });
+});
+
+describe("Store xoauth2 credential round-trip", () => {
+  it("persists auth_kind and decrypts access tokens", () => {
+    const masterKey = randomBytes(32);
+    const store = new Store(masterKey, ":memory:");
+    store.upsertAccount({
+      id: "acct1",
+      alias: "ms",
+      email: "u@outlook.com",
+      creds: {
+        ...baseCreds,
+        auth: {
+          kind: "xoauth2",
+          user: "u@outlook.com",
+          accessToken: "ya29.secret-token",
+        },
+      },
+    });
+    const row = store.getAccount("ms");
+    expect(row?.authKind).toBe("xoauth2");
+    expect(row?.passwordEnc).not.toContain("ya29");
+    expect(store.credentialsFor(row!).auth).toEqual({
+      kind: "xoauth2",
+      user: "u@outlook.com",
+      accessToken: "ya29.secret-token",
+    });
+    store.close();
   });
 });
 
@@ -51,12 +79,12 @@ describe("MailService connect/list/read/send (shipped path)", () => {
     const personal = await mail.connectAccount({
       alias: "personal",
       email: "you@personal.test",
-      creds: { ...baseCreds, username: "you@personal.test" },
+      creds: { ...baseCreds, auth: { kind: "password", user: "you@personal.test", pass: "ok" } },
     });
     const work = await mail.connectAccount({
       alias: "work",
       email: "you@work.test",
-      creds: { ...baseCreds, username: "you@work.test", password: "ok" },
+      creds: { ...baseCreds, auth: { kind: "password", user: "you@work.test", pass: "ok" } },
     });
 
     provider.seedAccount(personal.id, "you@personal.test", [
@@ -78,10 +106,16 @@ describe("MailService connect/list/read/send (shipped path)", () => {
     expect(accounts).toHaveLength(2);
     expect(accounts.map((a) => a.alias).sort()).toEqual(["personal", "work"]);
 
-    // passwords stored encrypted, not plaintext
+    // secrets stored encrypted, not plaintext
     const row = store.getAccount("personal");
     expect(row?.passwordEnc).toBeTruthy();
     expect(row?.passwordEnc).not.toContain("ok");
+    expect(row?.authKind).toBe("password");
+    expect(store.credentialsFor(row!).auth).toEqual({
+      kind: "password",
+      user: "you@personal.test",
+      pass: "ok",
+    });
 
     const all = await mail.listMessages("all", { limit: 20 });
     expect(all.errors).toEqual([]);
@@ -96,7 +130,7 @@ describe("MailService connect/list/read/send (shipped path)", () => {
     const personal = await mail.connectAccount({
       alias: "personal",
       email: "you@personal.test",
-      creds: { ...baseCreds, username: "you@personal.test" },
+      creds: { ...baseCreds, auth: { kind: "password", user: "you@personal.test", pass: "ok" } },
     });
     provider.seedAccount(personal.id, "you@personal.test", [
       {
@@ -124,7 +158,7 @@ describe("MailService connect/list/read/send (shipped path)", () => {
     await mail.connectAccount({
       alias: "work",
       email: "you@work.test",
-      creds: { ...baseCreds, username: "you@work.test" },
+      creds: { ...baseCreds, auth: { kind: "password", user: "you@work.test", pass: "ok" } },
     });
     const result = await mail.sendMessage("work", {
       to: "client@acme.test",
@@ -142,7 +176,7 @@ describe("MailService connect/list/read/send (shipped path)", () => {
       mail.connectAccount({
         alias: "bad",
         email: "bad@test.com",
-        creds: { ...baseCreds, username: "bad@test.com", password: "bad" },
+        creds: { ...baseCreds, auth: { kind: "password", user: "bad@test.com", pass: "bad" } },
       }),
     ).rejects.toThrow(/auth/i);
   });
@@ -154,7 +188,7 @@ describe("MCP JSON-RPC on shipped handlers", () => {
     const personal = await mail.connectAccount({
       alias: "personal",
       email: "p@test.com",
-      creds: { ...baseCreds, username: "p@test.com" },
+      creds: { ...baseCreds, auth: { kind: "password", user: "p@test.com", pass: "ok" } },
     });
     provider.seedAccount(personal.id, "p@test.com", [
       { subject: "Hi", from: "a@b.c", bodyText: "body" },

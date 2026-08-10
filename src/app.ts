@@ -12,7 +12,10 @@ import { ImapSmtpProvider, closeAll } from "./provider/imap-smtp.js";
 import { MailService } from "./mail/service.js";
 import {
   createApi,
+  applyCors,
   authFailure,
+  corsGate,
+  corsPreflightOrDeny,
   isAllowedOrigin,
   isLocalHostHeader,
 } from "./api/routes.js";
@@ -22,6 +25,8 @@ import type { MailProvider } from "./provider/types.js";
 export {
   isLocalHostHeader,
   isAllowedOrigin,
+  isApiOriginAllowed,
+  parseAllowedOrigins,
   tokensMatch,
 } from "./api/routes.js";
 
@@ -68,10 +73,15 @@ export function createRuntime(
   const mail = new MailService(store, provider);
   const app = new Hono();
 
-  // Public health (no auth) for smoke checks
-  app.get("/health", (c) =>
-    c.json({ ok: true, service: "mailmux", fixture: config.fixtureMode }),
-  );
+  // Public health (no auth) for smoke checks. It carries CORS headers so an
+  // allowlisted browser origin can tell "server unreachable" apart from
+  // "token rejected"; the origin allowlist still gates it.
+  app.options("/health", (c) => corsPreflightOrDeny(c, config.allowedOrigins));
+  app.get("/health", (c) => {
+    const denied = corsGate(c, config.allowedOrigins);
+    if (denied) return denied;
+    return c.json({ ok: true, service: "mailmux", fixture: config.fixtureMode });
+  });
 
   // Localhost-only bootstrap so the web UI can pick up the token without copy-paste
   app.get("/api/local-bootstrap", (c) => {
@@ -83,6 +93,12 @@ export function createRuntime(
     if (!isLocalHostHeader(c.req.header("host"))) {
       return c.json({ error: "localhost only" }, 403);
     }
+    // This body is the plaintext bearer token. It carries no CORS headers, so
+    // no cross-origin page can read it — but without these it stays
+    // heuristically cacheable by the browser and by any local proxy, and the
+    // answer varies by Origin.
+    c.header("Cache-Control", "no-store");
+    c.header("Vary", "Origin");
     return c.json({
       token: config.bearerToken,
       fixture: config.fixtureMode,
@@ -91,13 +107,16 @@ export function createRuntime(
   });
 
   // Mount API
-  const api = createApi(mail, config.bearerToken);
+  const api = createApi(mail, config.bearerToken, config.allowedOrigins);
   app.route("/", api);
 
   // MCP over HTTP (JSON-RPC POST) — same auth as API
+  app.options("/mcp", (c) => corsPreflightOrDeny(c, config.allowedOrigins));
   app.post("/mcp", async (c) => {
-    const failure = authFailure(c, config.bearerToken);
+    const origin = c.req.header("origin");
+    const failure = authFailure(c, config.bearerToken, config.allowedOrigins);
     if (failure) return failure;
+    applyCors(c, origin);
     let body: JsonRpcMessage | JsonRpcMessage[];
     try {
       body = await c.req.json<JsonRpcMessage | JsonRpcMessage[]>();
@@ -123,7 +142,7 @@ export function createRuntime(
 
   // Agent connect snippet
   app.get("/api/agent-connect", (c) => {
-    const failure = authFailure(c, config.bearerToken);
+    const failure = authFailure(c, config.bearerToken, config.allowedOrigins);
     if (failure) return failure;
     const base = `http://${config.host}:${config.port}`;
     return c.json({
@@ -160,6 +179,8 @@ export function createRuntime(
     if (!existsSync(index)) {
       return c.text("mailmux UI missing", 500);
     }
+    // The legacy web/index.html carries this placeholder; the Next export does
+    // not, so the replace is simply a no-op there.
     const html = readFileSync(index, "utf8").replace(
       "__MAILMUX_PORT__",
       String(config.port),
@@ -177,8 +198,17 @@ export function createRuntime(
   return { config, store, mail, provider, app };
 }
 
+/**
+ * Where the bundled UI is served from.
+ *
+ * `web-next` is checked first: `npm run web:sync` copies the Next.js static
+ * export there, and a user who has built it wants that interface rather than
+ * the legacy bundle. With no export present, `web/` is used exactly as before.
+ */
 function resolveWebRoot(): string {
   const candidates = [
+    join(process.cwd(), "web-next"),
+    join(__dirname, "..", "web-next"),
     join(process.cwd(), "web"),
     join(__dirname, "..", "web"),
     join(__dirname, "web"),

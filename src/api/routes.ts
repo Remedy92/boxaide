@@ -3,9 +3,66 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { MailService } from "../mail/service.js";
 import type { AccountCredentials } from "../provider/types.js";
+import { passwordCredentials } from "../provider/types.js";
 
 /** Highest `limit` any list endpoint will accept. */
 export const MAX_LIMIT = 200;
+
+/** REST body fields for connect/test — still flat username/password for the UI. */
+type ConnectCredentialFields = {
+  imapHost: string;
+  imapPort?: number;
+  imapSecure?: boolean;
+  smtpHost: string;
+  smtpPort?: number;
+  smtpSecure?: boolean;
+  username?: string;
+  password?: string;
+  /** Optional already-shaped auth (for tests / future OAuth). */
+  auth?: AccountCredentials["auth"];
+};
+
+type ConnectAccountBody = ConnectCredentialFields & {
+  alias: string;
+  email: string;
+};
+
+/**
+ * Map a connect/test body to AccountCredentials.
+ * Prefer explicit `auth`; fall back to username+password for the web form.
+ */
+export function parseConnectCredentials(
+  body: ConnectCredentialFields,
+): AccountCredentials | null {
+  const hosts = {
+    imapHost: body.imapHost,
+    imapPort: body.imapPort ?? 993,
+    imapSecure: body.imapSecure ?? true,
+    smtpHost: body.smtpHost,
+    smtpPort: body.smtpPort ?? 465,
+    smtpSecure: body.smtpSecure ?? true,
+  };
+  if (!hosts.imapHost || !hosts.smtpHost) return null;
+  if (body.auth) {
+    if (body.auth.kind === "password") {
+      if (!body.auth.user || !body.auth.pass) return null;
+      return { ...hosts, auth: body.auth };
+    }
+    if (body.auth.kind === "xoauth2") {
+      if (!body.auth.user || !body.auth.accessToken) return null;
+      return { ...hosts, auth: body.auth };
+    }
+    return null;
+  }
+  if (!body.username || body.password === undefined || body.password === "") {
+    return null;
+  }
+  return passwordCredentials({
+    ...hosts,
+    user: body.username,
+    pass: body.password,
+  });
+}
 
 const LOCAL_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
@@ -48,6 +105,147 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
   return LOCAL_HOSTNAMES.has(hostname.toLowerCase());
 }
 
+/** CORS response headers shared by preflight and real responses. */
+const CORS_METHODS = "GET, POST, DELETE, OPTIONS";
+const CORS_HEADERS = "authorization, content-type";
+const CORS_MAX_AGE = "600";
+
+/**
+ * Origins the browser UI may be served from, beyond loopback.
+ * Comma-separated absolute origins in MAILMUX_ALLOWED_ORIGINS, e.g.
+ *   https://mailmux-web.vercel.app,https://mail.example.com
+ * Defaults to closed: an unset value keeps today's loopback-only behaviour.
+ * "*" is deliberately dropped — an any-origin allowlist removes the only
+ * defence left against DNS rebinding on a loopback service.
+ */
+export function parseAllowedOrigins(raw: string | undefined): string[] {
+  if (!raw) return [];
+  const out: string[] = [];
+  for (const entry of raw.split(",")) {
+    const value = entry.trim();
+    if (!value || value === "*") continue;
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      continue;
+    }
+    // Only https survives: a plaintext allowlisted origin is trivially spoofed.
+    if (url.protocol !== "https:") continue;
+    out.push(url.origin.toLowerCase());
+  }
+  return out;
+}
+
+/**
+ * Origin gate for the *authenticated* API. Loopback always passes, so the
+ * bundled web/ UI needs no configuration. Everything else must be an exact
+ * origin match from the allowlist. Requests with no Origin (curl, MCP
+ * clients, stdio) pass, exactly as before.
+ *
+ * NOT used by /api/local-bootstrap: that route hands out the bearer token
+ * and must stay loopback-only via isAllowedOrigin.
+ */
+export function isApiOriginAllowed(
+  origin: string | undefined,
+  allowed: readonly string[],
+): boolean {
+  if (origin === undefined || origin === "") return true;
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (LOCAL_HOSTNAMES.has(url.hostname.toLowerCase())) return true;
+  return allowed.includes(url.origin.toLowerCase());
+}
+
+/**
+ * Stamp CORS headers on an outgoing response. Vary is set unconditionally —
+ * including on denials — so no cache can serve one origin's answer to another.
+ * Allow-Credentials is deliberately never sent: mailmux authenticates by
+ * header, never by cookie, so ambient credentials must not be possible.
+ *
+ * Never echoes "*": an allowlist that answers every origin is not an
+ * allowlist.
+ *
+ * The header carries the *parsed* origin, never the raw request header.
+ * isApiOriginAllowed compares `new URL(origin).origin`, and the WHATWG parser
+ * treats a backslash as a slash — so `https://good.example\.evil.com` parses to
+ * `https://good.example`, passes the allowlist, and echoing the raw string
+ * would hand that response to the attacker's origin. No browser emits such an
+ * Origin today, but a proxy that forwards a client-set one would.
+ */
+export function applyCors(c: Context, origin: string | undefined): void {
+  setHeader(c, "Vary", "Origin");
+  if (!origin) return;
+  let serialized: string;
+  try {
+    serialized = new URL(origin).origin;
+  } catch {
+    return;
+  }
+  if (serialized === "null") return;
+  setHeader(c, "Access-Control-Allow-Origin", serialized);
+}
+
+/**
+ * `c.header()` writes into the prepared-header bag, which is only merged when
+ * Hono builds the response. After `await next()` the response already exists,
+ * so the header has to go straight onto it.
+ */
+function setHeader(c: Context, name: string, value: string): void {
+  if (c.finalized) {
+    c.res.headers.set(name, value);
+    return;
+  }
+  c.header(name, value);
+}
+
+/** 204 answer to a CORS preflight. Carries no body and no auth requirement. */
+export function corsPreflight(
+  c: Context,
+  origin: string | undefined,
+): Response {
+  applyCors(c, origin);
+  c.header("Access-Control-Allow-Methods", CORS_METHODS);
+  c.header("Access-Control-Allow-Headers", CORS_HEADERS);
+  c.header("Access-Control-Max-Age", CORS_MAX_AGE);
+  return c.body(null, 204);
+}
+
+/** 403 for an origin that is not loopback and not on the allowlist. */
+export function forbiddenOrigin(c: Context): Response {
+  applyCors(c, undefined); // Vary only — never echo a rejected origin
+  return c.json({ error: "forbidden origin" }, 403);
+}
+
+/** Answer an OPTIONS preflight, or 403 when the origin is not allowlisted. */
+export function corsPreflightOrDeny(
+  c: Context,
+  allowedOrigins: readonly string[],
+): Response {
+  const origin = c.req.header("origin");
+  if (!isApiOriginAllowed(origin, allowedOrigins)) return forbiddenOrigin(c);
+  return corsPreflight(c, origin);
+}
+
+/**
+ * Origin gate for unauthenticated routes registered outside `createApi`
+ * (`/health`). Returns a response to send, or null to proceed with the CORS
+ * headers already stamped.
+ */
+export function corsGate(
+  c: Context,
+  allowedOrigins: readonly string[],
+): Response | null {
+  const origin = c.req.header("origin");
+  if (!isApiOriginAllowed(origin, allowedOrigins)) return forbiddenOrigin(c);
+  applyCors(c, origin);
+  return null;
+}
+
 /** Constant-time bearer comparison; a length mismatch fails without leaking. */
 export function tokensMatch(provided: string, expected: string): boolean {
   const a = Buffer.from(provided, "utf8");
@@ -61,13 +259,19 @@ export function tokensMatch(provided: string, expected: string): boolean {
  * or null when the request may proceed. Header only — never `?token=`,
  * which leaks into shell history, proxy logs and Referer headers.
  */
-export function authFailure(c: Context, expected: string): Response | null {
-  if (!isAllowedOrigin(c.req.header("origin"))) {
-    return c.json({ error: "forbidden origin" }, 403);
+export function authFailure(
+  c: Context,
+  expected: string,
+  allowedOrigins: readonly string[] = [],
+): Response | null {
+  const origin = c.req.header("origin");
+  if (!isApiOriginAllowed(origin, allowedOrigins)) {
+    return forbiddenOrigin(c);
   }
   const header = c.req.header("authorization") ?? "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7) : "";
   if (!tokensMatch(bearer, expected)) {
+    applyCors(c, origin);
     return c.json({ error: "unauthorized" }, 401);
   }
   return null;
@@ -82,13 +286,25 @@ function parseLimit(raw: string | undefined): number | null {
   return limit;
 }
 
-export function createApi(mail: MailService, bearerToken: string): Hono {
+export function createApi(
+  mail: MailService,
+  bearerToken: string,
+  allowedOrigins: readonly string[] = [],
+): Hono {
   const app = new Hono();
 
   app.use("/api/*", async (c, next) => {
-    const failure = authFailure(c, bearerToken);
+    const origin = c.req.header("origin");
+    // Preflight is answered before auth on purpose: a preflight carries no
+    // Authorization header by spec, so gating it on the token makes CORS
+    // impossible. The origin allowlist is the control that matters here.
+    if (c.req.method === "OPTIONS") {
+      return corsPreflightOrDeny(c, allowedOrigins);
+    }
+    const failure = authFailure(c, bearerToken, allowedOrigins);
     if (failure) return failure;
     await next();
+    applyCors(c, origin);
   });
 
   app.get("/api/health", (c) =>
@@ -108,28 +324,17 @@ export function createApi(mail: MailService, bearerToken: string): Hono {
   });
 
   app.post("/api/accounts", async (c) => {
-    const body = await c.req.json<{
-      alias: string;
-      email: string;
-      imapHost: string;
-      imapPort?: number;
-      imapSecure?: boolean;
-      smtpHost: string;
-      smtpPort?: number;
-      smtpSecure?: boolean;
-      username: string;
-      password: string;
-    }>();
-    const creds: AccountCredentials = {
-      imapHost: body.imapHost,
-      imapPort: body.imapPort ?? 993,
-      imapSecure: body.imapSecure ?? true,
-      smtpHost: body.smtpHost,
-      smtpPort: body.smtpPort ?? 465,
-      smtpSecure: body.smtpSecure ?? true,
-      username: body.username,
-      password: body.password,
-    };
+    const body = await c.req.json<ConnectAccountBody>();
+    const creds = parseConnectCredentials(body);
+    if (!creds) {
+      return c.json(
+        {
+          error:
+            "credentials required: password (username+password) or auth { kind, ... }",
+        },
+        400,
+      );
+    }
     try {
       const account = await mail.connectAccount({
         alias: body.alias,
@@ -146,8 +351,18 @@ export function createApi(mail: MailService, bearerToken: string): Hono {
   });
 
   app.post("/api/accounts/test", async (c) => {
-    const body = await c.req.json<AccountCredentials>();
-    const result = await mail.testCredentials(body);
+    const body = await c.req.json<ConnectCredentialFields>();
+    const creds = parseConnectCredentials(body);
+    if (!creds) {
+      return c.json(
+        {
+          error:
+            "credentials required: password (username+password) or auth { kind, ... }",
+        },
+        400,
+      );
+    }
+    const result = await mail.testCredentials(creds);
     return c.json(result, result.ok ? 200 : 400);
   });
 

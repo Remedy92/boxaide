@@ -90,8 +90,11 @@ async function seedFixtureDemo(
       smtpHost: "fixture",
       smtpPort: 465,
       smtpSecure: true,
-      username: "you@personal.test",
-      password: "fixture",
+      auth: {
+        kind: "password",
+        user: "you@personal.test",
+        pass: "fixture",
+      },
     },
   });
   const work = await mail.connectAccount({
@@ -104,8 +107,7 @@ async function seedFixtureDemo(
       smtpHost: "fixture",
       smtpPort: 465,
       smtpSecure: true,
-      username: "you@work.test",
-      password: "fixture",
+      auth: { kind: "password", user: "you@work.test", pass: "fixture" },
     },
   });
 

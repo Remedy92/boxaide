@@ -2,12 +2,19 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { randomBytes } from "node:crypto";
 import { Store } from "../src/db/store.js";
 import { FixtureProvider } from "../src/provider/fixture.js";
-import { createRuntime, isLocalHostHeader, isAllowedOrigin } from "../src/app.js";
+import {
+  createRuntime,
+  isLocalHostHeader,
+  isAllowedOrigin,
+  isApiOriginAllowed,
+  parseAllowedOrigins,
+} from "../src/app.js";
 import type { Runtime } from "../src/app.js";
+import { parseConnectCredentials } from "../src/api/routes.js";
 
 const TOKEN = "test-token-abcdefghijklmnop";
 
-function makeRuntime(): Runtime {
+function makeRuntime(allowedOrigins: string[] = []): Runtime {
   return createRuntime({
     dataDir: ":memory:",
     masterKey: randomBytes(32),
@@ -15,6 +22,7 @@ function makeRuntime(): Runtime {
     host: "127.0.0.1",
     port: 0,
     fixtureMode: true,
+    allowedOrigins,
     store: new Store(randomBytes(32), ":memory:"),
     provider: new FixtureProvider(),
   });
@@ -24,6 +32,49 @@ const authHeaders = {
   Authorization: `Bearer ${TOKEN}`,
   "Content-Type": "application/json",
 };
+
+describe("parseConnectCredentials", () => {
+  it("maps flat username/password to password auth", () => {
+    const creds = parseConnectCredentials({
+      imapHost: "imap.gmail.com",
+      smtpHost: "smtp.gmail.com",
+      username: "u@g.com",
+      password: "app-pass",
+    });
+    expect(creds?.auth).toEqual({
+      kind: "password",
+      user: "u@g.com",
+      pass: "app-pass",
+    });
+  });
+
+  it("accepts explicit xoauth2 auth without a password field", () => {
+    const creds = parseConnectCredentials({
+      imapHost: "outlook.office365.com",
+      smtpHost: "smtp.office365.com",
+      auth: {
+        kind: "xoauth2",
+        user: "u@outlook.com",
+        accessToken: "tok",
+      },
+    });
+    expect(creds?.auth).toEqual({
+      kind: "xoauth2",
+      user: "u@outlook.com",
+      accessToken: "tok",
+    });
+  });
+
+  it("rejects incomplete bodies", () => {
+    expect(
+      parseConnectCredentials({
+        imapHost: "imap.gmail.com",
+        smtpHost: "smtp.gmail.com",
+        username: "u@g.com",
+      }),
+    ).toBeNull();
+  });
+});
 
 describe("isLocalHostHeader (P0: suffix-matched Host bypass)", () => {
   it("rejects attacker domains that merely start with a loopback name", () => {
@@ -132,6 +183,279 @@ describe("HTTP security surface (shipped app)", () => {
       headers: { Authorization: TOKEN },
     });
     expect(bare.status).toBe(401);
+  });
+});
+
+const VERCEL = "https://mailmux-web.vercel.app";
+
+describe("parseAllowedOrigins (MAILMUX_ALLOWED_ORIGINS)", () => {
+  it("defaults closed on an unset or empty value", () => {
+    expect(parseAllowedOrigins(undefined)).toEqual([]);
+    expect(parseAllowedOrigins("")).toEqual([]);
+    expect(parseAllowedOrigins("   ")).toEqual([]);
+    expect(parseAllowedOrigins(",, ,")).toEqual([]);
+  });
+
+  it("refuses the wildcard outright", () => {
+    expect(parseAllowedOrigins("*")).toEqual([]);
+    expect(parseAllowedOrigins(` * , ${VERCEL} `)).toEqual([VERCEL]);
+  });
+
+  it("drops http and unparsable entries", () => {
+    expect(parseAllowedOrigins("http://mailmux-web.vercel.app")).toEqual([]);
+    expect(parseAllowedOrigins("not a url")).toEqual([]);
+    expect(parseAllowedOrigins("mailmux-web.vercel.app")).toEqual([]);
+  });
+
+  it("trims, lowercases, and reduces each entry to its origin", () => {
+    expect(parseAllowedOrigins("  https://A.App/x?y#z  ")).toEqual([
+      "https://a.app",
+    ]);
+    expect(parseAllowedOrigins("https://a.app:8443")).toEqual([
+      "https://a.app:8443",
+    ]);
+    expect(parseAllowedOrigins(`${VERCEL},https://mail.example.com`)).toEqual([
+      VERCEL,
+      "https://mail.example.com",
+    ]);
+  });
+});
+
+describe("isApiOriginAllowed (allowlist gate)", () => {
+  it("passes no-Origin callers and loopback with an empty allowlist", () => {
+    expect(isApiOriginAllowed(undefined, [])).toBe(true);
+    expect(isApiOriginAllowed("", [])).toBe(true);
+    expect(isApiOriginAllowed("http://127.0.0.1:8787", [])).toBe(true);
+    expect(isApiOriginAllowed("http://localhost:8787", [])).toBe(true);
+  });
+
+  it("rejects a remote origin when the allowlist is empty", () => {
+    expect(isApiOriginAllowed(VERCEL, [])).toBe(false);
+    expect(isApiOriginAllowed("https://evil.com", [])).toBe(false);
+  });
+
+  it("passes an exact allowlist match and rejects near misses", () => {
+    const allowed = [VERCEL];
+    expect(isApiOriginAllowed(VERCEL, allowed)).toBe(true);
+    expect(isApiOriginAllowed("https://mailmux-web.vercel.app.evil.com", allowed)).toBe(false);
+    expect(isApiOriginAllowed("http://mailmux-web.vercel.app", allowed)).toBe(false);
+    expect(isApiOriginAllowed("https://mailmux-web.vercel.app:8443", allowed)).toBe(false);
+    expect(isApiOriginAllowed("https://evil.com", allowed)).toBe(false);
+    expect(isApiOriginAllowed("not a url", allowed)).toBe(false);
+  });
+});
+
+describe("CORS allowlist over HTTP", () => {
+  let closed: Runtime;
+  let open: Runtime;
+
+  beforeEach(() => {
+    closed = makeRuntime();
+    open = makeRuntime([VERCEL]);
+  });
+
+  afterEach(() => {
+    closed.store.close();
+    open.store.close();
+  });
+
+  it("default is closed: a remote origin is still 403 with no env var", async () => {
+    const res = await closed.app.request("/api/accounts", {
+      headers: { ...authHeaders, Origin: VERCEL },
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "forbidden origin" });
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+    expect(res.headers.get("vary")).toBe("Origin");
+  });
+
+  it("default is closed: a preflight from a remote origin is 403", async () => {
+    const res = await closed.app.request("/api/accounts", {
+      method: "OPTIONS",
+      headers: {
+        Origin: VERCEL,
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "authorization",
+      },
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("a wildcard in the env string opens nothing", async () => {
+    const wild = makeRuntime(parseAllowedOrigins("*"));
+    try {
+      const res = await wild.app.request("/api/accounts", {
+        headers: { ...authHeaders, Origin: VERCEL },
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      wild.store.close();
+    }
+  });
+
+  it("answers a preflight for an allowlisted origin without any token", async () => {
+    const res = await open.app.request("/api/accounts", {
+      method: "OPTIONS",
+      headers: {
+        Origin: VERCEL,
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "authorization",
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe(VERCEL);
+    expect(res.headers.get("vary")).toBe("Origin");
+    expect(res.headers.get("access-control-allow-methods")).toContain("POST");
+    expect(res.headers.get("access-control-allow-methods")).toContain("DELETE");
+    expect(res.headers.get("access-control-allow-headers")).toContain(
+      "authorization",
+    );
+    expect(res.headers.get("access-control-allow-headers")).toContain(
+      "content-type",
+    );
+    expect(res.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(await res.text()).toBe("");
+  });
+
+  it("rejects a preflight from a non-allowlisted origin", async () => {
+    const res = await open.app.request("/api/accounts", {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://evil.com",
+        "Access-Control-Request-Method": "GET",
+      },
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+    expect(res.headers.get("vary")).toBe("Origin");
+    expect(await res.text()).not.toContain("accounts");
+  });
+
+  it("serves a real request from an allowlisted origin and echoes it back", async () => {
+    const res = await open.app.request("/api/accounts", {
+      headers: { ...authHeaders, Origin: VERCEL },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ accounts: [] });
+    expect(res.headers.get("access-control-allow-origin")).toBe(VERCEL);
+    expect(res.headers.get("vary")).toBe("Origin");
+    expect(res.headers.get("access-control-allow-credentials")).toBeNull();
+  });
+
+  it("still rejects a non-allowlisted origin when one is allowlisted", async () => {
+    const res = await open.app.request("/api/accounts", {
+      headers: { ...authHeaders, Origin: "https://evil.com" },
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("an allowlisted origin still needs the bearer token", async () => {
+    const none = await open.app.request("/api/accounts", {
+      headers: { Origin: VERCEL },
+    });
+    expect(none.status).toBe(401);
+    expect(none.headers.get("vary")).toBe("Origin");
+
+    const wrong = await open.app.request("/api/accounts", {
+      headers: { Origin: VERCEL, Authorization: `Bearer ${TOKEN}x` },
+    });
+    expect(wrong.status).toBe(401);
+  });
+
+  it("does not widen /api/local-bootstrap to the allowlisted origin", async () => {
+    const res = await open.app.request("/api/local-bootstrap", {
+      headers: { Origin: VERCEL, Host: "127.0.0.1:8787" },
+    });
+    expect(res.status).toBe(403);
+    const text = await res.text();
+    expect(text).not.toContain(TOKEN);
+    expect(JSON.parse(text)).toEqual({ error: "forbidden origin" });
+  });
+
+  it("covers /mcp with the same gate", async () => {
+    const pre = await open.app.request("/mcp", {
+      method: "OPTIONS",
+      headers: { Origin: VERCEL, "Access-Control-Request-Method": "POST" },
+    });
+    expect(pre.status).toBe(204);
+    expect(pre.headers.get("access-control-allow-origin")).toBe(VERCEL);
+
+    const ok = await open.app.request("/mcp", {
+      method: "POST",
+      headers: { ...authHeaders, Origin: VERCEL },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("access-control-allow-origin")).toBe(VERCEL);
+
+    const denied = await open.app.request("/mcp", {
+      method: "POST",
+      headers: { ...authHeaders, Origin: "https://evil.com" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(denied.status).toBe(403);
+  });
+
+  it("echoes the parsed origin, never the raw Origin header", async () => {
+    // The WHATWG parser reads a backslash as a slash, so this string parses to
+    // https://good.example and passes the allowlist. Echoing it verbatim would
+    // hand the response to https://good.example\.evil.com.
+    for (const raw of [`${VERCEL}\\.evil.com`, `${VERCEL}/`, `${VERCEL}/x?y`]) {
+      const res = await open.app.request("/api/accounts", {
+        headers: { ...authHeaders, Origin: raw },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("access-control-allow-origin")).toBe(VERCEL);
+    }
+  });
+
+  it("never answers a preflight with the raw Origin header either", async () => {
+    const res = await open.app.request("/api/accounts", {
+      method: "OPTIONS",
+      headers: {
+        Origin: `${VERCEL}\\.evil.com`,
+        "Access-Control-Request-Method": "GET",
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe(VERCEL);
+  });
+
+  it("marks the local-bootstrap token response uncacheable", async () => {
+    const res = await open.app.request("/api/local-bootstrap", {
+      headers: { Host: "127.0.0.1:8787" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("vary")).toBe("Origin");
+    // And it still hands out nothing to a browser: no CORS header at all.
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("covers /health so the UI can tell 'down' from 'bad token'", async () => {
+    const pre = await open.app.request("/health", {
+      method: "OPTIONS",
+      headers: { Origin: VERCEL, "Access-Control-Request-Method": "GET" },
+    });
+    expect(pre.status).toBe(204);
+
+    const ok = await open.app.request("/health", {
+      headers: { Origin: VERCEL },
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("access-control-allow-origin")).toBe(VERCEL);
+
+    const denied = await open.app.request("/health", {
+      headers: { Origin: "https://evil.com" },
+    });
+    expect(denied.status).toBe(403);
+
+    // curl and smoke checks send no Origin and must be unchanged.
+    const bare = await open.app.request("/health");
+    expect(bare.status).toBe(200);
+    expect(bare.headers.get("access-control-allow-origin")).toBeNull();
   });
 });
 
