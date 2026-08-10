@@ -5,7 +5,7 @@
 
 ## Decision
 
-Ship **mailmux** as a single **Node 20+ / TypeScript** process:
+Ship **mailmux** as a single **Node 22+ / TypeScript** process:
 
 | Layer | Choice |
 |-------|--------|
