@@ -35,21 +35,35 @@ const authHeaders = {
 
 describe("parseConnectCredentials", () => {
   it("maps flat username/password to password auth", () => {
-    const creds = parseConnectCredentials({
+    const parsed = parseConnectCredentials({
       imapHost: "imap.gmail.com",
       smtpHost: "smtp.gmail.com",
       username: "u@g.com",
       password: "app-pass",
     });
-    expect(creds?.auth).toEqual({
+    expect(parsed.ok).toBe(true);
+    expect(parsed.ok && parsed.creds.auth).toEqual({
       kind: "password",
       user: "u@g.com",
       pass: "app-pass",
     });
   });
 
-  it("accepts explicit xoauth2 auth without a password field", () => {
-    const creds = parseConnectCredentials({
+  it("accepts an explicitly shaped password auth object", () => {
+    const parsed = parseConnectCredentials({
+      imapHost: "imap.gmail.com",
+      smtpHost: "smtp.gmail.com",
+      auth: { kind: "password", user: "u@g.com", pass: "app-pass" },
+    });
+    expect(parsed.ok && parsed.creds.auth).toEqual({
+      kind: "password",
+      user: "u@g.com",
+      pass: "app-pass",
+    });
+  });
+
+  it("refuses xoauth2: no refresh path exists, so the account would expire", () => {
+    const parsed = parseConnectCredentials({
       imapHost: "outlook.office365.com",
       smtpHost: "smtp.office365.com",
       auth: {
@@ -58,11 +72,8 @@ describe("parseConnectCredentials", () => {
         accessToken: "tok",
       },
     });
-    expect(creds?.auth).toEqual({
-      kind: "xoauth2",
-      user: "u@outlook.com",
-      accessToken: "tok",
-    });
+    expect(parsed.ok).toBe(false);
+    expect(!parsed.ok && parsed.error).toMatch(/xoauth2 is not accepted yet/);
   });
 
   it("rejects incomplete bodies", () => {
@@ -71,8 +82,40 @@ describe("parseConnectCredentials", () => {
         imapHost: "imap.gmail.com",
         smtpHost: "smtp.gmail.com",
         username: "u@g.com",
-      }),
-    ).toBeNull();
+      }).ok,
+    ).toBe(false);
+    expect(
+      parseConnectCredentials({
+        imapHost: "",
+        smtpHost: "smtp.gmail.com",
+        username: "u@g.com",
+        password: "p",
+      }).ok,
+    ).toBe(false);
+  });
+});
+
+describe("POST /api/accounts rejects xoauth2 over REST", () => {
+  it("answers 400 and stores nothing", async () => {
+    const rt = makeRuntime();
+    try {
+      const res = await rt.app.request("/api/accounts", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({
+          alias: "ms",
+          email: "u@outlook.com",
+          imapHost: "outlook.office365.com",
+          smtpHost: "smtp.office365.com",
+          auth: { kind: "xoauth2", user: "u@outlook.com", accessToken: "tok" },
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/xoauth2 is not accepted yet/);
+      expect(rt.store.listAccounts()).toEqual([]);
+    } finally {
+      rt.store.close();
+    }
   });
 });
 

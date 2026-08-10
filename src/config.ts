@@ -2,7 +2,37 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { parseAllowedOrigins } from "./api/routes.js";
+
+/**
+ * Origins the browser UI may be served from, beyond loopback.
+ * Comma-separated absolute origins in MAILMUX_ALLOWED_ORIGINS, e.g.
+ *   https://mailmux-web.vercel.app,https://mail.example.com
+ * Defaults to closed: an unset value keeps today's loopback-only behaviour.
+ * "*" is deliberately dropped — an any-origin allowlist removes the only
+ * defence left against DNS rebinding on a loopback service.
+ *
+ * This lives in config, not in the route module: it parses an environment
+ * variable and knows nothing about HTTP, and importing it from `api/routes.ts`
+ * pulled Hono and every route into the config module.
+ */
+export function parseAllowedOrigins(raw: string | undefined): string[] {
+  if (!raw) return [];
+  const out: string[] = [];
+  for (const entry of raw.split(",")) {
+    const value = entry.trim();
+    if (!value || value === "*") continue;
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      continue;
+    }
+    // Only https survives: a plaintext allowlisted origin is trivially spoofed.
+    if (url.protocol !== "https:") continue;
+    out.push(url.origin.toLowerCase());
+  }
+  return out;
+}
 
 export type AppConfig = {
   dataDir: string;

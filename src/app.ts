@@ -26,9 +26,9 @@ export {
   isLocalHostHeader,
   isAllowedOrigin,
   isApiOriginAllowed,
-  parseAllowedOrigins,
   tokensMatch,
 } from "./api/routes.js";
+export { parseAllowedOrigins } from "./config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 

@@ -18,7 +18,7 @@ type ConnectCredentialFields = {
   smtpSecure?: boolean;
   username?: string;
   password?: string;
-  /** Optional already-shaped auth (for tests / future OAuth). */
+  /** Optional already-shaped auth. Only `kind: "password"` is accepted today. */
   auth?: AccountCredentials["auth"];
 };
 
@@ -27,13 +27,30 @@ type ConnectAccountBody = ConnectCredentialFields & {
   email: string;
 };
 
+export type ConnectCredentialsResult =
+  | { ok: true; creds: AccountCredentials }
+  | { ok: false; error: string };
+
+const MISSING_CREDENTIALS =
+  "credentials required: username and password, or auth { kind: 'password', user, pass }";
+
+/**
+ * XOAUTH2 is a valid MailAuth kind inside the provider and the store, but the
+ * REST surface refuses it. An access token expires in about an hour and the
+ * store has nowhere to keep a refresh token, so an account created this way
+ * would die with no recovery except delete and re-create. Open this up in the
+ * same change that adds token refresh.
+ */
+const XOAUTH2_NOT_ACCEPTED =
+  "xoauth2 is not accepted yet: no token refresh exists, so the account would stop working when the token expires";
+
 /**
  * Map a connect/test body to AccountCredentials.
  * Prefer explicit `auth`; fall back to username+password for the web form.
  */
 export function parseConnectCredentials(
   body: ConnectCredentialFields,
-): AccountCredentials | null {
+): ConnectCredentialsResult {
   const hosts = {
     imapHost: body.imapHost,
     imapPort: body.imapPort ?? 993,
@@ -42,26 +59,32 @@ export function parseConnectCredentials(
     smtpPort: body.smtpPort ?? 465,
     smtpSecure: body.smtpSecure ?? true,
   };
-  if (!hosts.imapHost || !hosts.smtpHost) return null;
+  if (!hosts.imapHost || !hosts.smtpHost) {
+    return { ok: false, error: "imapHost and smtpHost are required" };
+  }
   if (body.auth) {
-    if (body.auth.kind === "password") {
-      if (!body.auth.user || !body.auth.pass) return null;
-      return { ...hosts, auth: body.auth };
-    }
     if (body.auth.kind === "xoauth2") {
-      if (!body.auth.user || !body.auth.accessToken) return null;
-      return { ...hosts, auth: body.auth };
+      return { ok: false, error: XOAUTH2_NOT_ACCEPTED };
     }
-    return null;
+    if (body.auth.kind === "password") {
+      if (!body.auth.user || !body.auth.pass) {
+        return { ok: false, error: MISSING_CREDENTIALS };
+      }
+      return { ok: true, creds: { ...hosts, auth: body.auth } };
+    }
+    return { ok: false, error: MISSING_CREDENTIALS };
   }
   if (!body.username || body.password === undefined || body.password === "") {
-    return null;
+    return { ok: false, error: MISSING_CREDENTIALS };
   }
-  return passwordCredentials({
-    ...hosts,
-    user: body.username,
-    pass: body.password,
-  });
+  return {
+    ok: true,
+    creds: passwordCredentials({
+      ...hosts,
+      user: body.username,
+      pass: body.password,
+    }),
+  };
 }
 
 const LOCAL_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -109,33 +132,6 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
 const CORS_METHODS = "GET, POST, DELETE, OPTIONS";
 const CORS_HEADERS = "authorization, content-type";
 const CORS_MAX_AGE = "600";
-
-/**
- * Origins the browser UI may be served from, beyond loopback.
- * Comma-separated absolute origins in MAILMUX_ALLOWED_ORIGINS, e.g.
- *   https://mailmux-web.vercel.app,https://mail.example.com
- * Defaults to closed: an unset value keeps today's loopback-only behaviour.
- * "*" is deliberately dropped — an any-origin allowlist removes the only
- * defence left against DNS rebinding on a loopback service.
- */
-export function parseAllowedOrigins(raw: string | undefined): string[] {
-  if (!raw) return [];
-  const out: string[] = [];
-  for (const entry of raw.split(",")) {
-    const value = entry.trim();
-    if (!value || value === "*") continue;
-    let url: URL;
-    try {
-      url = new URL(value);
-    } catch {
-      continue;
-    }
-    // Only https survives: a plaintext allowlisted origin is trivially spoofed.
-    if (url.protocol !== "https:") continue;
-    out.push(url.origin.toLowerCase());
-  }
-  return out;
-}
 
 /**
  * Origin gate for the *authenticated* API. Loopback always passes, so the
@@ -262,7 +258,7 @@ export function tokensMatch(provided: string, expected: string): boolean {
 export function authFailure(
   c: Context,
   expected: string,
-  allowedOrigins: readonly string[] = [],
+  allowedOrigins: readonly string[],
 ): Response | null {
   const origin = c.req.header("origin");
   if (!isApiOriginAllowed(origin, allowedOrigins)) {
@@ -286,10 +282,15 @@ function parseLimit(raw: string | undefined): number | null {
   return limit;
 }
 
+/**
+ * `allowedOrigins` is required on purpose. A default of `[]` fails closed, but
+ * it fails closed silently: a new call site that forgets the argument loses the
+ * allowlist and the compiler stays quiet.
+ */
 export function createApi(
   mail: MailService,
   bearerToken: string,
-  allowedOrigins: readonly string[] = [],
+  allowedOrigins: readonly string[],
 ): Hono {
   const app = new Hono();
 
@@ -325,21 +326,13 @@ export function createApi(
 
   app.post("/api/accounts", async (c) => {
     const body = await c.req.json<ConnectAccountBody>();
-    const creds = parseConnectCredentials(body);
-    if (!creds) {
-      return c.json(
-        {
-          error:
-            "credentials required: password (username+password) or auth { kind, ... }",
-        },
-        400,
-      );
-    }
+    const parsed = parseConnectCredentials(body);
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
     try {
       const account = await mail.connectAccount({
         alias: body.alias,
         email: body.email,
-        creds,
+        creds: parsed.creds,
       });
       return c.json({ account }, 201);
     } catch (err) {
@@ -352,17 +345,9 @@ export function createApi(
 
   app.post("/api/accounts/test", async (c) => {
     const body = await c.req.json<ConnectCredentialFields>();
-    const creds = parseConnectCredentials(body);
-    if (!creds) {
-      return c.json(
-        {
-          error:
-            "credentials required: password (username+password) or auth { kind, ... }",
-        },
-        400,
-      );
-    }
-    const result = await mail.testCredentials(creds);
+    const parsed = parseConnectCredentials(body);
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const result = await mail.testCredentials(parsed.creds);
     return c.json(result, result.ok ? 200 : 400);
   });
 

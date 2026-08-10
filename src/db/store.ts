@@ -51,10 +51,12 @@ export class Store {
         smtp_secure INTEGER NOT NULL,
         username TEXT NOT NULL,
         password_enc TEXT NOT NULL,
+        auth_kind TEXT NOT NULL DEFAULT 'password',
         created_at TEXT NOT NULL
       );
     `);
-    // Older DBs lack auth_kind; default keeps every existing row on password auth.
+    // Only reached by databases created before auth_kind existed. Fresh ones
+    // get the column from the CREATE above, so this is a no-op for them.
     const cols = this.db
       .prepare(`PRAGMA table_info(accounts)`)
       .all() as Array<{ name: string }>;
