@@ -526,3 +526,82 @@ describe("limit validation on list endpoints", () => {
     expect(ok.status).toBe(200);
   });
 });
+
+describe("security response headers", () => {
+  let runtime: Runtime;
+
+  beforeEach(() => {
+    runtime = makeRuntime();
+  });
+
+  afterEach(() => {
+    runtime.store.close();
+  });
+
+  // Every one of these closes a class the token and the origin allowlist do
+  // not touch. A regression here is silent in the UI, so it is asserted.
+  const expected: ReadonlyArray<[string, string]> = [
+    ["x-frame-options", "DENY"],
+    ["x-content-type-options", "nosniff"],
+    ["referrer-policy", "no-referrer"],
+    ["cross-origin-opener-policy", "same-origin"],
+  ];
+
+  it.each(expected)("sets %s on the UI response", async (header, value) => {
+    const res = await runtime.app.request("/");
+    expect(res.headers.get(header)).toBe(value);
+  });
+
+  it.each(expected)("sets %s on an API response", async (header, value) => {
+    const res = await runtime.app.request("/api/accounts", {
+      headers: authHeaders,
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get(header)).toBe(value);
+  });
+
+  it("sets the headers even on an unauthorized response", async () => {
+    const res = await runtime.app.request("/api/accounts");
+    expect(res.status).toBe(401);
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it("forbids framing and inline base tags in the CSP", async () => {
+    const csp = (await runtime.app.request("/")).headers.get(
+      "content-security-policy",
+    );
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("base-uri 'none'");
+    expect(csp).toContain("object-src 'none'");
+  });
+
+  it("allows only loopback and https in connect-src", async () => {
+    const csp =
+      (await runtime.app.request("/")).headers.get(
+        "content-security-policy",
+      ) ?? "";
+    const connectSrc = csp
+      .split(";")
+      .map((d) => d.trim())
+      .find((d) => d.startsWith("connect-src"));
+    // The Server URL is user-configurable, so 'self' alone breaks the app on
+    // any port but the default. Plain http: to a remote host stays blocked.
+    expect(connectSrc).toBe(
+      "connect-src 'self' http://127.0.0.1:* http://localhost:* http://[::1]:* https:",
+    );
+    expect(connectSrc).not.toContain("http://*");
+    expect(csp).not.toContain("connect-src *");
+  });
+
+  it("never loosens script-src to allow an arbitrary external origin", async () => {
+    const csp =
+      (await runtime.app.request("/")).headers.get(
+        "content-security-policy",
+      ) ?? "";
+    const scriptSrc = csp
+      .split(";")
+      .map((d) => d.trim())
+      .find((d) => d.startsWith("script-src"));
+    expect(scriptSrc).toBe("script-src 'self' 'unsafe-inline'");
+  });
+});

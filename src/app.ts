@@ -19,6 +19,7 @@ import {
   isAllowedOrigin,
   isLocalHostHeader,
 } from "./api/routes.js";
+import { securityHeaders } from "./api/security-headers.js";
 import { handleMcpJsonRpc } from "./mcp/server.js";
 import type { MailProvider } from "./provider/types.js";
 
@@ -72,6 +73,11 @@ export function createRuntime(
 
   const mail = new MailService(store, provider);
   const app = new Hono();
+
+  // First middleware registered, so every route below — UI, API, MCP and any
+  // error response — carries the headers. It runs after the handler and only
+  // sets headers, so it cannot short-circuit a request.
+  app.use("*", securityHeaders());
 
   // Public health (no auth) for smoke checks. It carries CORS headers so an
   // allowlisted browser origin can tell "server unreachable" apart from
