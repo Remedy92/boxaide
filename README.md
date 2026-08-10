@@ -36,17 +36,16 @@ npm start
 
 ## Using the hosted interface
 
-mailmux ships two web interfaces. The bundled one at `/` is served by your own process. The newer one lives in `apps/web` — a Next.js static export — and you can run it either way. Both talk to the mailmux server on **your** machine, and neither sends your mail or your token anywhere else.
+mailmux has one web interface: the Next.js app in `apps/web`, built as a static export. You can serve it from your own process or host it elsewhere. Either way it talks to the mailmux server on **your** machine, and it never sends your mail or your token anywhere else.
 
 ### Local (recommended — works in every browser)
 
 ```bash
-npm run web:build   # npm ci + next build inside apps/web
-npm run web:sync    # copy apps/web/out -> web-next/
+npm run build
 npm start
 ```
 
-`mailmux serve` prefers `web-next/` when it exists and falls back to the bundled `web/`. Open the URL it prints, normally `http://127.0.0.1:8787`. Same origin as the API, so nothing else is needed.
+`npm run build` compiles the server, builds `apps/web`, and copies the export to `web-next/`. Open the URL it prints, normally `http://127.0.0.1:8787`. Same origin as the API, so nothing else is needed.
 
 To run it on its own during development:
 
@@ -180,7 +179,7 @@ Rules:
 - Only `https://` entries are kept. A plaintext origin is trivially spoofed on a hostile network, so `http://` entries are dropped.
 - Path, query and case are stripped: `https://A.App/x` becomes `https://a.app`. A port must match exactly — `https://a.app` does not allow `https://a.app:8443`.
 - **`*` is ignored on purpose.** mailmux holds your mail credentials; an any-origin allowlist would let any page you visit probe your server.
-- Loopback (`127.0.0.1`, `localhost`, `::1`) always passes, so the bundled UI needs no configuration.
+- Loopback (`127.0.0.1`, `localhost`, `::1`) always passes, so the self-hosted UI needs no configuration.
 - Requests with no `Origin` header (curl, MCP clients) are unaffected.
 
 **What enabling this costs you.** The origin check is the last defence-in-depth layer in front of a service that holds decrypted IMAP passwords. Adding an origin means:
@@ -196,7 +195,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 One Node process:
 
-- `/` — web UI (`web-next/` when the `apps/web` export has been synced, otherwise the bundled `web/`)  
+- `/` — web UI (the `apps/web` export, served from `web-next/`)  
 - `/api/*` — REST (same mail core)  
 - `/mcp` — JSON-RPC MCP  
 - `mailmux mcp` — stdio MCP  

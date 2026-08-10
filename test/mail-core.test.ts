@@ -340,8 +340,11 @@ describe("HTTP API via createRuntime (shipped app)", () => {
     const home = await runtime.app.request("/");
     expect(home.status).toBe(200);
     const html = await home.text();
-    expect(html).toContain("Connect mailbox");
-    expect(html).toContain("mailmux");
+    // The UI is the Next.js static export. Its shell is client-rendered, so
+    // assert on what the served document itself carries: the title and the
+    // export's own asset prefix.
+    expect(html).toContain("<title>mailmux</title>");
+    expect(html).toContain("/_next/static/");
 
     const mcpInit = await runtime.app.request("/mcp", {
       method: "POST",

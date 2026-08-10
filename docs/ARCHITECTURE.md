@@ -15,7 +15,7 @@ Ship **mailmux** as a single **Node 20+ / TypeScript** process:
 | Send | SMTP via **Nodemailer** |
 | State | SQLite (`better-sqlite3`) |
 | Secrets | AES-256-GCM, master key file / `MAILMUX_MASTER_KEY` |
-| Web | Two front ends, both static, both fully client-side: the bundled `web/` HTML/CSS/JS, and a Next.js App Router build in `apps/web` (see below) |
+| Web | One front end: a Next.js App Router build in `apps/web`, static and fully client-side (see below) |
 | Tests | Vitest + in-process **FixtureProvider** (no live mail required) |
 
 ## Why not alternatives
@@ -37,7 +37,7 @@ Ship **mailmux** as a single **Node 20+ / TypeScript** process:
 
 **Date:** 2026-08-09 · **Status:** accepted
 
-`apps/web` is a Next.js App Router build that talks to the mailmux server the same way the bundled UI does: from the browser, over HTTP, with a bearer token. The backend is unchanged apart from the CORS gate below.
+`apps/web` is a Next.js App Router build. It talks to the mailmux server from the browser, over HTTP, with a bearer token. The backend holds no UI state.
 
 | Decision | Reason |
 |---|---|
@@ -57,7 +57,7 @@ npm run web:sync    # copy apps/web/out -> web-next/
 npm start
 ```
 
-`resolveWebRoot()` (`src/app.ts`) prefers `web-next/` when it exists and falls back to `web/`. Served that way the page is same-origin with the API, so no allowlist entry, no preflight and no Local Network Access prompt applies — which is why it is the recommended path for Safari users (WebKit blocks an `https` page from reaching `127.0.0.1`, [bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934)).
+`resolveWebRoot()` (`src/app.ts`) serves `web-next/`. There is no second UI to fall back to: with no export present, `/` returns a 500 telling you to run `npm run build`. Served that way the page is same-origin with the API, so no allowlist entry, no preflight and no Local Network Access prompt applies — which is why it is the recommended path for Safari users (WebKit blocks an `https` page from reaching `127.0.0.1`, [bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934)).
 
 Deploying it to a static host (Vercel and equivalents): set the project's **Root Directory** to `apps/web`. Nothing in the repo can express that — it is a dashboard setting, and without it the platform builds the CLI package at the root instead. Then set `MAILMUX_ALLOWED_ORIGINS` on **your** machine to the deployed origin.
 
@@ -72,7 +72,7 @@ A browser page served from anywhere other than the mailmux process itself cannot
 | Decision | Reason |
 |---|---|
 | **Default empty (closed)** | Unset means byte-identical behaviour to before the change. Opening a service that holds decrypted IMAP passwords must be a deliberate act. |
-| **Loopback stays implicitly allowed** | The bundled `web/` UI and any same-origin static build need no configuration. |
+| **Loopback stays implicitly allowed** | The same-origin static build needs no configuration. |
 | **`*` parsed and dropped, never honoured** | The origin check is the surviving defence against DNS rebinding against a loopback service. `*` deletes it, and turns a leaked token into something usable from any page the user visits. |
 | **`https:` only for non-loopback entries** | A plaintext allowlisted origin is trivially spoofed on a hostile network. |
 | **Echo the *parsed* origin, never `*` and never the raw header** | A per-origin allowlist is meaningless without an exact echo, and it is a prerequisite for the `Vary` contract. The value comes from `new URL(origin).origin`, because the WHATWG parser reads a backslash as a slash: `https://good.example\.evil.com` passes the allowlist as `https://good.example`, and echoing the raw string back would hand the response to the attacker's origin. |

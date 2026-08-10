@@ -139,7 +139,7 @@ export function parseAllowedOrigins(raw: string | undefined): string[] {
 
 /**
  * Origin gate for the *authenticated* API. Loopback always passes, so the
- * bundled web/ UI needs no configuration. Everything else must be an exact
+ * self-hosted UI needs no configuration. Everything else must be an exact
  * origin match from the allowlist. Requests with no Origin (curl, MCP
  * clients, stdio) pass, exactly as before.
  *

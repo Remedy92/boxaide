@@ -177,15 +177,12 @@ export function createRuntime(
   app.get("/", async (c) => {
     const index = join(webRoot, "index.html");
     if (!existsSync(index)) {
-      return c.text("mailmux UI missing", 500);
+      return c.text(
+        "mailmux UI missing. Build it with: npm run build",
+        500,
+      );
     }
-    // The legacy web/index.html carries this placeholder; the Next export does
-    // not, so the replace is simply a no-op there.
-    const html = readFileSync(index, "utf8").replace(
-      "__MAILMUX_PORT__",
-      String(config.port),
-    );
-    return c.html(html);
+    return c.html(readFileSync(index, "utf8"));
   });
 
   app.use(
@@ -199,24 +196,22 @@ export function createRuntime(
 }
 
 /**
- * Where the bundled UI is served from.
+ * Where the UI is served from.
  *
- * `web-next` is checked first: `npm run web:sync` copies the Next.js static
- * export there, and a user who has built it wants that interface rather than
- * the legacy bundle. With no export present, `web/` is used exactly as before.
+ * `npm run build` exports `apps/web` and copies the result to `web-next`.
+ * There is no second UI to fall back to: when the export is absent, `/` says
+ * so rather than serving a stale page.
  */
 function resolveWebRoot(): string {
   const candidates = [
     join(process.cwd(), "web-next"),
     join(__dirname, "..", "web-next"),
-    join(process.cwd(), "web"),
-    join(__dirname, "..", "web"),
-    join(__dirname, "web"),
+    join(__dirname, "web-next"),
   ];
   for (const c of candidates) {
     if (existsSync(join(c, "index.html"))) return c;
   }
-  return join(process.cwd(), "web");
+  return join(process.cwd(), "web-next");
 }
 
 export async function startServer(

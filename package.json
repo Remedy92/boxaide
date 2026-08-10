@@ -11,15 +11,23 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run web:build && npm run web:sync",
+    "build:server": "tsc",
     "start": "node dist/cli.js serve",
     "dev": "tsx src/cli.ts serve",
     "mcp": "tsx src/cli.ts mcp",
     "test": "vitest run",
     "test:watch": "vitest",
     "web:build": "npm --prefix apps/web ci && npm --prefix apps/web run build",
-    "web:sync": "rm -rf web-next && cp -R apps/web/out web-next"
+    "web:sync": "rm -rf web-next && cp -R apps/web/out web-next",
+    "prepack": "npm run build"
   },
+  "files": [
+    "dist",
+    "web-next",
+    "README.md",
+    "LICENSE"
+  ],
   "keywords": [
     "mcp",
     "email",
