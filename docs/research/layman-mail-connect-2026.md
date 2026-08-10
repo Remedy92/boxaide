@@ -349,7 +349,7 @@ Refresh access_token before IMAP/API calls; re-auth UX on invalid_grant
 
 ### mailmux context
 
-- `/Users/lucasvanhoutven/Projects/mailmux/README.md` — MIT; no paid SaaS for core; app-password connect flow; ImapFlow/Nodemailer; local secrets.
+- `README.md` (this repo) — MIT; no paid SaaS for core; app-password connect flow; ImapFlow/Nodemailer; local secrets.
 
 ---
 

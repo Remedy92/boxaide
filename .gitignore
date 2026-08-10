@@ -7,6 +7,17 @@ dist/
 !.env.example
 coverage/
 
+# Runtime secrets. MAILMUX_DATA_DIR defaults to ~/.mailmux, outside the repo,
+# but pointing it at a path in here must never publish the bearer token, the
+# AES master key or the mail database.
+.mailmux/
+data/
+bearer.token
+master.key
+*.sqlite
+*.sqlite3
+*.db
+
 # Next.js front end (apps/web keeps its own lockfile and its own install)
 apps/web/.next/
 apps/web/out/
