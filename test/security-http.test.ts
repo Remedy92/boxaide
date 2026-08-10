@@ -11,6 +11,9 @@ import {
 } from "../src/app.js";
 import type { Runtime } from "../src/app.js";
 import { parseConnectCredentials } from "../src/api/routes.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const TOKEN = "test-token-abcdefghijklmnop";
 
@@ -567,5 +570,128 @@ describe("limit validation on list endpoints", () => {
       { headers: authHeaders },
     );
     expect(ok.status).toBe(200);
+  });
+});
+
+describe("security response headers", () => {
+  let runtime: Runtime;
+
+  beforeEach(() => {
+    runtime = makeRuntime();
+  });
+
+  afterEach(() => {
+    runtime.store.close();
+  });
+
+  // Every one of these closes a class the token and the origin allowlist do
+  // not touch. A regression here is silent in the UI, so it is asserted.
+  const expected: ReadonlyArray<[string, string]> = [
+    ["x-frame-options", "DENY"],
+    ["x-content-type-options", "nosniff"],
+    ["referrer-policy", "no-referrer"],
+    ["cross-origin-opener-policy", "same-origin"],
+  ];
+
+  it.each(expected)("sets %s on the UI response", async (header, value) => {
+    const res = await runtime.app.request("/");
+    expect(res.headers.get(header)).toBe(value);
+  });
+
+  it.each(expected)("sets %s on an API response", async (header, value) => {
+    const res = await runtime.app.request("/api/accounts", {
+      headers: authHeaders,
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get(header)).toBe(value);
+  });
+
+  it("sets the headers even on an unauthorized response", async () => {
+    const res = await runtime.app.request("/api/accounts");
+    expect(res.status).toBe(401);
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it("forbids framing and inline base tags in the CSP", async () => {
+    const csp = (await runtime.app.request("/")).headers.get(
+      "content-security-policy",
+    );
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("base-uri 'none'");
+    expect(csp).toContain("object-src 'none'");
+  });
+
+  it("allows only loopback and https in connect-src", async () => {
+    const csp =
+      (await runtime.app.request("/")).headers.get(
+        "content-security-policy",
+      ) ?? "";
+    const connectSrc = csp
+      .split(";")
+      .map((d) => d.trim())
+      .find((d) => d.startsWith("connect-src"));
+    // The Server URL is user-configurable, so 'self' alone breaks the app on
+    // any port but the default. Plain http: to a remote host stays blocked.
+    expect(connectSrc).toBe(
+      "connect-src 'self' http://127.0.0.1:* http://localhost:* http://[::1]:* https:",
+    );
+    expect(connectSrc).not.toContain("http://*");
+    expect(csp).not.toContain("connect-src *");
+  });
+
+  it("never loosens script-src to allow an arbitrary external origin", async () => {
+    const csp =
+      (await runtime.app.request("/")).headers.get(
+        "content-security-policy",
+      ) ?? "";
+    const scriptSrc = csp
+      .split(";")
+      .map((d) => d.trim())
+      .find((d) => d.startsWith("script-src"));
+    expect(scriptSrc).toBe("script-src 'self' 'unsafe-inline'");
+  });
+});
+
+describe("web root resolution", () => {
+  // The UI is a build artifact. `/` must be honest in both states rather than
+  // serving a stale page, so both are asserted directly.
+  it("serves the export when one is present", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailmux-web-present-"));
+    writeFileSync(join(dir, "index.html"), "<title>mailmux</title>");
+    const runtime = createRuntime({
+      dataDir: ":memory:",
+      masterKey: randomBytes(32),
+      bearerToken: TOKEN,
+      host: "127.0.0.1",
+      port: 0,
+      fixtureMode: true,
+      store: new Store(randomBytes(32), ":memory:"),
+      provider: new FixtureProvider(),
+      webRoot: dir,
+    });
+    const res = await runtime.app.request("/");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("<title>mailmux</title>");
+    runtime.store.close();
+  });
+
+  it("names the build command when no export exists", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailmux-web-absent-"));
+    const runtime = createRuntime({
+      dataDir: ":memory:",
+      masterKey: randomBytes(32),
+      bearerToken: TOKEN,
+      host: "127.0.0.1",
+      port: 0,
+      fixtureMode: true,
+      store: new Store(randomBytes(32), ":memory:"),
+      provider: new FixtureProvider(),
+      webRoot: dir,
+    });
+    const res = await runtime.app.request("/");
+    expect(res.status).toBe(500);
+    // A user who hits this needs the command, not just the symptom.
+    expect(await res.text()).toContain("npm run build");
+    runtime.store.close();
   });
 });

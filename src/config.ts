@@ -46,6 +46,12 @@ export type AppConfig = {
    * MAILMUX_ALLOWED_ORIGINS. Empty by default: loopback only.
    */
   allowedOrigins: string[];
+  /**
+   * Directory holding the built UI. Normally left unset and discovered from
+   * `web-next/`. Set it to pin the lookup — tests use it to exercise both the
+   * present and the missing case without depending on a build artifact.
+   */
+  webRoot?: string;
 };
 
 function expandHome(p: string): string {
@@ -106,5 +112,6 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     allowedOrigins:
       overrides.allowedOrigins ??
       parseAllowedOrigins(process.env.MAILMUX_ALLOWED_ORIGINS),
+    webRoot: overrides.webRoot ?? process.env.MAILMUX_WEB_ROOT,
   };
 }

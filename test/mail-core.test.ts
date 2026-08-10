@@ -6,6 +6,16 @@ import { MailService } from "../src/mail/service.js";
 import { encryptSecret, decryptSecret } from "../src/crypto/secrets.js";
 import { handleMcpJsonRpc } from "../src/mcp/server.js";
 import { createRuntime } from "../src/app.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+/** Stands in for a built `web-next/`. Contents mirror the export's shell. */
+const WEB_FIXTURE = mkdtempSync(join(tmpdir(), "mailmux-web-"));
+writeFileSync(
+  join(WEB_FIXTURE, "index.html"),
+  "<!DOCTYPE html><html><head><title>mailmux</title></head><body></body></html>",
+);
 
 function makeService() {
   const masterKey = randomBytes(32);
@@ -254,6 +264,11 @@ describe("HTTP API via createRuntime (shipped app)", () => {
       fixtureMode: true,
       store,
       provider,
+      // Pinned to a fixture: `/` serving the real export is a property of the
+      // build, not of this test. CI runs build:server only, so discovering
+      // web-next/ here would make the result depend on whether someone had
+      // run the Next export first.
+      webRoot: WEB_FIXTURE,
     });
 
     const health = await runtime.app.request("/health");
@@ -340,11 +355,7 @@ describe("HTTP API via createRuntime (shipped app)", () => {
     const home = await runtime.app.request("/");
     expect(home.status).toBe(200);
     const html = await home.text();
-    // The UI is the Next.js static export. Its shell is client-rendered, so
-    // assert on what the served document itself carries: the title and the
-    // export's own asset prefix.
     expect(html).toContain("<title>mailmux</title>");
-    expect(html).toContain("/_next/static/");
 
     const mcpInit = await runtime.app.request("/mcp", {
       method: "POST",

@@ -19,6 +19,7 @@ import {
   isAllowedOrigin,
   isLocalHostHeader,
 } from "./api/routes.js";
+import { securityHeaders } from "./api/security-headers.js";
 import { handleMcpJsonRpc } from "./mcp/server.js";
 import type { MailProvider } from "./provider/types.js";
 
@@ -72,6 +73,11 @@ export function createRuntime(
 
   const mail = new MailService(store, provider);
   const app = new Hono();
+
+  // First middleware registered, so every route below — UI, API, MCP and any
+  // error response — carries the headers. It runs after the handler and only
+  // sets headers, so it cannot short-circuit a request.
+  app.use("*", securityHeaders());
 
   // Public health (no auth) for smoke checks. It carries CORS headers so an
   // allowlisted browser origin can tell "server unreachable" apart from
@@ -173,7 +179,7 @@ export function createRuntime(
   });
 
   // Static web UI
-  const webRoot = resolveWebRoot();
+  const webRoot = resolveWebRoot(config.webRoot);
   app.get("/", async (c) => {
     const index = join(webRoot, "index.html");
     if (!existsSync(index)) {
@@ -202,7 +208,8 @@ export function createRuntime(
  * There is no second UI to fall back to: when the export is absent, `/` says
  * so rather than serving a stale page.
  */
-function resolveWebRoot(): string {
+function resolveWebRoot(configured?: string): string {
+  if (configured) return configured;
   const candidates = [
     join(process.cwd(), "web-next"),
     join(__dirname, "..", "web-next"),

@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# A second push to the same PR cancels the first: the older answer is never
+# the one that matters.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege. No job here writes to the repository.
+permissions:
+  contents: read
+
+jobs:
+  server:
+    name: server (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is the floor: better-sqlite3@13 declares engines node >=22, and
+        # on 20 every suite that opens a Store dies with a worker crash.
+        # 24 is the current LTS.
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck and compile
+        run: npm run build:server
+
+      - name: Test
+        run: npm test
+
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - run: npm ci
+        working-directory: apps/web
+
+      - run: npm run lint
+        working-directory: apps/web
+
+      - name: Build the static export
+        run: npm run build
+        working-directory: apps/web
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      # Production dependencies only. A dev-only advisory should not block a
+      # merge, and `npm audit` has no severity floor that says that on its own.
+      - name: Audit server dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Audit web dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+        working-directory: apps/web

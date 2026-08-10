@@ -5,7 +5,7 @@
 
 ## Decision
 
-Ship **mailmux** as a single **Node 20+ / TypeScript** process:
+Ship **mailmux** as a single **Node 22+ / TypeScript** process:
 
 | Layer | Choice |
 |-------|--------|
@@ -95,3 +95,23 @@ Implementation: `parseAllowedOrigins` / `isApiOriginAllowed` / `applyCors` / `co
 ## Rejected for v0
 
 Calendar, Superhuman polish, multi-tenant SaaS, agent-owned domains, Gmail OAuth as sole path.
+
+## Response security headers
+
+`src/api/security-headers.ts` runs as the first middleware in `createRuntime`, so the UI, the API, the MCP endpoint and every error response carry the same set. It only sets headers after the handler returns; it can never short-circuit a request.
+
+| Header | What it closes |
+|---|---|
+| `Content-Security-Policy` | External script origins, framing, `<base>` injection, plugin content |
+| `X-Frame-Options: DENY` | Clickjacking on browsers older than CSP L2 |
+| `X-Content-Type-Options: nosniff` | A JSON body or an attachment being re-read as HTML |
+| `Referrer-Policy: no-referrer` | A server URL, port and path leaking outward |
+| `Permissions-Policy` | Camera, microphone, geolocation, payment, USB |
+| `Cross-Origin-Opener-Policy` | Cross-origin window handles onto this page |
+
+Two directives are deliberately looser than they look, and `SECURITY.md` states both as known limits:
+
+- `script-src` allows `'unsafe-inline'`. A Next.js static export bootstraps hydration from an inline script and has no server to mint a per-response nonce. The origin restriction still holds. The control that actually stops sender-controlled markup is that `bodyHtml` is never rendered and `react/no-danger` is an ESLint error.
+- `connect-src` allows loopback on any port plus `https:`. The Server URL is user-configurable — the page ships pointing at `127.0.0.1:8787` and is reachable on whatever port you launched. `'self'` alone blocks the app's own health check whenever those differ, which is a real failure caught in a browser, not a hypothetical. Plain `http:` to a remote host stays blocked.
+
+The static deployment gets the same set from `apps/web/vercel.json`. Its `connect-src` is the same, since talking to your machine is the point.
