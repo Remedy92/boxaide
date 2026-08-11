@@ -10,148 +10,158 @@
    prefers-color-scheme media query, which would ignore the toggle entirely. */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* ===========================================================================
+   mailmux — near-monochrome, one accent.
+
+   The palette is deliberately achromatic: five neutral surfaces per theme, four
+   ink levels, and a single indigo that appears only on focus rings, the active
+   nav row, the unread dot and primary buttons. Nothing else in this file is
+   allowed to introduce a colour, and the semantic tones (success / warning /
+   danger) are the only exception.
+
+   There is no per-mailbox palette. Eight low-chroma tints used to run down the
+   left of every row, in the sidebar and behind the reader's monogram; they were
+   removed because the colour was never decodable — nothing told you which
+   mailbox was dusty blue — and eight near-greys at 2px is a distinction the eye
+   does not make. Rows name their mailbox in words instead.
+
+   Every ratio quoted below was measured with the WCAG 2.x relative-luminance
+   formula against every surface the token can legally sit on.
+   =========================================================================== */
+
 :root {
-  /* ---- surfaces: 3 elevations. Light goes LIGHTER toward the front. ---- */
-  --surface-0: #F1F3F7;   /* left rail, app chrome — recessed */
-  --surface-1: #FAFBFD;   /* message list plane */
-  --surface-2: #FFFFFF;   /* reader, dialogs, popovers — front plane */
-  --surface-hover: #EFF1F6;
-  --surface-selected: #E4E7EE;
-  --surface-overlay-scrim: rgb(18 20 26 / 0.32);
+  /* ---- surfaces: five steps. Light goes LIGHTER toward the front. -------- */
+  --surface-0: #f6f6f7;      /* sidebar, app chrome — recessed */
+  --surface-1: #fbfbfc;      /* message list plane */
+  --surface-2: #ffffff;      /* reader, dialogs, popovers — front plane */
+  --surface-hover: #f0f0f2;
+  --surface-selected: #e7e7ea;
+  --surface-overlay-scrim: rgb(16 17 19 / 0.28);
 
   /* ---- borders ----
-     `subtle` and `strong` are decorative: pane rules, monogram chips, dividers.
-     They are deliberately below 3:1 and never carry meaning alone.
+     `subtle` and `strong` are decoration: pane rules, dividers, chips. They sit
+     below 3:1 on purpose and never carry meaning on their own.
 
-     `--border-control` is not decorative. WCAG 2.2 SC 1.4.11 wants 3:1 for the
-     visual boundary that identifies an interactive component, and an input, a
-     select trigger or a segmented option is identified by nothing else. It
-     measures 3.38–4.18 : 1 against every light surface it can sit on
-     (surface-0/1/2/hover/selected) and 3.49–4.61 : 1 against every dark one. */
-  --border-subtle: #E5E8EF;
-  --border-strong: #CBD0DA;
-  --border-control: #767C8A;
+     `--border-control` is not decoration. WCAG 2.2 SC 1.4.11 asks for 3:1 on
+     the visual boundary that identifies an interactive component, and an input
+     or a select trigger is identified by nothing else. It measures
+     3.19–3.94 : 1 against every light surface (0/1/2/hover/selected) and
+     3.35–4.21 : 1 against every dark one. */
+  --border-subtle: #e8e8ea;
+  --border-strong: #d5d5d9;
+  --border-control: #7e8089;
 
-  /* ---- text ---- */
-  --text-primary: #12141A;
-  --text-secondary: #565D6E;
-  --text-tertiary: #5F6676;
-  --text-disabled: #A9AEBB;
+  /* ---- ink: four levels, no more ---- */
+  --text-primary: #0e0f11;
+  --text-secondary: #54565d;
+  --text-tertiary: #63656c;
+  --text-disabled: #a5a7ae;
 
-  /* The "not checked yet" status dot. It is a non-text state indicator with no
-     visible text beside it (the words live in the accessible name), so 1.4.11
-     applies and --text-disabled at 1.79–2.22 : 1 does not clear it. 3.38+ here. */
-  --dot-muted: #767C8A;
+  /* The "not checked yet" status dot. A non-text state indicator whose words
+     live only in the accessible name, so 1.4.11 applies; --text-disabled at
+     1.95–2.40 : 1 does not clear it and this does. */
+  --dot-muted: #7e8089;
 
-  /* Ink adjustment for the reader's hued identity monogram (§6.4). The light
-     ramp sits at oklch L 0.56, which lands at 3.70–3.99 : 1 on its own 16% tint
-     — below the 4.5 that 13px text needs. Darkening the ink to 87% lifts every
-     hue to 4.63–4.98. The dark ramp already clears 4.5, so it mixes 100%. */
-  --acct-ink: 87%;
+  /* ---- the one accent: indigo ---- */
+  --accent: #4a54c4;             /* accent text, unread dot, focus ring */
+  --accent-hover: #3d46ad;
+  --accent-active: #333b96;
+  --accent-fill: #4f5ad1;        /* primary button background */
+  --accent-fill-hover: #4550c2;
+  --accent-fill-fg: #ffffff;     /* 5.65 : 1 on --accent-fill */
+  --accent-subtle-bg: #edeefb;   /* active nav row, accent badge — 5.43 : 1 */
+  --accent-line: #c9cdf2;        /* 1px rule inside an accent surface */
 
-  /* ---- the one accent: signal petrol, OKLCH hue 196 ---- */
-  --accent: #006C6E;            /* text, unread dot, focus ring, active nav */
-  --accent-hover: #005658;
-  --accent-active: #004244;
-  --accent-fill: #007C7E;       /* primary button background */
-  --accent-fill-hover: #006C6E;
-  --accent-fill-fg: #FFFFFF;
-  --accent-subtle-bg: #DCF6F6;  /* selected nav, accent badge */
+  /* ---- semantic. Used for state, never for emphasis. ---- */
+  --success: #106b3e;  --success-bg: #e6f2ea;
+  --warning: #8a5300;  --warning-bg: #f9f0de;
+  --danger:  #b3231f;  --danger-bg:  #fbe9e8;
+  --danger-fill: #b3231f; --danger-fill-fg: #ffffff;
 
-  /* ---- semantic ---- */
-  --success: #136B3F;  --success-bg: #E4F3EA;
-  --warning: #8A5300;  --warning-bg: #FBF0DC;
-  --danger:  #B3231F;  --danger-bg:  #FBE7E6;
-  --danger-fill: #B3231F; --danger-fill-fg: #FFFFFF;
-
-  /* ---- account rail hues (deterministic, see lib/format/hue.ts) ---- */
-  --acct-0: #A95960; --acct-1: #A6603A; --acct-2: #88731B; --acct-3: #5D813D;
-  --acct-4: #4078B0; --acct-5: #706AAF; --acct-6: #8E609C; --acct-7: #A2597D;
-
-  /* ---- radii ---- */
+  /* ---- radii: small and consistent ---- */
   --radius-xs: 3px;
   --radius-sm: 4px;
   --radius-md: 6px;
-  --radius-lg: 10px;
+  --radius-lg: 8px;
   --radius-full: 999px;
 
-  /* ---- shadows: overlays ONLY. Nothing inline gets one. ---- */
-  --shadow-overlay: 0 1px 2px rgb(18 20 26 / 0.04), 0 8px 24px -8px rgb(18 20 26 / 0.14);
-  --shadow-dialog:  0 2px 4px rgb(18 20 26 / 0.05), 0 24px 56px -16px rgb(18 20 26 / 0.24);
+  /* ---- shadows: overlays ONLY. Nothing inline ever gets one. ---- */
+  --shadow-overlay: 0 1px 1px rgb(16 17 19 / 0.04), 0 6px 16px -6px rgb(16 17 19 / 0.12);
+  --shadow-dialog:  0 1px 2px rgb(16 17 19 / 0.05), 0 20px 48px -16px rgb(16 17 19 / 0.20);
 
-  /* ---- type scale (size / line-height) ---- */
-  --text-micro: 11px;  --leading-micro: 16px;   /* kbd, section labels, eyebrow */
-  --text-meta: 12px;   --leading-meta: 16px;    /* timestamps, addresses */
-  --text-dense: 13px;  --leading-dense: 18px;   /* compact rows, rail */
-  --text-ui: 14px;     --leading-ui: 20px;      /* default UI, comfortable rows */
-  --text-body: 15px;   --leading-body: 24px;    /* reader body — 1.6 */
-  --text-title: 20px;  --leading-title: 26px;   /* reader subject */
-  --text-display: 24px; --leading-display: 30px;/* dialog titles, empty headings */
+  /* ---- type: exactly four sizes ----
+     11 label · 12 meta · 13 UI and list · 15 reading and titles.
+     A fifth size is not a design decision, it is an accident. Hierarchy comes
+     from weight, colour and space. */
+  --text-micro: 11px;  --leading-micro: 16px;
+  --text-meta: 12px;   --leading-meta: 16px;
+  --text-ui: 13px;     --leading-ui: 18px;
+  --text-read: 15px;   --leading-read: 24px;
 
-  /* ---- motion ---- */
+  --tracking-tight: -0.011em;   /* 15px headings and titles */
+  --tracking-normal: -0.006em;  /* 13px UI — Inter reads tight at this size */
+  --tracking-label: 0.04em;     /* 11px uppercase section labels */
+
+  /* ---- motion: 100–150ms, and only on interactive state ---- */
   --dur-instant: 0ms;
   --dur-fast: 100ms;      /* hover-out, button press */
   --dur-enter: 140ms;     /* popover / dropdown / palette in */
-  --dur-exit: 110ms;      /* the same, out */
-  --dur-expand: 180ms;    /* composer height */
-  --dur-sheet: 220ms;     /* mobile pane / sheet slide */
+  --dur-exit: 100ms;      /* the same, out */
+  --dur-expand: 150ms;    /* composer height */
+  --dur-sheet: 200ms;     /* mobile pane / sheet slide */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
   --ease-sheet: cubic-bezier(0.32, 0.72, 0, 1);
 
-  /* ---- layout (see §5) ---- */
-  --rail-w: 240px;
-  --rail-w-collapsed: 56px;
-  --list-w: 380px;
-  --row-h: 72px;
-  --row-pad-y: 12px;
+  /* ---- layout ---- */
+  --rail-w: 228px;
+  --rail-w-collapsed: 52px;
+  --list-w: 360px;
+  --row-h: 62px;
+  --row-pad-y: 10px;
   --font-list: var(--text-ui);
   --reader-measure: 68ch;
 }
 
 [data-density="compact"] {
-  --row-h: 52px;
-  --row-pad-y: 8px;
-  --font-list: var(--text-dense);
+  --row-h: 44px;
+  --row-pad-y: 6px;
 }
 
 .dark {
-  --surface-0: #0E1014;
-  --surface-1: #15181E;
-  --surface-2: #1C2028;
-  --surface-hover: #1C2028;
-  --surface-selected: #242A34;
-  --surface-overlay-scrim: rgb(3 4 6 / 0.60);
+  --surface-0: #08090a;
+  --surface-1: #0d0e10;
+  --surface-2: #121316;
+  --surface-hover: #191a1d;
+  --surface-selected: #212226;
+  --surface-overlay-scrim: rgb(0 0 0 / 0.62);
 
-  --border-subtle: #242832;
-  --border-strong: #363C48;
-  --border-control: #767D8C;
+  --border-subtle: #1c1d20;
+  --border-strong: #2b2d31;
+  --border-control: #70737c;
 
-  --text-primary: #E7E9EF;   /* never #FFFFFF */
-  --text-secondary: #A2A9B8;
-  --text-tertiary: #8A91A0;
-  --text-disabled: #565C6A;
-  --dot-muted: #767D8C;
-  --acct-ink: 100%;
+  --text-primary: #edeef0;   /* never #ffffff */
+  --text-secondary: #9fa1a8;
+  --text-tertiary: #83858d;
+  --text-disabled: #54565d;
+  --dot-muted: #70737c;
 
-  --accent: #5CD1D2;
-  --accent-hover: #84E2E3;
-  --accent-active: #A6ECED;
-  --accent-fill: #31BFC1;
-  --accent-fill-hover: #5CD1D2;
-  --accent-fill-fg: #021818;
-  --accent-subtle-bg: #0D2A2B;
+  --accent: #9aa3f5;
+  --accent-hover: #b3bafa;
+  --accent-active: #c8ccfc;
+  --accent-fill: #5c67d8;
+  --accent-fill-hover: #6c76e0;
+  --accent-fill-fg: #ffffff;   /* 4.79 : 1 on --accent-fill */
+  --accent-subtle-bg: #16182b; /* 7.44 : 1 under --accent */
+  --accent-line: #2b2f52;
 
-  --success: #4ED08A;  --success-bg: #12291D;
-  --warning: #F0A93C;  --warning-bg: #2A2113;
-  --danger:  #FF6E6A;  --danger-bg:  #2E1817;
-  --danger-fill: #FF6E6A; --danger-fill-fg: #2E1817;
+  --success: #4ed08a;  --success-bg: #0f2419;
+  --warning: #f0a93c;  --warning-bg: #251d10;
+  --danger:  #ff6e6a;  --danger-bg:  #2a1514;
+  --danger-fill: #ff6e6a; --danger-fill-fg: #2a1514;
 
-  --acct-0: #D5848A; --acct-1: #D18B67; --acct-2: #B29E51; --acct-3: #87AC69;
-  --acct-4: #6DA3DA; --acct-5: #9995DA; --acct-6: #B98AC7; --acct-7: #CE84A7;
-
-  --shadow-overlay: 0 1px 2px rgb(0 0 0 / 0.40), 0 8px 24px -8px rgb(0 0 0 / 0.56);
-  --shadow-dialog:  0 2px 4px rgb(0 0 0 / 0.44), 0 24px 56px -16px rgb(0 0 0 / 0.64);
+  --shadow-overlay: 0 1px 1px rgb(0 0 0 / 0.50), 0 6px 16px -6px rgb(0 0 0 / 0.60);
+  --shadow-dialog:  0 1px 2px rgb(0 0 0 / 0.50), 0 20px 48px -16px rgb(0 0 0 / 0.70);
 }
 
 @theme inline {
@@ -172,6 +182,7 @@
   --color-accent-fill: var(--accent-fill);
   --color-accent-fill-fg: var(--accent-fill-fg);
   --color-accent-subtle: var(--accent-subtle-bg);
+  --color-accent-line: var(--accent-line);
   --color-success: var(--success);
   --color-success-bg: var(--success-bg);
   --color-warning: var(--warning);
@@ -182,16 +193,20 @@
   --radius-xs: 3px;
   --radius-sm: 4px;
   --radius-md: 6px;
-  --radius-lg: 10px;
+  --radius-lg: 8px;
 
   --shadow-overlay: var(--shadow-overlay);
   --shadow-dialog: var(--shadow-dialog);
 
-  /* Literal family names. @theme inline resolves at parse time and cannot read
-     the runtime var() that next/font injects — a var() reference here silently
-     falls back to system fonts. */
-  --font-sans: "IBM Plex Sans", "IBM Plex Sans Fallback", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "IBM Plex Mono", "IBM Plex Mono Fallback", ui-monospace, SFMono-Regular, monospace;
+  /* One sans stack, self-hosted by next/font at build time — nothing is
+     fetched from a third-party origin at runtime, which the CSP would block
+     anyway. The mono stack is the OS's own; no second web font is downloaded.
+     Literal family names: @theme inline resolves at parse time and cannot read
+     the runtime var() that next/font injects. */
+  --font-sans: "Inter", "Inter Fallback", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
 }
 
 @layer base {
@@ -206,8 +221,14 @@
     font-family: var(--font-sans);
     font-size: var(--text-ui);
     line-height: var(--leading-ui);
+    letter-spacing: var(--tracking-normal);
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
+    /* Inter's contextual alternates fix the `i`+`j` collision and the
+       straight-quote shapes; `cv11` gives the single-storey `a` that keeps
+       13px UI text from looking cramped. */
+    font-feature-settings: "cv11" 1, "calt" 1;
     overflow: hidden;             /* the panes scroll, the page never does */
   }
 
@@ -224,6 +245,25 @@
 
   /* Timestamps and every numeric column line up. */
   .tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+
+  /* Headings and titles: 15px, tighter tracking, never larger. */
+  .title-15 {
+    font-size: var(--text-read);
+    line-height: 20px;
+    letter-spacing: var(--tracking-tight);
+    font-weight: 600;
+  }
+
+  /* Panes scroll; their scrollbars stay out of the way until used. */
+  .pane-scroll { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+  .pane-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+  .pane-scroll::-webkit-scrollbar-thumb {
+    background-clip: content-box;
+    border: 3px solid transparent;
+    border-radius: var(--radius-full);
+    background-color: transparent;
+  }
+  .pane-scroll:hover::-webkit-scrollbar-thumb { background-color: var(--border-strong); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -236,8 +276,8 @@
 }
 
 /* ---------------------------------------------------------------------------
-   Layout — §5.1. One grid, never nested flex, so a width change is a single
-   custom-property write with no layout thrash.
+   Layout. One grid, never nested flex, so a width change is a single custom
+   property write with no layout thrash.
    --------------------------------------------------------------------------- */
 .shell {
   display: grid;
@@ -248,20 +288,26 @@
 }
 .shell[data-rail="collapsed"] { --rail-w: var(--rail-w-collapsed); }
 
+/* The Agent view has no message list. Two tracks, not a third one collapsed to
+   zero: a 0px column still creates a grid line the border-r of the sidebar
+   would sit against twice. */
+.shell[data-view="agent"] {
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+}
+
 /* ---------------------------------------------------------------------------
    shadcn/ui compatibility.
 
    The generated primitives in src/components/ui reference shadcn's semantic
    colour names (bg-background, border-input, ring-ring, …). Map them onto the
    mailmux tokens above so no primitive renders against an undefined utility.
-   Per §6.9 the button / input / badge variants are still remapped by hand when
-   those components are actually styled — this block only keeps the defaults
-   coherent in the meantime.
+   The button / input / badge variants are still remapped by hand where those
+   components are styled; this block only keeps the defaults coherent.
 
-   Known collision, deliberate: --color-accent is signal petrol (§3.3), while
-   shadcn uses `bg-accent` for a neutral hover surface. Any primitive that
-   hovers with `bg-accent` must be switched to `bg-surface-hover` when it is
-   styled. Do not repoint --color-accent; §3.3 is binding.
+   Known collision, deliberate: --color-accent is the product's one accent,
+   while shadcn uses `bg-accent` for a neutral hover surface. Any primitive that
+   hovers with `bg-accent` is switched to `bg-surface-hover` when it is styled.
+   Do not repoint --color-accent.
    --------------------------------------------------------------------------- */
 @theme inline {
   --color-background: var(--surface-2);
@@ -285,9 +331,9 @@
 }
 
 /* ---------------------------------------------------------------------------
-   Motion — §10. Animate transform, opacity and background-color only. The two
-   height animations below are the stated exceptions: a push-content reveal has
-   no transform equivalent, and both are one-off and user-initiated.
+   Motion. Animate transform, opacity and background-color only. The two height
+   animations below are the stated exceptions: a push-content reveal has no
+   transform equivalent, and both are one-off and user-initiated.
    --------------------------------------------------------------------------- */
 
 /* Refresh icon: 700ms per turn, looping while fetching, stops at 0°. */
@@ -316,14 +362,33 @@
 }
 .mailmux-slide-in { animation: mailmux-slide-in var(--dur-sheet) var(--ease-sheet); }
 
-/* §5.3 — the rail collapses to a 56px icon rail between 760px and 1099px. The
-   width change is a custom-property write and is deliberately not animated:
-   animated reflow at a breakpoint reads as jank. */
+/* The first-run wizard is the only full-screen surface, and the only place a
+   staged entrance is warranted: it is shown once. */
+@keyframes mailmux-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.mailmux-rise { animation: mailmux-rise 200ms var(--ease-out-expo) both; }
+
+/* Skeleton blocks breathe rather than shimmer: no travelling highlight, which
+   at 8 rows reads as a loading screen pretending to be busy. */
+@keyframes mailmux-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+.mailmux-pulse { animation: mailmux-pulse 1600ms ease-in-out infinite; }
+
+/* The rail collapses to a 52px icon rail between 760px and 1099px. The width
+   change is a custom-property write and is deliberately not animated: animated
+   reflow at a breakpoint reads as jank. */
 @media (min-width: 760px) and (max-width: 1099px) {
   .shell { --rail-w: var(--rail-w-collapsed); }
 }
 
-/* §5.3 — below 760px, one pane at a time. */
+/* Below 760px, one pane at a time. The attribute selector is repeated because
+   `.shell[data-view="agent"]` above outranks a bare `.shell` here, media query
+   or not — specificity is not affected by the @media wrapper. */
 @media (max-width: 759px) {
-  .shell { grid-template-columns: minmax(0, 1fr); }
+  .shell,
+  .shell[data-view="agent"] { grid-template-columns: minmax(0, 1fr); }
 }

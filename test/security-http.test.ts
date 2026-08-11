@@ -5,6 +5,7 @@ import { FixtureProvider } from "../src/provider/fixture.js";
 import {
   createRuntime,
   isLocalHostHeader,
+  isLoopbackBindAddress,
   isAllowedOrigin,
   isApiOriginAllowed,
   parseAllowedOrigins,
@@ -171,6 +172,35 @@ describe("isAllowedOrigin (browser CSRF guard)", () => {
   });
 });
 
+describe("isLoopbackBindAddress", () => {
+  it("accepts every form of the loopback interface", () => {
+    for (const host of ["127.0.0.1", "127.0.0.53", "localhost", "::1", "[::1]"]) {
+      expect(isLoopbackBindAddress(host)).toBe(true);
+    }
+  });
+
+  it("rejects every address that answers off-machine", () => {
+    for (const host of ["0.0.0.0", "::", "192.168.1.10", "10.0.0.5", "*", ""]) {
+      expect(isLoopbackBindAddress(host)).toBe(false);
+    }
+    expect(isLoopbackBindAddress(undefined)).toBe(false);
+  });
+
+  it("rejects strings that look like 127/8 but are not addresses", () => {
+    for (const host of [
+      "127.999.999.999",
+      "127.0.0.256",
+      "127.0.0",
+      "127.0.0.1.2",
+      "127.0.0.x",
+      "127.0.0.",
+      "127.0.0.1.evil.com",
+    ]) {
+      expect(isLoopbackBindAddress(host)).toBe(false);
+    }
+  });
+});
+
 describe("HTTP security surface (shipped app)", () => {
   let runtime: Runtime;
 
@@ -206,6 +236,31 @@ describe("HTTP security surface (shipped app)", () => {
     });
     expect(res.status).toBe(200);
     expect((await res.json()).token).toBe(TOKEN);
+  });
+
+  it("withholds the token entirely when the bind address is not loopback", async () => {
+    const open = createRuntime({
+      dataDir: ":memory:",
+      masterKey: randomBytes(32),
+      bearerToken: TOKEN,
+      host: "0.0.0.0",
+      port: 0,
+      fixtureMode: true,
+      allowedOrigins: [],
+      store: new Store(randomBytes(32), ":memory:"),
+      provider: new FixtureProvider(),
+    });
+    try {
+      // Both browser guards pass here: a remote client picks its own Host and
+      // sends no Origin. The bind address is what stops it.
+      const res = await open.app.request("/api/local-bootstrap", {
+        headers: { Host: "localhost:8787" },
+      });
+      expect(res.status).toBe(404);
+      expect(await res.text()).not.toContain(TOKEN);
+    } finally {
+      open.store.close();
+    }
   });
 
   it("rejects ?token= auth and accepts the same token in the header", async () => {

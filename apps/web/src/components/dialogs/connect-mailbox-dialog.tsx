@@ -1,9 +1,9 @@
 "use client";
 
 import * as React from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { ExternalLink, Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
-import { Spinner, StatusDot, TechnicalDetails } from "@/components/atoms";
+import { Field, Spinner, TechnicalDetails } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -14,17 +14,17 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { friendlyError } from "@/lib/api/errors";
 import {
   DEFAULT_IMAP_PORT,
   DEFAULT_SMTP_PORT,
+  GMAIL_PASSWORD_PROBLEM,
   PROVIDER_PRESETS,
+  isGoogleAppPassword,
+  presetForEmail,
+  stripPasswordSpaces,
 } from "@/lib/constants";
-import {
-  useCreateAccount,
-  useTestCredentials,
-} from "@/lib/hooks/use-account-mutations";
+import { useCreateAccount } from "@/lib/hooks/use-account-mutations";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { cn } from "@/lib/utils";
 
@@ -74,7 +74,6 @@ export function ConnectMailboxDialog({
 }) {
   const accounts = useAccounts();
   const create = useCreateAccount();
-  const test = useTestCredentials();
   const [form, setForm] = React.useState<Form>(() => formForPreset(DEFAULT_PRESET));
   const [preset, setPreset] = React.useState(DEFAULT_PRESET);
   const [reveal, setReveal] = React.useState(false);
@@ -83,6 +82,10 @@ export function ConnectMailboxDialog({
   const passwordRef = React.useRef<HTMLInputElement | null>(null);
   const imapRef = React.useRef<HTMLInputElement | null>(null);
   const smtpRef = React.useRef<HTMLInputElement | null>(null);
+  /* A chip picked by hand keeps its hosts: a custom domain on Google Workspace,
+     or Other in front of a company gateway, must survive the rest of the
+     address being typed. Only the chip row sets this. */
+  const pinned = React.useRef(false);
 
   const chosen = PROVIDER_PRESETS.find((entry) => entry.id === preset);
   const existing = (accounts.data ?? []).find(
@@ -102,12 +105,25 @@ export function ConnectMailboxDialog({
     }));
   };
 
+  /** The chip row: the same apply, plus the pin the address cannot undo. */
+  const choosePreset = (id: string) => {
+    pinned.current = true;
+    applyPreset(id);
+  };
+
+  const onEmailChange = (value: string) => {
+    setForm((current) => ({ ...current, email: value }));
+    if (pinned.current) return;
+    const guess = presetForEmail(value);
+    if (guess && guess.id !== preset) applyPreset(guess.id);
+  };
+
   const reset = () => {
     setForm(formForPreset(DEFAULT_PRESET));
     setPreset(DEFAULT_PRESET);
+    pinned.current = false;
     setValidation(null);
     setReveal(false);
-    test.reset();
     create.reset();
   };
 
@@ -120,7 +136,7 @@ export function ConnectMailboxDialog({
     // Derived, exactly as web/app.js does it.
     smtpSecure: (Number(form.smtpPort) || DEFAULT_SMTP_PORT) === 465,
     username: form.username.trim() || form.email.trim(),
-    password: form.password,
+    password: stripPasswordSpaces(form.password),
   });
 
   const requireBasics = (): boolean => {
@@ -137,13 +153,13 @@ export function ConnectMailboxDialog({
         return false;
       }
     }
+    if (preset === "gmail" && !isGoogleAppPassword(form.password)) {
+      passwordRef.current?.focus();
+      setValidation(GMAIL_PASSWORD_PROBLEM);
+      return false;
+    }
     setValidation(null);
     return true;
-  };
-
-  const onTest = () => {
-    if (!requireBasics()) return;
-    test.mutate(credentials());
   };
 
   const onSave = () => {
@@ -164,7 +180,7 @@ export function ConnectMailboxDialog({
     );
   };
 
-  const busy = create.isPending || test.isPending;
+  const busy = create.isPending;
   const presetRefs = React.useRef(new Map<string, HTMLButtonElement>());
 
   return (
@@ -188,7 +204,7 @@ export function ConnectMailboxDialog({
         }}
       >
         <DialogHeader>
-          <DialogTitle style={{ fontSize: "var(--text-display)" }}>
+          <DialogTitle className="title-15">
             Connect a mailbox
           </DialogTitle>
           <DialogDescription>
@@ -218,7 +234,7 @@ export function ConnectMailboxDialog({
                 (Math.max(at, 0) + delta + PROVIDER_PRESETS.length) %
                   PROVIDER_PRESETS.length
               ];
-            applyPreset(next.id);
+            choosePreset(next.id);
             presetRefs.current.get(next.id)?.focus();
           }}
         >
@@ -233,12 +249,13 @@ export function ConnectMailboxDialog({
               role="radio"
               aria-checked={preset === entry.id}
               tabIndex={preset === entry.id ? 0 : -1}
-              onClick={() => applyPreset(entry.id)}
+              onClick={() => choosePreset(entry.id)}
               className={cn(
-                "h-8 rounded-[var(--radius-full)] border px-3 text-[13px]",
+                "h-8 rounded-[var(--radius-md)] border px-3 text-[13px]",
+                "transition-colors duration-[var(--dur-fast)]",
                 preset === entry.id
                   ? "border-accent bg-accent-subtle text-accent"
-                  : "border-border-control bg-surface-1 text-fg-secondary hover:border-[var(--text-secondary)]",
+                  : "border-border-control bg-surface-2 text-fg-secondary hover:bg-surface-hover hover:text-fg",
               )}
             >
               {entry.label}
@@ -276,9 +293,7 @@ export function ConnectMailboxDialog({
               value={form.email}
               autoComplete="off"
               spellCheck={false}
-              onChange={(event) =>
-                setForm((value) => ({ ...value, email: event.target.value }))
-              }
+              onChange={(event) => onEmailChange(event.target.value)}
             />
           </Field>
 
@@ -290,6 +305,7 @@ export function ConnectMailboxDialog({
                 type={reveal ? "text" : "password"}
                 value={form.password}
                 autoComplete="off"
+                placeholder={chosen?.passwordPlaceholder || undefined}
                 className="pr-8"
                 onChange={(event) =>
                   setForm((value) => ({ ...value, password: event.target.value }))
@@ -308,6 +324,18 @@ export function ConnectMailboxDialog({
                 )}
               </button>
             </div>
+            {chosen?.passwordUrl && (
+              <Button asChild variant="secondary" size="sm">
+                <a
+                  href={chosen.passwordUrl}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                >
+                  <ExternalLink className="size-3.5" strokeWidth={1.5} />
+                  {chosen.passwordUrlLabel}
+                </a>
+              </Button>
+            )}
           </Field>
 
           <Field id="connect-username" label="Username">
@@ -388,35 +416,6 @@ export function ConnectMailboxDialog({
           <p className="text-[12px] leading-4 text-danger">{validation}</p>
         )}
 
-        {test.isSuccess && test.data.ok && (
-          <p className="flex items-center gap-1.5 rounded-[var(--radius-md)] bg-success-bg px-2 py-1.5 text-[12px] text-success">
-            <StatusDot tone="success" />
-            Connection works. You can save the mailbox now.
-          </p>
-        )}
-
-        {test.isSuccess && !test.data.ok && (
-          <div>
-            <p className="text-[12px] leading-4 text-danger">
-              {friendlyError(test.data.error)}
-            </p>
-            <TechnicalDetails raw={test.data.error} />
-          </div>
-        )}
-
-        {test.isError && (
-          <div>
-            <p className="text-[12px] leading-4 text-danger">
-              {friendlyError(
-                test.error instanceof Error ? test.error.message : test.error,
-              )}
-            </p>
-            <TechnicalDetails
-              raw={test.error instanceof Error ? test.error.message : test.error}
-            />
-          </div>
-        )}
-
         {create.isError && (
           <div>
             <p className="text-[12px] leading-4 text-danger">
@@ -446,16 +445,6 @@ export function ConnectMailboxDialog({
           </Button>
           <Button
             type="button"
-            variant="secondary"
-            disabled={busy}
-            aria-busy={test.isPending || undefined}
-            onClick={onTest}
-          >
-            {test.isPending && <Spinner />}
-            {test.isPending ? "Testing…" : "Test connection"}
-          </Button>
-          <Button
-            type="button"
             disabled={busy}
             aria-busy={create.isPending || undefined}
             onClick={onSave}
@@ -476,26 +465,4 @@ export function ConnectMailboxDialog({
 /** The server normalises the alias exactly this way (service.ts:49). */
 function normalizeAlias(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, "-");
-}
-
-function Field({
-  id,
-  label,
-  helper,
-  children,
-}: {
-  id: string;
-  label: string;
-  helper?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="space-y-1">
-      <Label htmlFor={id} className="text-[12px] font-medium text-fg-secondary">
-        {label}
-      </Label>
-      {children}
-      {helper && <p className="text-[12px] leading-4 text-fg-tertiary">{helper}</p>}
-    </div>
-  );
 }

@@ -12,7 +12,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useAccountHue } from "@/lib/hooks/use-account-hue";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useApp, useSearchQuery } from "@/lib/hooks/use-app-state";
 import { useFolders } from "@/lib/hooks/use-folders";
@@ -41,7 +40,6 @@ export function ListHeader({
   const app = useApp();
   const rawQuery = useSearchQuery();
   const accounts = useAccounts();
-  const hueFor = useAccountHue();
   // A local ref, registered with the shell in an effect. Passing the context's
   // callback straight to `ref` would make every later `app.*` read count as a
   // ref access during render.
@@ -67,7 +65,7 @@ export function ListHeader({
           two icon buttons inside a 380px pane: `flex-1` collapsed the search
           field to 89px, which truncated its own placeholder. Search owns the
           first row; the filters and actions sit under it. */}
-      <div className="flex h-12 items-center gap-2 px-3">
+      <div className="flex h-11 items-center gap-2 px-3">
         {showRailButton && (
           <Button
             type="button"
@@ -115,7 +113,7 @@ export function ListHeader({
         </div>
       </div>
 
-      <div className="flex h-10 items-center gap-1.5 border-b border-border-subtle px-3 pb-1.5">
+      <div className="flex h-9 items-center gap-1.5 border-b border-border-subtle px-3 pb-1.5">
         <Select
           value={app.account}
           onValueChange={(value) => app.setAccount(value)}
@@ -126,7 +124,7 @@ export function ListHeader({
           <SelectTrigger
             size="sm"
             aria-label="Filter by mailbox"
-            className="h-8 min-w-0 flex-1 text-[13px]"
+            className="h-7 min-w-0 flex-1"
           >
             <SelectValue />
           </SelectTrigger>
@@ -134,14 +132,7 @@ export function ListHeader({
             <SelectItem value={ALL}>All mailboxes</SelectItem>
             {list.map((account) => (
               <SelectItem key={account.id} value={account.alias}>
-                <span className="flex items-center gap-2">
-                  <span
-                    aria-hidden="true"
-                    className="inline-block h-3.5 w-[3px] rounded-[var(--radius-full)]"
-                    style={{ background: hueFor(account.id) }}
-                  />
-                  {account.alias}
-                </span>
+                {account.alias}
               </SelectItem>
             ))}
           </SelectContent>
@@ -165,7 +156,7 @@ export function ListHeader({
                   aria-disabled="true"
                   aria-label="Filter by folder"
                   aria-describedby={FOLDER_NOTE_ID}
-                  className="h-8 min-w-0 flex-1 cursor-not-allowed justify-start text-[13px] text-fg-disabled"
+                  className="h-7 min-w-0 flex-1 cursor-not-allowed justify-start text-fg-disabled"
                 >
                   Folder
                 </Button>
@@ -186,7 +177,7 @@ export function ListHeader({
             <SelectTrigger
               size="sm"
               aria-label="Filter by folder"
-              className="h-8 min-w-0 flex-1 text-[13px]"
+              className="h-7 min-w-0 flex-1"
             >
               <SelectValue placeholder="Folder" />
             </SelectTrigger>

@@ -1,8 +1,10 @@
 import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import type { Context } from "hono";
+import { streamSSE } from "hono/streaming";
+import type { AgentChannel, Turn } from "../agent/channel.js";
 import type { MailService } from "../mail/service.js";
-import type { AccountCredentials } from "../provider/types.js";
+import type { AccountCredentials, DraftInput } from "../provider/types.js";
 import { passwordCredentials } from "../provider/types.js";
 
 /** Highest `limit` any list endpoint will accept. */
@@ -87,6 +89,26 @@ export function parseConnectCredentials(
   };
 }
 
+/** Draft create/update body. `account` is ignored on the update route. */
+type DraftBody = DraftInput & { account?: string };
+
+/**
+ * Pick the draft fields explicitly, exactly as the send route does, so nothing
+ * else a client posts reaches the MIME composer.
+ */
+function draftFieldsOf(body: DraftBody): DraftInput {
+  return {
+    to: body.to,
+    subject: body.subject,
+    text: body.text,
+    html: body.html,
+    cc: body.cc,
+    bcc: body.bcc,
+    inReplyTo: body.inReplyTo,
+    references: body.references,
+  };
+}
+
 const LOCAL_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 /** Strip an optional `:port`, leaving bracketed and bare IPv6 literals intact. */
@@ -111,6 +133,33 @@ function hostnameOf(value: string): string {
 export function isLocalHostHeader(host: string | undefined): boolean {
   if (!host) return false;
   return LOCAL_HOSTNAMES.has(hostnameOf(host));
+}
+
+/**
+ * True only when the server's own bind address is loopback.
+ *
+ * The Host and Origin guards on /api/local-bootstrap are browser guards, and
+ * a browser is not the threat here: a remote client on a `0.0.0.0` bind can
+ * send `Host: localhost` and no Origin at all, and both guards pass. So the
+ * bind address itself decides whether the token endpoint exists.
+ *
+ * Any 127.0.0.0/8 address counts, not just 127.0.0.1 — the whole block is
+ * loopback-only. An empty or `*` host means "every interface" and fails.
+ */
+export function isLoopbackBindAddress(host: string | undefined): boolean {
+  if (!host) return false;
+  const value = hostnameOf(host).replace(/^\[|\]$/g, "");
+  if (value === "localhost" || value === "::1") return true;
+  // Octets are checked numerically. A digit-count pattern would accept
+  // 127.999.999.999, which is not an address at all — and this function
+  // decides whether the token endpoint exists.
+  const octets = value.split(".");
+  if (octets.length !== 4) return false;
+  if (octets[0] !== "127") return false;
+  return octets.every(
+    (part) =>
+      /^\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255,
+  );
 }
 
 /**
@@ -291,6 +340,7 @@ export function createApi(
   mail: MailService,
   bearerToken: string,
   allowedOrigins: readonly string[],
+  channel?: AgentChannel,
 ): Hono {
   const app = new Hono();
 
@@ -459,6 +509,77 @@ export function createApi(
     }
   });
 
+  app.get("/api/drafts", async (c) => {
+    const account = c.req.query("account") ?? "";
+    if (!account || account === "all") {
+      return c.json({ error: "account is required" }, 400);
+    }
+    const limit = parseLimit(c.req.query("limit"));
+    if (limit === null) {
+      return c.json(
+        { error: `limit must be an integer between 1 and ${MAX_LIMIT}` },
+        400,
+      );
+    }
+    try {
+      return c.json({ drafts: await mail.listDrafts(account, { limit }) });
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
+    }
+  });
+
+  app.post("/api/drafts", async (c) => {
+    const body = await c.req.json<DraftBody>();
+    if (!body.account) return c.json({ error: "account is required" }, 400);
+    try {
+      const draft = await mail.createDraft(body.account, draftFieldsOf(body));
+      return c.json({ draft }, 201);
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
+    }
+  });
+
+  // POST, not PUT: the CORS allow-list of methods is deliberately short, and a
+  // draft update is a replace-and-delete rather than an idempotent write.
+  app.post("/api/drafts/:accountId/:draftId", async (c) => {
+    const body = await c.req.json<DraftBody>();
+    try {
+      const draft = await mail.updateDraft(
+        c.req.param("accountId"),
+        decodeURIComponent(c.req.param("draftId")),
+        draftFieldsOf(body),
+      );
+      return c.json({ draft });
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
+    }
+  });
+
+  app.delete("/api/drafts/:accountId/:draftId", async (c) => {
+    try {
+      const deleted = await mail.deleteDraft(
+        c.req.param("accountId"),
+        decodeURIComponent(c.req.param("draftId")),
+      );
+      if (!deleted) return c.json({ error: "not found" }, 404);
+      return c.json({ deleted });
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
+    }
+  });
+
   app.post("/api/messages/send", async (c) => {
     const body = await c.req.json<{
       account: string;
@@ -491,5 +612,123 @@ export function createApi(
     }
   });
 
+  /* ---- the agent conversation ------------------------------------------
+     Registered only when the runtime built a channel. Without one these paths
+     404 rather than 500, and the UI's own capability check is the same
+     question: does this server have an agent channel at all?
+     --------------------------------------------------------------------- */
+  if (channel) registerAgentRoutes(app, channel);
+
   return app;
+}
+
+/** Longest a message from the composer may be. Well past any real question. */
+const MAX_CHAT_CHARS = 8_000;
+
+/**
+ * Heartbeat interval for the SSE stream.
+ *
+ * A stream that sends nothing for minutes is indistinguishable from a dead one,
+ * and intermediaries close idle connections. The comment frame costs two bytes
+ * of payload and keeps `onerror`-driven reconnect logic honest.
+ */
+const SSE_HEARTBEAT_MS = 20_000;
+
+function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
+  app.get("/api/agent/state", (c) => {
+    const after = c.req.query("after");
+    const afterSeq = after !== undefined && /^\d+$/.test(after) ? Number(after) : undefined;
+    return c.json({
+      turns: channel.history(afterSeq),
+      presence: channel.presence(),
+    });
+  });
+
+  app.post("/api/agent/messages", async (c) => {
+    let body: { text?: unknown };
+    try {
+      body = await c.req.json<{ text?: unknown }>();
+    } catch {
+      return c.json({ error: "body must be JSON" }, 400);
+    }
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (!text) return c.json({ error: "text is required" }, 400);
+    if (text.length > MAX_CHAT_CHARS) {
+      return c.json({ error: `text must be ${MAX_CHAT_CHARS} characters or fewer` }, 400);
+    }
+    const turn = channel.post({ role: "user", text });
+    // The presence that ships with the write is what the composer uses to say
+    // "no agent is listening" the moment a message lands unheard.
+    return c.json({ turn, presence: channel.presence() }, 201);
+  });
+
+  app.post("/api/agent/clear", (c) => {
+    channel.clear();
+    return c.json({ cleared: true });
+  });
+
+  /**
+   * The live conversation.
+   *
+   * Read with fetch, not EventSource: EventSource cannot send an Authorization
+   * header, and the only alternative — the bearer token in the query string —
+   * would put it in every access log and in browser history. The client reads
+   * the body stream and parses the frames itself.
+   */
+  app.get("/api/agent/stream", (c) =>
+    streamSSE(c, async (stream) => {
+      const queue: Turn[] = [];
+      let wake: (() => void) | null = null;
+
+      const unsubscribe = channel.subscribe((turn) => {
+        queue.push(turn);
+        wake?.();
+      });
+
+      // `onAbort` is the only close signal that fires for a client that simply
+      // went away — the write below can stay pending indefinitely otherwise.
+      let open = true;
+      stream.onAbort(() => {
+        open = false;
+        unsubscribe();
+        wake?.();
+      });
+
+      await stream.writeSSE({
+        event: "presence",
+        data: JSON.stringify(channel.presence()),
+      });
+
+      try {
+        while (open) {
+          while (queue.length > 0 && open) {
+            const turn = queue.shift() as Turn;
+            await stream.writeSSE({ event: "turn", data: JSON.stringify(turn) });
+          }
+          if (!open) break;
+          // Wake on the next turn, or on the heartbeat, whichever lands first.
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(() => {
+              wake = null;
+              resolve();
+            }, SSE_HEARTBEAT_MS);
+            wake = () => {
+              clearTimeout(timer);
+              wake = null;
+              resolve();
+            };
+          });
+          if (!open) break;
+          if (queue.length === 0) {
+            await stream.writeSSE({
+              event: "presence",
+              data: JSON.stringify(channel.presence()),
+            });
+          }
+        }
+      } finally {
+        unsubscribe();
+      }
+    }),
+  );
 }

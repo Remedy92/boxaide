@@ -1,15 +1,7 @@
 "use client";
 
 import * as React from "react";
-import {
-  CircleAlert,
-  Inbox,
-  KeyRound,
-  MailOpen,
-  Search,
-  Server,
-  ShieldAlert,
-} from "lucide-react";
+import { CircleAlert, KeyRound, Server, ShieldAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import { TechnicalDetails } from "@/components/atoms";
@@ -47,7 +39,7 @@ function Block({
           }`}
           strokeWidth={1.5}
         />
-        <h2 className="mt-3 text-[14px] leading-5 font-medium text-fg">
+        <h2 className="mt-3 text-[13px] leading-[18px] font-medium text-fg">
           {headline}
         </h2>
         <div className="mt-1 text-[13px] leading-[18px] text-fg-secondary">
@@ -293,27 +285,44 @@ export function MixedContentState({ baseUrl }: { baseUrl: string }) {
 /** §7.5 — the server answers and has no mailboxes. */
 export function NoAccountsState({ onConnect }: { onConnect: () => void }) {
   return (
-    <Block
-      icon={Inbox}
-      headline="No mailboxes yet"
-      actions={
-        <Button type="button" onClick={onConnect}>
+    <Quiet
+      action={
+        <Button type="button" size="sm" onClick={onConnect}>
           Connect a mailbox
         </Button>
       }
     >
-      <p>
-        Connect one and mailmux starts fetching. Credentials are encrypted and
-        stay on your machine.
-      </p>
-    </Block>
+      No mailboxes yet. Credentials are encrypted and stay on your machine.
+    </Quiet>
   );
 }
 
 /**
- * A healthy listing that came back with no rows. The spec fixes no copy for
- * this case; the wording below states only what the request actually asked for.
+ * One quiet sentence and, at most, one way out.
+ *
+ * A routine empty list is not an error and gets no icon, no headline and no
+ * explanation: nothing went wrong, and a diagram of an empty tray does not
+ * help. The connection blocks above are the opposite case — something IS
+ * wrong, the user cannot guess what, and every word there is load-bearing.
  */
+function Quiet({
+  children,
+  action,
+}: {
+  children: React.ReactNode;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="flex h-full items-center justify-center px-6 py-10">
+      <div className="max-w-[240px] text-center">
+        <p className="text-[13px] leading-[18px] text-fg-tertiary">{children}</p>
+        {action && <div className="mt-3">{action}</div>}
+      </div>
+    </div>
+  );
+}
+
+/** A healthy listing that came back with no rows. */
 export function NoMessagesState({
   unreadOnly,
   folder,
@@ -325,25 +334,21 @@ export function NoMessagesState({
 }) {
   const filtered = unreadOnly || !!folder;
   return (
-    <Block
-      icon={unreadOnly ? MailOpen : Inbox}
-      headline={unreadOnly ? "Nothing unread" : "Nothing here"}
-      actions={
+    <Quiet
+      action={
         filtered ? (
-          <Button type="button" variant="secondary" onClick={onShowAll}>
+          <Button type="button" size="sm" variant="secondary" onClick={onShowAll}>
             Show all mail
           </Button>
         ) : undefined
       }
     >
-      <p>
-        {unreadOnly
-          ? "Every message this listing returned has been read."
-          : folder
-            ? "That folder returned no messages."
-            : "This mailbox returned no messages."}
-      </p>
-    </Block>
+      {unreadOnly
+        ? "Nothing unread."
+        : folder
+          ? "That folder is empty."
+          : "This mailbox is empty."}
+    </Quiet>
   );
 }
 
@@ -356,20 +361,16 @@ export function NoResultsState({
   onClear: () => void;
 }) {
   return (
-    <Block
-      icon={Search}
-      headline="No matches"
-      actions={
-        <Button type="button" variant="secondary" onClick={onClear}>
+    <Quiet
+      action={
+        <Button type="button" size="sm" variant="secondary" onClick={onClear}>
           Clear search
         </Button>
       }
     >
-      <p>
-        Nothing in Inbox matched “{query}”. Your mail server runs this search, so
-        what it matches varies by provider.
-      </p>
-    </Block>
+      Nothing in Inbox matched “{query}”. Your mail server runs this search, so
+      what it matches varies by provider.
+    </Quiet>
   );
 }
 

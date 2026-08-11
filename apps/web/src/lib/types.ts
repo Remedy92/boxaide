@@ -64,6 +64,55 @@ export type MessageListResponse = {
 /** POST /api/messages/send 201 → { result: SendResult } */
 export type SendResult = { messageId: string; accepted: string[] }; // messageId may be ""
 
+/* -------------------------------------------------------------------------- */
+/* drafts                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Body of POST /api/drafts and POST /api/drafts/:accountId/:draftId.
+ *
+ * Every field is optional because a draft is allowed to be half-written — that
+ * is the whole reason it is not a SendMessageBody. The update route REPLACES
+ * the draft, so anything omitted is dropped rather than merged.
+ */
+export type DraftInput = {
+  to?: string;
+  subject?: string;
+  text?: string;
+  html?: string;
+  cc?: string;
+  bcc?: string;
+  inReplyTo?: string;
+  references?: string;
+};
+
+/**
+ * What create and update return. It carries no content: a draft is stored by
+ * APPEND, so the server answers with where it landed and nothing else. Refetch
+ * the list to read a draft back.
+ */
+export type DraftRef = {
+  id: string; // `${accountId}:${encodeURIComponent(folder)}:${uid}`, same shape as a message id
+  accountId: string;
+  uid: number;
+  folder: string;
+  messageId: string;
+};
+
+/** A row from GET /api/drafts?account=… — full body text included. */
+export type MailDraft = DraftRef & {
+  to: string;
+  cc?: string;
+  bcc?: string;
+  subject: string;
+  date: string; // ISO 8601
+  snippet: string;
+  bodyText: string;
+  bodyHtml?: string; // RAW UNSANITISED HTML. NEVER RENDER.
+  inReplyTo?: string;
+  references?: string;
+};
+
 /** POST /api/accounts/test → 200 {ok:true} | 400 {ok:false, error} */
 export type ConnectionTestResult = { ok: boolean; error?: string };
 
@@ -85,6 +134,45 @@ export type AccountCredentials = {
   smtpSecure: boolean;
   username: string;
   password: string;
+};
+
+/* -------------------------------------------------------------------------- */
+/* the agent conversation                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One turn. `activity` is the agent narrating what it is doing rather than
+ * answering, and the UI draws it as a quiet line instead of a message.
+ */
+export type AgentTurn = {
+  seq: number;
+  at: string; // ISO 8601
+  role: "user" | "agent" | "activity";
+  text: string;
+  /** MCP client name. Best effort — see AgentChannel.noteClient on the server. */
+  agent: string | null;
+};
+
+/**
+ * Who is listening.
+ *
+ * `waiting` is the only field that is proof: it counts agents parked in an open
+ * chat_await_message call. `listening` also accepts an agent that called within
+ * the last few seconds, so a normal poll loop does not flicker between
+ * iterations. Neither is a claim that any particular client is "connected" —
+ * see the capabilities dialog.
+ */
+export type AgentPresence = {
+  waiting: number;
+  listening: boolean;
+  lastSeenAt: string | null;
+  lastAgent: string | null;
+};
+
+/** GET /api/agent/state */
+export type AgentStateResponse = {
+  turns: AgentTurn[];
+  presence: AgentPresence;
 };
 
 /** Union of every error body shape the server can emit. */

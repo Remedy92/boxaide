@@ -2,7 +2,11 @@ import { randomBytes } from "node:crypto";
 import type {
   AccountCredentials,
   ConnectionTestResult,
+  DraftInput,
+  DraftRef,
+  ListDraftsOpts,
   ListMessagesOpts,
+  MailDraft,
   MailFolder,
   MailMessage,
   MailMessageSummary,
@@ -13,7 +17,15 @@ import type {
   SendResult,
 } from "./types.js";
 
-type Stored = MailMessage & { accountEmail: string };
+/** `inReplyTo` has no place on a delivered message; a draft needs to keep it. */
+type Stored = MailMessage & { accountEmail: string; inReplyTo?: string };
+
+/**
+ * Drafts live in the same box as mail under this folder, mirroring IMAP: the
+ * real provider APPENDs into a mailbox, so listMessages and listFolders see
+ * them there too.
+ */
+const DRAFTS_FOLDER = "Drafts";
 
 function nowIso(offsetMs = 0): string {
   return new Date(Date.now() + offsetMs).toISOString();
@@ -214,8 +226,94 @@ export class FixtureProvider implements MailProvider {
     return [...names].map((name) => ({
       name,
       path: name,
-      specialUse: name === "Sent" ? "\\Sent" : undefined,
+      specialUse: specialUseOf(name),
     }));
+  }
+
+  async createDraft(
+    account: ProviderAccount,
+    input: DraftInput,
+  ): Promise<DraftRef> {
+    const box = this.ensureBox(account.id, account.email);
+    const uid = this.nextUid.get(account.id) ?? 1;
+    this.nextUid.set(account.id, uid + 1);
+    const messageId = `<${randomBytes(8).toString("hex")}@fixture.local>`;
+    const text = input.text ?? "";
+    box.push({
+      id: makeId(account.id, uid),
+      accountId: account.id,
+      uid,
+      messageId,
+      folder: DRAFTS_FOLDER,
+      from: account.email,
+      to: input.to ?? "",
+      cc: input.cc,
+      bcc: input.bcc,
+      subject: input.subject ?? "(no subject)",
+      date: nowIso(),
+      snippet: text.slice(0, 140),
+      // Your own unfinished mail is not unread mail — same call as the IMAP
+      // provider, which appends \Draft together with \Seen.
+      seen: true,
+      hasAttachments: false,
+      bodyText: text,
+      bodyHtml: input.html,
+      inReplyTo: input.inReplyTo,
+      references: input.references,
+      accountEmail: account.email,
+    });
+    return {
+      id: makeId(account.id, uid),
+      accountId: account.id,
+      uid,
+      folder: DRAFTS_FOLDER,
+      messageId,
+    };
+  }
+
+  async updateDraft(
+    account: ProviderAccount,
+    draftId: string,
+    input: DraftInput,
+  ): Promise<DraftRef> {
+    const existing = this.findDraft(account, draftId);
+    if (!existing) throw new Error(`draft not found: ${draftId}`);
+    // Store the replacement first, then drop the old one: same order as the
+    // IMAP provider, so the new id is what both surfaces hand back.
+    const ref = await this.createDraft(account, input);
+    await this.deleteDraft(account, draftId);
+    return ref;
+  }
+
+  async listDrafts(
+    account: ProviderAccount,
+    opts: ListDraftsOpts = {},
+  ): Promise<MailDraft[]> {
+    const limit = opts.limit ?? 25;
+    return this.ensureBox(account.id, account.email)
+      .filter((m) => m.folder === DRAFTS_FOLDER)
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+      .slice(0, limit)
+      .map(toDraft);
+  }
+
+  async deleteDraft(
+    account: ProviderAccount,
+    draftId: string,
+  ): Promise<boolean> {
+    const box = this.ensureBox(account.id, account.email);
+    const found = this.findDraft(account, draftId);
+    if (!found) return false;
+    box.splice(box.indexOf(found), 1);
+    return true;
+  }
+
+  private findDraft(
+    account: ProviderAccount,
+    draftId: string,
+  ): Stored | undefined {
+    const found = this.find(account, draftId);
+    return found?.folder === DRAFTS_FOLDER ? found : undefined;
   }
 
   private find(account: ProviderAccount, messageId: string): Stored | undefined {
@@ -225,6 +323,32 @@ export class FixtureProvider implements MailProvider {
       msgs.find((m) => String(m.uid) === messageId)
     );
   }
+}
+
+function specialUseOf(name: string): string | undefined {
+  if (name === "Sent") return "\\Sent";
+  if (name === DRAFTS_FOLDER) return "\\Drafts";
+  return undefined;
+}
+
+function toDraft(m: Stored): MailDraft {
+  return {
+    id: m.id,
+    accountId: m.accountId,
+    uid: m.uid,
+    folder: m.folder,
+    messageId: m.messageId ?? "",
+    to: m.to,
+    cc: m.cc,
+    bcc: m.bcc,
+    subject: m.subject,
+    date: m.date,
+    snippet: m.snippet,
+    bodyText: m.bodyText,
+    bodyHtml: m.bodyHtml,
+    inReplyTo: m.inReplyTo,
+    references: m.references,
+  };
 }
 
 function toSummary(m: Stored): MailMessageSummary {

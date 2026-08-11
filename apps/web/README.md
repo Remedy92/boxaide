@@ -50,6 +50,7 @@ src/lib/          types, settings, api/ (the only fetch), format/, hooks/
 ## Rules that are not negotiable
 
 - **Never render `message.bodyHtml`.** It is raw unsanitised sender HTML and there is no sanitiser here. The reader renders `bodyText` only; "View HTML source" shows it escaped inside a `<pre>`. `react/no-danger` is an ESLint error, so `dangerouslySetInnerHTML` cannot land.
-- **Never call `/api/local-bootstrap` or `/api/agent-connect`.** Both return the bearer token in a response body. The MCP snippet is built client-side from `localStorage`.
+- **Never call `/api/agent-connect`.** Its response embeds the bearer token. The MCP snippet is built client-side from `localStorage`.
+- **`/api/local-bootstrap` is called from one place, under one condition.** The setup wizard calls it only when the page's own origin IS the server address and that origin is loopback — the page is the server's own UI, so first run needs no token copy-paste. Served from anywhere else, a human pastes the token; the server enforces the same boundary.
 - **Never fetch outside `src/lib/api/client.ts`.** It is the one place the token becomes an `Authorization` header, and the one place the base URL is resolved.
 - **Only draw what the server can do.** Before adding a control, find its endpoint in `src/api/routes.ts`. There is no archive, delete, move, star, label, snooze, thread, attachment download, unread count or agent-presence signal, because there is no endpoint behind any of them. A greyed-out roadmap control is still a claim.

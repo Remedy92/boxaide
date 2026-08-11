@@ -106,6 +106,47 @@ export type ConnectionTestResult = {
   error?: string;
 };
 
+/**
+ * Fields of a draft. Every one is optional on purpose: a draft is allowed to
+ * be half-written, which is the whole reason it is not a SendMessageInput.
+ */
+export type DraftInput = {
+  to?: string;
+  subject?: string;
+  text?: string;
+  html?: string;
+  cc?: string;
+  bcc?: string;
+  inReplyTo?: string;
+  references?: string;
+};
+
+/** Where a draft landed. `id` is the same accountId:folder:uid shape as mail. */
+export type DraftRef = {
+  id: string;
+  accountId: string;
+  uid: number;
+  folder: string;
+  messageId: string;
+};
+
+export type MailDraft = DraftRef & {
+  to: string;
+  cc?: string;
+  bcc?: string;
+  subject: string;
+  date: string;
+  snippet: string;
+  bodyText: string;
+  bodyHtml?: string;
+  inReplyTo?: string;
+  references?: string;
+};
+
+export type ListDraftsOpts = {
+  limit?: number;
+};
+
 export type MailFolder = {
   name: string;
   path: string;
@@ -140,4 +181,28 @@ export interface MailProvider {
     seen: boolean,
   ): Promise<boolean>;
   listFolders(account: ProviderAccount): Promise<MailFolder[]>;
+  /**
+   * Store a new draft in the account's Drafts mailbox. Nothing leaves the
+   * machine: this is the write path that does not deliver mail.
+   */
+  createDraft(
+    account: ProviderAccount,
+    input: DraftInput,
+  ): Promise<DraftRef>;
+  /**
+   * Replace a draft's content. A draft is immutable on IMAP, so this stores a
+   * new one and removes the old — the returned ref carries a NEW id, and the
+   * id passed in is dead afterwards.
+   */
+  updateDraft(
+    account: ProviderAccount,
+    draftId: string,
+    input: DraftInput,
+  ): Promise<DraftRef>;
+  listDrafts(
+    account: ProviderAccount,
+    opts?: ListDraftsOpts,
+  ): Promise<MailDraft[]>;
+  /** Returns false when the draft is already gone. */
+  deleteDraft(account: ProviderAccount, draftId: string): Promise<boolean>;
 }

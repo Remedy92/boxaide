@@ -12,6 +12,10 @@ const ALL_TOOLS = [
   "message_get",
   "message_send",
   "message_mark_read",
+  "draft_create",
+  "draft_update",
+  "drafts_list",
+  "draft_delete",
   "folders_list",
 ];
 
@@ -71,7 +75,7 @@ describe("MCP tool surface", () => {
     messageId = listed.messages[0].id;
   });
 
-  it("advertises all seven tools with input schemas", async () => {
+  it("advertises all eleven tools with input schemas", async () => {
     const listed = (await handleMcpJsonRpc(mail, {
       jsonrpc: "2.0",
       id: 1,
@@ -84,6 +88,25 @@ describe("MCP tool surface", () => {
     for (const tool of listed.result.tools) {
       expect(tool.inputSchema, tool.name).toBeTruthy();
     }
+  });
+
+  it("tells agents drafting is the default and sending is the escalation", async () => {
+    const listed = (await handleMcpJsonRpc(mail, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+    })) as { result: { tools: Array<{ name: string; description: string }> } };
+    const byName = new Map(
+      listed.result.tools.map((t) => [t.name, t.description]),
+    );
+    for (const name of ["draft_create", "draft_update", "drafts_list"]) {
+      expect(byName.get(name), name).toMatch(/safe default/i);
+      expect(byName.get(name), name).toMatch(/message_send/);
+    }
+    // The escalation says so on its own card too — an agent that only reads
+    // message_send must still learn drafting exists.
+    expect(byName.get("message_send")).toMatch(/escalation/i);
+    expect(byName.get("message_send")).toMatch(/draft_create/);
   });
 
   it("forwards inReplyTo and references on message_send", async () => {
@@ -149,6 +172,91 @@ describe("MCP tool surface", () => {
     expect(payloadOf(res)).toEqual({ updated: true });
     const listed = await mail.listMessages("personal", { limit: 10 });
     expect(listed.messages[0].seen).toBe(true);
+  });
+
+  it("drafts a reply through draft_create without sending it", async () => {
+    const res = await call(mail, "draft_create", {
+      account: "personal",
+      to: "z@test.com",
+      subject: "Re: Original thread",
+      text: "drafted, not sent",
+      inReplyTo: "<orig@example.com>",
+      references: "<orig@example.com>",
+    });
+    const draft = payloadOf(res).draft;
+    expect(draft.id).toBeTruthy();
+    expect(draft.folder).toBe("Drafts");
+    expect(provider.getSent()).toHaveLength(0);
+
+    const listed = payloadOf(await call(mail, "drafts_list", {
+      account: "personal",
+    }));
+    expect(listed.drafts).toHaveLength(1);
+    expect(listed.drafts[0].id).toBe(draft.id);
+    expect(listed.drafts[0].inReplyTo).toBe("<orig@example.com>");
+    expect(listed.drafts[0].bodyText).toBe("drafted, not sent");
+  });
+
+  it("leaves omitted draft fields undefined rather than empty strings", async () => {
+    await call(mail, "draft_create", {
+      account: "personal",
+      subject: "Just a subject",
+    });
+    const listed = payloadOf(await call(mail, "drafts_list", {
+      account: "personal",
+    }));
+    expect(listed.drafts[0].subject).toBe("Just a subject");
+    expect(listed.drafts[0].cc).toBeUndefined();
+    expect(listed.drafts[0].inReplyTo).toBeUndefined();
+  });
+
+  it("replaces a draft through draft_update and returns a new id", async () => {
+    const first = payloadOf(await call(mail, "draft_create", {
+      account: "personal",
+      subject: "v1",
+      text: "one",
+    })).draft;
+    const second = payloadOf(await call(mail, "draft_update", {
+      account: "personal",
+      draftId: first.id,
+      subject: "v2",
+      text: "two",
+    })).draft;
+    expect(second.id).not.toBe(first.id);
+
+    const listed = payloadOf(await call(mail, "drafts_list", {
+      account: "personal",
+    }));
+    expect(listed.drafts).toHaveLength(1);
+    expect(listed.drafts[0].subject).toBe("v2");
+    expect(listed.drafts[0].bodyText).toBe("two");
+  });
+
+  it("discards a draft through draft_delete, and reports the second try", async () => {
+    const draft = payloadOf(await call(mail, "draft_create", {
+      account: "personal",
+      subject: "Discard me",
+    })).draft;
+    expect(payloadOf(await call(mail, "draft_delete", {
+      account: "personal",
+      draftId: draft.id,
+    }))).toEqual({ deleted: true });
+    expect(payloadOf(await call(mail, "draft_delete", {
+      account: "personal",
+      draftId: draft.id,
+    }))).toEqual({ deleted: false });
+    expect(payloadOf(await call(mail, "drafts_list", { account: "personal" }))
+      .drafts).toHaveLength(0);
+  });
+
+  it("reports an unknown draft on update as an isError result", async () => {
+    const res = (await call(mail, "draft_update", {
+      account: "personal",
+      draftId: "personal:Drafts:999",
+      text: "nope",
+    })) as ToolResult & { result: { isError?: boolean } };
+    expect(res.result.isError).toBe(true);
+    expect(payloadOf(res).error).toMatch(/draft not found/i);
   });
 
   it("lists folders for one account", async () => {

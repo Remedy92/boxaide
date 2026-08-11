@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="mailmux">
-  <title>mailmux</title>
-  <!-- Three account rails converging into one: the multiplex, drawn. -->
-  <rect x="5" y="4" width="3" height="24" rx="1.5" fill="#4078B0" />
-  <rect x="11" y="8" width="3" height="16" rx="1.5" fill="#88731B" />
-  <rect x="17" y="12" width="3" height="8" rx="1.5" fill="#8E609C" />
-  <rect x="24" y="4" width="3" height="24" rx="1.5" fill="#006C6E" />
-</svg>

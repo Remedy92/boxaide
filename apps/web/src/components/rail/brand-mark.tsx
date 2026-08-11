@@ -20,14 +20,14 @@ export function BrandMark({
   return (
     <div
       className={cn(
-        "flex h-[52px] items-center gap-2",
+        "flex h-12 items-center gap-2",
         collapsed && "justify-center",
       )}
     >
-      <BrandGlyph />
+      <BrandGlyph className="text-fg" />
       {!collapsed && (
         <>
-          <span className="font-mono text-[14px] font-semibold tracking-[-0.02em] text-fg">
+          <span className="text-[13px] font-semibold tracking-[var(--tracking-tight)] text-fg">
             mailmux
           </span>
           {fixture && (

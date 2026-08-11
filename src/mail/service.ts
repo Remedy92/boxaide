@@ -2,7 +2,11 @@ import { randomBytes } from "node:crypto";
 import type { Store } from "../db/store.js";
 import type {
   AccountCredentials,
+  DraftInput,
+  DraftRef,
+  ListDraftsOpts,
   ListMessagesOpts,
+  MailDraft,
   MailFolder,
   MailMessage,
   MailMessageSummary,
@@ -169,6 +173,38 @@ export class MailService {
 
   async listFolders(accountRef: string): Promise<MailFolder[]> {
     return this.provider.listFolders(this.resolve(accountRef));
+  }
+
+  /**
+   * Draft writes are per-account only — there is no "all" fan-out. A draft
+   * belongs to exactly one mailbox, and guessing which would be a send-adjacent
+   * decision made on the user's behalf.
+   */
+  async createDraft(
+    accountRef: string,
+    input: DraftInput,
+  ): Promise<DraftRef> {
+    return this.provider.createDraft(this.resolve(accountRef), input);
+  }
+
+  /** Returns a NEW draft id; the one passed in is dead afterwards. */
+  async updateDraft(
+    accountRef: string,
+    draftId: string,
+    input: DraftInput,
+  ): Promise<DraftRef> {
+    return this.provider.updateDraft(this.resolve(accountRef), draftId, input);
+  }
+
+  async listDrafts(
+    accountRef: string,
+    opts: ListDraftsOpts = {},
+  ): Promise<MailDraft[]> {
+    return this.provider.listDrafts(this.resolve(accountRef), opts);
+  }
+
+  async deleteDraft(accountRef: string, draftId: string): Promise<boolean> {
+    return this.provider.deleteDraft(this.resolve(accountRef), draftId);
   }
 
   async testCredentials(
