@@ -217,12 +217,34 @@ passwords, because an agent summarising an inbox puts mail content in those rows
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `MAILMUX_DATA_DIR` | `~/.mailmux` | SQLite + keys |
-| `MAILMUX_HOST` | `127.0.0.1` | Bind address |
+| `MAILMUX_HOST` | `127.0.0.1` | Bind address — see below |
 | `MAILMUX_PORT` | `8787` | Port |
 | `MAILMUX_TOKEN` | auto file | API/MCP bearer |
-| `MAILMUX_MASTER_KEY` | auto file | AES key for passwords |
+| `MAILMUX_MASTER_KEY` | auto file | AES key for passwords — see below |
 | `MAILMUX_FIXTURE` | off | Demo provider |
 | `MAILMUX_ALLOWED_ORIGINS` | empty | Extra browser origins allowed to call the API — see below |
+
+### Bind address (`MAILMUX_HOST`)
+
+The default binds to loopback, so only your own machine can reach the server. Change it and the server answers on the network, where the bearer token is the only thing between a stranger and your mail.
+
+One behaviour changes on a non-loopback bind: `/api/local-bootstrap`, which hands out the bearer token in plaintext, answers `404` and hands out nothing. Its `Host` and `Origin` checks are browser guards, and a remote client picks both headers itself. Paste the token in by hand instead; it is in `~/.mailmux/bearer.token`.
+
+### Master key (`MAILMUX_MASTER_KEY`)
+
+This key encrypts your stored mail passwords. Leave it unset and mailmux generates a random one in `~/.mailmux/master.key`.
+
+Set it to **64 hex characters** — a full random 32-byte key:
+
+```bash
+openssl rand -hex 32
+```
+
+Any other value is treated as a passphrase and stretched with scrypt (N=2¹⁷, r=8 — 128 MB per attempt, about 0.2s once at startup). The salt is random per install and stored in `~/.mailmux/master.salt`, so no precomputed table applies and the same passphrase on two machines produces two different keys. A passphrase still holds far less entropy than a random key, so prefer the hex form.
+
+**Back up `master.salt` with your data directory.** Lose it and a passphrase no longer derives the key that encrypted your stored mail passwords.
+
+**Upgrading:** passphrases used to be hashed once with SHA-256. The scrypt change means a passphrase set before this version derives a different key, and stored mail passwords no longer decrypt. Re-enter each account's password once, or keep the old key by setting `MAILMUX_MASTER_KEY` to the hex of `sha256(<your passphrase>)`.
 
 ### Browser origins (`MAILMUX_ALLOWED_ORIGINS`)
 
@@ -275,7 +297,7 @@ Tests call **shipped** `MailService`, crypto, HTTP app, and MCP handlers with an
 
 - Default bind is localhost.
 - Browser requests are loopback-only unless `MAILMUX_ALLOWED_ORIGINS` names another origin. Default is closed.
-- Passwords encrypted at rest; master key in `~/.mailmux/master.key` (mode 0600).
+- Passwords encrypted at rest; master key in `~/.mailmux/master.key` (mode 0600). A passphrase in `MAILMUX_MASTER_KEY` is stretched with scrypt against `~/.mailmux/master.salt`.
 - Prefer app passwords over primary account passwords.
 - Keep `message_send` behind agent confirmation.
 
