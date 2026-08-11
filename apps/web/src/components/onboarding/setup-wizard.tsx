@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, Check, ExternalLink, Eye, EyeOff, Plug } from "lucide-react";
+import { ArrowLeft, ExternalLink, Eye, EyeOff, Plug } from "lucide-react";
 import { toast } from "sonner";
 import {
   BrandGlyph,
@@ -17,15 +17,14 @@ import { getApiHealth, getHealth, getLocalBootstrap } from "@/lib/api/endpoints"
 import {
   DEFAULT_IMAP_PORT,
   DEFAULT_SMTP_PORT,
+  GMAIL_PASSWORD_PROBLEM,
   PROVIDER_PRESETS,
+  isGoogleAppPassword,
   presetForEmail,
   stripPasswordSpaces,
   type ProviderPreset,
 } from "@/lib/constants";
-import {
-  useCreateAccount,
-  useTestCredentials,
-} from "@/lib/hooks/use-account-mutations";
+import { useCreateAccount } from "@/lib/hooks/use-account-mutations";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useApp } from "@/lib/hooks/use-app-state";
 import { useSettings, useUpdateSettings } from "@/lib/hooks/use-settings";
@@ -516,7 +515,6 @@ function MailboxStep({
   onDone: () => void;
 }) {
   const create = useCreateAccount();
-  const test = useTestCredentials();
   const [preset, setPreset] = React.useState<ProviderPreset>(PROVIDER_PRESETS[0]);
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
@@ -545,7 +543,6 @@ function MailboxStep({
     setSmtpHost(next.smtpHost);
     setSmtpPort(String(next.smtpPort));
     setProblem(null);
-    test.reset();
     create.reset();
     if (next.id === "other") setAdvanced(true);
   };
@@ -586,6 +583,10 @@ function MailboxStep({
       setProblem(`Paste the ${preset.passwordName.toLowerCase()} you just made.`);
       return false;
     }
+    if (preset.id === "gmail" && !isGoogleAppPassword(password)) {
+      setProblem(GMAIL_PASSWORD_PROBLEM);
+      return false;
+    }
     if (!imapHost.trim() || !smtpHost.trim()) {
       setProblem("Fill in both server names under More settings.");
       setAdvanced(true);
@@ -614,7 +615,7 @@ function MailboxStep({
     );
   };
 
-  const busy = create.isPending || test.isPending;
+  const busy = create.isPending;
 
   return (
     <section aria-labelledby="wizard-step-2">
@@ -723,6 +724,7 @@ function MailboxStep({
               type={reveal ? "text" : "password"}
               value={password}
               autoComplete="off"
+              placeholder={preset.passwordPlaceholder || undefined}
               className="pr-8 font-mono"
               onChange={(event) => {
                 setPassword(event.target.value);
@@ -828,28 +830,12 @@ function MailboxStep({
         <div role="status" aria-live="polite">
           {problem && <p className="text-[12px] leading-4 text-danger">{problem}</p>}
 
-          {test.isSuccess && test.data.ok && (
-            <p className="flex items-center gap-1.5 text-[12px] text-success">
-              <Check className="size-3.5" strokeWidth={1.5} />
-              That worked. Press Connect to keep it.
-            </p>
-          )}
-
-          {test.isSuccess && !test.data.ok && (
+          {create.isError && (
             <div>
               <p className="text-[12px] leading-4 text-danger">
-                {friendlyError(test.data.error)}
+                {friendlyError(errorText(create.error))}
               </p>
-              <TechnicalDetails raw={test.data.error} />
-            </div>
-          )}
-
-          {(test.isError || create.isError) && (
-            <div>
-              <p className="text-[12px] leading-4 text-danger">
-                {friendlyError(errorText(test.error ?? create.error))}
-              </p>
-              <TechnicalDetails raw={errorText(test.error ?? create.error)} />
+              <TechnicalDetails raw={errorText(create.error)} />
             </div>
           )}
         </div>
@@ -859,18 +845,6 @@ function MailboxStep({
         <Button type="button" variant="ghost" disabled={busy} onClick={onBack}>
           <ArrowLeft className="size-4" strokeWidth={1.5} />
           Back
-        </Button>
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={busy}
-          aria-busy={test.isPending || undefined}
-          onClick={() => {
-            if (ready()) test.mutate(credentials());
-          }}
-        >
-          {test.isPending && <Spinner />}
-          {test.isPending ? "Testing…" : "Test it"}
         </Button>
         <Button
           type="button"

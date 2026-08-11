@@ -51,6 +51,12 @@ export type ProviderPreset = {
    * someone who has never heard the phrase "app password".
    */
   passwordName: string;
+  /**
+   * Sits inside the empty password box, where someone about to type their
+   * normal account password is actually looking. Empty for "Other", whose
+   * password may well be the account one.
+   */
+  passwordPlaceholder: string;
   steps: readonly string[];
   /**
    * Where the steps end up. A full https URL, because both mailbox forms open
@@ -85,6 +91,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     smtpPort: 465,
     hint: "Gmail needs a 16-character App password, not your Google password. Turn on 2-Step Verification first, then create one at myaccount.google.com/apppasswords.",
     passwordName: "App password",
+    passwordPlaceholder: "16-letter code, not your Gmail password",
     passwordUrl: "https://myaccount.google.com/apppasswords",
     passwordUrlLabel: "Open Google settings",
     domains: ["gmail.com", "googlemail.com"],
@@ -105,6 +112,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     smtpPort: 587,
     hint: "Outlook needs an app password from account.microsoft.com → Security. Work or school accounts often block IMAP entirely.",
     passwordName: "App password",
+    passwordPlaceholder: "App password, not your normal one",
     passwordUrl: "https://account.microsoft.com/security",
     passwordUrlLabel: "Open Microsoft settings",
     domains: ["outlook.com", "hotmail.com", "live.com", "msn.com"],
@@ -125,6 +133,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     smtpPort: 587,
     hint: "iCloud needs an app-specific password from account.apple.com → Sign-In and Security.",
     passwordName: "App-specific password",
+    passwordPlaceholder: "16-letter code from Apple",
     passwordUrl: "https://account.apple.com",
     passwordUrlLabel: "Open Apple settings",
     domains: ["icloud.com", "me.com", "mac.com"],
@@ -145,6 +154,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     smtpPort: 465,
     hint: "Fastmail needs an app password: Settings → Privacy & Security → App passwords.",
     passwordName: "App password",
+    passwordPlaceholder: "App password, not your normal one",
     passwordUrl: "https://app.fastmail.com/settings/security/apppasswords",
     passwordUrlLabel: "Open Fastmail settings",
     domains: ["fastmail.com", "fastmail.fm"],
@@ -164,6 +174,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     smtpPort: 465,
     hint: "",
     passwordName: "Password",
+    passwordPlaceholder: "",
     passwordUrl: "",
     passwordUrlLabel: "",
     domains: [],
@@ -196,6 +207,20 @@ export function presetForEmail(email: string): ProviderPreset | null {
 export function stripPasswordSpaces(value: string): string {
   return value.replace(/\s+/g, "");
 }
+
+/**
+ * A Google app password is exactly sixteen letters, shown as four groups of
+ * four. Nothing else on the preset row has a format this predictable, so this
+ * is the one provider where a normal account password can be caught before it
+ * is sent — every other provider gets no length rule at all.
+ */
+export function isGoogleAppPassword(value: string): boolean {
+  return /^[a-z]{16}$/i.test(stripPasswordSpaces(value));
+}
+
+/** Shown by both mailbox forms when a Gmail submit carries something else. */
+export const GMAIL_PASSWORD_PROBLEM =
+  "That looks like your normal Google password. Gmail needs the 16-letter code — use the Open Google settings button above.";
 
 /** Fallback IMAP port when the user leaves the field empty (§6.5). */
 export const DEFAULT_IMAP_PORT = 993;
