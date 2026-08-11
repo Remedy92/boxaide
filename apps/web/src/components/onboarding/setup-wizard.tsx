@@ -142,6 +142,11 @@ function ServerStep({
   const [reveal, setReveal] = React.useState(false);
   const [probe, setProbe] = React.useState<Probe>({ status: "idle" });
   const [auth, setAuth] = React.useState<Auth>({ status: "idle" });
+  /* "detecting" is the first render: one quiet line while the page finds and
+     signs into its own server. Most people never see the form below — it is
+     the fallback for a remotely hosted page or a server that is not running,
+     and those are the only audiences the address and token fields have. */
+  const [phase, setPhase] = React.useState<"detecting" | "manual">("detecting");
 
   /* The address this page was served from. When mailmux serves its own build,
      that address IS the server — no typing, no CORS, no local-network prompt.
@@ -193,7 +198,7 @@ function ServerStep({
      silent on purpose — the manual paste path below is the fallback, not an
      error state. */
   const adoptLocalToken = React.useCallback(
-    async (url: string) => {
+    async (url: string): Promise<boolean> => {
       setAuth({ status: "checking" });
       try {
         const boot = await getLocalBootstrap({ baseUrl: url, token: "" });
@@ -202,19 +207,39 @@ function ServerStep({
         setToken(boot.token);
         setAuth({ status: "ok", version: api.version });
         update({ baseUrl: url, token: boot.token });
+        return true;
       } catch {
         setAuth({ status: "idle" });
+        return false;
       }
     },
     [update],
   );
 
+  /* A token from an earlier visit: prove it still works, silently. */
+  const verifyStored = React.useCallback(
+    async (url: string, stored: string): Promise<boolean> => {
+      try {
+        const api = await getApiHealth({ baseUrl: url, token: stored });
+        setAuth({ status: "ok", version: api.version });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [],
+  );
+
   const probeRef = React.useRef(runProbe);
   const adoptRef = React.useRef(adoptLocalToken);
+  const verifyStoredRef = React.useRef(verifyStored);
+  const onDoneRef = React.useRef(onDone);
   React.useEffect(() => {
     probeRef.current = runProbe;
     adoptRef.current = adoptLocalToken;
-  }, [runProbe, adoptLocalToken]);
+    verifyStoredRef.current = verifyStored;
+    onDoneRef.current = onDone;
+  }, [runProbe, adoptLocalToken, verifyStored, onDone]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -230,10 +255,23 @@ function ServerStep({
           live = pageOrigin;
         }
       }
-      if (cancelled || !live) return;
-      if (!settings.token && pageOrigin && isSameServer(pageOrigin, live)) {
-        await adoptRef.current(pageOrigin);
+      if (!cancelled && live) {
+        // Signed in without a human: a still-valid stored token, or the
+        // server's own page vouching for itself. Either way there is no
+        // decision left on this screen, so it does not appear.
+        if (settings.token) {
+          if (await verifyStoredRef.current(live, settings.token)) {
+            if (!cancelled) onDoneRef.current();
+            return;
+          }
+        } else if (pageOrigin && isSameServer(pageOrigin, live)) {
+          if (await adoptRef.current(pageOrigin)) {
+            if (!cancelled) onDoneRef.current();
+            return;
+          }
+        }
       }
+      if (!cancelled) setPhase("manual");
     })();
     return () => {
       cancelled = true;
@@ -271,6 +309,20 @@ function ServerStep({
       });
     }
   };
+
+  if (phase === "detecting") {
+    return (
+      <section
+        aria-live="polite"
+        className="flex min-h-[280px] items-center justify-center"
+      >
+        <p className="flex items-center gap-2 text-[13px] leading-[18px] text-fg-secondary">
+          <Spinner className="text-fg-tertiary" />
+          Getting things ready…
+        </p>
+      </section>
+    );
+  }
 
   return (
     <section aria-labelledby="wizard-step-1">
