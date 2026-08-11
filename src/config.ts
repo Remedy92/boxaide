@@ -76,15 +76,33 @@ function ensureDir(dir: string): void {
  * Deleting this file makes stored mail passwords underivable. It sits in the
  * data directory next to `master.key`, so anything that backs one up takes
  * the other.
+ *
+ * Creation is `wx`, and a missing file is an ENOENT from the read rather than
+ * a prior existsSync. Two processes starting together — the desktop app and a
+ * `mailmux serve`, say — would otherwise both see no salt, both write one, and
+ * the loser would derive a key that does not match the one its secrets were
+ * encrypted under. Whoever creates the file first wins, and the other reads it.
  */
 function loadOrCreateSalt(dataDir: string): Buffer {
-  const saltPath = join(dataDir, "master.salt");
-  if (existsSync(saltPath)) {
-    return Buffer.from(readFileSync(saltPath, "utf8").trim(), "hex");
+  for (;;) {
+    const saltPath = join(dataDir, "master.salt");
+    try {
+      return Buffer.from(readFileSync(saltPath, "utf8").trim(), "hex");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    const salt = randomBytes(16);
+    try {
+      writeFileSync(saltPath, salt.toString("hex"), {
+        mode: 0o600,
+        flag: "wx",
+      });
+      return salt;
+    } catch (err) {
+      // Someone created it between the read and the write. Read theirs.
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
   }
-  const salt = randomBytes(16);
-  writeFileSync(saltPath, salt.toString("hex"), { mode: 0o600 });
-  return salt;
 }
 
 /**
