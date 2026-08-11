@@ -3,21 +3,30 @@
  * this file may call `request`, and nothing anywhere may call `fetch`.
  *
  * Never called from this app:
- *   GET /api/local-bootstrap — loopback-only by design and hands out the token
- *     in plaintext.
  *   GET /api/agent-connect  — its response embeds the full bearer token; the
  *     MCP snippet is built client-side from localStorage instead (§6.7).
+ *
+ * Called from exactly one place, under one condition:
+ *   GET /api/local-bootstrap — hands out the token in plaintext. The wizard
+ *     calls it only when the page is served same-origin from loopback, i.e.
+ *     the page IS the server's own UI (getLocalBootstrap documents the guard).
  */
 
-import { query, request } from "@/lib/api/client";
+import { query, request, stream } from "@/lib/api/client";
 import { ApiError } from "@/lib/api/errors";
 import { DEFAULT_LIMIT } from "@/lib/constants";
 import type {
   AccountCredentials,
+  AgentPresence,
+  AgentStateResponse,
+  AgentTurn,
   ApiHealthResponse,
   ConnectionTestResult,
   CreatedAccount,
+  DraftInput,
+  DraftRef,
   HealthResponse,
+  MailDraft,
   MailFolder,
   MailMessage,
   MailAccountMeta,
@@ -56,6 +65,26 @@ export function getApiHealth(ctx: Ctx): Promise<ApiHealthResponse> {
     token: ctx.token,
     signal: ctx.signal,
     transport: { healthReachable: true },
+  });
+}
+
+export type LocalBootstrapResponse = {
+  token: string;
+  fixture: boolean;
+  mcpUrl: string;
+};
+
+/**
+ * The token, in plaintext. The server only answers when the Host header is
+ * loopback and the Origin is absent or loopback; the caller must additionally
+ * hold to the client-side rule: only when the page's own origin IS `baseUrl`
+ * and that origin is loopback. Anywhere else, a human pastes the token.
+ */
+export function getLocalBootstrap(ctx: Ctx): Promise<LocalBootstrapResponse> {
+  return request<LocalBootstrapResponse>("/api/local-bootstrap", {
+    baseUrl: ctx.baseUrl,
+    token: "",
+    signal: ctx.signal,
   });
 }
 
@@ -286,6 +315,97 @@ export async function sendMessage(
 }
 
 /* -------------------------------------------------------------------------- */
+/* drafts                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * GET /api/drafts?account=… — ONE mailbox at a time.
+ *
+ * `account=all` is a 400, and there is no unified draft endpoint, so the
+ * unified Drafts view fans out one request per mailbox client-side and merges
+ * the answers (see useDrafts).
+ */
+export async function listDrafts(
+  accountRef: string,
+  ctx: Ctx,
+  limit?: number,
+): Promise<MailDraft[]> {
+  const data = await request<{ drafts: MailDraft[] }>(
+    `/api/drafts${query({ account: accountRef, limit: limit ?? DEFAULT_LIMIT })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+  return data.drafts;
+}
+
+/**
+ * The 201 body is a DraftRef: where it landed, with no content. Refetch the
+ * list to read the draft back.
+ */
+export async function createDraft(
+  accountRef: string,
+  input: DraftInput,
+  ctx: Ctx,
+): Promise<DraftRef> {
+  const data = await request<{ draft: DraftRef }>("/api/drafts", {
+    method: "POST",
+    body: { account: accountRef, ...input },
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+  return data.draft;
+}
+
+/**
+ * POST, not PUT — the server's CORS method list is deliberately short and an
+ * update is a replace-and-delete, not an idempotent write.
+ *
+ * It REPLACES the draft, so every field to be kept must be sent, and it returns
+ * a NEW id: the old one stops resolving. Callers must adopt `draft.id` from the
+ * response or their next save 404s.
+ */
+export async function updateDraft(
+  accountId: string,
+  draftId: string,
+  input: DraftInput,
+  ctx: Ctx,
+): Promise<DraftRef> {
+  const data = await request<{ draft: DraftRef }>(
+    `/api/drafts/${encodeURIComponent(accountId)}/${encodeURIComponent(draftId)}`,
+    {
+      method: "POST",
+      body: input,
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.draft;
+}
+
+/** A 404 means the draft was already gone; that is normalised, not thrown. */
+export async function deleteDraft(
+  accountId: string,
+  draftId: string,
+  ctx: Ctx,
+): Promise<{ deleted: boolean }> {
+  try {
+    return await request<{ deleted: boolean }>(
+      `/api/drafts/${encodeURIComponent(accountId)}/${encodeURIComponent(draftId)}`,
+      {
+        method: "DELETE",
+        baseUrl: ctx.baseUrl,
+        token: ctx.token,
+        signal: ctx.signal,
+      },
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return { deleted: false };
+    throw err;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* folders                                                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -299,6 +419,72 @@ export async function listFolders(
     { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
   );
   return data.folders;
+}
+
+/* -------------------------------------------------------------------------- */
+/* the agent conversation                                                     */
+/* -------------------------------------------------------------------------- */
+
+/** History plus presence. `after` asks for turns newer than a sequence number. */
+export function getAgentState(ctx: Ctx, after?: number): Promise<AgentStateResponse> {
+  return request<AgentStateResponse>(`/api/agent/state${query({ after })}`, {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * Post the user's message.
+ *
+ * The response carries presence as it was at the moment of the write, which is
+ * what lets the composer say "no agent is listening" about THIS message rather
+ * than about whatever the last stream frame happened to report.
+ */
+export function sendAgentMessage(
+  text: string,
+  ctx: Ctx,
+): Promise<{ turn: AgentTurn; presence: AgentPresence }> {
+  return request<{ turn: AgentTurn; presence: AgentPresence }>("/api/agent/messages", {
+    method: "POST",
+    body: { text },
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+export function clearAgentConversation(ctx: Ctx): Promise<{ cleared: boolean }> {
+  return request<{ cleared: boolean }>("/api/agent/clear", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * Follow the conversation. Resolves when the server closes the stream; the
+ * caller reconnects.
+ */
+export function streamAgent(
+  ctx: Ctx,
+  on: { turn: (turn: AgentTurn) => void; presence: (presence: AgentPresence) => void },
+): Promise<void> {
+  return stream("/api/agent/stream", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+    onEvent: (event, data) => {
+      try {
+        if (event === "turn") on.turn(JSON.parse(data) as AgentTurn);
+        else if (event === "presence") on.presence(JSON.parse(data) as AgentPresence);
+      } catch {
+        // A frame we cannot parse is dropped rather than tearing down a live
+        // conversation. The next one re-states presence anyway.
+      }
+    },
+  });
 }
 
 /* -------------------------------------------------------------------------- */

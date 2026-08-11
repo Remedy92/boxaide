@@ -15,6 +15,15 @@ export type MessageListParams = {
 };
 
 /**
+ * A partial account failure is a 200 whose errors[] names the mailbox, so
+ * React Query sees success and would never retry it. Gmail in particular
+ * refuses a login burst and accepts the identical credential seconds later —
+ * observed live, not hypothetical. These three delays retry that window
+ * automatically; past them the banner's manual Retry is the honest state.
+ */
+const PARTIAL_RETRY_DELAYS_MS = [3_000, 8_000, 20_000] as const;
+
+/**
  * One query for both listing and search. `keepPreviousData` is what stops the
  * pane blanking to a skeleton on every filter change — the single biggest thing
  * that makes a mail client feel slow.
@@ -26,6 +35,19 @@ export function useMessages(params: MessageListParams) {
   const ctx = useApiCtx();
   const searching = params.q.trim().length > 0;
   return useQuery<MessageListResponse>({
+    refetchInterval: (query) => {
+      const errors = query.state.data?.errors;
+      if (!errors || errors.length === 0) return false;
+      // dataUpdateCount counts every settled fetch of this query instance, so
+      // it walks the delay ladder once per failing refresh and then stops.
+      const attempt = Math.min(
+        query.state.dataUpdateCount - 1,
+        PARTIAL_RETRY_DELAYS_MS.length,
+      );
+      return attempt < PARTIAL_RETRY_DELAYS_MS.length
+        ? PARTIAL_RETRY_DELAYS_MS[attempt]
+        : false;
+    },
     queryKey: [
       "messages",
       ctx.baseUrl,

@@ -90,6 +90,28 @@ If your server is not on loopback, put it behind `https` or reach it over a tunn
 
 Nothing. The deployed page has no server-side code: no API routes, no server actions, no proxy, no middleware. Your token, your mail credentials and every message body travel only between your browser and your own machine.
 
+## Desktop app
+
+A window instead of a terminal, for people who do not want either. `apps/desktop` is an Electron shell: it starts the same server inside its own process, binds `127.0.0.1`, and uses the same `~/.mailmux` data directory, master key and bearer token. An account connected in the desktop app is the same account your agents reach over MCP.
+
+```bash
+npm run build                 # repository root: server + UI export
+cd apps/desktop
+npm install                   # its own package.json and lockfile
+npm run dev                   # opens the window
+```
+
+`npm install` rebuilds `better-sqlite3` against Electron's ABI (`electron-builder install-app-deps`). If Electron's own binary is missing afterwards — this repo blocks install scripts unless `allowScripts` names them — run `node node_modules/electron/install.js` once.
+
+Installers:
+
+```bash
+npm run dist:mac              # mac: signed dmg in apps/desktop/release/
+npm run dist                  # other platforms — nsis or AppImage
+```
+
+On mac, `dist:mac` signs the app and the dmg with a Developer ID certificate pinned by hash in `scripts/sign-mac.sh` (electron-builder's by-name signing is ambiguous when the keychain holds two same-named certificates). Notarization is a separate, credential-holding step; the commands are at the top of that script. `npm run dist` builds for the platform it runs on. Both scripts re-copy the compiled server and the UI export out of the repository root first, so run the root `npm run build` again after any server change. The port follows `MAILMUX_PORT` (default 8787); if something already holds it — `mailmux serve` in a terminal, or a second copy of the app — the window does not open and the app says so.
+
 ## Agent MCP (any client)
 
 ### HTTP MCP (Cursor / remote-capable clients)
@@ -139,8 +161,47 @@ npm run mcp
 | `messages_search` | Free-text search |
 | `message_get` | Full body |
 | `message_send` | Send (confirm in your agent) |
+| `chat_await_message` | Wait for the user's next message in the mailmux window |
+| `chat_say` | Answer them there |
+| `chat_activity` | Post a one-line "here is what I am doing" |
+| `chat_history` | Re-read the conversation |
 
 Accounts are connected once in the web UI (or API). Agents reuse the same store — **no per-agent OAuth**.
+
+## Talking to your agent inside mailmux
+
+The Agent view is the app's first screen, and mailmux runs no model behind it.
+The agent is whichever MCP client you already use — Claude Code, Codex, Cursor,
+Claude Desktop — and the four `chat_*` tools above are how it holds the
+conversation in the mailmux window instead of in its own terminal. There is no
+per-client integration: a long-polling tool call is the one capability every MCP
+client has.
+
+Connect the client as above, then say this to it once, in its own window:
+
+```
+You are my mailmux inbox agent. Use the mailmux MCP tools.
+
+Loop: call chat_await_message, do the work, post the answer with chat_say, then
+call chat_await_message again. Keep going until I tell you to stop.
+
+Everything I read appears in the mailmux window, so every answer must go through
+chat_say — do not answer here. A chat_await_message that returns no message is
+normal; call it again. Use chat_activity for anything slow. Draft rather than
+send unless I ask you to send.
+```
+
+The kickoff is not optional and cannot be automated away: MCP is client-driven,
+so nothing on the mailmux side can make an agent start listening. Anything you
+type before one does is queued and delivered when it arrives.
+
+Notes on what the UI claims. "Listening" means an agent is parked in an open
+`chat_await_message` — a request that is open right now, not an inference. It
+never says "connected", because a stateless `POST /mcp` cannot tell a configured
+client from one that was never started. Each message goes to exactly one agent,
+so do not point two at the same server. The conversation is stored in
+`~/.mailmux/mailmux.db`, encrypted with the same master key as the account
+passwords, because an agent summarising an inbox puts mail content in those rows.
 
 ## Install options
 
@@ -156,12 +217,34 @@ Accounts are connected once in the web UI (or API). Agents reuse the same store 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `MAILMUX_DATA_DIR` | `~/.mailmux` | SQLite + keys |
-| `MAILMUX_HOST` | `127.0.0.1` | Bind address |
+| `MAILMUX_HOST` | `127.0.0.1` | Bind address — see below |
 | `MAILMUX_PORT` | `8787` | Port |
 | `MAILMUX_TOKEN` | auto file | API/MCP bearer |
-| `MAILMUX_MASTER_KEY` | auto file | AES key for passwords |
+| `MAILMUX_MASTER_KEY` | auto file | AES key for passwords — see below |
 | `MAILMUX_FIXTURE` | off | Demo provider |
 | `MAILMUX_ALLOWED_ORIGINS` | empty | Extra browser origins allowed to call the API — see below |
+
+### Bind address (`MAILMUX_HOST`)
+
+The default binds to loopback, so only your own machine can reach the server. Change it and the server answers on the network, where the bearer token is the only thing between a stranger and your mail.
+
+One behaviour changes on a non-loopback bind: `/api/local-bootstrap`, which hands out the bearer token in plaintext, answers `404` and hands out nothing. Its `Host` and `Origin` checks are browser guards, and a remote client picks both headers itself. Paste the token in by hand instead; it is in `~/.mailmux/bearer.token`.
+
+### Master key (`MAILMUX_MASTER_KEY`)
+
+This key encrypts your stored mail passwords. Leave it unset and mailmux generates a random one in `~/.mailmux/master.key`.
+
+Set it to **64 hex characters** — a full random 32-byte key:
+
+```bash
+openssl rand -hex 32
+```
+
+Any other value is treated as a passphrase and stretched with scrypt (N=2¹⁷, r=8 — 128 MB per attempt, about 0.2s once at startup). The salt is random per install and stored in `~/.mailmux/master.salt`, so no precomputed table applies and the same passphrase on two machines produces two different keys. A passphrase still holds far less entropy than a random key, so prefer the hex form.
+
+**Back up `master.salt` with your data directory.** Lose it and a passphrase no longer derives the key that encrypted your stored mail passwords.
+
+**Upgrading:** passphrases used to be hashed once with SHA-256. The scrypt change means a passphrase set before this version derives a different key, and stored mail passwords no longer decrypt. Re-enter each account's password once, or keep the old key by setting `MAILMUX_MASTER_KEY` to the hex of `sha256(<your passphrase>)`.
 
 ### Browser origins (`MAILMUX_ALLOWED_ORIGINS`)
 
@@ -214,7 +297,7 @@ Tests call **shipped** `MailService`, crypto, HTTP app, and MCP handlers with an
 
 - Default bind is localhost.
 - Browser requests are loopback-only unless `MAILMUX_ALLOWED_ORIGINS` names another origin. Default is closed.
-- Passwords encrypted at rest; master key in `~/.mailmux/master.key` (mode 0600).
+- Passwords encrypted at rest; master key in `~/.mailmux/master.key` (mode 0600). A passphrase in `MAILMUX_MASTER_KEY` is stretched with scrypt against `~/.mailmux/master.salt`.
 - Prefer app passwords over primary account passwords.
 - Keep `message_send` behind agent confirmation.
 

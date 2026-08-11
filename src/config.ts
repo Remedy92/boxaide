@@ -1,5 +1,5 @@
-import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes, scryptSync } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -60,31 +60,106 @@ function expandHome(p: string): string {
 }
 
 function ensureDir(dir: string): void {
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // `recursive` already succeeds on an existing directory, so an existence
+  // check would only add a window for someone else to create it first.
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+}
+
+/**
+ * Read a generated secret from `path`, creating it on first use.
+ *
+ * The three files this manages — master key, scrypt salt, bearer token — are
+ * generated once and then depended on forever, so first-run creation must not
+ * race. Checking existence and then writing loses that race: two processes
+ * starting together (the desktop app and a `mailmux serve`, say) both find no
+ * file, both generate, both write, and the loser proceeds with a value that is
+ * no longer the one on disk. For the master key or the salt that means
+ * deriving a key that does not match the one the stored mail passwords were
+ * encrypted under.
+ *
+ * So absence is an ENOENT from the read, and creation is `wx`, which fails
+ * rather than truncating when the file appeared in between. Whoever creates
+ * the file wins and everyone else reads what they wrote. The loop runs twice
+ * at most in practice: once to find it missing, once to read the winner's.
+ */
+function loadOrCreateSecretFile(path: string, generate: () => string): string {
+  for (;;) {
+    try {
+      return readFileSync(path, "utf8").trim();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    const value = generate();
+    try {
+      writeFileSync(path, value, { mode: 0o600, flag: "wx" });
+      return value;
+    } catch (err) {
+      // Someone created it between the read and the write. Read theirs.
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+  }
+}
+
+/**
+ * The per-install scrypt salt, created on first use.
+ *
+ * A salt is not a secret, so keeping it beside the database costs nothing. It
+ * still does the two jobs that matter against an attacker who holds both: no
+ * precomputed table works, because the table would have to be built for this
+ * one file, and the same passphrase on two installs derives two different
+ * keys. Only the passphrase and the work factor stand between the attacker
+ * and the key, and that is what scrypt is priced for.
+ *
+ * Deleting this file makes stored mail passwords underivable. It sits in the
+ * data directory next to `master.key`, so anything that backs one up takes
+ * the other.
+ */
+function loadOrCreateSalt(dataDir: string): Buffer {
+  const hex = loadOrCreateSecretFile(join(dataDir, "master.salt"), () =>
+    randomBytes(16).toString("hex"),
+  );
+  return Buffer.from(hex, "hex");
+}
+
+/**
+ * Stretch a human passphrase into a 32-byte AES key.
+ *
+ * A single hash is wrong here: a passphrase carries far less entropy than the
+ * key it produces, and one SHA-256 lets an attacker holding the database try
+ * billions of guesses per second. scrypt makes each guess cost memory and
+ * time. The parameters below need 128 MB per guess, which is the part an
+ * attacker cannot buy their way around cheaply, and cost about 0.2s once at
+ * startup on a 2024 laptop.
+ *
+ * A 64-char random hex MAILMUX_MASTER_KEY skips derivation altogether and
+ * stays the documented recommendation.
+ */
+function deriveKeyFromPassphrase(passphrase: string, salt: Buffer): Buffer {
+  return scryptSync(passphrase.normalize("NFKC"), salt, 32, {
+    N: 2 ** 17,
+    r: 8,
+    p: 1,
+    maxmem: 192 * 1024 * 1024,
+  });
 }
 
 function loadOrCreateKey(dataDir: string): Buffer {
   const envKey = process.env.MAILMUX_MASTER_KEY;
   if (envKey) {
     if (/^[0-9a-fA-F]{64}$/.test(envKey)) return Buffer.from(envKey, "hex");
-    return createHash("sha256").update(envKey).digest();
+    return deriveKeyFromPassphrase(envKey, loadOrCreateSalt(dataDir));
   }
-  const keyPath = join(dataDir, "master.key");
-  if (existsSync(keyPath)) {
-    return Buffer.from(readFileSync(keyPath, "utf8").trim(), "hex");
-  }
-  const key = randomBytes(32);
-  writeFileSync(keyPath, key.toString("hex"), { mode: 0o600 });
-  return key;
+  const hex = loadOrCreateSecretFile(join(dataDir, "master.key"), () =>
+    randomBytes(32).toString("hex"),
+  );
+  return Buffer.from(hex, "hex");
 }
 
 function loadOrCreateToken(dataDir: string): string {
   if (process.env.MAILMUX_TOKEN) return process.env.MAILMUX_TOKEN;
-  const tokenPath = join(dataDir, "bearer.token");
-  if (existsSync(tokenPath)) return readFileSync(tokenPath, "utf8").trim();
-  const token = randomBytes(24).toString("base64url");
-  writeFileSync(tokenPath, token, { mode: 0o600 });
-  return token;
+  return loadOrCreateSecretFile(join(dataDir, "bearer.token"), () =>
+    randomBytes(24).toString("base64url"),
+  );
 }
 
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {

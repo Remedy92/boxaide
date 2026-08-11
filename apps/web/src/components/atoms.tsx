@@ -1,21 +1,23 @@
 "use client";
 
 import * as React from "react";
-import { LoaderCircle } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { useAccountHue } from "@/lib/hooks/use-account-hue";
+import { Check, Copy, LoaderCircle } from "lucide-react";
+import { toast } from "sonner";
+import { cn, copyToClipboard } from "@/lib/utils";
 import { friendlyError } from "@/lib/api/errors";
 
 /**
- * The handful of shapes that appear in more than one pane. Keeping them here
- * rather than duplicating them is what stops the account rail drifting between
- * the sidebar, the list and the reader.
+ * The handful of shapes that appear in more than one pane.
+ *
+ * Icons: lucide, always `size-4` (16px) and always `strokeWidth={1.5}`. One
+ * size and one stroke weight across the whole product; a 20px icon or a 2px
+ * stroke anywhere is a bug, not a variant.
  */
 
-/** §6.9. 18px min-height, mono, token surfaces. */
+/** 11px, mono, one hairline. Sits inline in a button or a shortcut sheet. */
 export function Kbd({ children }: { children: React.ReactNode }) {
   return (
-    <kbd className="inline-flex min-h-[18px] items-center rounded-[var(--radius-xs)] border border-border-subtle bg-surface-0 px-[5px] py-[2px] font-mono text-[11px] leading-none text-fg-tertiary">
+    <kbd className="inline-flex min-h-[17px] min-w-[17px] items-center justify-center rounded-[var(--radius-xs)] border border-border-subtle bg-surface-0 px-[4px] font-mono text-[11px] leading-none text-fg-tertiary">
       {children}
     </kbd>
   );
@@ -27,7 +29,7 @@ export function Spinner({ className }: { className?: string }) {
     <LoaderCircle
       aria-hidden="true"
       className={cn("size-[14px] animate-spin", className)}
-      strokeWidth={2}
+      strokeWidth={1.5}
     />
   );
 }
@@ -39,9 +41,9 @@ const DOT_BG: Record<DotTone, string> = {
   warning: "bg-warning",
   danger: "bg-danger",
   // --dot-muted, not --text-disabled. In the collapsed rail footer and beside a
-  // sidebar account the words live only in the accessible name, so the dot is
+  // sidebar mailbox the words live only in the accessible name, so the dot is
   // the sole visual carrier and 1.4.11's 3:1 applies. --text-disabled measures
-  // 1.79–2.22 : 1 and is for inactive controls, which SC 1.4.3 exempts.
+  // under 2.4 : 1 and is for inactive controls, which SC 1.4.3 exempts.
   muted: "bg-[var(--dot-muted)]",
   accent: "bg-accent",
 };
@@ -70,53 +72,25 @@ export function StatusDot({
 }
 
 /**
- * The 3px full-height account rail — the signature element. Seeded on the
- * account id everywhere except the reader's identity monogram, so the same
- * mailbox is the same hue in the sidebar, the list and the reader.
- */
-export function AccountRail({
-  seed,
-  dim = false,
-  className,
-}: {
-  seed: string;
-  dim?: boolean;
-  className?: string;
-}) {
-  const hueFor = useAccountHue();
-  return (
-    <span
-      aria-hidden="true"
-      className={cn(
-        "block w-[3px] shrink-0 self-stretch rounded-[var(--radius-full)]",
-        className,
-      )}
-      style={{ background: hueFor(seed), opacity: dim ? 0.45 : 1 }}
-    />
-  );
-}
-
-/**
- * The raw server text stays reachable wherever an error is shown — that is the
- * showError contract from web/app.js, preserved. Rendered only when
- * friendlyError actually replaced the text.
+ * The raw server text stays reachable wherever an error is shown. Rendered only
+ * when friendlyError() actually replaced the text.
  */
 export function TechnicalDetails({ raw }: { raw: unknown }) {
   const text = String(raw ?? "").trim();
   if (!text || friendlyError(text) === text) return null;
   return (
     <details className="mt-2">
-      <summary className="cursor-pointer text-[12px] text-fg-tertiary">
+      <summary className="cursor-pointer text-[12px] text-fg-tertiary hover:text-fg-secondary">
         Technical details
       </summary>
-      <pre className="mt-1.5 max-h-40 overflow-auto rounded-[var(--radius-md)] bg-surface-0 p-2 font-mono text-[12px] whitespace-pre-wrap text-fg-secondary">
+      <pre className="mt-1.5 max-h-40 overflow-auto rounded-[var(--radius-md)] border border-border-subtle bg-surface-0 p-2 font-mono text-[11px] leading-4 whitespace-pre-wrap text-fg-secondary">
         {text}
       </pre>
     </details>
   );
 }
 
-/** The 11px uppercase mono section label used down the left rail. */
+/** The 11px uppercase section label used down the left rail and in panels. */
 export function SectionLabel({
   children,
   action,
@@ -126,7 +100,7 @@ export function SectionLabel({
 }) {
   return (
     <div className="flex h-6 items-center justify-between">
-      <span className="font-mono text-[11px] leading-4 font-medium tracking-[0.06em] text-fg-tertiary uppercase">
+      <span className="text-[11px] leading-4 font-medium tracking-[var(--tracking-label)] text-fg-tertiary uppercase">
         {children}
       </span>
       {action}
@@ -135,21 +109,177 @@ export function SectionLabel({
 }
 
 /**
- * The 14×14 brand mark, §6.2: three 2px rails of heights 14 / 10 / 6, in
- * --acct-4, --acct-2 and --acct-6, converging. Both themes define all three.
+ * The brand mark: three rails of falling height — many mailboxes, one inbox.
+ * Monochrome — it takes the ink colour of whatever it sits in, so it never
+ * introduces a hue.
+ *
+ * The geometry is shared with two files that cannot import it: the desktop app
+ * icon (apps/desktop/scripts/make-icons.mjs, which rasterises it) and
+ * public/favicon.svg. Change one, change all three.
  */
-export function BrandGlyph({ size = 14 }: { size?: number }) {
+export function BrandGlyph({
+  size = 14,
+  className,
+}: {
+  size?: number;
+  className?: string;
+}) {
   return (
     <svg
       width={size}
       height={size}
       viewBox="0 0 14 14"
       aria-hidden="true"
-      className="shrink-0"
+      className={cn("shrink-0", className)}
+      fill="currentColor"
     >
-      <rect x="1" y="0" width="2" height="14" rx="1" fill="var(--acct-4)" />
-      <rect x="6" y="2" width="2" height="10" rx="1" fill="var(--acct-2)" />
-      <rect x="11" y="4" width="2" height="6" rx="1" fill="var(--acct-6)" />
+      <rect x="1.7" y="0" width="2.6" height="14" rx="1.3" />
+      <rect x="6.2" y="2" width="2.6" height="10" rx="1.3" opacity="0.72" />
+      <rect x="10.7" y="4" width="2.6" height="6" rx="1.3" opacity="0.5" />
     </svg>
+  );
+}
+
+/**
+ * Copy-to-clipboard, in the one shape the whole product uses: the icon flips to
+ * a check for 1200ms and a toast states the outcome.
+ *
+ * navigator.clipboard does not exist in a non-secure context, which is exactly
+ * where a self-hosted http:// page lives — so a failure says "press ⌘C"
+ * instead of doing nothing silently.
+ */
+export function CopyButton({
+  value,
+  label,
+  className,
+  onFallback,
+}: {
+  value: string;
+  /** Used in the accessible name and the toast: "Copy {label}". */
+  label: string;
+  className?: string;
+  /** Called when the clipboard is unavailable, so the caller can select text. */
+  onFallback?: () => void;
+}) {
+  const [copied, setCopied] = React.useState(false);
+  const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  const run = async () => {
+    const ok = await copyToClipboard(value);
+    if (!ok) {
+      onFallback?.();
+      toast.warning("Press ⌘C to copy", {
+        description: "This browser blocked clipboard access.",
+      });
+      return;
+    }
+    setCopied(true);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1200);
+    toast.success(`Copied ${label}`);
+  };
+
+  return (
+    <button
+      type="button"
+      aria-label={`Copy ${label}`}
+      onClick={() => void run()}
+      className={cn(
+        "inline-flex size-6 items-center justify-center rounded-[var(--radius-sm)]",
+        "text-fg-tertiary transition-colors duration-[var(--dur-fast)]",
+        "hover:bg-surface-hover hover:text-fg",
+        className,
+      )}
+    >
+      {copied ? (
+        <Check className="size-3.5 text-success" strokeWidth={1.5} />
+      ) : (
+        <Copy className="size-3.5" strokeWidth={1.5} />
+      )}
+    </button>
+  );
+}
+
+/**
+ * A monospace block with a copy affordance in its top-right corner. Used for
+ * every agent-configuration snippet and every shell line the product asks a
+ * person to paste somewhere.
+ */
+export function CopyBlock({
+  value,
+  label,
+  className,
+}: {
+  value: string;
+  label: string;
+  className?: string;
+}) {
+  const ref = React.useRef<HTMLPreElement | null>(null);
+
+  const selectAll = () => {
+    const node = ref.current;
+    if (!node || typeof window === "undefined") return;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  };
+
+  return (
+    <div className={cn("relative min-w-0", className)}>
+      <pre
+        ref={ref}
+        className="pane-scroll min-w-0 overflow-x-auto rounded-[var(--radius-md)] border border-border-subtle bg-surface-0 py-2.5 pr-9 pl-3 font-mono text-[11px] leading-[18px] whitespace-pre text-fg-secondary"
+      >
+        {value}
+      </pre>
+      <CopyButton
+        value={value}
+        label={label}
+        onFallback={selectAll}
+        className="absolute top-1.5 right-1.5 bg-surface-0"
+      />
+    </div>
+  );
+}
+
+/** A label + control + optional helper, at the one spacing the product uses. */
+export function Field({
+  id,
+  label,
+  helper,
+  error,
+  children,
+}: {
+  id: string;
+  label: string;
+  helper?: React.ReactNode;
+  error?: string | null;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <label
+        htmlFor={id}
+        className="block text-[12px] leading-4 font-medium text-fg-secondary"
+      >
+        {label}
+      </label>
+      {children}
+      {error ? (
+        <p id={`${id}-error`} className="text-[12px] leading-4 text-danger">
+          {error}
+        </p>
+      ) : helper ? (
+        <p className="text-[12px] leading-4 text-fg-tertiary">{helper}</p>
+      ) : null}
+    </div>
   );
 }

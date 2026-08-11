@@ -41,11 +41,14 @@ export function FolderList({
   activeFolder,
   onSelect,
   collapsed = false,
+  disabled = false,
 }: {
   accountRef: string;
   activeFolder: string | undefined;
   onSelect: (path: string | undefined) => void;
   collapsed?: boolean;
+  /** True while another view owns the list pane: no folder is current then. */
+  disabled?: boolean;
 }) {
   const isAll = accountRef === "all";
   const folders = useFolders(accountRef);
@@ -87,9 +90,13 @@ export function FolderList({
             label={folder.name}
             title={folder.path}
             ariaLabel={`Folder ${folder.path}`}
-            active={activeFolder === folder.path}
+            active={!disabled && activeFolder === folder.path}
             onClick={() =>
-              onSelect(activeFolder === folder.path ? undefined : folder.path)
+              onSelect(
+                !disabled && activeFolder === folder.path
+                  ? undefined
+                  : folder.path,
+              )
             }
           />
         ))

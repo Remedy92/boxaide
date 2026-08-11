@@ -4,11 +4,9 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   createAccount,
   deleteAccount,
-  testCredentials,
   type CreateAccountBody,
 } from "@/lib/api/endpoints";
 import { useApiCtx } from "@/lib/hooks/use-settings";
-import type { AccountCredentials } from "@/lib/types";
 
 /**
  * POST /api/accounts performs a live IMAP login server-side and can take
@@ -25,14 +23,6 @@ export function useCreateAccount() {
       void queryClient.invalidateQueries({ queryKey: ["folders"] });
       void queryClient.invalidateQueries({ queryKey: ["messages"] });
     },
-  });
-}
-
-/** A failed test is a 400 whose body still carries `ok:false` — not a throw. */
-export function useTestCredentials() {
-  const ctx = useApiCtx();
-  return useMutation({
-    mutationFn: (creds: AccountCredentials) => testCredentials(creds, ctx),
   });
 }
 

@@ -1,0 +1,7 @@
+node_modules/
+
+# `npm run sync` copies the compiled server and the UI export in here.
+server/
+
+# electron-builder output
+release/

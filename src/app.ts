@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
-import { serve } from "@hono/node-server";
+import { serve, type ServerType } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import type { AppConfig } from "./config.js";
 import { loadConfig } from "./config.js";
@@ -18,13 +18,16 @@ import {
   corsPreflightOrDeny,
   isAllowedOrigin,
   isLocalHostHeader,
+  isLoopbackBindAddress,
 } from "./api/routes.js";
 import { securityHeaders } from "./api/security-headers.js";
 import { handleMcpJsonRpc } from "./mcp/server.js";
+import { AgentChannel } from "./agent/channel.js";
 import type { MailProvider } from "./provider/types.js";
 
 export {
   isLocalHostHeader,
+  isLoopbackBindAddress,
   isAllowedOrigin,
   isApiOriginAllowed,
   tokensMatch,
@@ -45,6 +48,7 @@ export type Runtime = {
   store: Store;
   mail: MailService;
   provider: MailProvider;
+  channel: AgentChannel;
   app: Hono;
 };
 
@@ -72,6 +76,7 @@ export function createRuntime(
   }
 
   const mail = new MailService(store, provider);
+  const channel = new AgentChannel(store);
   const app = new Hono();
 
   // First middleware registered, so every route below — UI, API, MCP and any
@@ -93,6 +98,15 @@ export function createRuntime(
   app.get("/api/local-bootstrap", (c) => {
     // This handler is registered before the /api/* auth middleware, so it
     // carries its own Origin guard.
+    //
+    // The bind address is checked first, and it is the only check that is not
+    // a browser guard. Host and Origin are attacker-supplied: a remote client
+    // on a non-loopback bind sends `Host: localhost` with no Origin and passes
+    // both. On such a bind the endpoint does not exist at all, and the token
+    // must be pasted in by a human.
+    if (!isLoopbackBindAddress(config.host)) {
+      return c.json({ error: "not found" }, 404);
+    }
     if (!isAllowedOrigin(c.req.header("origin"))) {
       return c.json({ error: "forbidden origin" }, 403);
     }
@@ -113,7 +127,7 @@ export function createRuntime(
   });
 
   // Mount API
-  const api = createApi(mail, config.bearerToken, config.allowedOrigins);
+  const api = createApi(mail, config.bearerToken, config.allowedOrigins, channel);
   app.route("/", api);
 
   // MCP over HTTP (JSON-RPC POST) — same auth as API
@@ -139,11 +153,32 @@ export function createRuntime(
     const messages = Array.isArray(body) ? body : [body];
     const results = [];
     for (const msg of messages) {
-      const res = await handleMcpJsonRpc(mail, msg);
+      const res = await handleMcpJsonRpc(mail, msg, channel);
       if (res != null) results.push(res);
     }
+    // A JSON-RPC notification has no id and takes no reply. The streamable-HTTP
+    // transport says so explicitly: a body of nothing but notifications and
+    // responses MUST be answered with 202 and an empty body.
+    //
+    // Answering `{}` with a 200 instead is well-formed JSON and is not a
+    // JSON-RPC message, which is fatal to a strict client — Codex drops the
+    // whole transport on `notifications/initialized` and then reports that the
+    // tools do not exist. Claude Code happens to ignore the body. Getting this
+    // right is the difference between "works with the client I tested" and
+    // "works with any MCP client".
+    if (results.length === 0) return c.body(null, 202);
     if (Array.isArray(body)) return c.json(results);
-    return c.json(results[0] ?? {});
+    return c.json(results[0]);
+  });
+
+  // Session termination. This server is stateless — there is no session to end
+  // — and the spec's answer for that is 405, not the 404 an unrouted DELETE
+  // would produce. Clients log the 404 as a transport error on every shutdown.
+  app.delete("/mcp", (c) => {
+    const failure = authFailure(c, config.bearerToken, config.allowedOrigins);
+    if (failure) return failure;
+    applyCors(c, c.req.header("origin"));
+    return c.body(null, 405);
   });
 
   // Agent connect snippet
@@ -198,7 +233,7 @@ export function createRuntime(
     }),
   );
 
-  return { config, store, mail, provider, app };
+  return { config, store, mail, provider, channel, app };
 }
 
 /**
@@ -221,19 +256,40 @@ function resolveWebRoot(configured?: string): string {
   return join(process.cwd(), "web-next");
 }
 
+/**
+ * Start the HTTP server and resolve only once it is listening.
+ *
+ * Resolving on the `listening` callback rather than synchronously is what lets
+ * an embedder — the Electron shell in `apps/desktop` — open a window the moment
+ * this returns instead of polling. It also turns a busy port into a rejected
+ * promise the caller can report, rather than an unhandled `error` event.
+ */
 export async function startServer(
   overrides: Partial<AppConfig> = {},
-): Promise<{ runtime: Runtime; stop: () => Promise<void> }> {
+): Promise<{ runtime: Runtime; url: string; stop: () => Promise<void> }> {
   const runtime = createRuntime(overrides);
-  const server = serve({
-    fetch: runtime.app.fetch,
-    hostname: runtime.config.host,
-    port: runtime.config.port,
+  const server = await new Promise<ServerType>((resolve, reject) => {
+    const s = serve(
+      {
+        fetch: runtime.app.fetch,
+        hostname: runtime.config.host,
+        port: runtime.config.port,
+      },
+      () => {
+        s.off("error", reject);
+        resolve(s);
+      },
+    );
+    s.once("error", reject);
   });
   return {
     runtime,
+    url: `http://${runtime.config.host}:${runtime.config.port}`,
     stop: async () => {
       server.close();
+      // Before the store closes: a parked long poll and the SSE drain interval
+      // both hold a reference to it, and both would touch a closed handle.
+      runtime.channel.close();
       runtime.store.close();
       await closeAll();
     },

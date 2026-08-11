@@ -1,11 +1,17 @@
 "use client";
 
 import * as React from "react";
-import { Check, Copy, Eye, EyeOff, Monitor, Moon, Sun } from "lucide-react";
+import { Eye, EyeOff, Monitor, Moon, Sun } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
-import { Spinner, StatusDot, TechnicalDetails, type DotTone } from "@/components/atoms";
+import {
+  CopyBlock,
+  Spinner,
+  StatusDot,
+  TechnicalDetails,
+  type DotTone,
+} from "@/components/atoms";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -23,8 +29,9 @@ import { useApp } from "@/lib/hooks/use-app-state";
 import { useMeta } from "@/lib/hooks/use-connection";
 import { useMcpTools } from "@/lib/hooks/use-mcp-tools";
 import { useSettings, useUpdateSettings } from "@/lib/hooks/use-settings";
+import { genericMcpSnippet, mcpEndpoint } from "@/lib/agent-config";
 import { hostLabel, isValidBaseUrl, normalizeBaseUrl } from "@/lib/settings";
-import { cn, copyToClipboard } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 
 type TestResult = { tone: DotTone; message: string; note?: string; raw?: string };
 
@@ -75,19 +82,8 @@ function SettingsBody({
   const [urlError, setUrlError] = React.useState<string | null>(null);
   const [testing, setTesting] = React.useState(false);
   const [result, setResult] = React.useState<TestResult | null>(null);
-  const [copied, setCopied] = React.useState(false);
   const baseUrlRef = React.useRef<HTMLInputElement | null>(null);
   const tokenRef = React.useRef<HTMLInputElement | null>(null);
-  const snippetRef = React.useRef<HTMLPreElement | null>(null);
-  // This dialog unmounts on close (`if (!open) return null` above), which is
-  // well inside the 1200ms confirm window, so the timer has to be cancellable.
-  const copyTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  React.useEffect(
-    () => () => {
-      if (copyTimer.current) clearTimeout(copyTimer.current);
-    },
-    [],
-  );
 
   /* Focus only — no state is written here, so no cascading render. */
   React.useEffect(() => {
@@ -152,45 +148,16 @@ function SettingsBody({
     void runTestRef.current();
   }, [autoTest]);
 
-  const endpoint = `${normalizeBaseUrl(baseUrl)}/mcp`;
-  const snippet = JSON.stringify(
-    {
-      mcpServers: {
-        mailmux: {
-          url: endpoint,
-          headers: { Authorization: `Bearer ${token || "<your token>"}` },
-        },
-      },
-    },
-    null,
-    2,
-  );
-
-  const copySnippet = async () => {
-    const ok = await copyToClipboard(snippet);
-    if (!ok) {
-      const node = snippetRef.current;
-      if (node && typeof window !== "undefined") {
-        const range = document.createRange();
-        range.selectNodeContents(node);
-        const selection = window.getSelection();
-        selection?.removeAllRanges();
-        selection?.addRange(range);
-      }
-      toast.warning("Press ⌘C to copy");
-      return;
-    }
-    setCopied(true);
-    if (copyTimer.current) clearTimeout(copyTimer.current);
-    copyTimer.current = setTimeout(() => setCopied(false), 1200);
-    toast.success("Copied MCP configuration");
-  };
+  /* Built from the fields as typed, not from what is saved: the snippet must
+     match the server the user is about to point at. */
+  const endpoint = mcpEndpoint(baseUrl);
+  const snippet = genericMcpSnippet({ baseUrl, token });
 
   return (
     <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-[560px] overflow-y-auto">
+      <DialogContent className="pane-scroll max-h-[86vh] max-w-[560px] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle style={{ fontSize: "var(--text-display)" }}>
+          <DialogTitle className="title-15">
             Settings
           </DialogTitle>
           <DialogDescription>
@@ -396,61 +363,51 @@ function SettingsBody({
 
         <Separator className="bg-border-subtle" />
 
-        {/* ---- Agents (MCP) ----------------------------------------------- */}
+        {/* ---- Agents (MCP) -----------------------------------------------
+            One generic block lives here; the per-client configuration lives in
+            "Connect your agent", so there is one place that formats a snippet
+            and one place that can drift. */}
         <section className="space-y-3">
-          <h3 className="text-[13px] font-medium text-fg">Agents (MCP)</h3>
-          {/* Not "the same access this page has" unqualified: this page can
-              also connect and remove mailboxes, and no MCP tool does either
-              (mcp/server.ts exposes seven read/send/mark tools). The
-              capabilities dialog carries the same qualifier. */}
+          <h3 className="text-[13px] font-medium text-fg">Agents</h3>
           <p className="text-[13px] leading-[18px] text-fg-secondary">
-            Point an MCP client at your mailmux server to give it the same
-            access to your mail that this page has, through seven tools. It
-            cannot connect or remove a mailbox.
+            Point an MCP client at this endpoint and it can read, draft, and
+            send from every connected mailbox. It cannot connect or remove one.
           </p>
 
-          <p className="font-mono text-[13px] text-fg-secondary">{endpoint}</p>
+          <p className="font-mono text-[12px] break-all text-fg-secondary">
+            {endpoint}
+          </p>
 
           {token && (
             <p className="text-[12px] leading-4 text-warning">
-              This snippet contains your token. Don&rsquo;t paste it anywhere
-              public.
+              The configuration below contains your token. Don&rsquo;t paste it
+              anywhere public.
             </p>
           )}
 
-          <div className="relative">
-            <pre
-              ref={snippetRef}
-              className="overflow-x-auto rounded-[var(--radius-md)] bg-surface-0 p-3 font-mono text-[12px] text-fg-secondary"
-            >
-              {snippet}
-            </pre>
+          <CopyBlock value={snippet} label="MCP configuration" />
+
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Copy MCP configuration"
-              className="absolute top-1.5 right-1.5"
-              onClick={() => void copySnippet()}
+              onClick={() => {
+                onOpenChange(false);
+                app.openDialog("agent");
+              }}
             >
-              {copied ? (
-                <Check className="size-4 text-success" strokeWidth={1.5} />
-              ) : (
-                <Copy className="size-4" strokeWidth={1.5} />
-              )}
+              Connect your agent
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={mcp.isPending}
+              aria-busy={mcp.isPending || undefined}
+              onClick={() => mcp.mutate()}
+            >
+              {mcp.isPending && <Spinner />}
+              {mcp.isPending ? "Testing…" : "Test MCP endpoint"}
             </Button>
           </div>
-
-          <Button
-            type="button"
-            variant="secondary"
-            disabled={mcp.isPending}
-            aria-busy={mcp.isPending || undefined}
-            onClick={() => mcp.mutate()}
-          >
-            {mcp.isPending && <Spinner />}
-            {mcp.isPending ? "Testing…" : "Test MCP endpoint"}
-          </Button>
 
           <div role="status" aria-live="polite">
             {mcp.isSuccess && (
@@ -476,6 +433,26 @@ function SettingsBody({
               </>
             )}
           </div>
+        </section>
+
+        <Separator className="bg-border-subtle" />
+
+        {/* ---- Setup ------------------------------------------------------ */}
+        <section className="space-y-2">
+          <h3 className="text-[13px] font-medium text-fg">Setup</h3>
+          <p className="text-[13px] leading-[18px] text-fg-secondary">
+            Walk through finding the server and adding a mailbox again.
+          </p>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              onOpenChange(false);
+              app.openWizard();
+            }}
+          >
+            Run setup again
+          </Button>
         </section>
       </DialogContent>
     </Dialog>

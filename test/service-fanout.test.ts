@@ -7,7 +7,9 @@ import { handleMcpJsonRpc } from "../src/mcp/server.js";
 import type {
   AccountCredentials,
   ConnectionTestResult,
+  DraftRef,
   ListMessagesOpts,
+  MailDraft,
   MailFolder,
   MailMessage,
   MailMessageSummary,
@@ -91,6 +93,24 @@ class FlakyProvider implements MailProvider {
 
   async listFolders(): Promise<MailFolder[]> {
     return [];
+  }
+
+  // Drafts are per-account only, so they never reach a fan-out. Present so the
+  // double still satisfies MailProvider rather than drifting from it.
+  async createDraft(): Promise<DraftRef> {
+    throw new Error("not used");
+  }
+
+  async updateDraft(): Promise<DraftRef> {
+    throw new Error("not used");
+  }
+
+  async listDrafts(): Promise<MailDraft[]> {
+    return [];
+  }
+
+  async deleteDraft(): Promise<boolean> {
+    return false;
   }
 }
 

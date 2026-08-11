@@ -1,19 +1,19 @@
 "use client";
 
 import { X } from "lucide-react";
-import { AccountRail, StatusDot, type DotTone } from "@/components/atoms";
+import { StatusDot, type DotTone } from "@/components/atoms";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { friendlyError } from "@/lib/api/errors";
 import { useApp } from "@/lib/hooks/use-app-state";
-import { initials } from "@/lib/format/address";
 import { cn } from "@/lib/utils";
 import type { MailAccountMeta } from "@/lib/types";
 
 /**
- * §6.2 row 4. The status dot has exactly three states and every one is derived
- * from real data: the account is absent from the last list response's errors[],
- * present in it, or no list response has arrived yet this session. There is no
- * fourth "connecting" state, because nothing on the wire reports one.
+ * A mailbox in the sidebar. The status dot has exactly three states and every
+ * one is derived from real data: the account is absent from the last list
+ * response's errors[], present in it, or no list response has arrived yet this
+ * session. There is no fourth "connecting" state, because nothing on the wire
+ * reports one.
  */
 export type AccountHealth =
   | { state: "ok" }
@@ -56,40 +56,38 @@ export function AccountRow({
 
   if (collapsed) {
     return (
-      <>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label={rowLabel}
-              aria-current={selected ? "true" : undefined}
-              onClick={() => onSelect(account.alias)}
-              className={cn(
-                "flex h-8 w-full items-center justify-center gap-1 rounded-[var(--radius-md)]",
-                selected ? "bg-surface-selected" : "hover:bg-surface-hover",
-              )}
-            >
-              <AccountRail seed={account.id} className="h-7" />
-              <Monogram seed={account.email} size={24} />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="right">
-            {account.alias} — {statusWords}
-          </TooltipContent>
-        </Tooltip>
-      </>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={rowLabel}
+            aria-current={selected ? "true" : undefined}
+            onClick={() => onSelect(account.alias)}
+            className={cn(
+              "flex h-7 w-full items-center justify-center gap-1.5 rounded-[var(--radius-md)]",
+              "transition-colors duration-[var(--dur-fast)]",
+              selected ? "bg-surface-selected" : "hover:bg-surface-hover",
+            )}
+          >
+            <StatusDot tone={TONE[health.state]} />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="right">
+          {account.alias} — {statusWords}
+        </TooltipContent>
+      </Tooltip>
     );
   }
 
   return (
     <div
       className={cn(
-        "group flex items-center gap-2 rounded-[var(--radius-md)] pr-1 pl-1",
-        compact ? "h-8" : "h-10",
+        "group flex items-center gap-2 rounded-[var(--radius-md)] pr-1 pl-2",
+        "transition-colors duration-[var(--dur-fast)]",
+        compact ? "h-7" : "h-9",
         selected ? "bg-surface-selected" : "hover:bg-surface-hover",
       )}
     >
-      <AccountRail seed={account.id} className={compact ? "h-6" : "h-7"} />
       <button
         type="button"
         onClick={() => onSelect(account.alias)}
@@ -98,12 +96,11 @@ export function AccountRow({
         title={account.email}
         className="flex min-w-0 flex-1 items-center gap-2 text-left"
       >
-        <Monogram seed={account.email} size={24} />
         <span className="min-w-0 flex-1">
           <span
             className={cn(
-              "block truncate text-[13px] leading-[18px] text-fg",
-              selected ? "font-semibold" : "font-medium",
+              "block truncate text-[13px] leading-[18px]",
+              selected ? "font-medium text-fg" : "text-fg-secondary",
             )}
           >
             {account.alias}
@@ -140,18 +137,5 @@ export function AccountRow({
         </button>
       </span>
     </div>
-  );
-}
-
-/** The rail's own monogram: neutral, like the list's. Colour is the rail's job. */
-function Monogram({ seed, size }: { seed: string; size: number }) {
-  return (
-    <span
-      aria-hidden="true"
-      className="flex shrink-0 items-center justify-center rounded-[var(--radius-sm)] border border-border-subtle bg-surface-2 font-mono text-[11px] font-semibold text-fg-secondary"
-      style={{ width: size, height: size }}
-    >
-      {initials(seed)}
-    </span>
   );
 }

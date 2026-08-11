@@ -193,6 +193,13 @@ const ERROR_HINTS: Array<[RegExp, string]> = [
     /auth|invalid credential|login failed|password|AUTHENTICATIONFAILED|535|534/i,
     "Wrong username or app password. Gmail, iCloud and Outlook need an app password, not your normal password.",
   ],
+  // ImapFlow reports a rejected LOGIN as a bare "Command failed", but so does a
+  // server that throttled or dropped the connection — the same credential is
+  // often accepted seconds later, so this must not accuse the password.
+  [
+    /command failed/i,
+    "The mail server refused the connection just now. Retry usually fixes it; if it keeps failing, reconnect this mailbox with a fresh app password.",
+  ],
   [
     /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|getaddrinfo|EHOSTUNREACH|ENETUNREACH|connection refused/i,
     "Cannot reach that IMAP server — check the host and port.",

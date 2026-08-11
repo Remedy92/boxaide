@@ -1,0 +1,72 @@
+appId: app.mailmux.desktop
+productName: mailmux
+copyright: MIT licensed
+
+directories:
+  output: release
+  buildResources: build
+
+# Named rather than left to electron-builder's by-convention lookup in
+# buildResources: a missing icon is otherwise a silent fall back to the stock
+# Electron diamond, which ships and is only noticed in the dock.
+# Regenerate all three with `npm run icons`.
+icon: build/icon.icns
+
+# node_modules for production dependencies is added by electron-builder itself;
+# these entries only trim what else goes into the asar.
+files:
+  - "**/*"
+  - "!scripts/**"
+  - "!release/**"
+  - "!electron-builder.yml"
+  # The UI export is shipped unpacked, see extraResources below.
+  - "!server/web-next/**"
+
+# `serveStatic` reads the UI with plain fs calls. Keeping the export outside the
+# asar means it is a real directory on disk and never goes through Electron's
+# asar shim.
+extraResources:
+  - from: server/web-next
+    to: web-next
+
+asar: true
+# better-sqlite3 loads a .node binary, which cannot be read from inside an asar.
+asarUnpack:
+  - "**/node_modules/better-sqlite3/**"
+
+# Rebuilds better-sqlite3 against Electron's ABI while packaging.
+npmRebuild: true
+
+mac:
+  target: dmg
+  category: public.app-category.productivity
+  # Signs with the Developer ID Application identity from the login keychain
+  # (electron-builder auto-discovers it). Hardened runtime is a notarization
+  # prerequisite; the two entitlements are what Electron's JIT needs to run
+  # under it.
+  # The keychain holds two same-named Developer ID certificates, which makes
+  # a by-name --sign ambiguous; the SHA-1 hash pins the newer one (2026-07).
+  identity: 403ADC00F0A6E8A510184F01AA2D670FA1988B54
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # Notarization needs credentials only the owner can mint. One-time setup:
+  #   xcrun notarytool store-credentials mailmux-notary \
+  #     --apple-id <apple-id> --team-id 22DPQ7YCAS
+  # then build with: APPLE_KEYCHAIN_PROFILE=mailmux-notary npm run dist
+  notarize: false
+
+win:
+  target: nsis
+  icon: build/icon.ico
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  target: AppImage
+  category: Network
+  icon: build/icon.png

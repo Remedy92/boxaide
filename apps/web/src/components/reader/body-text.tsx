@@ -46,8 +46,8 @@ export function BodyText({
         style={{
           whiteSpace: "pre-wrap",
           overflowWrap: "anywhere",
-          fontSize: "var(--text-body)",
-          lineHeight: "var(--leading-body)",
+          fontSize: "var(--text-read)",
+          lineHeight: "var(--leading-read)",
         }}
       >
         {linkifyToElements(body)}

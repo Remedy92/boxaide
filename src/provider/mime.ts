@@ -7,8 +7,10 @@ export type ParsedMailBody = {
   from?: string;
   to?: string;
   cc?: string;
+  bcc?: string;
   date?: string;
   messageId?: string;
+  inReplyTo?: string;
   references?: string;
 };
 
@@ -35,8 +37,10 @@ export async function parseRfc822(raw: string | Buffer): Promise<ParsedMailBody>
     from: formatAddress(parsed.from as unknown),
     to: formatAddress(parsed.to as unknown),
     cc: formatAddress(parsed.cc as unknown),
+    bcc: formatAddress(parsed.bcc as unknown),
     date: parsed.date ? parsed.date.toISOString() : undefined,
     messageId: parsed.messageId || undefined,
+    inReplyTo: parsed.inReplyTo || undefined,
     references: formatReferences(parsed.references),
   };
 }

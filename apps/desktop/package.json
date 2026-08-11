@@ -1,0 +1,40 @@
+{
+  "name": "mailmux-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop shell for mailmux \u2014 runs the mailmux server in-process and opens the UI in a window",
+  "author": "mailmux contributors",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "sync": "node scripts/sync-server.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "predev": "npm run sync",
+    "dev": "electron .",
+    "presmoke": "npm run sync",
+    "smoke": "electron . --smoke",
+    "predist": "npm run sync",
+    "dist": "electron-builder",
+    "postinstall": "electron-builder install-app-deps",
+    "dist:mac": "npm run sync && electron-builder --mac dmg -c.mac.identity=null && sh scripts/sign-mac.sh"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "better-sqlite3": "^13.0.3",
+    "hono": "^4.13.1",
+    "imapflow": "^1.6.6",
+    "mailparser": "^3.9.15",
+    "nodemailer": "^9.0.5",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true,
+    "electron@43.3.0": true
+  }
+}
