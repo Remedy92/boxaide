@@ -88,3 +88,44 @@ describe("MAILMUX_MASTER_KEY", () => {
     expect(statSync(saltPath).mode & 0o777).toBe(0o600);
   });
 });
+
+describe("generated secret files", () => {
+  it("creates the master key and bearer token owner-readable only", () => {
+    const dir = newDir();
+    loadConfig({ dataDir: dir });
+    for (const name of ["master.key", "bearer.token"]) {
+      expect(statSync(join(dir, name)).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it("keeps the same key and token across runs", () => {
+    const dir = newDir();
+    const first = loadConfig({ dataDir: dir });
+    const second = loadConfig({ dataDir: dir });
+    expect(second.masterKey.toString("hex")).toBe(first.masterKey.toString("hex"));
+    expect(second.bearerToken).toBe(first.bearerToken);
+  });
+
+  it("adopts a key and token that another process wrote first", () => {
+    // The loser of a first-run race must use what is on disk. Overwriting the
+    // master key would leave it unable to decrypt the secrets already stored
+    // under the winner's key.
+    const dir = newDir();
+    const key = "b".repeat(64);
+    const token = "a-token-another-process-wrote";
+    writeFileSync(join(dir, "master.key"), key, { mode: 0o600 });
+    writeFileSync(join(dir, "bearer.token"), token, { mode: 0o600 });
+
+    const config = loadConfig({ dataDir: dir });
+    expect(config.masterKey.toString("hex")).toBe(key);
+    expect(config.bearerToken).toBe(token);
+    expect(readFileSync(join(dir, "master.key"), "utf8")).toBe(key);
+    expect(readFileSync(join(dir, "bearer.token"), "utf8")).toBe(token);
+  });
+
+  it("still creates the data directory when it is missing", () => {
+    const dir = join(newDir(), "nested", "mailmux");
+    expect(loadConfig({ dataDir: dir }).bearerToken).toBeTruthy();
+    expect(existsSync(join(dir, "bearer.token"))).toBe(true);
+  });
+});
