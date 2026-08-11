@@ -4,6 +4,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { AgentChannel } from "../agent/channel.js";
+import { DEFAULT_WAIT_MS, MAX_WAIT_MS } from "../agent/channel.js";
 import type { MailService } from "../mail/service.js";
 import type { DraftInput } from "../provider/types.js";
 
@@ -219,16 +221,103 @@ const TOOLS = [
   },
 ];
 
+/**
+ * The chat channel.
+ *
+ * These are only listed when the server was built with a channel, which is
+ * every real entry point — `serve` and `mailmux mcp` both have one. A caller
+ * that constructs the MCP server without one gets the mail tools and nothing
+ * that would advertise a conversation it cannot hold.
+ *
+ * The descriptions carry the loop protocol because there is nowhere else to put
+ * it. An agent reads these once and has to work out, unaided, that it should
+ * keep calling `chat_await_message` rather than answer in its own terminal and
+ * stop. Every sentence here is load-bearing; shortening them breaks the feature
+ * in a way no type checks.
+ */
+const CHAT_LOOP = [
+  "This is a LOOP, and you must keep running it until the user tells you to stop:",
+  "call chat_await_message → do the work → chat_say the answer → call chat_await_message again.",
+  "Never end your turn after answering once; go straight back to chat_await_message.",
+].join(" ");
+
+const CHAT_TOOLS = [
+  {
+    name: "chat_await_message",
+    description: `Wait for the user's next message in the mailmux window, and return it. ${CHAT_LOOP} A call that returns { "message": null, "timedOut": true } means nobody typed anything yet — that is normal and is NOT an error and NOT a reason to stop; call this tool again immediately. Anything the user typed before you started waiting is queued and comes back on the first call. Each message goes to exactly one agent, so do not run two agents against the same mailmux.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        timeoutSeconds: {
+          type: "number",
+          description: `How long to wait before returning { message: null }. Default ${DEFAULT_WAIT_MS / 1000}, maximum ${MAX_WAIT_MS / 1000}. Keep it below your own client's tool timeout.`,
+          default: DEFAULT_WAIT_MS / 1000,
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "chat_say",
+    description: `Post a message to the user in the mailmux window. This is how the user reads your answer — text you write in your own terminal or chat client is NOT visible to them, so every answer to a chat_await_message has to go through here. Write it as a reply to a person: plain sentences, no tool-call transcripts, no JSON. ${CHAT_LOOP}`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        text: {
+          type: "string",
+          description: "What to say. Markdown is rendered.",
+        },
+      },
+      required: ["text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "chat_activity",
+    description:
+      "Post a short status line — 'searching three mailboxes for the invoice', 'reading 12 messages' — while a request is taking a while. It renders as a quiet line, not as a message, so the user can see you are working instead of watching nothing happen. Optional, one short present-tense clause, and never a substitute for chat_say: an activity line is not an answer.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        text: { type: "string", description: "One short present-tense clause." },
+      },
+      required: ["text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "chat_history",
+    description:
+      "Read recent turns of this conversation, oldest first. Use it to pick up context after you restart or lose your own history — the user expects you to remember what they already told you in this window.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        limit: { type: "number", default: 50 },
+      },
+      additionalProperties: false,
+    },
+  },
+];
+
+const CHAT_TOOL_NAMES = new Set(CHAT_TOOLS.map((t) => t.name));
+
+function toolsFor(channel?: AgentChannel) {
+  return channel ? [...TOOLS, ...CHAT_TOOLS] : TOOLS;
+}
+
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
 
-export function createMcpServer(mail: MailService): Server {
+export function createMcpServer(
+  mail: MailService,
+  channel?: AgentChannel,
+): Server {
   const server = new Server(
     { name: "mailmux", version: "0.1.0" },
     { capabilities: { tools: {} } },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOLS,
+    tools: toolsFor(channel),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -236,7 +325,7 @@ export function createMcpServer(mail: MailService): Server {
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
 
     try {
-      const result = await dispatch(mail, name, args);
+      const result = await dispatch(mail, name, args, channel);
       return {
         content: [
           {
@@ -280,7 +369,12 @@ async function dispatch(
   mail: MailService,
   name: string,
   args: Record<string, unknown>,
+  channel?: AgentChannel,
 ): Promise<unknown> {
+  if (CHAT_TOOL_NAMES.has(name)) {
+    if (!channel) throw new Error(`${name} is not available on this server`);
+    return dispatchChat(channel, name, args);
+  }
   switch (name) {
     case "accounts_list":
       return { accounts: mail.listAccounts() };
@@ -366,8 +460,81 @@ async function dispatch(
   }
 }
 
-export async function runStdioMcp(mail: MailService): Promise<void> {
-  const server = createMcpServer(mail);
+/**
+ * The chat tools.
+ *
+ * `chat_await_message` returns `{ message: null, timedOut: true }` rather than
+ * throwing on a timeout. An error would show up in the agent's client as a
+ * failed tool call, which is exactly the signal that makes a model stop and
+ * apologise instead of calling again — and calling again is the entire
+ * protocol. The hint is repeated in the payload because that is the last thing
+ * the model reads before deciding what to do next.
+ */
+async function dispatchChat(
+  channel: AgentChannel,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  switch (name) {
+    case "chat_await_message": {
+      const seconds = Number(args.timeoutSeconds ?? DEFAULT_WAIT_MS / 1000);
+      const turn = await channel.awaitUserTurn({
+        timeoutMs: Number.isFinite(seconds) ? seconds * 1000 : DEFAULT_WAIT_MS,
+      });
+      if (!turn) {
+        return {
+          message: null,
+          timedOut: true,
+          hint: "Nobody typed anything yet. This is normal. Call chat_await_message again now.",
+        };
+      }
+      return {
+        message: { seq: turn.seq, at: turn.at, text: turn.text },
+        hint: "Answer with chat_say, then call chat_await_message again.",
+      };
+    }
+    case "chat_say": {
+      const turn = channel.post({
+        role: "agent",
+        text: String(args.text ?? ""),
+        agent: channel.clientName,
+      });
+      return {
+        posted: true,
+        seq: turn.seq,
+        hint: "Delivered. Call chat_await_message again to keep the conversation open.",
+      };
+    }
+    case "chat_activity": {
+      const turn = channel.post({
+        role: "activity",
+        text: String(args.text ?? ""),
+        agent: channel.clientName,
+      });
+      return { posted: true, seq: turn.seq };
+    }
+    case "chat_history": {
+      const limit = Math.min(Math.max(Number(args.limit ?? 50), 1), 200);
+      const turns = channel.history().slice(-limit);
+      return {
+        turns: turns.map((t) => ({
+          seq: t.seq,
+          at: t.at,
+          role: t.role,
+          text: t.text,
+        })),
+      };
+    }
+    default:
+      throw new Error(`unknown tool: ${name}`);
+  }
+}
+
+export async function runStdioMcp(
+  mail: MailService,
+  channel?: AgentChannel,
+): Promise<void> {
+  const server = createMcpServer(mail, channel);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -381,11 +548,19 @@ export async function handleMcpJsonRpc(
     method?: string;
     params?: unknown;
   },
+  channel?: AgentChannel,
 ): Promise<unknown> {
   const id = message.id ?? null;
   if (message.method === "initialize") {
-    const requested = (message.params as { protocolVersion?: unknown } | undefined)
-      ?.protocolVersion;
+    const params = message.params as
+      | { protocolVersion?: unknown; clientInfo?: { name?: unknown } }
+      | undefined;
+    const requested = params?.protocolVersion;
+    // Best effort, for a presence label only. See AgentChannel.noteClient.
+    const clientName = params?.clientInfo?.name;
+    if (channel && typeof clientName === "string") {
+      channel.noteClient(clientName);
+    }
     return {
       jsonrpc: "2.0",
       id,
@@ -404,14 +579,17 @@ export async function handleMcpJsonRpc(
     return { jsonrpc: "2.0", id, result: {} };
   }
   if (message.method === "tools/list") {
-    return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
+    return { jsonrpc: "2.0", id, result: { tools: toolsFor(channel) } };
   }
   if (message.method === "tools/call") {
     const params = message.params as {
       name: string;
       arguments?: Record<string, unknown>;
     };
-    if (!TOOL_NAMES.has(params.name)) {
+    const known =
+      TOOL_NAMES.has(params.name) ||
+      (channel !== undefined && CHAT_TOOL_NAMES.has(params.name));
+    if (!known) {
       return {
         jsonrpc: "2.0",
         id,
@@ -423,6 +601,7 @@ export async function handleMcpJsonRpc(
         mail,
         params.name,
         params.arguments ?? {},
+        channel,
       );
       return {
         jsonrpc: "2.0",

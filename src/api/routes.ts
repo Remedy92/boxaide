@@ -1,6 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import type { Context } from "hono";
+import { streamSSE } from "hono/streaming";
+import type { AgentChannel, Turn } from "../agent/channel.js";
 import type { MailService } from "../mail/service.js";
 import type { AccountCredentials, DraftInput } from "../provider/types.js";
 import { passwordCredentials } from "../provider/types.js";
@@ -311,6 +313,7 @@ export function createApi(
   mail: MailService,
   bearerToken: string,
   allowedOrigins: readonly string[],
+  channel?: AgentChannel,
 ): Hono {
   const app = new Hono();
 
@@ -582,5 +585,123 @@ export function createApi(
     }
   });
 
+  /* ---- the agent conversation ------------------------------------------
+     Registered only when the runtime built a channel. Without one these paths
+     404 rather than 500, and the UI's own capability check is the same
+     question: does this server have an agent channel at all?
+     --------------------------------------------------------------------- */
+  if (channel) registerAgentRoutes(app, channel);
+
   return app;
+}
+
+/** Longest a message from the composer may be. Well past any real question. */
+const MAX_CHAT_CHARS = 8_000;
+
+/**
+ * Heartbeat interval for the SSE stream.
+ *
+ * A stream that sends nothing for minutes is indistinguishable from a dead one,
+ * and intermediaries close idle connections. The comment frame costs two bytes
+ * of payload and keeps `onerror`-driven reconnect logic honest.
+ */
+const SSE_HEARTBEAT_MS = 20_000;
+
+function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
+  app.get("/api/agent/state", (c) => {
+    const after = c.req.query("after");
+    const afterSeq = after !== undefined && /^\d+$/.test(after) ? Number(after) : undefined;
+    return c.json({
+      turns: channel.history(afterSeq),
+      presence: channel.presence(),
+    });
+  });
+
+  app.post("/api/agent/messages", async (c) => {
+    let body: { text?: unknown };
+    try {
+      body = await c.req.json<{ text?: unknown }>();
+    } catch {
+      return c.json({ error: "body must be JSON" }, 400);
+    }
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (!text) return c.json({ error: "text is required" }, 400);
+    if (text.length > MAX_CHAT_CHARS) {
+      return c.json({ error: `text must be ${MAX_CHAT_CHARS} characters or fewer` }, 400);
+    }
+    const turn = channel.post({ role: "user", text });
+    // The presence that ships with the write is what the composer uses to say
+    // "no agent is listening" the moment a message lands unheard.
+    return c.json({ turn, presence: channel.presence() }, 201);
+  });
+
+  app.post("/api/agent/clear", (c) => {
+    channel.clear();
+    return c.json({ cleared: true });
+  });
+
+  /**
+   * The live conversation.
+   *
+   * Read with fetch, not EventSource: EventSource cannot send an Authorization
+   * header, and the only alternative — the bearer token in the query string —
+   * would put it in every access log and in browser history. The client reads
+   * the body stream and parses the frames itself.
+   */
+  app.get("/api/agent/stream", (c) =>
+    streamSSE(c, async (stream) => {
+      const queue: Turn[] = [];
+      let wake: (() => void) | null = null;
+
+      const unsubscribe = channel.subscribe((turn) => {
+        queue.push(turn);
+        wake?.();
+      });
+
+      // `onAbort` is the only close signal that fires for a client that simply
+      // went away — the write below can stay pending indefinitely otherwise.
+      let open = true;
+      stream.onAbort(() => {
+        open = false;
+        unsubscribe();
+        wake?.();
+      });
+
+      await stream.writeSSE({
+        event: "presence",
+        data: JSON.stringify(channel.presence()),
+      });
+
+      try {
+        while (open) {
+          while (queue.length > 0 && open) {
+            const turn = queue.shift() as Turn;
+            await stream.writeSSE({ event: "turn", data: JSON.stringify(turn) });
+          }
+          if (!open) break;
+          // Wake on the next turn, or on the heartbeat, whichever lands first.
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(() => {
+              wake = null;
+              resolve();
+            }, SSE_HEARTBEAT_MS);
+            wake = () => {
+              clearTimeout(timer);
+              wake = null;
+              resolve();
+            };
+          });
+          if (!open) break;
+          if (queue.length === 0) {
+            await stream.writeSSE({
+              event: "presence",
+              data: JSON.stringify(channel.presence()),
+            });
+          }
+        }
+      } finally {
+        unsubscribe();
+      }
+    }),
+  );
 }
