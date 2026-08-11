@@ -34,6 +34,22 @@ npmRebuild: true
 mac:
   target: dmg
   category: public.app-category.productivity
+  # Signs with the Developer ID Application identity from the login keychain
+  # (electron-builder auto-discovers it). Hardened runtime is a notarization
+  # prerequisite; the two entitlements are what Electron's JIT needs to run
+  # under it.
+  # The keychain holds two same-named Developer ID certificates, which makes
+  # a by-name --sign ambiguous; the SHA-1 hash pins the newer one (2026-07).
+  identity: 403ADC00F0A6E8A510184F01AA2D670FA1988B54
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # Notarization needs credentials only the owner can mint. One-time setup:
+  #   xcrun notarytool store-credentials mailmux-notary \
+  #     --apple-id <apple-id> --team-id 22DPQ7YCAS
+  # then build with: APPLE_KEYCHAIN_PROFILE=mailmux-notary npm run dist
+  notarize: false
 
 win:
   target: nsis

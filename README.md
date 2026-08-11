@@ -106,10 +106,11 @@ npm run dev                   # opens the window
 Installers:
 
 ```bash
-npm run dist                  # apps/desktop/release/ — dmg, nsis or AppImage
+npm run dist:mac              # mac: signed dmg in apps/desktop/release/
+npm run dist                  # other platforms — nsis or AppImage
 ```
 
-`npm run dist` builds for the platform it runs on. Both scripts re-copy the compiled server and the UI export out of the repository root first, so run the root `npm run build` again after any server change. The port follows `MAILMUX_PORT` (default 8787); if something already holds it — `mailmux serve` in a terminal, or a second copy of the app — the window does not open and the app says so.
+On mac, `dist:mac` signs the app and the dmg with a Developer ID certificate pinned by hash in `scripts/sign-mac.sh` (electron-builder's by-name signing is ambiguous when the keychain holds two same-named certificates). Notarization is a separate, credential-holding step; the commands are at the top of that script. `npm run dist` builds for the platform it runs on. Both scripts re-copy the compiled server and the UI export out of the repository root first, so run the root `npm run build` again after any server change. The port follows `MAILMUX_PORT` (default 8787); if something already holds it — `mailmux serve` in a terminal, or a second copy of the app — the window does not open and the app says so.
 
 ## Agent MCP (any client)
 
