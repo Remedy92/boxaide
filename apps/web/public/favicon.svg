@@ -1,8 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="mailmux">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" role="img" aria-label="mailmux">
   <title>mailmux</title>
-  <!-- Three account rails converging into one: the multiplex, drawn. -->
-  <rect x="5" y="4" width="3" height="24" rx="1.5" fill="#4078B0" />
-  <rect x="11" y="8" width="3" height="16" rx="1.5" fill="#88731B" />
-  <rect x="17" y="12" width="3" height="8" rx="1.5" fill="#8E609C" />
-  <rect x="24" y="4" width="3" height="24" rx="1.5" fill="#006C6E" />
+  <!-- Three rails of falling height: many mailboxes, one inbox. Same geometry
+       as the desktop app icon (apps/desktop/scripts/make-icons.mjs) and as
+       BrandGlyph in src/components/atoms.tsx — the mark on its own 14-unit
+       grid, scaled to 56% and centred on the plate. A plate rather than a bare
+       glyph so the mark keeps its contrast on a light and a dark tab strip
+       alike. -->
+  <rect width="14" height="14" rx="3.15" fill="#0E0F11" />
+  <g transform="translate(3.08 3.08) scale(0.56)">
+    <rect x="1.7" y="0" width="2.6" height="14" rx="1.3" fill="#fff" />
+    <rect x="6.2" y="2" width="2.6" height="10" rx="1.3" fill="#fff" opacity="0.72" />
+    <rect x="10.7" y="4" width="2.6" height="6" rx="1.3" fill="#fff" opacity="0.5" />
+  </g>
 </svg>

@@ -14,7 +14,6 @@ import {
   validateDraft,
   type DraftField,
 } from "@/lib/format/address";
-import { useAccountHue } from "@/lib/hooks/use-account-hue";
 import { buildReplySeed } from "@/lib/format/reply";
 import type { ComposeMode } from "@/lib/hooks/use-app-state";
 import { missingRecipients, useSend } from "@/lib/hooks/use-send";
@@ -57,7 +56,6 @@ export function InlineReply({
   drafts: React.RefObject<Map<string, Draft>>;
 }) {
   const send = useSend();
-  const hueFor = useAccountHue();
 
   const seedFor = (mode: ReplyMode) =>
     buildReplySeed(
@@ -303,11 +301,6 @@ export function InlineReply({
       <div className="mt-3 flex items-center gap-3">
         {account && (
           <span className="flex min-w-0 items-center gap-1.5 font-mono text-[11px] text-fg-tertiary">
-            <span
-              aria-hidden="true"
-              className="inline-block size-1.5 shrink-0 rounded-[var(--radius-full)]"
-              style={{ background: hueFor(account.id) }}
-            />
             <span className="truncate">Sending from {account.email}</span>
           </span>
         )}

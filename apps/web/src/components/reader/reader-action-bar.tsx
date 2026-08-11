@@ -71,7 +71,7 @@ export function ReaderActionBar({
   };
 
   return (
-    <div className="sticky top-0 z-10 flex h-12 shrink-0 items-center gap-1 border-b border-border-subtle bg-surface-2 px-3">
+    <div className="sticky top-0 z-10 flex h-11 shrink-0 items-center gap-1 border-b border-border-subtle bg-surface-2 px-3">
       {narrow && (
         <Button
           type="button"

@@ -21,6 +21,22 @@ export type StoredAccount = {
   createdAt: string;
 };
 
+/**
+ * One turn of the agent conversation.
+ *
+ * `activity` is the agent narrating what it is doing ("reading 12 messages in
+ * Inbox") as distinct from answering. The UI renders it as a quiet line rather
+ * than a message, which is why it is a role and not a flag on `agent`.
+ */
+export type StoredTurn = {
+  seq: number;
+  at: string;
+  role: "user" | "agent" | "activity";
+  text: string;
+  /** MCP client name, when the caller identified itself. */
+  agent: string | null;
+};
+
 export class Store {
   readonly db: Database.Database;
 
@@ -65,6 +81,143 @@ export class Store {
         `ALTER TABLE accounts ADD COLUMN auth_kind TEXT NOT NULL DEFAULT 'password'`,
       );
     }
+
+    // The agent conversation. `text_enc` is encrypted with the same master key
+    // the account passwords use, and for the same reason: an agent summarising
+    // an inbox puts mail content in these rows, and mail content has never been
+    // at rest in plaintext anywhere else in this product.
+    //
+    // `delivered` belongs to user rows only. It is the hand-off cursor: a
+    // message typed while no agent was listening is still waiting when one
+    // arrives, and it survives a restart because it is a column and not a
+    // variable in a process that just exited.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_turns (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        role TEXT NOT NULL,
+        text_enc TEXT NOT NULL,
+        agent TEXT,
+        delivered INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+  }
+
+  /* ---- agent conversation ------------------------------------------------
+     Rows in, rows out. Every decision about who gets a message and when lives
+     in AgentChannel; this class only reads and writes.
+     --------------------------------------------------------------------- */
+
+  appendTurn(input: {
+    at: string;
+    role: StoredTurn["role"];
+    text: string;
+    agent: string | null;
+  }): StoredTurn {
+    const res = this.db
+      .prepare(
+        `INSERT INTO agent_turns (at, role, text_enc, agent, delivered)
+         VALUES (@at, @role, @textEnc, @agent, 0)`,
+      )
+      .run({
+        at: input.at,
+        role: input.role,
+        textEnc: encryptSecret(this.masterKey, input.text),
+        agent: input.agent,
+      });
+    return {
+      seq: Number(res.lastInsertRowid),
+      at: input.at,
+      role: input.role,
+      text: input.text,
+      agent: input.agent,
+    };
+  }
+
+  listTurns(options: { afterSeq?: number; limit?: number } = {}): StoredTurn[] {
+    const limit = Math.min(Math.max(options.limit ?? 200, 1), 1000);
+    // Newest `limit` rows, then flipped: asking for "the last 200" and getting
+    // the FIRST 200 is the classic version of this bug.
+    const rows = this.db
+      .prepare(
+        `SELECT seq, at, role, text_enc as textEnc, agent
+         FROM agent_turns
+         WHERE seq > ?
+         ORDER BY seq DESC
+         LIMIT ?`,
+      )
+      .all(options.afterSeq ?? 0, limit) as Array<{
+      seq: number;
+      at: string;
+      role: StoredTurn["role"];
+      textEnc: string;
+      agent: string | null;
+    }>;
+    return rows.reverse().map((row) => ({
+      seq: row.seq,
+      at: row.at,
+      role: row.role,
+      text: decryptSecret(this.masterKey, row.textEnc),
+      agent: row.agent,
+    }));
+  }
+
+  /**
+   * The oldest user turn no agent has taken yet, marked as taken in the same
+   * transaction. Returns null when there is nothing waiting.
+   *
+   * The claim has to be atomic. Two agents polling the same channel would
+   * otherwise both read the same row and both answer it.
+   */
+  claimNextUserTurn(): StoredTurn | null {
+    const claim = this.db.transaction((): StoredTurn | null => {
+      const row = this.db
+        .prepare(
+          `SELECT seq, at, role, text_enc as textEnc, agent
+           FROM agent_turns
+           WHERE role = 'user' AND delivered = 0
+           ORDER BY seq ASC
+           LIMIT 1`,
+        )
+        .get() as
+        | {
+            seq: number;
+            at: string;
+            role: StoredTurn["role"];
+            textEnc: string;
+            agent: string | null;
+          }
+        | undefined;
+      if (!row) return null;
+      this.db
+        .prepare(`UPDATE agent_turns SET delivered = 1 WHERE seq = ?`)
+        .run(row.seq);
+      return {
+        seq: row.seq,
+        at: row.at,
+        role: row.role,
+        text: decryptSecret(this.masterKey, row.textEnc),
+        agent: row.agent,
+      };
+    });
+    return claim();
+  }
+
+  clearTurns(): void {
+    this.db.exec(`DELETE FROM agent_turns`);
+  }
+
+  /** Drops everything but the newest `keep` turns. */
+  trimTurns(keep: number): void {
+    this.db
+      .prepare(
+        `DELETE FROM agent_turns WHERE seq <= (
+           SELECT COALESCE(MIN(seq), 0) - 1 FROM (
+             SELECT seq FROM agent_turns ORDER BY seq DESC LIMIT ?
+           )
+         )`,
+      )
+      .run(Math.max(keep, 1));
   }
 
   listAccounts(): Array<{

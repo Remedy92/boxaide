@@ -2,13 +2,12 @@
 
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
-import { AccountRail, StatusDot } from "@/components/atoms";
+import { StatusDot } from "@/components/atoms";
 import { AttachmentNote } from "@/components/reader/attachment-note";
 import { Monogram } from "@/components/list/monogram";
 import { Badge } from "@/components/ui/badge";
 import { displayName, parseAddress, parseAddressList } from "@/lib/format/address";
 import { formatReaderDate, isoAttr, isoTitle } from "@/lib/format/date";
-import { useAccountHue } from "@/lib/hooks/use-account-hue";
 import type { MailMessage, MailMessageSummary } from "@/lib/types";
 
 /**
@@ -25,7 +24,6 @@ export function IdentityBlock({
   alias: string | null;
 }) {
   const [expanded, setExpanded] = React.useState(false);
-  const hueFor = useAccountHue();
   const sender = parseAddress(message.from);
   const recipients = parseAddressList(message.to);
   const cc = "cc" in message ? parseAddressList(message.cc ?? "") : [];
@@ -36,10 +34,9 @@ export function IdentityBlock({
   return (
     <div>
       <div className="flex items-start gap-3">
-        <AccountRail seed={message.accountId} className="min-h-[44px] self-stretch" />
-        <Monogram from={message.from} size={36} hueSeed={sender.address || message.from} />
+        <Monogram from={message.from} size={36} />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[14px] leading-5 font-semibold text-fg">
+          <p className="truncate text-[13px] leading-[18px] font-semibold text-fg">
             {displayName(message.from)}
           </p>
           {sender.address && (
@@ -60,7 +57,7 @@ export function IdentityBlock({
         </time>
       </div>
 
-      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 pl-[calc(3px+0.75rem+36px+0.75rem)]">
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 pl-[calc(36px+0.75rem)]">
         <button
           type="button"
           aria-expanded={expanded}
@@ -84,11 +81,6 @@ export function IdentityBlock({
 
         {/* Provenance: which mailbox received this, and from which folder. */}
         <span className="flex items-center gap-1.5" title={`${alias ?? message.accountId} · ${message.folder}`}>
-          <span
-            aria-hidden="true"
-            className="inline-block size-1.5 rounded-[var(--radius-full)]"
-            style={{ background: hueFor(message.accountId) }}
-          />
           <span className="font-mono text-[11px] leading-4 text-fg-secondary">
             {alias ?? message.accountId}
           </span>

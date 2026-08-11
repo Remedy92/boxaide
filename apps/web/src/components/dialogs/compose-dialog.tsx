@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { Kbd, Spinner, TechnicalDetails } from "@/components/atoms";
+import { Field, Kbd, Spinner, TechnicalDetails } from "@/components/atoms";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -38,16 +38,26 @@ import {
   validateDraft,
   type DraftField,
 } from "@/lib/format/address";
-import { useAccountHue } from "@/lib/hooks/use-account-hue";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import type { ComposeSeed } from "@/lib/hooks/use-app-state";
+import { useApp } from "@/lib/hooks/use-app-state";
+import {
+  useCreateDraft,
+  useDeleteDraft,
+  useUpdateDraft,
+} from "@/lib/hooks/use-drafts";
 import { missingRecipients, useSend } from "@/lib/hooks/use-send";
 
 /**
- * §6.6. No attachment control (there is no upload path in SendMessageInput), no
- * rich-text toggle (the client refuses to render HTML, so a composer whose
- * output it will not display is incoherent), and no Save draft (there is no
- * draft endpoint).
+ * The composer.
+ *
+ * No attachment control — there is no upload path in SendMessageInput — and no
+ * rich-text toggle, because this client refuses to render HTML and a composer
+ * whose output it will not display is incoherent.
+ *
+ * Saving a draft IS supported: it stores plain text into the mailbox's own
+ * Drafts folder through `POST /api/drafts`, so the same draft shows up in the
+ * user's phone mail app and to any agent holding the MCP tools.
  */
 export function ComposeDialog({
   open,
@@ -72,9 +82,12 @@ function ComposeForm({
   seed: ComposeSeed;
   onOpenChange: (open: boolean) => void;
 }) {
+  const app = useApp();
   const accounts = useAccounts();
-  const hueFor = useAccountHue();
   const send = useSend();
+  const createDraft = useCreateDraft();
+  const updateDraft = useUpdateDraft();
+  const deleteDraft = useDeleteDraft();
   const list = accounts.data ?? [];
 
   const [account, setAccount] = React.useState(
@@ -93,11 +106,24 @@ function ComposeForm({
     field: DraftField;
     message: string;
   } | null>(null);
+  /* The draft this composer is bound to. It starts as the one it was opened
+     from and is replaced on every save, because the update route mints a new
+     id and retires the old one. */
+  const [draftRef, setDraftRef] = React.useState<{
+    accountId: string;
+    draftId: string;
+  } | null>(
+    seed.draftId && seed.draftAccountId
+      ? { accountId: seed.draftAccountId, draftId: seed.draftId }
+      : null,
+  );
   const toRef = React.useRef<HTMLInputElement | null>(null);
   const subjectRef = React.useRef<HTMLInputElement | null>(null);
   const bodyRef = React.useRef<HTMLTextAreaElement | null>(null);
 
   const chosen = list.find((entry) => entry.alias === account) ?? null;
+  const savingDraft = createDraft.isPending || updateDraft.isPending;
+  const busy = send.isPending || savingDraft;
 
   const close = (force = false) => {
     if (!force && text.trim().length > 0) {
@@ -105,6 +131,62 @@ function ComposeForm({
       return;
     }
     onOpenChange(false);
+  };
+
+  const draftFields = () => ({
+    to: to || undefined,
+    cc: cc || undefined,
+    bcc: bcc || undefined,
+    subject: subject || undefined,
+    text: text || undefined,
+    inReplyTo: seed.inReplyTo,
+    references: seed.references,
+  });
+
+  /**
+   * Save without sending. A draft may be half-written — every field on
+   * DraftInput is optional — so this deliberately runs none of the send-time
+   * validation. The only requirement is a mailbox to store it in.
+   */
+  const saveDraft = (thenClose: boolean) => {
+    if (!account) return;
+    const onError = (error: unknown) =>
+      toast.error("Could not save that draft", {
+        description: friendlyError(
+          error instanceof Error ? error.message : error,
+        ),
+      });
+
+    if (draftRef) {
+      updateDraft.mutate(
+        {
+          accountId: draftRef.accountId,
+          draftId: draftRef.draftId,
+          draft: draftFields(),
+        },
+        {
+          onSuccess: (ref) => {
+            setDraftRef({ accountId: ref.accountId, draftId: ref.id });
+            toast.success("Draft saved");
+            if (thenClose) onOpenChange(false);
+          },
+          onError,
+        },
+      );
+      return;
+    }
+
+    createDraft.mutate(
+      { account, draft: draftFields() },
+      {
+        onSuccess: (ref) => {
+          setDraftRef({ accountId: ref.accountId, draftId: ref.id });
+          toast.success("Saved to Drafts");
+          if (thenClose) onOpenChange(false);
+        },
+        onError,
+      },
+    );
   };
 
   const submit = () => {
@@ -145,6 +227,22 @@ function ComposeForm({
           } else {
             toast.success(`Sent to ${result.accepted.join(", ")}`);
           }
+          /* Only now: a stored draft is discarded after the server has taken
+             the message, never before, so a failed send cannot lose the text.
+             The failure is reported and the draft is left alone. */
+          if (draftRef) {
+            const gone = draftRef;
+            deleteDraft.mutate(
+              { accountId: gone.accountId, draftId: gone.draftId },
+              {
+                onError: () =>
+                  toast.warning("Sent, but the draft is still in Drafts", {
+                    description: "Discard it from the Drafts view.",
+                  }),
+              },
+            );
+            if (app.selectedDraft?.draftId === gone.draftId) app.clearSelection();
+          }
           onOpenChange(false);
         },
       },
@@ -156,24 +254,28 @@ function ComposeForm({
       ? "Forward message"
       : seed.mode === "reply" || seed.mode === "replyAll"
         ? "Reply"
-        : "New message";
+        : draftRef
+          ? "Continue draft"
+          : "New message";
 
   return (
     <>
       <Dialog open onOpenChange={(next) => (next ? undefined : close())}>
         <DialogContent
-          className="max-w-[620px]"
+          className="max-w-[600px]"
           onKeyDown={(event) => {
             if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
               event.preventDefault();
               submit();
             }
+            if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+              event.preventDefault();
+              saveDraft(false);
+            }
           }}
         >
           <DialogHeader>
-            <DialogTitle style={{ fontSize: "var(--text-display)" }}>
-              {title}
-            </DialogTitle>
+            <DialogTitle className="title-15">{title}</DialogTitle>
             <DialogDescription>
               Plain text only. mailmux sends through your own SMTP server and
               forces the From address to the mailbox you pick.
@@ -188,7 +290,7 @@ function ComposeForm({
           )}
 
           <div className="space-y-3">
-            <div className="space-y-1">
+            <div className="space-y-1.5">
               <Label
                 htmlFor="compose-from"
                 className="text-[12px] font-medium text-fg-secondary"
@@ -196,18 +298,13 @@ function ComposeForm({
                 From
               </Label>
               <Select value={account} onValueChange={setAccount}>
-                <SelectTrigger id="compose-from" className="h-8 w-full text-[13px]">
+                <SelectTrigger id="compose-from" className="h-8 w-full">
                   <SelectValue placeholder="Pick a mailbox" />
                 </SelectTrigger>
                 <SelectContent>
                   {list.map((entry) => (
                     <SelectItem key={entry.id} value={entry.alias}>
                       <span className="flex items-center gap-2">
-                        <span
-                          aria-hidden="true"
-                          className="inline-block size-1.5 rounded-[var(--radius-full)]"
-                          style={{ background: hueFor(entry.id) }}
-                        />
                         {entry.alias}
                         <span className="font-mono text-[11px] text-fg-tertiary">
                           {entry.email}
@@ -219,13 +316,7 @@ function ComposeForm({
               </Select>
             </div>
 
-            <div className="space-y-1">
-              <Label
-                htmlFor="compose-to"
-                className="text-[12px] font-medium text-fg-secondary"
-              >
-                To
-              </Label>
+            <Field id="compose-to" label="To">
               <Input
                 id="compose-to"
                 ref={toRef}
@@ -241,7 +332,7 @@ function ComposeForm({
                   setTo(event.target.value);
                 }}
               />
-            </div>
+            </Field>
 
             <button
               type="button"
@@ -253,45 +344,27 @@ function ComposeForm({
             </button>
 
             {showCc && (
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-1">
-                  <Label
-                    htmlFor="compose-cc"
-                    className="text-[12px] font-medium text-fg-secondary"
-                  >
-                    Cc
-                  </Label>
+              <div className="grid grid-cols-2 gap-3">
+                <Field id="compose-cc" label="Cc">
                   <Input
                     id="compose-cc"
                     value={cc}
                     className="font-mono"
                     onChange={(event) => setCc(event.target.value)}
                   />
-                </div>
-                <div className="space-y-1">
-                  <Label
-                    htmlFor="compose-bcc"
-                    className="text-[12px] font-medium text-fg-secondary"
-                  >
-                    Bcc
-                  </Label>
+                </Field>
+                <Field id="compose-bcc" label="Bcc">
                   <Input
                     id="compose-bcc"
                     value={bcc}
                     className="font-mono"
                     onChange={(event) => setBcc(event.target.value)}
                   />
-                </div>
+                </Field>
               </div>
             )}
 
-            <div className="space-y-1">
-              <Label
-                htmlFor="compose-subject"
-                className="text-[12px] font-medium text-fg-secondary"
-              >
-                Subject
-              </Label>
+            <Field id="compose-subject" label="Subject">
               <Input
                 id="compose-subject"
                 ref={subjectRef}
@@ -305,15 +378,9 @@ function ComposeForm({
                   setSubject(event.target.value);
                 }}
               />
-            </div>
+            </Field>
 
-            <div className="space-y-1">
-              <Label
-                htmlFor="compose-body"
-                className="text-[12px] font-medium text-fg-secondary"
-              >
-                Message
-              </Label>
+            <Field id="compose-body" label="Message">
               <Textarea
                 id="compose-body"
                 ref={bodyRef}
@@ -328,9 +395,9 @@ function ComposeForm({
                   setInvalid(null);
                   setText(event.target.value);
                 }}
-                className="max-h-[24rem] min-h-[16rem] resize-y"
+                className="max-h-[24rem] min-h-[15rem] resize-y"
               />
-            </div>
+            </Field>
           </div>
 
           {invalid && (
@@ -357,21 +424,33 @@ function ComposeForm({
           )}
 
           <DialogFooter className="items-center sm:justify-between">
-            <span className="font-mono text-[11px] text-fg-tertiary">
-              {chosen ? `Sending from ${chosen.email}` : "Pick a mailbox to send from"}
+            <span className="truncate font-mono text-[11px] text-fg-tertiary">
+              {chosen
+                ? `Sending from ${chosen.email}`
+                : "Pick a mailbox to send from"}
             </span>
             <span className="flex items-center gap-2">
               <Button
                 type="button"
                 variant="ghost"
-                disabled={send.isPending}
+                disabled={busy}
                 onClick={() => close()}
               >
                 Discard
               </Button>
               <Button
                 type="button"
-                disabled={send.isPending || !account}
+                variant="secondary"
+                disabled={busy || !account}
+                aria-busy={savingDraft || undefined}
+                onClick={() => saveDraft(true)}
+              >
+                {savingDraft && <Spinner />}
+                {savingDraft ? "Saving…" : "Save as draft"}
+              </Button>
+              <Button
+                type="button"
+                disabled={busy || !account}
                 aria-busy={send.isPending || undefined}
                 onClick={submit}
               >
@@ -389,7 +468,9 @@ function ComposeForm({
           <AlertDialogHeader>
             <AlertDialogTitle>Discard this message?</AlertDialogTitle>
             <AlertDialogDescription>
-              Your text is not saved anywhere.
+              {draftRef
+                ? "Your saved draft stays in the Drafts folder. Anything typed since the last save is lost."
+                : "Your text is not saved anywhere. Use Save as draft to keep it."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

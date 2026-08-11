@@ -30,8 +30,8 @@ export function QuotedBlock({ text, lines }: { text: string; lines: number }) {
             style={{
               whiteSpace: "pre-wrap",
               overflowWrap: "anywhere",
-              fontSize: "var(--text-body)",
-              lineHeight: "var(--leading-body)",
+              fontSize: "var(--text-read)",
+              lineHeight: "var(--leading-read)",
             }}
           >
             {linkifyToElements(text)}

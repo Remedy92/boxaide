@@ -61,6 +61,23 @@ export function MessageList({
   const hasRows = rows.length > 0;
   const searching = app.query.trim().length > 0;
 
+  /* Which mailbox a row came from, as its name.
+
+     This replaces the 2px colour stripe that used to run down the left of every
+     row. A stripe needs a legend the UI never had — the only way to learn that
+     dusty-blue meant "work" was to notice the same dusty blue in the sidebar —
+     and eight low-chroma greys are hard to tell apart at 2px anyway. The alias
+     says it outright, costs no colour, and reads the same to a screen reader.
+
+     Shown only in the unified view of more than one mailbox, which is the only
+     place the answer varies between rows. */
+  const showMailbox = app.account === "all" && (accounts.data?.length ?? 0) > 1;
+  const aliasById = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const account of accounts.data ?? []) map.set(account.id, account.alias);
+    return map;
+  }, [accounts.data]);
+
   /* ---- skeleton tiers, on the 300ms floor -------------------------- */
   const [waited, setWaited] = React.useState(0);
   React.useEffect(() => {
@@ -189,6 +206,7 @@ export function MessageList({
             selected={selectedId === message.id}
             active={activeId === message.id}
             compact={app.density === "compact"}
+            mailbox={showMailbox ? aliasById.get(message.accountId) : undefined}
             registerRow={registerRow}
             onSelect={select}
             onPrefetch={prefetch}
@@ -237,7 +255,7 @@ export function MessageList({
               : ""}
       </p>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">{body}</div>
+      <div className="pane-scroll min-h-0 flex-1 overflow-y-auto">{body}</div>
     </div>
   );
 }
