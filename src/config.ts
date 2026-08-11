@@ -1,5 +1,5 @@
 import { randomBytes, scryptSync } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -60,7 +60,44 @@ function expandHome(p: string): string {
 }
 
 function ensureDir(dir: string): void {
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // `recursive` already succeeds on an existing directory, so an existence
+  // check would only add a window for someone else to create it first.
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+}
+
+/**
+ * Read a generated secret from `path`, creating it on first use.
+ *
+ * The three files this manages — master key, scrypt salt, bearer token — are
+ * generated once and then depended on forever, so first-run creation must not
+ * race. Checking existence and then writing loses that race: two processes
+ * starting together (the desktop app and a `mailmux serve`, say) both find no
+ * file, both generate, both write, and the loser proceeds with a value that is
+ * no longer the one on disk. For the master key or the salt that means
+ * deriving a key that does not match the one the stored mail passwords were
+ * encrypted under.
+ *
+ * So absence is an ENOENT from the read, and creation is `wx`, which fails
+ * rather than truncating when the file appeared in between. Whoever creates
+ * the file wins and everyone else reads what they wrote. The loop runs twice
+ * at most in practice: once to find it missing, once to read the winner's.
+ */
+function loadOrCreateSecretFile(path: string, generate: () => string): string {
+  for (;;) {
+    try {
+      return readFileSync(path, "utf8").trim();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    const value = generate();
+    try {
+      writeFileSync(path, value, { mode: 0o600, flag: "wx" });
+      return value;
+    } catch (err) {
+      // Someone created it between the read and the write. Read theirs.
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+  }
 }
 
 /**
@@ -76,33 +113,12 @@ function ensureDir(dir: string): void {
  * Deleting this file makes stored mail passwords underivable. It sits in the
  * data directory next to `master.key`, so anything that backs one up takes
  * the other.
- *
- * Creation is `wx`, and a missing file is an ENOENT from the read rather than
- * a prior existsSync. Two processes starting together — the desktop app and a
- * `mailmux serve`, say — would otherwise both see no salt, both write one, and
- * the loser would derive a key that does not match the one its secrets were
- * encrypted under. Whoever creates the file first wins, and the other reads it.
  */
 function loadOrCreateSalt(dataDir: string): Buffer {
-  for (;;) {
-    const saltPath = join(dataDir, "master.salt");
-    try {
-      return Buffer.from(readFileSync(saltPath, "utf8").trim(), "hex");
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    }
-    const salt = randomBytes(16);
-    try {
-      writeFileSync(saltPath, salt.toString("hex"), {
-        mode: 0o600,
-        flag: "wx",
-      });
-      return salt;
-    } catch (err) {
-      // Someone created it between the read and the write. Read theirs.
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    }
-  }
+  const hex = loadOrCreateSecretFile(join(dataDir, "master.salt"), () =>
+    randomBytes(16).toString("hex"),
+  );
+  return Buffer.from(hex, "hex");
 }
 
 /**
@@ -133,22 +149,17 @@ function loadOrCreateKey(dataDir: string): Buffer {
     if (/^[0-9a-fA-F]{64}$/.test(envKey)) return Buffer.from(envKey, "hex");
     return deriveKeyFromPassphrase(envKey, loadOrCreateSalt(dataDir));
   }
-  const keyPath = join(dataDir, "master.key");
-  if (existsSync(keyPath)) {
-    return Buffer.from(readFileSync(keyPath, "utf8").trim(), "hex");
-  }
-  const key = randomBytes(32);
-  writeFileSync(keyPath, key.toString("hex"), { mode: 0o600 });
-  return key;
+  const hex = loadOrCreateSecretFile(join(dataDir, "master.key"), () =>
+    randomBytes(32).toString("hex"),
+  );
+  return Buffer.from(hex, "hex");
 }
 
 function loadOrCreateToken(dataDir: string): string {
   if (process.env.MAILMUX_TOKEN) return process.env.MAILMUX_TOKEN;
-  const tokenPath = join(dataDir, "bearer.token");
-  if (existsSync(tokenPath)) return readFileSync(tokenPath, "utf8").trim();
-  const token = randomBytes(24).toString("base64url");
-  writeFileSync(tokenPath, token, { mode: 0o600 });
-  return token;
+  return loadOrCreateSecretFile(join(dataDir, "bearer.token"), () =>
+    randomBytes(24).toString("base64url"),
+  );
 }
 
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
