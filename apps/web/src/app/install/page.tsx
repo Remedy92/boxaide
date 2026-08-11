@@ -58,7 +58,11 @@ const DOWNLOADS: Record<
   mac: {
     name: "Mac",
     file: "mailmux-mac.dmg",
-    needs: "macOS 12 or later",
+    // Apple silicon only. `electron-builder --mac dmg` builds for the host
+    // architecture, and this was built on an M-series machine; `lipo -archs`
+    // on the packaged binary reports arm64 alone. Saying "macOS 12 or later"
+    // on its own would hand an Intel Mac a file it cannot run.
+    needs: "macOS 12 or later, Apple silicon",
     // The second sentence is here because the dmg is signed with a Developer ID
     // but not notarised, and macOS refuses the first open of anything it cannot
     // check with Apple. Right-click → Open stopped working for this in Sequoia;
