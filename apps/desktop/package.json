@@ -9,6 +9,7 @@
   "main": "src/main.js",
   "scripts": {
     "sync": "node scripts/sync-server.mjs",
+    "icons": "node scripts/make-icons.mjs",
     "predev": "npm run sync",
     "dev": "electron .",
     "presmoke": "npm run sync",

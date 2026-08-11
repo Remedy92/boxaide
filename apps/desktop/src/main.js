@@ -9,7 +9,8 @@
  * There is no preload script and no IPC. The renderer is the same static page
  * the browser gets, and it gets no Electron surface at all.
  */
-import { app, BrowserWindow, dialog, shell } from "electron";
+import { app, BrowserWindow, dialog, nativeImage, shell } from "electron";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,6 +18,16 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 /** `npm run smoke` — load the window, report, quit. Never shows a window. */
 const smoke = process.argv.includes("--smoke");
+
+/**
+ * The generated mark, from `npm run icons`.
+ *
+ * A packaged build takes its icon from the bundle — the .icns on macOS, the
+ * .ico compiled into the .exe — so this is only read when running unpackaged.
+ * Without it `npm run dev` shows the stock Electron diamond, which makes the
+ * one thing this task is checking impossible to check.
+ */
+const iconPng = join(here, "..", "build", "icon.png");
 
 /**
  * The UI export lives outside the asar in a packaged build (`extraResources`),
@@ -76,6 +87,12 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 async function start() {
+  // macOS takes the dock icon from the bundle once packaged; unpackaged there is
+  // no bundle to read, so it has to be set by hand. Windows and Linux get theirs
+  // from the BrowserWindow below.
+  if (!app.isPackaged && process.platform === "darwin" && existsSync(iconPng)) {
+    app.dock?.setIcon(nativeImage.createFromPath(iconPng));
+  }
   const { startServer } = await import("../server/dist/app.js");
   // host is pinned rather than read from MAILMUX_HOST: a desktop app that binds
   // a non-loopback address would put decrypted mail credentials on the LAN.
@@ -97,6 +114,10 @@ function createWindow(url) {
     minWidth: 960,
     minHeight: 620,
     title: "mailmux",
+    // Ignored on macOS, which reads the bundle. Set unconditionally rather than
+    // behind a platform check so a Windows or Linux dev run is not the stock
+    // Electron diamond.
+    ...(existsSync(iconPng) ? { icon: iconPng } : {}),
     // A standard frame: the traffic lights stay in the title bar, where they
     // cannot land on top of the web UI's own header. The page ships no drag
     // region and no top inset, so `hiddenInset` would cover its top-left
