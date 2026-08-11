@@ -136,6 +136,33 @@ export function isLocalHostHeader(host: string | undefined): boolean {
 }
 
 /**
+ * True only when the server's own bind address is loopback.
+ *
+ * The Host and Origin guards on /api/local-bootstrap are browser guards, and
+ * a browser is not the threat here: a remote client on a `0.0.0.0` bind can
+ * send `Host: localhost` and no Origin at all, and both guards pass. So the
+ * bind address itself decides whether the token endpoint exists.
+ *
+ * Any 127.0.0.0/8 address counts, not just 127.0.0.1 — the whole block is
+ * loopback-only. An empty or `*` host means "every interface" and fails.
+ */
+export function isLoopbackBindAddress(host: string | undefined): boolean {
+  if (!host) return false;
+  const value = hostnameOf(host).replace(/^\[|\]$/g, "");
+  if (value === "localhost" || value === "::1") return true;
+  // Octets are checked numerically. A digit-count pattern would accept
+  // 127.999.999.999, which is not an address at all — and this function
+  // decides whether the token endpoint exists.
+  const octets = value.split(".");
+  if (octets.length !== 4) return false;
+  if (octets[0] !== "127") return false;
+  return octets.every(
+    (part) =>
+      /^\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255,
+  );
+}
+
+/**
  * Browser CSRF guard. Requests with no Origin (curl, MCP clients) pass;
  * a present Origin must be loopback.
  */
