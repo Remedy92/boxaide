@@ -136,6 +136,45 @@ export type AccountCredentials = {
   password: string;
 };
 
+/* -------------------------------------------------------------------------- */
+/* the agent conversation                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One turn. `activity` is the agent narrating what it is doing rather than
+ * answering, and the UI draws it as a quiet line instead of a message.
+ */
+export type AgentTurn = {
+  seq: number;
+  at: string; // ISO 8601
+  role: "user" | "agent" | "activity";
+  text: string;
+  /** MCP client name. Best effort — see AgentChannel.noteClient on the server. */
+  agent: string | null;
+};
+
+/**
+ * Who is listening.
+ *
+ * `waiting` is the only field that is proof: it counts agents parked in an open
+ * chat_await_message call. `listening` also accepts an agent that called within
+ * the last few seconds, so a normal poll loop does not flicker between
+ * iterations. Neither is a claim that any particular client is "connected" —
+ * see the capabilities dialog.
+ */
+export type AgentPresence = {
+  waiting: number;
+  listening: boolean;
+  lastSeenAt: string | null;
+  lastAgent: string | null;
+};
+
+/** GET /api/agent/state */
+export type AgentStateResponse = {
+  turns: AgentTurn[];
+  presence: AgentPresence;
+};
+
 /** Union of every error body shape the server can emit. */
 export type ErrorBody =
   | { error: string }

@@ -32,6 +32,24 @@ import { cn } from "@/lib/utils";
  * is the point: drafting is the default an agent should reach for, and sending
  * is a separate tool it has to choose on purpose.
  */
+/**
+ * The prompt that puts an agent into the chat loop.
+ *
+ * Worded for a model, not for a person: it names the three tools, says the loop
+ * is a loop, and pre-empts the two ways it reliably goes wrong — answering in
+ * its own terminal where the user cannot see it, and treating an empty
+ * chat_await_message as a reason to stop.
+ */
+const KICKOFF = `You are my mailmux inbox agent. Use the mailmux MCP tools.
+
+Loop: call chat_await_message, do the work, post the answer with chat_say, then
+call chat_await_message again. Keep going until I tell you to stop.
+
+Everything I read appears in the mailmux window, so every answer must go through
+chat_say — do not answer here. A chat_await_message that returns no message is
+normal; call it again. Use chat_activity for anything slow. Draft rather than
+send unless I ask you to send.`;
+
 export function AgentConnectDialog({
   open,
   onOpenChange,
@@ -62,8 +80,9 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
         <DialogHeader>
           <DialogTitle className="title-15">Connect your agent</DialogTitle>
           <DialogDescription>
-            Your agent can read, draft, and send from all your mailboxes.
-            Drafting is the default; sending needs the send tool.
+            Point any MCP client at mailmux. It can then read, draft and send
+            from all your mailboxes — and hold a conversation with you in the
+            Agent view. Drafting is the default; sending needs the send tool.
           </DialogDescription>
         </DialogHeader>
 
@@ -142,6 +161,23 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
               anything public.
             </p>
           )}
+        </div>
+
+        {/* Without this step the Agent view stays silent, and the reason is
+            invisible: MCP is client-driven, so mailmux cannot make an agent
+            start listening. Something has to tell it to enter the loop, and
+            that something is the person, once, in their own client. */}
+        <div className="space-y-2">
+          <SectionLabel>Then start the conversation</SectionLabel>
+          <p className="text-[13px] leading-[18px] text-fg-secondary">
+            Configuration alone does not make your agent appear in the Agent
+            view. Say this to it once, in its own window:
+          </p>
+          <CopyBlock value={KICKOFF} label="starting prompt" />
+          <p className="text-[12px] leading-4 text-fg-tertiary">
+            It then waits for whatever you type here. Anything you send before
+            it starts is queued, not lost.
+          </p>
         </div>
 
         <div className="space-y-2">

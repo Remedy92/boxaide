@@ -55,8 +55,14 @@ export type DialogName =
 
 export type SettingsFocus = "baseUrl" | "token" | null;
 
-/** Which pane the list is showing. Drafts are a separate collection, not a folder. */
-export type View = "mail" | "drafts";
+/**
+ * Which view owns the workspace.
+ *
+ * `agent` is the default and is a different SHAPE from the other two, not a
+ * different filter: it has no message list, so the shell drops to two columns.
+ * Drafts are a separate collection, not a folder.
+ */
+export type View = "agent" | "mail" | "drafts";
 
 export type Selection = { accountId: string; messageId: string };
 
@@ -248,7 +254,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const updateSettings = useUpdateSettings();
 
   const [account, setAccountState] = React.useState("all");
-  const [view, setViewState] = React.useState<View>("mail");
+  /* Agent first. The app opens on the conversation, not on a list of mail —
+     that is the product's whole claim, and a default that says otherwise is the
+     one place a person will believe over any amount of copy. */
+  const [view, setViewState] = React.useState<View>("agent");
   const [folder, setFolder] = React.useState<string | undefined>(undefined);
   const [unreadOnly, setUnreadOnlyState] = React.useState(false);
   const [rawQuery, setRawQuery] = React.useState("");

@@ -19,6 +19,7 @@ import {
   Search,
   Server,
   Settings2,
+  Sparkle,
   SunMoon,
   Trash2,
   FilePen,
@@ -205,6 +206,14 @@ function Palette({
       action: () => void queryClient.invalidateQueries({ queryKey: ["messages"] }),
     },
 
+    {
+      id: "go-agent",
+      group: "Go to",
+      label: "Agent conversation",
+      icon: <Sparkle />,
+      hint: "g a",
+      action: () => app.setView("agent"),
+    },
     {
       id: "go-inbox",
       group: "Go to",

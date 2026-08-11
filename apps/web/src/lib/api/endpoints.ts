@@ -12,11 +12,14 @@
  *     the page IS the server's own UI (getLocalBootstrap documents the guard).
  */
 
-import { query, request } from "@/lib/api/client";
+import { query, request, stream } from "@/lib/api/client";
 import { ApiError } from "@/lib/api/errors";
 import { DEFAULT_LIMIT } from "@/lib/constants";
 import type {
   AccountCredentials,
+  AgentPresence,
+  AgentStateResponse,
+  AgentTurn,
   ApiHealthResponse,
   ConnectionTestResult,
   CreatedAccount,
@@ -416,6 +419,72 @@ export async function listFolders(
     { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
   );
   return data.folders;
+}
+
+/* -------------------------------------------------------------------------- */
+/* the agent conversation                                                     */
+/* -------------------------------------------------------------------------- */
+
+/** History plus presence. `after` asks for turns newer than a sequence number. */
+export function getAgentState(ctx: Ctx, after?: number): Promise<AgentStateResponse> {
+  return request<AgentStateResponse>(`/api/agent/state${query({ after })}`, {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * Post the user's message.
+ *
+ * The response carries presence as it was at the moment of the write, which is
+ * what lets the composer say "no agent is listening" about THIS message rather
+ * than about whatever the last stream frame happened to report.
+ */
+export function sendAgentMessage(
+  text: string,
+  ctx: Ctx,
+): Promise<{ turn: AgentTurn; presence: AgentPresence }> {
+  return request<{ turn: AgentTurn; presence: AgentPresence }>("/api/agent/messages", {
+    method: "POST",
+    body: { text },
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+export function clearAgentConversation(ctx: Ctx): Promise<{ cleared: boolean }> {
+  return request<{ cleared: boolean }>("/api/agent/clear", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * Follow the conversation. Resolves when the server closes the stream; the
+ * caller reconnects.
+ */
+export function streamAgent(
+  ctx: Ctx,
+  on: { turn: (turn: AgentTurn) => void; presence: (presence: AgentPresence) => void },
+): Promise<void> {
+  return stream("/api/agent/stream", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+    onEvent: (event, data) => {
+      try {
+        if (event === "turn") on.turn(JSON.parse(data) as AgentTurn);
+        else if (event === "presence") on.presence(JSON.parse(data) as AgentPresence);
+      } catch {
+        // A frame we cannot parse is dropped rather than tearing down a live
+        // conversation. The next one re-states presence anyway.
+      }
+    },
+  });
 }
 
 /* -------------------------------------------------------------------------- */

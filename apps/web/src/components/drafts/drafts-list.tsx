@@ -37,13 +37,21 @@ export function DraftsList({
 }) {
   const app = useApp();
   const accounts = useAccounts();
-  const list = accounts.data ?? [];
+  // Memoised so the alias map below is not rebuilt on every render: `?? []`
+  // returns a fresh array each time the query has no data.
+  const list = React.useMemo(() => accounts.data ?? [], [accounts.data]);
   const drafts = useDrafts(app.account);
 
   const rows = drafts.drafts;
   const selectedId = app.selectedDraft?.draftId ?? null;
   const activeId = selectedId ?? rows[0]?.id ?? null;
-  const showRail = app.account === ALL && list.length > 1;
+  /* The mailbox alias, in the unified view only. See MessageList. */
+  const showMailbox = app.account === ALL && list.length > 1;
+  const aliasById = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const account of list) map.set(account.id, account.alias);
+    return map;
+  }, [list]);
 
   const rowRefs = React.useRef(new Map<string, HTMLLIElement>());
   const registerRow = React.useCallback(
@@ -112,7 +120,7 @@ export function DraftsList({
             draft={draft}
             selected={selectedId === draft.id}
             active={activeId === draft.id}
-            showRail={showRail}
+            mailbox={showMailbox ? aliasById.get(draft.accountId) : undefined}
             onSelect={selectDraft}
             registerRow={registerRow}
           />

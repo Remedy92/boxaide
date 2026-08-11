@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { AgentView } from "@/components/agent/agent-view";
 import { AgentConnectDialog } from "@/components/dialogs/agent-connect-dialog";
 import { CapabilitiesDialog } from "@/components/dialogs/capabilities-dialog";
 import { CommandPalette } from "@/components/dialogs/command-palette";
@@ -17,6 +18,7 @@ import { LeftRail } from "@/components/rail/left-rail";
 import { RailSheet } from "@/components/rail/rail-sheet";
 import { Reader } from "@/components/reader/reader";
 import { useAccounts } from "@/lib/hooks/use-accounts";
+import { AgentProvider } from "@/lib/hooks/use-agent";
 import { AppStateProvider, useApp } from "@/lib/hooks/use-app-state";
 import { useDrafts } from "@/lib/hooks/use-drafts";
 import { useKeyboard } from "@/lib/hooks/use-keyboard";
@@ -29,7 +31,12 @@ import {
 export function AppShell() {
   return (
     <AppStateProvider>
-      <Shell />
+      {/* Above the shell, so the conversation stream stays open across view
+          changes: an answer that lands while the user is reading mail has to be
+          there when they switch back, and the sidebar dot has to stay honest. */}
+      <AgentProvider>
+        <Shell />
+      </AgentProvider>
     </AppStateProvider>
   );
 }
@@ -49,6 +56,8 @@ function Shell() {
   const nav = useMessageNavigation();
   const markRead = useMarkRead();
   const drafting = app.view === "drafts";
+  /** No message list and no reading pane — the conversation is the workspace. */
+  const conversing = app.view === "agent";
   const drafts = useDrafts(app.account, drafting);
 
   // Mounted here and nowhere else: prefetch-below and the debounced mark-read.
@@ -77,6 +86,7 @@ function Shell() {
   const { gPending } = useKeyboard(
     {
       next: () => {
+        if (conversing) return;
         if (drafting) {
           if (draftRows.length === 0) return;
           selectDraftAt(
@@ -87,6 +97,7 @@ function Shell() {
         nav.next();
       },
       previous: () => {
+        if (conversing) return;
         if (drafting) {
           if (draftRows.length === 0) return;
           selectDraftAt(draftIndex <= 0 ? 0 : draftIndex - 1);
@@ -95,6 +106,7 @@ function Shell() {
         nav.previous();
       },
       open: () => {
+        if (conversing) return;
         if (drafting) {
           if (draftIndex < 0) selectDraftAt(0);
           return;
@@ -128,7 +140,7 @@ function Shell() {
         row?.focus();
       },
       toggleRead: () => {
-        if (drafting) return;
+        if (drafting || conversing) return;
         const current = nav.current;
         if (!current) return;
         markRead.mutate({
@@ -137,9 +149,12 @@ function Shell() {
           seen: !current.seen,
         });
       },
-      reply: () => (drafting ? undefined : app.requestReply("reply")),
-      replyAll: () => (drafting ? undefined : app.requestReply("replyAll")),
-      forward: () => (drafting ? undefined : app.requestReply("forward")),
+      reply: () =>
+        drafting || conversing ? undefined : app.requestReply("reply"),
+      replyAll: () =>
+        drafting || conversing ? undefined : app.requestReply("replyAll"),
+      forward: () =>
+        drafting || conversing ? undefined : app.requestReply("forward"),
       compose: () => {
         if (list.length === 0) return;
         app.openCompose({ account: list[0]?.alias });
@@ -147,6 +162,7 @@ function Shell() {
       focusSearch: app.focusSearch,
       commandPalette: () => app.openPalette(),
       shortcuts: () => app.openDialog("shortcuts"),
+      goAgent: () => app.setView("agent"),
       goInbox: () => {
         app.setView("mail");
         app.setAccount("all");
@@ -162,7 +178,7 @@ function Shell() {
         if (account) app.setAccount(account.alias);
       },
       goFolder: () => {
-        if (app.account === "all" || drafting) return;
+        if (app.account === "all" || drafting || conversing) return;
         app.openPalette("folders");
       },
       toggleRail: app.toggleRail,
@@ -180,7 +196,7 @@ function Shell() {
 
   const collapsedRail = app.medium || app.railCollapsed;
   const openItem = drafting ? app.selectedDraft !== null : app.selected !== null;
-  const showPaneOnly = app.narrow && openItem;
+  const showPaneOnly = !conversing && app.narrow && openItem;
   /** Narrow with nothing open: the reading pane is not rendered, so the list is the page. */
   const listIsMain = app.narrow && !showPaneOnly;
 
@@ -202,6 +218,10 @@ function Shell() {
       data-density={app.density}
       data-rail={collapsedRail ? "collapsed" : "expanded"}
       data-narrow={app.narrow ? "true" : "false"}
+      /* The Agent view has no list column, so the grid drops to two tracks.
+         Driven by a data attribute rather than an inline style so the media
+         queries in globals.css can still override it at the breakpoints. */
+      data-view={conversing ? "agent" : "mail"}
       style={
         app.narrow
           ? ({ gridTemplateColumns: "minmax(0, 1fr)" } as React.CSSProperties)
@@ -242,36 +262,52 @@ function Shell() {
 
       {/* There is a <main> at every width. The landmark moves rather than
           disappearing: below 760px with nothing open the list IS the page, so
-          it carries it. */}
-      {(!app.narrow || !showPaneOnly) &&
-        (listIsMain ? (
-          <main
-            aria-label={drafting ? "Drafts" : "Messages"}
-            tabIndex={-1}
-            className="h-full min-h-0 border-r border-border-subtle bg-surface-1"
-          >
-            {listPane}
-          </main>
-        ) : (
-          <div
-            role="region"
-            aria-label={drafting ? "Draft list" : "Message list"}
-            className="h-full min-h-0 border-r border-border-subtle bg-surface-1"
-          >
-            {listPane}
-          </div>
-        ))}
-
-      {(!app.narrow || showPaneOnly) && (
+          it carries it. In the Agent view the conversation is the only pane and
+          carries it at every width. */}
+      {conversing ? (
         <main
-          aria-label={drafting ? "Draft" : "Message"}
+          aria-label="Agent conversation"
           tabIndex={-1}
-          className={`h-full min-h-0 bg-surface-2 ${
-            showPaneOnly && !app.reducedMotion ? "mailmux-slide-in" : ""
-          }`}
+          className="h-full min-h-0 bg-surface-2"
         >
-          {drafting ? <DraftEditor /> : <Reader />}
+          <AgentView
+            onOpenRail={() => app.setRailSheetOpen(true)}
+            showRailButton={app.narrow}
+          />
         </main>
+      ) : (
+        <>
+          {(!app.narrow || !showPaneOnly) &&
+            (listIsMain ? (
+              <main
+                aria-label={drafting ? "Drafts" : "Messages"}
+                tabIndex={-1}
+                className="h-full min-h-0 border-r border-border-subtle bg-surface-1"
+              >
+                {listPane}
+              </main>
+            ) : (
+              <div
+                role="region"
+                aria-label={drafting ? "Draft list" : "Message list"}
+                className="h-full min-h-0 border-r border-border-subtle bg-surface-1"
+              >
+                {listPane}
+              </div>
+            ))}
+
+          {(!app.narrow || showPaneOnly) && (
+            <main
+              aria-label={drafting ? "Draft" : "Message"}
+              tabIndex={-1}
+              className={`h-full min-h-0 bg-surface-2 ${
+                showPaneOnly && !app.reducedMotion ? "mailmux-slide-in" : ""
+              }`}
+            >
+              {drafting ? <DraftEditor /> : <Reader />}
+            </main>
+          )}
+        </>
       )}
 
       {app.narrow && (

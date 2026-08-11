@@ -4,13 +4,10 @@ import * as React from "react";
 import { Check, Copy, LoaderCircle } from "lucide-react";
 import { toast } from "sonner";
 import { cn, copyToClipboard } from "@/lib/utils";
-import { useAccountHue } from "@/lib/hooks/use-account-hue";
 import { friendlyError } from "@/lib/api/errors";
 
 /**
- * The handful of shapes that appear in more than one pane. Keeping them here
- * rather than duplicating them is what stops the mailbox tint drifting between
- * the sidebar, the list and the reader.
+ * The handful of shapes that appear in more than one pane.
  *
  * Icons: lucide, always `size-4` (16px) and always `strokeWidth={1.5}`. One
  * size and one stroke weight across the whole product; a 20px icon or a 2px
@@ -75,33 +72,6 @@ export function StatusDot({
 }
 
 /**
- * The 2px mailbox tint. Seeded on the account id everywhere except the reader's
- * identity monogram, so one mailbox is one tint in the sidebar, the list and
- * the reader. Two pixels, not three: it is a margin note, not a stripe.
- */
-export function AccountRail({
-  seed,
-  dim = false,
-  className,
-}: {
-  seed: string;
-  dim?: boolean;
-  className?: string;
-}) {
-  const hueFor = useAccountHue();
-  return (
-    <span
-      aria-hidden="true"
-      className={cn(
-        "block w-[2px] shrink-0 self-stretch rounded-[var(--radius-full)]",
-        className,
-      )}
-      style={{ background: hueFor(seed), opacity: dim ? 0.4 : 1 }}
-    />
-  );
-}
-
-/**
  * The raw server text stays reachable wherever an error is shown. Rendered only
  * when friendlyError() actually replaced the text.
  */
@@ -139,8 +109,13 @@ export function SectionLabel({
 }
 
 /**
- * The brand mark: three rails of falling height, converging. Monochrome — it
- * takes the ink colour of whatever it sits in, so it never introduces a hue.
+ * The brand mark: three rails of falling height — many mailboxes, one inbox.
+ * Monochrome — it takes the ink colour of whatever it sits in, so it never
+ * introduces a hue.
+ *
+ * The geometry is shared with two files that cannot import it: the desktop app
+ * icon (apps/desktop/scripts/make-icons.mjs, which rasterises it) and
+ * public/favicon.svg. Change one, change all three.
  */
 export function BrandGlyph({
   size = 14,
@@ -158,9 +133,9 @@ export function BrandGlyph({
       className={cn("shrink-0", className)}
       fill="currentColor"
     >
-      <rect x="1" y="0" width="2" height="14" rx="1" />
-      <rect x="6" y="2" width="2" height="10" rx="1" opacity="0.68" />
-      <rect x="11" y="4" width="2" height="6" rx="1" opacity="0.38" />
+      <rect x="1.7" y="0" width="2.6" height="14" rx="1.3" />
+      <rect x="6.2" y="2" width="2.6" height="10" rx="1.3" opacity="0.72" />
+      <rect x="10.7" y="4" width="2.6" height="6" rx="1.3" opacity="0.5" />
     </svg>
   );
 }

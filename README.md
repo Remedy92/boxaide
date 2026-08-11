@@ -161,8 +161,47 @@ npm run mcp
 | `messages_search` | Free-text search |
 | `message_get` | Full body |
 | `message_send` | Send (confirm in your agent) |
+| `chat_await_message` | Wait for the user's next message in the mailmux window |
+| `chat_say` | Answer them there |
+| `chat_activity` | Post a one-line "here is what I am doing" |
+| `chat_history` | Re-read the conversation |
 
 Accounts are connected once in the web UI (or API). Agents reuse the same store — **no per-agent OAuth**.
+
+## Talking to your agent inside mailmux
+
+The Agent view is the app's first screen, and mailmux runs no model behind it.
+The agent is whichever MCP client you already use — Claude Code, Codex, Cursor,
+Claude Desktop — and the four `chat_*` tools above are how it holds the
+conversation in the mailmux window instead of in its own terminal. There is no
+per-client integration: a long-polling tool call is the one capability every MCP
+client has.
+
+Connect the client as above, then say this to it once, in its own window:
+
+```
+You are my mailmux inbox agent. Use the mailmux MCP tools.
+
+Loop: call chat_await_message, do the work, post the answer with chat_say, then
+call chat_await_message again. Keep going until I tell you to stop.
+
+Everything I read appears in the mailmux window, so every answer must go through
+chat_say — do not answer here. A chat_await_message that returns no message is
+normal; call it again. Use chat_activity for anything slow. Draft rather than
+send unless I ask you to send.
+```
+
+The kickoff is not optional and cannot be automated away: MCP is client-driven,
+so nothing on the mailmux side can make an agent start listening. Anything you
+type before one does is queued and delivered when it arrives.
+
+Notes on what the UI claims. "Listening" means an agent is parked in an open
+`chat_await_message` — a request that is open right now, not an inference. It
+never says "connected", because a stateless `POST /mcp` cannot tell a configured
+client from one that was never started. Each message goes to exactly one agent,
+so do not point two at the same server. The conversation is stored in
+`~/.mailmux/mailmux.db`, encrypted with the same master key as the account
+passwords, because an agent summarising an inbox puts mail content in those rows.
 
 ## Install options
 

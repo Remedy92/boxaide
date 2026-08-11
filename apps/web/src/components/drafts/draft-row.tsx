@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { AccountRail } from "@/components/atoms";
 import { formatListDate, isoAttr, isoTitle } from "@/lib/format/date";
 import { cn } from "@/lib/utils";
 import type { MailDraft } from "@/lib/types";
@@ -17,7 +16,7 @@ export const DraftRow = React.memo(function DraftRow({
   draft,
   selected,
   active,
-  showRail,
+  mailbox,
   onSelect,
   registerRow,
 }: {
@@ -25,8 +24,11 @@ export const DraftRow = React.memo(function DraftRow({
   selected: boolean;
   /** Holds the roving tabindex. */
   active: boolean;
-  /** Only in the unified view: one mailbox means one tint, which is noise. */
-  showRail: boolean;
+  /**
+   * The mailbox alias, in the unified view of more than one mailbox. Replaces
+   * the colour stripe this row used to carry; see MessageRow for why.
+   */
+  mailbox?: string;
   onSelect: (selection: { accountId: string; draftId: string }) => void;
   registerRow: (id: string, node: HTMLLIElement | null) => void;
 }) {
@@ -66,9 +68,7 @@ export const DraftRow = React.memo(function DraftRow({
       }}
       className={cn(
         "grid cursor-pointer items-center gap-3 px-3 outline-offset-[-2px]",
-        showRail
-          ? "grid-cols-[2px_minmax(0,1fr)_auto]"
-          : "grid-cols-[minmax(0,1fr)_auto]",
+        "grid-cols-[minmax(0,1fr)_auto]",
         "transition-colors duration-[var(--dur-fast)] hover:duration-0",
         selected
           ? "bg-surface-selected"
@@ -80,18 +80,21 @@ export const DraftRow = React.memo(function DraftRow({
         paddingBottom: "var(--row-pad-y)",
       }}
     >
-      {showRail && <AccountRail seed={accountId} className="h-full" />}
-
       <span className="min-w-0">
-        <span className="flex items-center gap-1.5">
+        <span className="flex min-w-0 items-baseline gap-1.5">
           <span
             className={cn(
-              "truncate text-[13px] leading-[18px]",
+              "min-w-0 truncate text-[13px] leading-[18px]",
               to ? "font-medium text-fg" : "text-fg-tertiary italic",
             )}
           >
             {to || "No recipient"}
           </span>
+          {mailbox && (
+            <span className="shrink-0 text-[11px] leading-4 text-fg-tertiary">
+              {mailbox}
+            </span>
+          )}
         </span>
         <span className="block overflow-hidden text-[13px] leading-[18px] text-ellipsis whitespace-nowrap">
           <span className={subject ? "text-fg-secondary" : "text-fg-tertiary"}>

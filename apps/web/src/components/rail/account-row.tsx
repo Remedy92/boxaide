@@ -1,7 +1,7 @@
 "use client";
 
 import { X } from "lucide-react";
-import { AccountRail, StatusDot, type DotTone } from "@/components/atoms";
+import { StatusDot, type DotTone } from "@/components/atoms";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { friendlyError } from "@/lib/api/errors";
 import { useApp } from "@/lib/hooks/use-app-state";
@@ -69,7 +69,6 @@ export function AccountRow({
               selected ? "bg-surface-selected" : "hover:bg-surface-hover",
             )}
           >
-            <AccountRail seed={account.id} className="h-4" />
             <StatusDot tone={TONE[health.state]} />
           </button>
         </TooltipTrigger>
@@ -89,7 +88,6 @@ export function AccountRow({
         selected ? "bg-surface-selected" : "hover:bg-surface-hover",
       )}
     >
-      <AccountRail seed={account.id} className={compact ? "h-4" : "h-5"} />
       <button
         type="button"
         onClick={() => onSelect(account.alias)}

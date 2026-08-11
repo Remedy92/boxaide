@@ -27,6 +27,7 @@ export type KeyboardHandlers = {
   focusSearch: () => void;
   commandPalette: () => void;
   shortcuts: () => void;
+  goAgent: () => void;
   goInbox: () => void;
   goUnread: () => void;
   goDrafts: () => void;
@@ -101,7 +102,10 @@ export function useKeyboard(
       if (gPendingRef.current) {
         const key = event.key;
         closeGWindow();
-        if (key === "i") {
+        if (key === "a") {
+          event.preventDefault();
+          h.goAgent();
+        } else if (key === "i") {
           event.preventDefault();
           h.goInbox();
         } else if (key === "u") {

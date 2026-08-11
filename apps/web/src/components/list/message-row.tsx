@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import { Paperclip } from "lucide-react";
-import { AccountRail } from "@/components/atoms";
 import { displayName } from "@/lib/format/address";
 import { formatListDate, isoAttr, isoTitle } from "@/lib/format/date";
 import { cn } from "@/lib/utils";
@@ -22,7 +21,7 @@ export const MessageRow = React.memo(function MessageRow({
   selected,
   active,
   compact,
-  showRail,
+  mailbox,
   onSelect,
   onPrefetch,
   registerRow,
@@ -33,10 +32,10 @@ export const MessageRow = React.memo(function MessageRow({
   active: boolean;
   compact: boolean;
   /**
-   * The mailbox tint only earns its column in the unified view. Filtered to one
-   * mailbox, every row carries the same stripe, which is decoration.
+   * The mailbox alias, in the unified view of more than one mailbox. Undefined
+   * anywhere the answer is the same on every row, where it would be noise.
    */
-  showRail: boolean;
+  mailbox?: string;
   /* All three are stable across parent renders — the row closes over its own
      id rather than receiving a freshly built closure, which is what lets
      React.memo above actually bail out. */
@@ -74,7 +73,7 @@ export const MessageRow = React.memo(function MessageRow({
   const showSnippet = message.snippet && message.snippet !== message.subject;
   const label = `${message.seen ? "Read" : "Unread"}. ${sender}. ${
     message.subject
-  }. ${formatListDate(message.date)}${
+  }. ${formatListDate(message.date)}${mailbox ? `. In ${mailbox}` : ""}${
     message.hasAttachments ? ". Has attachments" : ""
   }`;
 
@@ -103,9 +102,7 @@ export const MessageRow = React.memo(function MessageRow({
       onMouseLeave={cancelHover}
       className={cn(
         "grid cursor-pointer items-center gap-2.5 px-3 outline-offset-[-2px]",
-        showRail
-          ? "grid-cols-[2px_18px_minmax(0,1fr)_auto]"
-          : "grid-cols-[18px_minmax(0,1fr)_auto]",
+        "grid-cols-[18px_minmax(0,1fr)_auto]",
         "transition-colors duration-[var(--dur-fast)] hover:duration-0",
         selected
           ? "bg-surface-selected"
@@ -119,14 +116,6 @@ export const MessageRow = React.memo(function MessageRow({
         paddingBottom: "var(--row-pad-y)",
       }}
     >
-      {showRail && (
-        <AccountRail
-          seed={message.accountId}
-          dim={message.seen && !selected}
-          className="h-full"
-        />
-      )}
-
       {/* There is no avatar and no monogram in this pane. The API has no avatar
           source, hashing a correspondent's address to Gravatar would leak it,
           and a coloured initial per row is the loudest thing a dense list can
@@ -141,13 +130,24 @@ export const MessageRow = React.memo(function MessageRow({
       </span>
 
       <span className="min-w-0">
-        <span
-          className={cn(
-            "block truncate text-[13px] leading-[18px]",
-            message.seen ? "font-normal text-fg-secondary" : "font-medium text-fg",
+        {/* The sender truncates; the mailbox never does. Letting the pair share
+            the ellipsis would cut the alias to "wo…" on the rows with the
+            longest sender names, which are exactly the rows where knowing the
+            mailbox matters. */}
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <span
+            className={cn(
+              "min-w-0 truncate text-[13px] leading-[18px]",
+              message.seen ? "font-normal text-fg-secondary" : "font-medium text-fg",
+            )}
+          >
+            {sender}
+          </span>
+          {mailbox && (
+            <span className="shrink-0 text-[11px] leading-4 text-fg-tertiary">
+              {mailbox}
+            </span>
           )}
-        >
-          {sender}
         </span>
         <span
           className="block overflow-hidden text-ellipsis whitespace-nowrap"

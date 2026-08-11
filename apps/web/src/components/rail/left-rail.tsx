@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { FilePen, Inbox, MailOpen, Plus } from "lucide-react";
+import { FilePen, Inbox, MailOpen, Plus, Sparkle } from "lucide-react";
+import { StatusDot } from "@/components/atoms";
 import { AccountRow, type AccountHealth } from "@/components/rail/account-row";
 import { AgentsSection } from "@/components/rail/agents-section";
 import { BrandMark } from "@/components/rail/brand-mark";
@@ -18,6 +19,7 @@ import {
 } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAccounts } from "@/lib/hooks/use-accounts";
+import { useAgent } from "@/lib/hooks/use-agent";
 import { useApp } from "@/lib/hooks/use-app-state";
 import { useConnection } from "@/lib/hooks/use-connection";
 import { useHealth } from "@/lib/hooks/use-health";
@@ -42,6 +44,7 @@ export function LeftRail({
   const accounts = useAccounts();
   const health = useHealth();
   const connection = useConnection();
+  const agent = useAgent();
   const messages = useMessages({
     account: app.account,
     folder: app.folder,
@@ -79,6 +82,25 @@ export function LeftRail({
   const viewsAndFolders = (
     <>
       <div className="space-y-px">
+        {/* First, and first for a reason: the conversation is the product's
+            front door. The trailing dot is the same fact the Agent header
+            states in words — an agent is parked in an open chat_await_message
+            — and it is absent rather than grey when nothing is listening, so
+            the sidebar never carries a status nobody asked about. */}
+        <NavItem
+          icon={Sparkle}
+          label="Agent"
+          active={app.view === "agent"}
+          onClick={() => app.setView("agent")}
+          trailing={
+            agent.presence.listening ? (
+              <span className="flex items-center pr-0.5">
+                <StatusDot tone="success" />
+                <span className="sr-only">An agent is listening</span>
+              </span>
+            ) : undefined
+          }
+        />
         <NavItem
           icon={Inbox}
           label="Inbox"
@@ -109,15 +131,21 @@ export function LeftRail({
         />
       </div>
 
-      <FolderList
-        accountRef={app.account}
-        activeFolder={app.folder}
-        disabled={app.view === "drafts"}
-        onSelect={(path) => {
-          app.setView("mail");
-          app.setFolder(path);
-        }}
-      />
+      {/* Not rendered in the Agent view. Folders scope the message list, and in
+          a conversation there is no list to scope — the section would sit there
+          explaining that it needs a mailbox picked, about a pane that is not on
+          screen. Drafts still shows it, disabled, because Drafts IS a list. */}
+      {app.view !== "agent" && (
+        <FolderList
+          accountRef={app.account}
+          activeFolder={app.folder}
+          disabled={app.view === "drafts"}
+          onSelect={(path) => {
+            app.setView("mail");
+            app.setFolder(path);
+          }}
+        />
+      )}
     </>
   );
 

@@ -12,7 +12,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useAccountHue } from "@/lib/hooks/use-account-hue";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useApp, useSearchQuery } from "@/lib/hooks/use-app-state";
 import { useFolders } from "@/lib/hooks/use-folders";
@@ -41,7 +40,6 @@ export function ListHeader({
   const app = useApp();
   const rawQuery = useSearchQuery();
   const accounts = useAccounts();
-  const hueFor = useAccountHue();
   // A local ref, registered with the shell in an effect. Passing the context's
   // callback straight to `ref` would make every later `app.*` read count as a
   // ref access during render.
@@ -134,14 +132,7 @@ export function ListHeader({
             <SelectItem value={ALL}>All mailboxes</SelectItem>
             {list.map((account) => (
               <SelectItem key={account.id} value={account.alias}>
-                <span className="flex items-center gap-2">
-                  <span
-                    aria-hidden="true"
-                    className="inline-block h-3.5 w-[3px] rounded-[var(--radius-full)]"
-                    style={{ background: hueFor(account.id) }}
-                  />
-                  {account.alias}
-                </span>
+                {account.alias}
               </SelectItem>
             ))}
           </SelectContent>

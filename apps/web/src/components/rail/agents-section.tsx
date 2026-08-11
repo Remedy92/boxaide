@@ -7,17 +7,18 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 /**
- * mailmux cannot tell you whether an agent is connected.
+ * mailmux still cannot tell you whether an agent is CONNECTED.
  *
- * POST /mcp is stateless: it handles `initialize`, stores nothing, mints no
- * session id and records no call. stdio MCP runs in a different process the
- * server cannot observe even in principle, and Store.migrate creates one table
- * — `accounts` — so there is nowhere to put an event.
+ * POST /mcp is stateless: it handles `initialize`, stores nothing and mints no
+ * session id, so a client that has configured mailmux and gone quiet is
+ * indistinguishable from one that was never started. Nothing here claims
+ * otherwise: no agent count, no "connected", no activity feed.
  *
- * Therefore: no "Agent connected", no green agent dot, no agent count, no
- * last-seen and no activity feed. What the rail offers is a way into the
- * configuration and into the capability disclosure, and nothing that implies a
- * live connection.
+ * What became knowable is narrower and is reported elsewhere. An agent parked
+ * in `chat_await_message` is holding a request open, and that request is a
+ * fact — the Agent nav row and the conversation header call that "listening",
+ * and only that. See AgentChannel.presence and AgentPresenceBadge; the wording
+ * in both is deliberate and should not be widened to "connected".
  */
 export function AgentsSection({
   collapsed = false,
