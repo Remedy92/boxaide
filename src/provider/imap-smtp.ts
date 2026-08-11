@@ -459,6 +459,14 @@ type FetchedHead = {
 /**
  * Second, bounded pass: fetch only the leading bytes of each message's text
  * part so the list view shows a real snippet instead of the subject again.
+ *
+ * One FETCH per distinct part key, never the union of keys over every uid:
+ * Gmail answers a UID FETCH that names a body part any listed message lacks
+ * with "NO Some messages could not be FETCHed" for the WHOLE command, so one
+ * multipart message in the window used to kill the entire inbox load. Each
+ * group asks a uid only for the part its own BODYSTRUCTURE advertised, and a
+ * group that still fails is dropped alone — snippets are decoration, and
+ * decoration must never take the list down with it.
  */
 async function attachSnippets(
   client: ImapFlow,
@@ -466,30 +474,39 @@ async function attachSnippets(
 ): Promise<Map<number, string>> {
   const snippets = new Map<number, string>();
   const wanted = new Map<number, StructureNode>();
-  const keys = new Set<string>();
+  const groups = new Map<string, number[]>();
   for (const head of heads) {
     const part = pickTextPart(head.bodyStructure as StructureNode | undefined);
     if (!part) continue;
     wanted.set(head.uid, part);
-    keys.add(partKey(part));
-  }
-  if (wanted.size === 0) return snippets;
-  const uids = [...wanted.keys()];
-  for await (const msg of client.fetch(
-    uids,
-    {
-      uid: true,
-      bodyParts: [...keys].map((key) => ({ key, maxLength: SNIPPET_BYTES })),
-    },
-    { uid: true },
-  )) {
-    const part = wanted.get(msg.uid);
-    if (!part) continue;
     const key = partKey(part);
-    const raw = lookupPart(msg.bodyParts, key);
-    if (!raw || raw.length === 0) continue;
-    const text = previewFromPart(part, raw, msg.binaryParts?.has(key) ?? false);
-    if (text) snippets.set(msg.uid, text);
+    const uids = groups.get(key);
+    if (uids) uids.push(head.uid);
+    else groups.set(key, [head.uid]);
+  }
+  for (const [key, uids] of groups) {
+    try {
+      for await (const msg of client.fetch(
+        uids,
+        { uid: true, bodyParts: [{ key, maxLength: SNIPPET_BYTES }] },
+        { uid: true },
+      )) {
+        const part = wanted.get(msg.uid);
+        if (!part) continue;
+        const raw = lookupPart(msg.bodyParts, key);
+        if (!raw || raw.length === 0) continue;
+        const text = previewFromPart(
+          part,
+          raw,
+          msg.binaryParts?.has(key) ?? false,
+        );
+        if (text) snippets.set(msg.uid, text);
+      }
+    } catch (err) {
+      console.warn(
+        `snippet fetch failed for part ${key} (${uids.length} messages): ${imapErrorText(err)}`,
+      );
+    }
   }
   return snippets;
 }
