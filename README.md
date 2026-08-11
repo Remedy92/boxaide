@@ -90,6 +90,28 @@ If your server is not on loopback, put it behind `https` or reach it over a tunn
 
 Nothing. The deployed page has no server-side code: no API routes, no server actions, no proxy, no middleware. Your token, your mail credentials and every message body travel only between your browser and your own machine.
 
+## Desktop app
+
+A window instead of a terminal, for people who do not want either. `apps/desktop` is an Electron shell: it starts the same server inside its own process, binds `127.0.0.1`, and uses the same `~/.mailmux` data directory, master key and bearer token. An account connected in the desktop app is the same account your agents reach over MCP.
+
+```bash
+npm run build                 # repository root: server + UI export
+cd apps/desktop
+npm install                   # its own package.json and lockfile
+npm run dev                   # opens the window
+```
+
+`npm install` rebuilds `better-sqlite3` against Electron's ABI (`electron-builder install-app-deps`). If Electron's own binary is missing afterwards — this repo blocks install scripts unless `allowScripts` names them — run `node node_modules/electron/install.js` once.
+
+Installers:
+
+```bash
+npm run dist:mac              # mac: signed dmg in apps/desktop/release/
+npm run dist                  # other platforms — nsis or AppImage
+```
+
+On mac, `dist:mac` signs the app and the dmg with a Developer ID certificate pinned by hash in `scripts/sign-mac.sh` (electron-builder's by-name signing is ambiguous when the keychain holds two same-named certificates). Notarization is a separate, credential-holding step; the commands are at the top of that script. `npm run dist` builds for the platform it runs on. Both scripts re-copy the compiled server and the UI export out of the repository root first, so run the root `npm run build` again after any server change. The port follows `MAILMUX_PORT` (default 8787); if something already holds it — `mailmux serve` in a terminal, or a second copy of the app — the window does not open and the app says so.
+
 ## Agent MCP (any client)
 
 ### HTTP MCP (Cursor / remote-capable clients)

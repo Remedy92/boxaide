@@ -3,7 +3,7 @@
 import * as React from "react";
 import { SEARCH_DEBOUNCE_MS } from "@/lib/constants";
 import { useSettings, useUpdateSettings } from "@/lib/hooks/use-settings";
-import type { Density } from "@/lib/settings";
+import { readSettings, type Density } from "@/lib/settings";
 import type { MailAccountMeta } from "@/lib/types";
 
 /**
@@ -35,6 +35,13 @@ export type ComposeSeed = {
   references?: string;
   /** True when the source message carried no Message-ID (§6.4). */
   threadingUnavailable?: boolean;
+  /**
+   * Set when the composer was opened FROM a stored draft. On a successful send
+   * the composer deletes that draft, so "move to compose and send" does not
+   * leave the unsent copy sitting in the Drafts folder.
+   */
+  draftId?: string;
+  draftAccountId?: string;
 };
 
 export type DialogName =
@@ -43,11 +50,18 @@ export type DialogName =
   | "settings"
   | "shortcuts"
   | "palette"
-  | "capabilities";
+  | "capabilities"
+  | "agent";
 
 export type SettingsFocus = "baseUrl" | "token" | null;
 
+/** Which pane the list is showing. Drafts are a separate collection, not a folder. */
+export type View = "mail" | "drafts";
+
 export type Selection = { accountId: string; messageId: string };
+
+/** A draft's id has the same accountId:folder:uid shape as a message id. */
+export type DraftSelection = { accountId: string; draftId: string };
 
 export type ReplyRequest = { mode: Exclude<ComposeMode, "new">; nonce: number };
 
@@ -71,10 +85,17 @@ type AppStateValue = {
   /** True while a search is running. Search ignores `folder` and `unread`. */
   searching: boolean;
 
+  /* view */
+  view: View;
+  setView: (value: View) => void;
+
   /* selection */
   selected: Selection | null;
   select: (value: Selection) => void;
   clearSelection: () => void;
+  /** Non-null only while the hash names a draft. Mutually exclusive with `selected`. */
+  selectedDraft: DraftSelection | null;
+  selectDraft: (value: DraftSelection) => void;
 
   /* layout */
   density: Density;
@@ -110,6 +131,13 @@ type AppStateValue = {
   settingsAutoTest: number | null;
   openSettings: (focus?: SettingsFocus, autoTest?: boolean) => void;
 
+  /* first run */
+  /** True while the full-screen setup wizard owns the viewport. */
+  wizardOpen: boolean;
+  openWizard: () => void;
+  /** Marks this browser set up and returns to the inbox. */
+  finishWizard: () => void;
+
   /* composer */
   composeSeed: ComposeSeed | null;
   openCompose: (seed?: Partial<ComposeSeed>) => void;
@@ -141,6 +169,9 @@ export function useSearchQuery(): string {
 }
 
 const HASH_PATTERN = /^#\/a\/([^/]+)\/m\/(.+)$/;
+/** Same shape, `d` instead of `m`. One hash, so a draft and a message can
+    never both be open — which is also true of the reading pane. */
+const DRAFT_HASH_PATTERN = /^#\/a\/([^/]+)\/d\/(.+)$/;
 
 /**
  * history.replaceState fires neither `hashchange` nor `popstate`, so the store
@@ -182,17 +213,42 @@ function selectionFromHash(hash: string): Selection | null {
   }
 }
 
+function draftFromHash(hash: string): DraftSelection | null {
+  const match = DRAFT_HASH_PATTERN.exec(hash);
+  if (!match) return null;
+  try {
+    return {
+      accountId: decodeURIComponent(match[1]),
+      draftId: decodeURIComponent(match[2]),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function hashFor(selection: Selection): string {
   return `#/a/${encodeURIComponent(selection.accountId)}/m/${encodeURIComponent(
     selection.messageId,
   )}`;
 }
 
+function draftHashFor(selection: DraftSelection): string {
+  return `#/a/${encodeURIComponent(selection.accountId)}/d/${encodeURIComponent(
+    selection.draftId,
+  )}`;
+}
+
+/** "Has this hydrated yet?" as an external store, so it costs no extra render. */
+const NO_SUBSCRIBE = () => () => {};
+const CLIENT_MOUNTED = () => true;
+const SERVER_MOUNTED = () => false;
+
 export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const settings = useSettings();
   const updateSettings = useUpdateSettings();
 
   const [account, setAccountState] = React.useState("all");
+  const [view, setViewState] = React.useState<View>("mail");
   const [folder, setFolder] = React.useState<string | undefined>(undefined);
   const [unreadOnly, setUnreadOnlyState] = React.useState(false);
   const [rawQuery, setRawQuery] = React.useState("");
@@ -220,6 +276,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     readServerHash,
   );
   const selected = React.useMemo(() => selectionFromHash(hash), [hash]);
+  const selectedDraft = React.useMemo(() => draftFromHash(hash), [hash]);
 
   /* The browser's own Back button pops the pushed entry without going through
      clearSelection, so the flag has to follow the hash, not only our callers.
@@ -279,8 +336,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
 
   React.useEffect(() => {
     // No hash ⇒ nothing of ours is on the stack, however it got popped.
-    if (!selected) pushedSelection.current = false;
-  }, [selected]);
+    if (!selected && !selectedDraft) pushedSelection.current = false;
+  }, [selected, selectedDraft]);
 
   const select = React.useCallback(
     (value: Selection) => {
@@ -289,6 +346,22 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       const next = hashFor(value);
       if (typeof window === "undefined" || window.location.hash === next) return;
       // Below 760px the reader replaces the list, so Back must return to it.
+      if (narrow && !pushedSelection.current) {
+        window.history.pushState(null, "", next);
+        pushedSelection.current = true;
+      } else {
+        window.history.replaceState(null, "", next);
+      }
+      window.dispatchEvent(new Event(HASH_EVENT));
+    },
+    [narrow],
+  );
+
+  const selectDraft = React.useCallback(
+    (value: DraftSelection) => {
+      setReplyRequest(null);
+      const next = draftHashFor(value);
+      if (typeof window === "undefined" || window.location.hash === next) return;
       if (narrow && !pushedSelection.current) {
         window.history.pushState(null, "", next);
         pushedSelection.current = true;
@@ -325,6 +398,26 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     setAccountState(value);
     // Folders are per mailbox, so the folder filter cannot survive the change.
     setFolder(undefined);
+  }, []);
+
+  /* Switching between mail and drafts drops the open item: a message id and a
+     draft id name different collections, and leaving one in the hash would put
+     the reading pane on something the list no longer contains. */
+  const clearSelectionRefForView = React.useRef(clearSelection);
+  React.useEffect(() => {
+    clearSelectionRefForView.current = clearSelection;
+  }, [clearSelection]);
+
+  const viewRef = React.useRef(view);
+  React.useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
+
+  const setView = React.useCallback((next: View) => {
+    if (viewRef.current === next) return;
+    viewRef.current = next;
+    clearSelectionRefForView.current();
+    setViewState(next);
   }, []);
 
   /**
@@ -420,9 +513,41 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       inReplyTo: seed?.inReplyTo,
       references: seed?.references,
       threadingUnavailable: seed?.threadingUnavailable,
+      draftId: seed?.draftId,
+      draftAccountId: seed?.draftAccountId,
     });
     setDialog("compose");
   }, []);
+
+  /* ---- first run ------------------------------------------------------ */
+  /* Gated on mount so the prerendered HTML — which reads the DEFAULT settings,
+     where `onboarded` is false — never paints the wizard over a browser that is
+     already set up. */
+  const mounted = React.useSyncExternalStore(
+    NO_SUBSCRIBE,
+    CLIENT_MOUNTED,
+    SERVER_MOUNTED,
+  );
+  /* Captured once, on this browser's first render, and never re-read.
+     `onboarded` is true as soon as a token exists, so reading it live would
+     close the wizard the instant step one saved one — the user would never see
+     step two. What decides whether the wizard opens is the state the browser
+     arrived in; what closes it is finishing or skipping it. */
+  const [arrivedOnboarded] = React.useState(() => readSettings().onboarded);
+  const [wizardForced, setWizardForced] = React.useState(false);
+  const [wizardDone, setWizardDone] = React.useState(false);
+  const wizardOpen =
+    mounted && !wizardDone && (wizardForced || !arrivedOnboarded);
+
+  const openWizard = React.useCallback(() => {
+    setWizardDone(false);
+    setWizardForced(true);
+  }, []);
+  const finishWizard = React.useCallback(() => {
+    setWizardForced(false);
+    setWizardDone(true);
+    updateSettings({ onboarded: true });
+  }, [updateSettings]);
 
   const requestReply = React.useCallback(
     (mode: Exclude<ComposeMode, "new">) =>
@@ -481,9 +606,13 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       clearSearch,
       query,
       searching: query.trim().length > 0,
+      view,
+      setView,
       selected,
       select,
       clearSelection,
+      selectedDraft,
+      selectDraft,
       density: settings.density,
       toggleDensity,
       railCollapsed: settings.railCollapsed,
@@ -507,6 +636,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       settingsFocus,
       settingsAutoTest,
       openSettings,
+      wizardOpen,
+      openWizard,
+      finishWizard,
       composeSeed,
       openCompose,
       replyRequest,
@@ -518,6 +650,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     [
       account,
       setAccount,
+      view,
+      setView,
       folder,
       unreadOnly,
       setUnreadOnly,
@@ -526,6 +660,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       selected,
       select,
       clearSelection,
+      selectedDraft,
+      selectDraft,
       settings.density,
       toggleDensity,
       settings.railCollapsed,
@@ -547,6 +683,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       settingsFocus,
       settingsAutoTest,
       openSettings,
+      wizardOpen,
+      openWizard,
+      finishWizard,
       composeSeed,
       openCompose,
       replyRequest,

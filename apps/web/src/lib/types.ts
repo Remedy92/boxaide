@@ -64,6 +64,55 @@ export type MessageListResponse = {
 /** POST /api/messages/send 201 → { result: SendResult } */
 export type SendResult = { messageId: string; accepted: string[] }; // messageId may be ""
 
+/* -------------------------------------------------------------------------- */
+/* drafts                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Body of POST /api/drafts and POST /api/drafts/:accountId/:draftId.
+ *
+ * Every field is optional because a draft is allowed to be half-written — that
+ * is the whole reason it is not a SendMessageBody. The update route REPLACES
+ * the draft, so anything omitted is dropped rather than merged.
+ */
+export type DraftInput = {
+  to?: string;
+  subject?: string;
+  text?: string;
+  html?: string;
+  cc?: string;
+  bcc?: string;
+  inReplyTo?: string;
+  references?: string;
+};
+
+/**
+ * What create and update return. It carries no content: a draft is stored by
+ * APPEND, so the server answers with where it landed and nothing else. Refetch
+ * the list to read a draft back.
+ */
+export type DraftRef = {
+  id: string; // `${accountId}:${encodeURIComponent(folder)}:${uid}`, same shape as a message id
+  accountId: string;
+  uid: number;
+  folder: string;
+  messageId: string;
+};
+
+/** A row from GET /api/drafts?account=… — full body text included. */
+export type MailDraft = DraftRef & {
+  to: string;
+  cc?: string;
+  bcc?: string;
+  subject: string;
+  date: string; // ISO 8601
+  snippet: string;
+  bodyText: string;
+  bodyHtml?: string; // RAW UNSANITISED HTML. NEVER RENDER.
+  inReplyTo?: string;
+  references?: string;
+};
+
 /** POST /api/accounts/test → 200 {ok:true} | 400 {ok:false, error} */
 export type ConnectionTestResult = { ok: boolean; error?: string };
 

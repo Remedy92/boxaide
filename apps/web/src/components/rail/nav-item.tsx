@@ -6,15 +6,17 @@ import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 /**
- * §6.2. The one row shape shared by Unified inbox, Unread, every folder and the
- * Agents entries. 32px tall, 16px icon, 13px label. There is no disabled state
- * on a nav item — a nav target that cannot be navigated to is simply not drawn,
- * except for the folder section, which explains itself in prose instead.
+ * The one row shape shared by Inbox, Unread, Drafts, every folder and the agent
+ * entries. 28px tall, one 16px icon, one 13px label, no counts and no badges.
+ *
+ * The active state is a background shift plus the accent, never a left bar and
+ * never a shadow. There is no disabled state — a nav target that cannot be
+ * navigated to is simply not drawn, except in the folder section, which
+ * explains itself in prose instead.
  */
 export function NavItem({
   icon: Icon,
   label,
-  sublabel,
   active = false,
   onClick,
   title,
@@ -26,7 +28,6 @@ export function NavItem({
 }: {
   icon: LucideIcon;
   label: string;
-  sublabel?: string;
   active?: boolean;
   onClick?: () => void;
   title?: string;
@@ -45,9 +46,8 @@ export function NavItem({
       aria-disabled={disabled ? "true" : undefined}
       onClick={disabled ? undefined : onClick}
       className={cn(
-        "flex w-full items-center gap-2 rounded-[var(--radius-md)] px-2 text-left",
+        "flex h-7 w-full items-center gap-2 rounded-[var(--radius-md)] px-2 text-left",
         "transition-colors duration-[var(--dur-fast)] hover:duration-0",
-        sublabel && !collapsed ? "min-h-9 py-1" : "h-8",
         collapsed && "justify-center px-0",
         disabled
           ? "cursor-not-allowed text-fg-disabled"
@@ -69,20 +69,13 @@ export function NavItem({
         strokeWidth={1.5}
       />
       {!collapsed && (
-        <span className="min-w-0 flex-1">
-          <span
-            className={cn(
-              "block truncate text-[13px] leading-[18px]",
-              active && "font-medium",
-            )}
-          >
-            {label}
-          </span>
-          {sublabel && (
-            <span className="block truncate font-mono text-[11px] leading-4 text-fg-tertiary">
-              {sublabel}
-            </span>
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate text-[13px] leading-[18px]",
+            active && "font-medium",
           )}
+        >
+          {label}
         </span>
       )}
       {!collapsed && trailing}

@@ -39,7 +39,7 @@ export function IdentityBlock({
         <AccountRail seed={message.accountId} className="min-h-[44px] self-stretch" />
         <Monogram from={message.from} size={36} hueSeed={sender.address || message.from} />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[14px] leading-5 font-semibold text-fg">
+          <p className="truncate text-[13px] leading-[18px] font-semibold text-fg">
             {displayName(message.from)}
           </p>
           {sender.address && (

@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { MailService } from "../mail/service.js";
-import type { AccountCredentials } from "../provider/types.js";
+import type { AccountCredentials, DraftInput } from "../provider/types.js";
 import { passwordCredentials } from "../provider/types.js";
 
 /** Highest `limit` any list endpoint will accept. */
@@ -84,6 +84,26 @@ export function parseConnectCredentials(
       user: body.username,
       pass: body.password,
     }),
+  };
+}
+
+/** Draft create/update body. `account` is ignored on the update route. */
+type DraftBody = DraftInput & { account?: string };
+
+/**
+ * Pick the draft fields explicitly, exactly as the send route does, so nothing
+ * else a client posts reaches the MIME composer.
+ */
+function draftFieldsOf(body: DraftBody): DraftInput {
+  return {
+    to: body.to,
+    subject: body.subject,
+    text: body.text,
+    html: body.html,
+    cc: body.cc,
+    bcc: body.bcc,
+    inReplyTo: body.inReplyTo,
+    references: body.references,
   };
 }
 
@@ -451,6 +471,77 @@ export function createApi(
       );
       if (!updated) return c.json({ error: "not found" }, 404);
       return c.json({ updated, seen: body.seen });
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
+    }
+  });
+
+  app.get("/api/drafts", async (c) => {
+    const account = c.req.query("account") ?? "";
+    if (!account || account === "all") {
+      return c.json({ error: "account is required" }, 400);
+    }
+    const limit = parseLimit(c.req.query("limit"));
+    if (limit === null) {
+      return c.json(
+        { error: `limit must be an integer between 1 and ${MAX_LIMIT}` },
+        400,
+      );
+    }
+    try {
+      return c.json({ drafts: await mail.listDrafts(account, { limit }) });
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
+    }
+  });
+
+  app.post("/api/drafts", async (c) => {
+    const body = await c.req.json<DraftBody>();
+    if (!body.account) return c.json({ error: "account is required" }, 400);
+    try {
+      const draft = await mail.createDraft(body.account, draftFieldsOf(body));
+      return c.json({ draft }, 201);
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
+    }
+  });
+
+  // POST, not PUT: the CORS allow-list of methods is deliberately short, and a
+  // draft update is a replace-and-delete rather than an idempotent write.
+  app.post("/api/drafts/:accountId/:draftId", async (c) => {
+    const body = await c.req.json<DraftBody>();
+    try {
+      const draft = await mail.updateDraft(
+        c.req.param("accountId"),
+        decodeURIComponent(c.req.param("draftId")),
+        draftFieldsOf(body),
+      );
+      return c.json({ draft });
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
+    }
+  });
+
+  app.delete("/api/drafts/:accountId/:draftId", async (c) => {
+    try {
+      const deleted = await mail.deleteDraft(
+        c.req.param("accountId"),
+        decodeURIComponent(c.req.param("draftId")),
+      );
+      if (!deleted) return c.json({ error: "not found" }, 404);
+      return c.json({ deleted });
     } catch (err) {
       return c.json(
         { error: err instanceof Error ? err.message : String(err) },

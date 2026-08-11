@@ -23,6 +23,13 @@ export type Settings = {
   density: Density;
   railCollapsed: boolean;
   recentCommands: string[];
+  /**
+   * True once the first-run wizard has been finished or skipped. It is a UI
+   * preference, not a claim about the server: a fresh browser pointed at a
+   * working server still gets the wizard, because it is that browser that has
+   * no token.
+   */
+  onboarded: boolean;
 };
 
 /**
@@ -38,6 +45,7 @@ export const SETTINGS_KEYS = {
   density: "mailmux.density",
   railCollapsed: "mailmux.railCollapsed",
   recentCommands: "mailmux.recentCommands",
+  onboarded: "mailmux.onboarded",
   /** Owned by next-themes, listed here so the key namespace is documented. */
   theme: "mailmux.theme",
 } as const;
@@ -48,6 +56,7 @@ export const DEFAULT_SETTINGS: Settings = {
   density: "comfortable",
   railCollapsed: false,
   recentCommands: [],
+  onboarded: false,
 };
 
 /** Fired on the window after any write, so same-tab listeners can react. */
@@ -136,6 +145,12 @@ export function readSettings(): Settings {
     density: density === "compact" ? "compact" : "comfortable",
     railCollapsed: railCollapsed === "1",
     recentCommands: parseRecentCommands(readString(SETTINGS_KEYS.recentCommands)),
+    /* A pre-existing token means this browser was already set up before the
+       wizard shipped. Treating that as "onboarded" is the difference between an
+       upgrade and being sent back to a first-run screen. */
+    onboarded:
+      readString(SETTINGS_KEYS.onboarded) === "1" ||
+      (token ?? "").length > 0,
   };
 }
 
@@ -158,6 +173,9 @@ export function writeSettings(patch: Partial<Settings>): Settings {
   }
   if (patch.railCollapsed !== undefined) {
     writeString(SETTINGS_KEYS.railCollapsed, patch.railCollapsed ? "1" : "0");
+  }
+  if (patch.onboarded !== undefined) {
+    writeString(SETTINGS_KEYS.onboarded, patch.onboarded ? "1" : "0");
   }
   if (patch.recentCommands !== undefined) {
     writeString(

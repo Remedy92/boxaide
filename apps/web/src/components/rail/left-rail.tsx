@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Inbox, MailOpen, Plus } from "lucide-react";
+import { FilePen, Inbox, MailOpen, Plus } from "lucide-react";
 import { AccountRow, type AccountHealth } from "@/components/rail/account-row";
 import { AgentsSection } from "@/components/rail/agents-section";
 import { BrandMark } from "@/components/rail/brand-mark";
@@ -26,8 +26,8 @@ import { useSettings } from "@/lib/hooks/use-settings";
 import type { MailAccountMeta } from "@/lib/types";
 
 /**
- * §6.2. The rail carries provenance and configuration. It carries no counts —
- * the backend returns none, and counting the page we happened to fetch is a
+ * The rail carries provenance and configuration. It carries no counts — the
+ * backend returns none, and counting the page we happened to fetch is a
  * different number from the one the mailbox holds.
  */
 export function LeftRail({
@@ -74,15 +74,17 @@ export function LeftRail({
     return { loaded, total };
   }, [app.account, errors.length, hasResponse, list.length]);
 
+  const inMail = app.view === "mail";
+
   const viewsAndFolders = (
     <>
-      <div className="space-y-0.5">
+      <div className="space-y-px">
         <NavItem
           icon={Inbox}
           label="Inbox"
-          sublabel="all mailboxes"
-          active={app.account === "all" && !app.unreadOnly && !app.folder}
+          active={inMail && app.account === "all" && !app.unreadOnly && !app.folder}
           onClick={() => {
+            app.setView("mail");
             app.setAccount("all");
             app.setUnreadOnly(false);
           }}
@@ -90,22 +92,38 @@ export function LeftRail({
         <NavItem
           icon={MailOpen}
           label="Unread"
-          active={app.unreadOnly}
-          onClick={() => app.setUnreadOnly(!app.unreadOnly)}
+          active={inMail && app.unreadOnly}
+          onClick={() => {
+            app.setView("mail");
+            app.setUnreadOnly(!app.unreadOnly);
+          }}
+        />
+        {/* Drafts is a view, not a folder: it comes from GET /api/drafts, which
+            takes one mailbox at a time and is unified here rather than by the
+            server. Putting it in the folder list would imply otherwise. */}
+        <NavItem
+          icon={FilePen}
+          label="Drafts"
+          active={app.view === "drafts"}
+          onClick={() => app.setView("drafts")}
         />
       </div>
 
       <FolderList
         accountRef={app.account}
         activeFolder={app.folder}
-        onSelect={app.setFolder}
+        disabled={app.view === "drafts"}
+        onSelect={(path) => {
+          app.setView("mail");
+          app.setFolder(path);
+        }}
       />
     </>
   );
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className={collapsed ? "px-2" : "px-4"}>
+      <div className={collapsed ? "px-2" : "px-3"}>
         <BrandMark
           fixture={health.data?.fixture ?? false}
           collapsed={collapsed}
@@ -120,8 +138,8 @@ export function LeftRail({
       </div>
 
       <div
-        className={`min-h-0 flex-1 space-y-4 overflow-y-auto pb-4 ${
-          collapsed ? "px-2" : "px-4"
+        className={`pane-scroll min-h-0 flex-1 space-y-5 overflow-y-auto pb-4 ${
+          collapsed ? "px-2" : "px-3"
         }`}
       >
         {collapsed ? (
@@ -142,7 +160,7 @@ export function LeftRail({
               </TooltipTrigger>
               <TooltipContent side="right">Views and folders</TooltipContent>
             </Tooltip>
-            <PopoverContent side="right" align="start" className="w-60 p-2">
+            <PopoverContent side="right" align="start" className="w-56 p-1.5">
               <div className="space-y-3">{viewsAndFolders}</div>
             </PopoverContent>
           </Popover>
@@ -150,7 +168,7 @@ export function LeftRail({
           viewsAndFolders
         )}
 
-        <div className="space-y-0.5">
+        <div className="space-y-px">
           {!collapsed && (
             <SectionLabel
               action={
@@ -219,6 +237,7 @@ export function LeftRail({
 
         <AgentsSection
           collapsed={collapsed}
+          onOpenAgentConnect={() => app.openDialog("agent")}
           onOpenCapabilities={() => app.openDialog("capabilities")}
         />
       </div>

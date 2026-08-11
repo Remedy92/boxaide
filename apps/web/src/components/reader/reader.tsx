@@ -64,13 +64,8 @@ export function Reader() {
         className="flex h-full items-center justify-center px-5"
       >
         <div className="text-center">
-          <div className="mx-auto w-8">
-            <BrandGlyph size={32} />
-          </div>
-          <p className="mt-3 text-[14px] leading-5 text-fg-secondary">
-            No message selected
-          </p>
-          <p className="mt-1 text-[13px] leading-[18px] text-fg-tertiary">
+          <BrandGlyph size={20} className="mx-auto text-fg-disabled" />
+          <p className="mt-3 text-[13px] leading-[18px] text-fg-tertiary">
             Pick a message, or press j to start.
           </p>
         </div>
@@ -103,7 +98,7 @@ export function Reader() {
       <div
         id="mailmux-reader"
         tabIndex={-1}
-        className="min-h-0 flex-1 overflow-y-auto px-5 pb-8 focus:outline-none"
+        className="pane-scroll min-h-0 flex-1 overflow-y-auto px-5 pb-10 focus:outline-none"
       >
         {message.isError && !notFound && (
           // role="alert": the message the user asked for did not arrive and
@@ -137,7 +132,7 @@ export function Reader() {
 
         {notFound ? (
           <div role="alert" className="mt-6">
-            <p className="text-[14px] leading-5 font-medium text-fg">
+            <p className="text-[13px] leading-[18px] font-medium text-fg">
               That message is gone. It may have been moved or deleted on the
               server.
             </p>
@@ -161,11 +156,9 @@ export function Reader() {
                 present at every width and in every state. The subject is still
                 the largest text on the page — the level is semantics, not size. */}
             <h2
-              className="mb-3 font-semibold text-fg"
+              className="title-15 mb-3 text-fg"
               title={shown.subject}
               style={{
-                fontSize: "var(--text-title)",
-                lineHeight: "var(--leading-title)",
                 display: "-webkit-box",
                 WebkitLineClamp: 3,
                 WebkitBoxOrient: "vertical",

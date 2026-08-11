@@ -60,6 +60,10 @@ export function MessageList({
   const errors = messages.data?.errors ?? [];
   const hasRows = rows.length > 0;
   const searching = app.query.trim().length > 0;
+  /* The mailbox tint column only exists where it distinguishes anything: the
+     unified view of more than one mailbox. */
+  const showRail =
+    app.account === "all" && (accounts.data?.length ?? 0) > 1;
 
   /* ---- skeleton tiers, on the 300ms floor -------------------------- */
   const [waited, setWaited] = React.useState(0);
@@ -189,6 +193,7 @@ export function MessageList({
             selected={selectedId === message.id}
             active={activeId === message.id}
             compact={app.density === "compact"}
+            showRail={showRail}
             registerRow={registerRow}
             onSelect={select}
             onPrefetch={prefetch}
@@ -237,7 +242,7 @@ export function MessageList({
               : ""}
       </p>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">{body}</div>
+      <div className="pane-scroll min-h-0 flex-1 overflow-y-auto">{body}</div>
     </div>
   );
 }
