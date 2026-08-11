@@ -25,6 +25,8 @@ function makeService() {
   return { masterKey, store, provider, mail };
 }
 
+const PERSONAL_PASS = "personal-app-password-fixture";
+
 const baseCreds = {
   imapHost: "fixture",
   imapPort: 993,
@@ -89,7 +91,12 @@ describe("MailService connect/list/read/send (shipped path)", () => {
     const personal = await mail.connectAccount({
       alias: "personal",
       email: "you@personal.test",
-      creds: { ...baseCreds, auth: { kind: "password", user: "you@personal.test", pass: "ok" } },
+      // Long and distinctive, because the encryption check below searches the
+      // ciphertext for this string. A short one matches base64 by chance.
+      creds: {
+        ...baseCreds,
+        auth: { kind: "password", user: "you@personal.test", pass: PERSONAL_PASS },
+      },
     });
     const work = await mail.connectAccount({
       alias: "work",
@@ -119,12 +126,12 @@ describe("MailService connect/list/read/send (shipped path)", () => {
     // secrets stored encrypted, not plaintext
     const row = store.getAccount("personal");
     expect(row?.passwordEnc).toBeTruthy();
-    expect(row?.passwordEnc).not.toContain("ok");
+    expect(row?.passwordEnc).not.toContain(PERSONAL_PASS);
     expect(row?.authKind).toBe("password");
     expect(store.credentialsFor(row!).auth).toEqual({
       kind: "password",
       user: "you@personal.test",
-      pass: "ok",
+      pass: PERSONAL_PASS,
     });
 
     const all = await mail.listMessages("all", { limit: 20 });
