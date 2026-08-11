@@ -14,7 +14,7 @@ Ship **mailmux** as a single **Node 22+ / TypeScript** process:
 | Receive | IMAP via **ImapFlow** |
 | Send | SMTP via **Nodemailer** |
 | State | SQLite (`better-sqlite3`) |
-| Secrets | AES-256-GCM, master key file / `MAILMUX_MASTER_KEY` |
+| Secrets | AES-256-GCM, master key file / `MAILMUX_MASTER_KEY` (64-hex verbatim, anything else stretched with scrypt) |
 | Web | One front end: a Next.js App Router build in `apps/web`, static and fully client-side (see below) |
 | Tests | Vitest + in-process **FixtureProvider** (no live mail required) |
 
@@ -80,7 +80,7 @@ A browser page served from anywhere other than the mailmux process itself cannot
 | **`Access-Control-Allow-Credentials` never sent** | mailmux authenticates by header, never by cookie. Ambient credentials must stay impossible. |
 | **`Access-Control-Allow-Headers: authorization, content-type`** | Exactly what the client sends. Echoing the request's header list back would make the allowlist meaningless. |
 | **Preflight answered before the auth gate** | An `OPTIONS` preflight carries no `Authorization` by spec, so gating it on the token makes CORS impossible. The origin allowlist is the control that applies; a preflight runs no handler and returns an empty 204. |
-| **`/api/local-bootstrap` deliberately not widened** | It is unauthenticated and returns the bearer token in plaintext. It keeps the strict loopback-only `isAllowedOrigin` plus the `Host` check, and answers `Cache-Control: no-store` + `Vary: Origin` so neither the browser nor a local proxy retains the token. A remote UI must have its token pasted in by a human. |
+| **`/api/local-bootstrap` deliberately not widened** | It is unauthenticated and returns the bearer token in plaintext. It exists only while the server's own bind address is loopback — `Host` and `Origin` are browser guards, and a remote client on a `0.0.0.0` bind chooses both headers itself, so `isLoopbackBindAddress(config.host)` is checked first and the route answers `404` otherwise. Beyond that it keeps the strict loopback-only `isAllowedOrigin` plus the `Host` check, and answers `Cache-Control: no-store` + `Vary: Origin` so neither the browser nor a local proxy retains the token. A remote UI must have its token pasted in by a human. |
 
 Residual risk: allowlisting a hostname means anyone who can serve a page there — a preview deployment on a shared team, a hijacked account — can reach the server **if they also hold the token**. Prefer a custom domain over a platform-assigned hostname, and keep the list short.
 

@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes, scryptSync } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -63,11 +63,57 @@ function ensureDir(dir: string): void {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
 }
 
+/**
+ * The per-install scrypt salt, created on first use.
+ *
+ * A salt is not a secret, so keeping it beside the database costs nothing. It
+ * still does the two jobs that matter against an attacker who holds both: no
+ * precomputed table works, because the table would have to be built for this
+ * one file, and the same passphrase on two installs derives two different
+ * keys. Only the passphrase and the work factor stand between the attacker
+ * and the key, and that is what scrypt is priced for.
+ *
+ * Deleting this file makes stored mail passwords underivable. It sits in the
+ * data directory next to `master.key`, so anything that backs one up takes
+ * the other.
+ */
+function loadOrCreateSalt(dataDir: string): Buffer {
+  const saltPath = join(dataDir, "master.salt");
+  if (existsSync(saltPath)) {
+    return Buffer.from(readFileSync(saltPath, "utf8").trim(), "hex");
+  }
+  const salt = randomBytes(16);
+  writeFileSync(saltPath, salt.toString("hex"), { mode: 0o600 });
+  return salt;
+}
+
+/**
+ * Stretch a human passphrase into a 32-byte AES key.
+ *
+ * A single hash is wrong here: a passphrase carries far less entropy than the
+ * key it produces, and one SHA-256 lets an attacker holding the database try
+ * billions of guesses per second. scrypt makes each guess cost memory and
+ * time. The parameters below need 128 MB per guess, which is the part an
+ * attacker cannot buy their way around cheaply, and cost about 0.2s once at
+ * startup on a 2024 laptop.
+ *
+ * A 64-char random hex MAILMUX_MASTER_KEY skips derivation altogether and
+ * stays the documented recommendation.
+ */
+function deriveKeyFromPassphrase(passphrase: string, salt: Buffer): Buffer {
+  return scryptSync(passphrase.normalize("NFKC"), salt, 32, {
+    N: 2 ** 17,
+    r: 8,
+    p: 1,
+    maxmem: 192 * 1024 * 1024,
+  });
+}
+
 function loadOrCreateKey(dataDir: string): Buffer {
   const envKey = process.env.MAILMUX_MASTER_KEY;
   if (envKey) {
     if (/^[0-9a-fA-F]{64}$/.test(envKey)) return Buffer.from(envKey, "hex");
-    return createHash("sha256").update(envKey).digest();
+    return deriveKeyFromPassphrase(envKey, loadOrCreateSalt(dataDir));
   }
   const keyPath = join(dataDir, "master.key");
   if (existsSync(keyPath)) {

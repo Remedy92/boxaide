@@ -14,6 +14,7 @@ coverage/
 data/
 bearer.token
 master.key
+master.salt
 *.sqlite
 *.sqlite3
 *.db

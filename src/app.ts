@@ -18,6 +18,7 @@ import {
   corsPreflightOrDeny,
   isAllowedOrigin,
   isLocalHostHeader,
+  isLoopbackBindAddress,
 } from "./api/routes.js";
 import { securityHeaders } from "./api/security-headers.js";
 import { handleMcpJsonRpc } from "./mcp/server.js";
@@ -25,6 +26,7 @@ import type { MailProvider } from "./provider/types.js";
 
 export {
   isLocalHostHeader,
+  isLoopbackBindAddress,
   isAllowedOrigin,
   isApiOriginAllowed,
   tokensMatch,
@@ -93,6 +95,15 @@ export function createRuntime(
   app.get("/api/local-bootstrap", (c) => {
     // This handler is registered before the /api/* auth middleware, so it
     // carries its own Origin guard.
+    //
+    // The bind address is checked first, and it is the only check that is not
+    // a browser guard. Host and Origin are attacker-supplied: a remote client
+    // on a non-loopback bind sends `Host: localhost` with no Origin and passes
+    // both. On such a bind the endpoint does not exist at all, and the token
+    // must be pasted in by a human.
+    if (!isLoopbackBindAddress(config.host)) {
+      return c.json({ error: "not found" }, 404);
+    }
     if (!isAllowedOrigin(c.req.header("origin"))) {
       return c.json({ error: "forbidden origin" }, 403);
     }
