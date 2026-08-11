@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, Check, Eye, EyeOff, Plug } from "lucide-react";
+import { ArrowLeft, Check, ExternalLink, Eye, EyeOff, Plug } from "lucide-react";
 import { toast } from "sonner";
 import {
   BrandGlyph,
@@ -18,6 +18,8 @@ import {
   DEFAULT_IMAP_PORT,
   DEFAULT_SMTP_PORT,
   PROVIDER_PRESETS,
+  presetForEmail,
+  stripPasswordSpaces,
   type ProviderPreset,
 } from "@/lib/constants";
 import {
@@ -531,6 +533,10 @@ function MailboxStep({
   );
   const [problem, setProblem] = React.useState<string | null>(null);
   const presetRefs = React.useRef(new Map<string, HTMLButtonElement>());
+  /* Someone who picks a provider by hand keeps it: a custom domain on Google
+     Workspace, or Other in front of a company gateway, must survive the rest of
+     the address being typed. Only the row itself sets this. */
+  const pinned = React.useRef(false);
 
   const applyPreset = (next: ProviderPreset) => {
     setPreset(next);
@@ -544,6 +550,20 @@ function MailboxStep({
     if (next.id === "other") setAdvanced(true);
   };
 
+  /** The provider row: the same apply, plus the pin the address cannot undo. */
+  const choosePreset = (next: ProviderPreset) => {
+    pinned.current = true;
+    applyPreset(next);
+  };
+
+  const onEmailChange = (value: string) => {
+    setEmail(value);
+    setProblem(null);
+    if (pinned.current) return;
+    const guess = presetForEmail(value);
+    if (guess && guess.id !== preset.id) applyPreset(guess);
+  };
+
   const credentials = () => ({
     imapHost: imapHost.trim(),
     imapPort: Number(imapPort) || DEFAULT_IMAP_PORT,
@@ -554,7 +574,7 @@ function MailboxStep({
     // everything else is STARTTLS. A fifth toggle to get wrong helps nobody.
     smtpSecure: (Number(smtpPort) || DEFAULT_SMTP_PORT) === 465,
     username: username.trim() || email.trim(),
-    password,
+    password: stripPasswordSpaces(password),
   });
 
   const ready = () => {
@@ -562,7 +582,7 @@ function MailboxStep({
       setProblem("Type the email address of the mailbox you want to read.");
       return false;
     }
-    if (!password) {
+    if (!stripPasswordSpaces(password)) {
       setProblem(`Paste the ${preset.passwordName.toLowerCase()} you just made.`);
       return false;
     }
@@ -628,7 +648,7 @@ function MailboxStep({
               (Math.max(at, 0) + delta + PROVIDER_PRESETS.length) %
                 PROVIDER_PRESETS.length
             ];
-          applyPreset(next);
+          choosePreset(next);
           presetRefs.current.get(next.id)?.focus();
         }}
       >
@@ -643,7 +663,7 @@ function MailboxStep({
             role="radio"
             aria-checked={preset.id === entry.id}
             tabIndex={preset.id === entry.id ? 0 : -1}
-            onClick={() => applyPreset(entry)}
+            onClick={() => choosePreset(entry)}
             className={cn(
               "h-8 rounded-[var(--radius-md)] border px-3 text-[13px]",
               "transition-colors duration-[var(--dur-fast)]",
@@ -683,10 +703,7 @@ function MailboxStep({
             autoComplete="off"
             className="font-mono"
             placeholder="you@example.com"
-            onChange={(event) => {
-              setEmail(event.target.value);
-              setProblem(null);
-            }}
+            onChange={(event) => onEmailChange(event.target.value)}
           />
         </Field>
 
@@ -695,7 +712,8 @@ function MailboxStep({
           label={preset.passwordName}
           helper={
             preset.passwordUrl
-              ? `From ${preset.passwordUrl} — not the password you type into the website.`
+              ? // The scheme is there for the link, not for reading.
+                `From ${preset.passwordUrl.replace(/^https:\/\//, "")} — not the password you type into the website.`
               : undefined
           }
         >
@@ -724,6 +742,18 @@ function MailboxStep({
               )}
             </button>
           </div>
+          {preset.passwordUrl && (
+            <Button asChild variant="secondary" size="sm">
+              <a
+                href={preset.passwordUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+              >
+                <ExternalLink className="size-3.5" strokeWidth={1.5} />
+                {preset.passwordUrlLabel}
+              </a>
+            </Button>
+          )}
         </Field>
 
         <button

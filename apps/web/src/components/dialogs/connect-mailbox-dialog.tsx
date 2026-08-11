@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { ExternalLink, Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
 import { Field, Spinner, StatusDot, TechnicalDetails } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,8 @@ import {
   DEFAULT_IMAP_PORT,
   DEFAULT_SMTP_PORT,
   PROVIDER_PRESETS,
+  presetForEmail,
+  stripPasswordSpaces,
 } from "@/lib/constants";
 import {
   useCreateAccount,
@@ -82,6 +84,10 @@ export function ConnectMailboxDialog({
   const passwordRef = React.useRef<HTMLInputElement | null>(null);
   const imapRef = React.useRef<HTMLInputElement | null>(null);
   const smtpRef = React.useRef<HTMLInputElement | null>(null);
+  /* A chip picked by hand keeps its hosts: a custom domain on Google Workspace,
+     or Other in front of a company gateway, must survive the rest of the
+     address being typed. Only the chip row sets this. */
+  const pinned = React.useRef(false);
 
   const chosen = PROVIDER_PRESETS.find((entry) => entry.id === preset);
   const existing = (accounts.data ?? []).find(
@@ -101,9 +107,23 @@ export function ConnectMailboxDialog({
     }));
   };
 
+  /** The chip row: the same apply, plus the pin the address cannot undo. */
+  const choosePreset = (id: string) => {
+    pinned.current = true;
+    applyPreset(id);
+  };
+
+  const onEmailChange = (value: string) => {
+    setForm((current) => ({ ...current, email: value }));
+    if (pinned.current) return;
+    const guess = presetForEmail(value);
+    if (guess && guess.id !== preset) applyPreset(guess.id);
+  };
+
   const reset = () => {
     setForm(formForPreset(DEFAULT_PRESET));
     setPreset(DEFAULT_PRESET);
+    pinned.current = false;
     setValidation(null);
     setReveal(false);
     test.reset();
@@ -119,7 +139,7 @@ export function ConnectMailboxDialog({
     // Derived, exactly as web/app.js does it.
     smtpSecure: (Number(form.smtpPort) || DEFAULT_SMTP_PORT) === 465,
     username: form.username.trim() || form.email.trim(),
-    password: form.password,
+    password: stripPasswordSpaces(form.password),
   });
 
   const requireBasics = (): boolean => {
@@ -217,7 +237,7 @@ export function ConnectMailboxDialog({
                 (Math.max(at, 0) + delta + PROVIDER_PRESETS.length) %
                   PROVIDER_PRESETS.length
               ];
-            applyPreset(next.id);
+            choosePreset(next.id);
             presetRefs.current.get(next.id)?.focus();
           }}
         >
@@ -232,7 +252,7 @@ export function ConnectMailboxDialog({
               role="radio"
               aria-checked={preset === entry.id}
               tabIndex={preset === entry.id ? 0 : -1}
-              onClick={() => applyPreset(entry.id)}
+              onClick={() => choosePreset(entry.id)}
               className={cn(
                 "h-8 rounded-[var(--radius-md)] border px-3 text-[13px]",
                 "transition-colors duration-[var(--dur-fast)]",
@@ -276,9 +296,7 @@ export function ConnectMailboxDialog({
               value={form.email}
               autoComplete="off"
               spellCheck={false}
-              onChange={(event) =>
-                setForm((value) => ({ ...value, email: event.target.value }))
-              }
+              onChange={(event) => onEmailChange(event.target.value)}
             />
           </Field>
 
@@ -308,6 +326,18 @@ export function ConnectMailboxDialog({
                 )}
               </button>
             </div>
+            {chosen?.passwordUrl && (
+              <Button asChild variant="secondary" size="sm">
+                <a
+                  href={chosen.passwordUrl}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                >
+                  <ExternalLink className="size-3.5" strokeWidth={1.5} />
+                  {chosen.passwordUrlLabel}
+                </a>
+              </Button>
+            )}
           </Field>
 
           <Field id="connect-username" label="Username">

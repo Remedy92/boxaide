@@ -52,8 +52,19 @@ export type ProviderPreset = {
    */
   passwordName: string;
   steps: readonly string[];
-  /** Where the steps end up. Shown as text, never auto-opened. */
+  /**
+   * Where the steps end up. A full https URL, because both mailbox forms open
+   * it in a new tab — a bare host would resolve against the app's own origin.
+   */
   passwordUrl: string;
+  /** Names the provider's own site on the button that opens passwordUrl. */
+  passwordUrlLabel: string;
+  /**
+   * Addresses that pick this preset on their own, lowercase, no leading @.
+   * Only the domains a provider actually hands out — a custom domain on Google
+   * Workspace is unknowable from the address alone.
+   */
+  domains: readonly string[];
 };
 
 /**
@@ -74,7 +85,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     smtpPort: 465,
     hint: "Gmail needs a 16-character App password, not your Google password. Turn on 2-Step Verification first, then create one at myaccount.google.com/apppasswords.",
     passwordName: "App password",
-    passwordUrl: "myaccount.google.com/apppasswords",
+    passwordUrl: "https://myaccount.google.com/apppasswords",
+    passwordUrlLabel: "Open Google settings",
+    domains: ["gmail.com", "googlemail.com"],
     steps: [
       "Open myaccount.google.com and pick Security in the left menu.",
       "Turn on 2-Step Verification if it is off. Google hides app passwords until you do.",
@@ -92,7 +105,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     smtpPort: 587,
     hint: "Outlook needs an app password from account.microsoft.com → Security. Work or school accounts often block IMAP entirely.",
     passwordName: "App password",
-    passwordUrl: "account.microsoft.com/security",
+    passwordUrl: "https://account.microsoft.com/security",
+    passwordUrlLabel: "Open Microsoft settings",
+    domains: ["outlook.com", "hotmail.com", "live.com", "msn.com"],
     steps: [
       "Open account.microsoft.com and choose Security.",
       "Turn on two-step verification if it is off. App passwords only exist once it is on.",
@@ -110,7 +125,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     smtpPort: 587,
     hint: "iCloud needs an app-specific password from account.apple.com → Sign-In and Security.",
     passwordName: "App-specific password",
-    passwordUrl: "account.apple.com",
+    passwordUrl: "https://account.apple.com",
+    passwordUrlLabel: "Open Apple settings",
+    domains: ["icloud.com", "me.com", "mac.com"],
     steps: [
       "Open account.apple.com and sign in.",
       "Choose Sign-In and Security, then App-Specific Passwords.",
@@ -128,7 +145,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     smtpPort: 465,
     hint: "Fastmail needs an app password: Settings → Privacy & Security → App passwords.",
     passwordName: "App password",
-    passwordUrl: "app.fastmail.com/settings/security/apppasswords",
+    passwordUrl: "https://app.fastmail.com/settings/security/apppasswords",
+    passwordUrlLabel: "Open Fastmail settings",
+    domains: ["fastmail.com", "fastmail.fm"],
     steps: [
       "Open Fastmail in a browser and go to Settings.",
       "Choose Privacy & Security, then App Passwords.",
@@ -146,6 +165,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     hint: "",
     passwordName: "Password",
     passwordUrl: "",
+    passwordUrlLabel: "",
+    domains: [],
     steps: [
       "Find your provider's IMAP and SMTP settings — they are usually on a page called “IMAP settings” or “Mail client setup”.",
       "If your provider offers app passwords, make one for mailmux rather than using your account password.",
@@ -153,6 +174,28 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     ],
   },
 ] as const;
+
+/**
+ * The preset a typed address gives away, or null when the domain is not one of
+ * the four — an unknown domain leaves whatever is selected alone rather than
+ * guessing "Other" over a choice someone already made.
+ */
+export function presetForEmail(email: string): ProviderPreset | null {
+  const domain = email.trim().toLowerCase().split("@")[1];
+  if (!domain) return null;
+  return (
+    PROVIDER_PRESETS.find((entry) => entry.domains.includes(domain)) ?? null
+  );
+}
+
+/**
+ * App passwords are shown in groups — Google's sixteen letters arrive as four
+ * words — and every provider then rejects the spaces. Stripping them on submit
+ * rather than on keystroke leaves the field editable as typed.
+ */
+export function stripPasswordSpaces(value: string): string {
+  return value.replace(/\s+/g, "");
+}
 
 /** Fallback IMAP port when the user leaves the field empty (§6.5). */
 export const DEFAULT_IMAP_PORT = 993;
