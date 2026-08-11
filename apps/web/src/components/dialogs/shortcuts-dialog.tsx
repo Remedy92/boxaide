@@ -26,6 +26,7 @@ const GROUPS: Array<[string, Array<[string, string[]]>]> = [
       // the one-pane layout below 760px actually returns to the list.
       ["Leave the reader or the search box", ["Esc"]],
       ["Scroll the reader", ["Space"]],
+      ["Agent conversation", ["g", "a"]],
       ["Inbox — all mailboxes", ["g", "i"]],
       ["Unread only", ["g", "u"]],
       ["Drafts", ["g", "d"]],

@@ -50,7 +50,7 @@ async function main(): Promise<void> {
       await seedFixtureDemo(runtime.mail, runtime.provider, runtime.store);
     }
     // stdio: no console.log on stdout
-    await runStdioMcp(runtime.mail);
+    await runStdioMcp(runtime.mail, runtime.channel);
     return;
   }
 

@@ -16,9 +16,14 @@
    The palette is deliberately achromatic: five neutral surfaces per theme, four
    ink levels, and a single indigo that appears only on focus rings, the active
    nav row, the unread dot and primary buttons. Nothing else in this file is
-   allowed to introduce a colour. Semantic tones (success / warning / danger)
-   and the eight mailbox tints are the only exceptions, and the mailbox tints
-   are held under ~20% chroma so a six-mailbox sidebar still reads as grey.
+   allowed to introduce a colour, and the semantic tones (success / warning /
+   danger) are the only exception.
+
+   There is no per-mailbox palette. Eight low-chroma tints used to run down the
+   left of every row, in the sidebar and behind the reader's monogram; they were
+   removed because the colour was never decodable — nothing told you which
+   mailbox was dusty blue — and eight near-greys at 2px is a distinction the eye
+   does not make. Rows name their mailbox in words instead.
 
    Every ratio quoted below was measured with the WCAG 2.x relative-luminance
    formula against every surface the token can legally sit on.
@@ -57,11 +62,6 @@
      1.95–2.40 : 1 does not clear it and this does. */
   --dot-muted: #7e8089;
 
-  /* Ink adjustment for the reader's tinted identity monogram. The ink is mixed
-     to 87% toward black, which puts all eight tints at 5.13–5.58 : 1 on their
-     own 16% wash. The dark ramp already clears 4.5, so it mixes 100%. */
-  --acct-ink: 87%;
-
   /* ---- the one accent: indigo ---- */
   --accent: #4a54c4;             /* accent text, unread dot, focus ring */
   --accent-hover: #3d46ad;
@@ -77,12 +77,6 @@
   --warning: #8a5300;  --warning-bg: #f9f0de;
   --danger:  #b3231f;  --danger-bg:  #fbe9e8;
   --danger-fill: #b3231f; --danger-fill-fg: #ffffff;
-
-  /* ---- mailbox tints (deterministic, see lib/format/hue.ts) ----
-     Low chroma on purpose: they separate six mailboxes at a glance without
-     turning the sidebar into a colour wheel. 4.92–5.47 : 1 on the list plane. */
-  --acct-0: #5e6b80; --acct-1: #6e6478; --acct-2: #7a606b; --acct-3: #75675a;
-  --acct-4: #5d726a; --acct-5: #666a80; --acct-6: #7b6459; --acct-7: #5f717a;
 
   /* ---- radii: small and consistent ---- */
   --radius-xs: 3px;
@@ -151,7 +145,6 @@
   --text-tertiary: #83858d;
   --text-disabled: #54565d;
   --dot-muted: #70737c;
-  --acct-ink: 100%;
 
   --accent: #9aa3f5;
   --accent-hover: #b3bafa;
@@ -166,9 +159,6 @@
   --warning: #f0a93c;  --warning-bg: #251d10;
   --danger:  #ff6e6a;  --danger-bg:  #2a1514;
   --danger-fill: #ff6e6a; --danger-fill-fg: #2a1514;
-
-  --acct-0: #98a6bc; --acct-1: #a79bb4; --acct-2: #b599a6; --acct-3: #b0a18f;
-  --acct-4: #94b0a4; --acct-5: #9ea3be; --acct-6: #b99d8d; --acct-7: #94aab5;
 
   --shadow-overlay: 0 1px 1px rgb(0 0 0 / 0.50), 0 6px 16px -6px rgb(0 0 0 / 0.60);
   --shadow-dialog:  0 1px 2px rgb(0 0 0 / 0.50), 0 20px 48px -16px rgb(0 0 0 / 0.70);
@@ -298,6 +288,13 @@
 }
 .shell[data-rail="collapsed"] { --rail-w: var(--rail-w-collapsed); }
 
+/* The Agent view has no message list. Two tracks, not a third one collapsed to
+   zero: a 0px column still creates a grid line the border-r of the sidebar
+   would sit against twice. */
+.shell[data-view="agent"] {
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+}
+
 /* ---------------------------------------------------------------------------
    shadcn/ui compatibility.
 
@@ -388,7 +385,10 @@
   .shell { --rail-w: var(--rail-w-collapsed); }
 }
 
-/* Below 760px, one pane at a time. */
+/* Below 760px, one pane at a time. The attribute selector is repeated because
+   `.shell[data-view="agent"]` above outranks a bare `.shell` here, media query
+   or not — specificity is not affected by the @media wrapper. */
 @media (max-width: 759px) {
-  .shell { grid-template-columns: minmax(0, 1fr); }
+  .shell,
+  .shell[data-view="agent"] { grid-template-columns: minmax(0, 1fr); }
 }

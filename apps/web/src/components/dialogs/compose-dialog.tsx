@@ -38,7 +38,6 @@ import {
   validateDraft,
   type DraftField,
 } from "@/lib/format/address";
-import { useAccountHue } from "@/lib/hooks/use-account-hue";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import type { ComposeSeed } from "@/lib/hooks/use-app-state";
 import { useApp } from "@/lib/hooks/use-app-state";
@@ -85,7 +84,6 @@ function ComposeForm({
 }) {
   const app = useApp();
   const accounts = useAccounts();
-  const hueFor = useAccountHue();
   const send = useSend();
   const createDraft = useCreateDraft();
   const updateDraft = useUpdateDraft();
@@ -307,11 +305,6 @@ function ComposeForm({
                   {list.map((entry) => (
                     <SelectItem key={entry.id} value={entry.alias}>
                       <span className="flex items-center gap-2">
-                        <span
-                          aria-hidden="true"
-                          className="inline-block size-1.5 rounded-[var(--radius-full)]"
-                          style={{ background: hueFor(entry.id) }}
-                        />
                         {entry.alias}
                         <span className="font-mono text-[11px] text-fg-tertiary">
                           {entry.email}

@@ -6,6 +6,12 @@ directories:
   output: release
   buildResources: build
 
+# Named rather than left to electron-builder's by-convention lookup in
+# buildResources: a missing icon is otherwise a silent fall back to the stock
+# Electron diamond, which ships and is only noticed in the dock.
+# Regenerate all three with `npm run icons`.
+icon: build/icon.icns
+
 # node_modules for production dependencies is added by electron-builder itself;
 # these entries only trim what else goes into the asar.
 files:
@@ -53,6 +59,7 @@ mac:
 
 win:
   target: nsis
+  icon: build/icon.ico
 
 nsis:
   oneClick: false
@@ -62,3 +69,4 @@ nsis:
 linux:
   target: AppImage
   category: Network
+  icon: build/icon.png

@@ -16,6 +16,7 @@ import {
  * src/api/routes.ts, src/mcp/server.ts and src/provider/types.ts.
  */
 const CAN = [
+  "Hold a conversation with your own MCP agent, in the Agent view",
   "Read mail from every connected mailbox",
   "Search mailboxes (Inbox only)",
   "Mark messages read and unread",
@@ -26,6 +27,7 @@ const CAN = [
 ];
 
 const CANNOT = [
+  "Answer you by itself — mailmux runs no model and never calls one",
   "Archive, delete, or move messages",
   "Star, flag, label, or tag",
   "Snooze or remind",
@@ -35,7 +37,7 @@ const CANNOT = [
   "Push new mail — this page fetches when you ask it to",
 ];
 
-/** The eleven tools in src/mcp/server.ts, in the order they are declared. */
+/** The fifteen tools in src/mcp/server.ts, in the order they are declared. */
 const TOOLS = [
   "accounts_list",
   "messages_list",
@@ -48,6 +50,10 @@ const TOOLS = [
   "drafts_list",
   "draft_delete",
   "folders_list",
+  "chat_await_message",
+  "chat_say",
+  "chat_activity",
+  "chat_history",
 ];
 
 export function CapabilitiesDialog({

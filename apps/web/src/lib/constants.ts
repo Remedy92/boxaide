@@ -23,19 +23,6 @@ export const SEARCH_DEBOUNCE_MS = 300;
 /** Most recent command-palette entries kept in localStorage (§2.6). */
 export const MAX_RECENT_COMMANDS = 8;
 
-/** Account rail hues. Index comes from hueIndex(); both themes define all 8. */
-export const ACCOUNT_HUE_COUNT = 8;
-export const ACCOUNT_HUES = [
-  "var(--acct-0)",
-  "var(--acct-1)",
-  "var(--acct-2)",
-  "var(--acct-3)",
-  "var(--acct-4)",
-  "var(--acct-5)",
-  "var(--acct-6)",
-  "var(--acct-7)",
-] as const;
-
 export type ProviderPreset = {
   id: string;
   label: string;
