@@ -45,6 +45,11 @@ asarUnpack:
 # Rebuilds better-sqlite3 against Electron's ABI while packaging.
 npmRebuild: true
 
+# Upload is `gh release`, after this script signs. A GH_TOKEN in the
+# environment otherwise makes electron-builder try to publish and crash
+# in updateInfoBuilder after the dmg is already written.
+publish: null
+
 # Version-free file names, so the download page can link to
 # /releases/latest/download/<name> and never be edited again. The names are
 # repeated in apps/web/src/app/install/page.tsx — change one, change the other.
