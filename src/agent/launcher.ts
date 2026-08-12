@@ -3,9 +3,10 @@
  *
  * MCP is client-driven, so the Agent view is silent until some client enters
  * the chat_await_message loop. For GUI clients (Claude Desktop) nothing can
- * automate that. For CLI agents there is no such wall: `claude -p` runs
- * headless, takes its MCP servers on the command line, and keeps looping for
- * as long as the kickoff prompt tells it to. This module detects which known
+ * automate that. For CLI agents there is no such wall: `claude -p` and
+ * `grok -p` run headless, take their MCP servers (Claude on the command
+ * line, Grok via an isolated GROK_HOME), and keep looping for as long as
+ * the kickoff prompt tells them to. This module detects which known
  * agent CLIs are installed, and spawns exactly one of them wired to this
  * server.
  *
@@ -20,7 +21,15 @@
  *    waiter; a second launched agent would race it for every message.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  realpathSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -66,11 +75,11 @@ normal; call it again. Use chat_activity for anything slow. Draft rather than
 send unless I ask you to send.`;
 
 /**
- * Every mailmux tool except message_send, in Claude Code's MCP tool
- * namespace. Deliberately a hand-written allowlist and not "TOOLS minus
- * send": adding a new server tool must not silently pre-approve it here.
+ * Every mailmux tool except message_send. Deliberately a hand-written
+ * allowlist and not "TOOLS minus send": adding a new server tool must not
+ * silently pre-approve it here. Each CLI namespaces these differently.
  */
-const PREAPPROVED_TOOLS = [
+const PREAPPROVED_TOOL_NAMES = [
   "accounts_list",
   "messages_list",
   "messages_search",
@@ -85,7 +94,11 @@ const PREAPPROVED_TOOLS = [
   "chat_say",
   "chat_activity",
   "chat_history",
-].map((name) => `mcp__mailmux__${name}`);
+];
+
+const CLAUDE_PREAPPROVED_TOOLS = PREAPPROVED_TOOL_NAMES.map(
+  (name) => `mcp__mailmux__${name}`,
+);
 
 export type LaunchContext = {
   mcpUrl: string;
@@ -105,6 +118,21 @@ export type AgentSpec = {
    * not exist.
    */
   args?: (ctx: LaunchContext) => string[];
+  /**
+   * Extra child env, overlayed on the inherited env (and the widened PATH).
+   * Grok has no --strict-mcp-config; GROK_HOME plus these flags keep the
+   * process from picking up the user's other MCP servers.
+   */
+  childEnv?: (ctx: LaunchContext, workDir: string) => Record<string, string>;
+  /**
+   * Runs after the empty workdir exists and before spawn. Grok has no
+   * --mcp-config flag; this writes the isolated config the process will read.
+   */
+  prepare?: (
+    ctx: LaunchContext,
+    workDir: string,
+    parentEnv: NodeJS.ProcessEnv,
+  ) => void;
 };
 
 /**
@@ -128,17 +156,170 @@ function claudeArgs(ctx: LaunchContext): string[] {
     }),
     "--strict-mcp-config",
     "--allowedTools",
-    PREAPPROVED_TOOLS.join(","),
+    CLAUDE_PREAPPROVED_TOOLS.join(","),
   ];
+}
+
+/**
+ * Grok Build, headless. There is no --mcp-config / --strict-mcp-config: MCP
+ * servers come from config.toml. We give the process its own GROK_HOME so
+ * the user's ~/.grok servers and plugins are not loaded, write mailmux as
+ * the only server there, and pre-approve read/draft tools under dontAsk
+ * (anything else, including message_send, is a silent denial).
+ *
+ * Claude/Cursor MCP entries in ~/.claude.json still appear in `grok inspect`
+ * even with GROK_HOME set; the env flags below mark them disabled. Plugin
+ * MCP servers Grok discovers from ~/.claude/plugins cannot be turned off
+ * from here — the allowlist is the boundary that still holds.
+ */
+function grokHomeFor(ctx: LaunchContext): string {
+  const root =
+    ctx.dataDir === ":memory:" ? join(tmpdir(), "mailmux-agent") : ctx.dataDir;
+  return join(root, "agent-homes", "grok");
+}
+
+function grokArgs(_ctx: LaunchContext): string[] {
+  const args = [
+    "-p",
+    KICKOFF,
+    "--verbatim",
+    "--permission-mode",
+    "dontAsk",
+    "--no-subagents",
+    "--no-plan",
+    "--no-memory",
+    "--disable-web-search",
+  ];
+  for (const name of PREAPPROVED_TOOL_NAMES) {
+    args.push("--allow", `MCPTool(mailmux__${name})`);
+  }
+  return args;
+}
+
+function grokChildEnv(ctx: LaunchContext, _workDir: string): Record<string, string> {
+  return {
+    GROK_HOME: grokHomeFor(ctx),
+    MAILMUX_TOKEN: ctx.bearerToken,
+    GROK_DISABLE_AUTOUPDATER: "1",
+    GROK_CLAUDE_MCPS_ENABLED: "0",
+    GROK_CURSOR_MCPS_ENABLED: "0",
+    GROK_CLAUDE_SKILLS_ENABLED: "0",
+    GROK_CURSOR_SKILLS_ENABLED: "0",
+    GROK_CLAUDE_HOOKS_ENABLED: "0",
+    GROK_CURSOR_HOOKS_ENABLED: "0",
+    GROK_CLAUDE_RULES_ENABLED: "0",
+    GROK_CURSOR_RULES_ENABLED: "0",
+    GROK_CLAUDE_AGENTS_ENABLED: "0",
+    GROK_CURSOR_AGENTS_ENABLED: "0",
+  };
+}
+
+function grokPrepare(
+  ctx: LaunchContext,
+  workDir: string,
+  parentEnv: NodeJS.ProcessEnv,
+): void {
+  const home = grokHomeFor(ctx);
+  mkdirSync(home, { recursive: true });
+
+  let trusted = workDir;
+  try {
+    trusted = realpathSync(workDir);
+  } catch {
+    // The directory was just created; the unresolved path is still the cwd.
+  }
+
+  writeFileSync(join(home, "config.toml"), grokConfigToml(ctx), { mode: 0o600 });
+  writeFileSync(join(home, "trusted_folders.toml"), grokTrustToml(trusted), {
+    mode: 0o600,
+  });
+
+  // If GROK_HOME is ignored, project config in the empty workdir still
+  // declares mailmux. Same name as the isolated user server, so it does
+  // not stack a second copy when both are read.
+  const projectGrok = join(workDir, ".grok");
+  mkdirSync(projectGrok, { recursive: true });
+  writeFileSync(join(projectGrok, "config.toml"), grokProjectToml(ctx), {
+    mode: 0o600,
+  });
+
+  const parentHome = parentEnv.GROK_HOME || join(homedir(), ".grok");
+  const authFrom = join(parentHome, "auth.json");
+  if (existsSync(authFrom)) {
+    refreshLink(authFrom, join(home, "auth.json"));
+  }
+}
+
+function grokConfigToml(ctx: LaunchContext): string {
+  return [
+    "[cli]",
+    "auto_update = false",
+    "",
+    "[compat.claude]",
+    "mcps = false",
+    "skills = false",
+    "rules = false",
+    "agents = false",
+    "hooks = false",
+    "",
+    "[compat.cursor]",
+    "mcps = false",
+    "skills = false",
+    "rules = false",
+    "agents = false",
+    "hooks = false",
+    "",
+    "[mcp_servers.mailmux]",
+    `url = ${tomlString(ctx.mcpUrl)}`,
+    `bearer_token_env_var = ${tomlString("MAILMUX_TOKEN")}`,
+    "",
+  ].join("\n");
+}
+
+function grokProjectToml(ctx: LaunchContext): string {
+  return [
+    "[mcp_servers.mailmux]",
+    `url = ${tomlString(ctx.mcpUrl)}`,
+    `bearer_token_env_var = ${tomlString("MAILMUX_TOKEN")}`,
+    "",
+  ].join("\n");
+}
+
+function grokTrustToml(workDir: string): string {
+  return `[folders.${tomlString(workDir)}]\ntrusted = true\n`;
+}
+
+function tomlString(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function refreshLink(from: string, to: string): void {
+  try {
+    unlinkSync(to);
+  } catch {
+    // First launch, or a leftover we can overwrite.
+  }
+  try {
+    symlinkSync(from, to);
+  } catch {
+    copyFileSync(from, to);
+  }
 }
 
 export const KNOWN_AGENTS: AgentSpec[] = [
   { id: "claude-code", label: "Claude Code", bin: "claude", args: claudeArgs },
+  {
+    id: "grok",
+    label: "Grok",
+    bin: "grok",
+    args: grokArgs,
+    childEnv: grokChildEnv,
+    prepare: grokPrepare,
+  },
   // Detected and shown, not yet launchable: their CLIs have no verified way
   // to take an MCP server plus a per-tool allowlist on one command line.
   { id: "codex", label: "Codex", bin: "codex" },
   { id: "gemini", label: "Gemini CLI", bin: "gemini" },
-  { id: "grok", label: "Grok", bin: "grok" },
   { id: "opencode", label: "opencode", bin: "opencode" },
 ];
 
@@ -211,13 +392,18 @@ export class AgentLauncher {
         ? join(tmpdir(), "mailmux-agent")
         : join(this.ctx.dataDir, "agent-workdir");
     mkdirSync(workDir, { recursive: true });
+    spec.prepare?.(this.ctx, workDir, this.env);
 
     this.stderrTail = "";
     const child = spawn(bin, spec.args(this.ctx), {
       cwd: workDir,
       // The widened PATH travels with the agent: launched from the Finder app
       // the inherited PATH lacks even the directory its own binary sits in.
-      env: { ...this.env, PATH: this.searchDirs().join(delimiter) },
+      env: {
+        ...this.env,
+        PATH: this.searchDirs().join(delimiter),
+        ...spec.childEnv?.(this.ctx, workDir),
+      },
       stdio: ["ignore", "ignore", "pipe"],
     });
     child.stderr?.setEncoding("utf8");

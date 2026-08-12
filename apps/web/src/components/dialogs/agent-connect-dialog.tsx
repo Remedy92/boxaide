@@ -95,7 +95,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
           <div
             role="tablist"
             aria-label="Agent client"
-            className="flex gap-1 border-b border-border-subtle pb-2"
+            className="flex flex-wrap gap-1 border-b border-border-subtle pb-2"
             onKeyDown={(event) => {
               const delta =
                 event.key === "ArrowRight"

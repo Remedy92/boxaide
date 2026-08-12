@@ -11,7 +11,11 @@
 
 import { normalizeBaseUrl } from "@/lib/settings";
 
-export type AgentTargetId = "claude-code" | "claude-desktop" | "cursor";
+export type AgentTargetId =
+  | "claude-code"
+  | "grok"
+  | "claude-desktop"
+  | "cursor";
 
 export type AgentTarget = {
   id: AgentTargetId;
@@ -75,6 +79,17 @@ export function buildAgentTargets(input: AgentConfigInput): AgentTarget[] {
       )}`,
       carriesToken: true,
       note: "Adds mailmux for the current project. Add --scope user to make it available everywhere.",
+    },
+    {
+      id: "grok",
+      label: "Grok",
+      where: "Run this once in any terminal.",
+      kind: "shell",
+      snippet: `grok mcp add --transport http mailmux ${shellQuote(url)} --header ${shellQuote(
+        `Authorization: Bearer ${token}`,
+      )}`,
+      carriesToken: true,
+      note: "Writes ~/.grok/config.toml. Then start a grok session and paste the prompt below — or press Start next to Grok in the Agents list if the CLI is on this machine.",
     },
     {
       id: "claude-desktop",

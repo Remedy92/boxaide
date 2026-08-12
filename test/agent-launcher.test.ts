@@ -3,7 +3,7 @@
  * scripts — never at a real agent CLI, which would burn the user's account
  * and hang the suite.
  */
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -137,6 +137,64 @@ describe("AgentLauncher", () => {
     // The agent must not inherit the user's other MCP servers.
     expect(args).toContain("--strict-mcp-config");
   });
+
+  it("launches Grok with an isolated config and a mailmux-only allowlist", () => {
+    const grok = KNOWN_AGENTS.find((s) => s.id === "grok");
+    expect(grok?.args).toBeTypeOf("function");
+    const ctx = {
+      mcpUrl: "http://127.0.0.1:8787/mcp",
+      bearerToken: "secret-token-xyz",
+      dataDir: tempDir(),
+    };
+    const args = grok!.args!(ctx);
+    expect(args[0]).toBe("-p");
+    expect(args).toContain("--permission-mode");
+    expect(args[args.indexOf("--permission-mode") + 1]).toBe("dontAsk");
+    expect(args).toContain("--allow");
+    expect(args).toContain("MCPTool(mailmux__draft_create)");
+    expect(args).toContain("MCPTool(mailmux__chat_await_message)");
+    expect(args.join("\0")).not.toContain("message_send");
+    expect(args.join("\0")).not.toContain(ctx.bearerToken);
+
+    const workDir = join(ctx.dataDir, "agent-workdir");
+    mkdirSync(workDir, { recursive: true });
+    grok!.prepare!(ctx, workDir, { PATH: "/usr/bin" });
+    const env = grok!.childEnv!(ctx, workDir);
+    expect(env.MAILMUX_TOKEN).toBe(ctx.bearerToken);
+    expect(env.GROK_HOME).toBe(join(ctx.dataDir, "agent-homes", "grok"));
+    expect(env.GROK_CLAUDE_MCPS_ENABLED).toBe("0");
+    expect(env.GROK_CURSOR_MCPS_ENABLED).toBe("0");
+
+    const toml = readFileSync(join(env.GROK_HOME, "config.toml"), "utf8");
+    expect(toml).toContain(ctx.mcpUrl);
+    expect(toml).toContain("bearer_token_env_var");
+    expect(toml).not.toContain(ctx.bearerToken);
+    expect(toml).toMatch(/compat\.claude[\s\S]*mcps = false/);
+    expect(readFileSync(join(workDir, ".grok", "config.toml"), "utf8")).toContain(
+      ctx.mcpUrl,
+    );
+  });
+
+  it("starts a fake grok binary after writing its isolated home", async () => {
+    const dataDir = tempDir();
+    const bin = fakeBinDir("grok");
+    const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
+    const launcher = new AgentLauncher(
+      { mcpUrl: "http://127.0.0.1:9/mcp", bearerToken: "secret-token-xyz", dataDir },
+      [grok],
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    const running = launcher.start("grok");
+    expect(running.id).toBe("grok");
+    const home = join(dataDir, "agent-homes", "grok");
+    expect(readFileSync(join(home, "config.toml"), "utf8")).toContain(
+      "http://127.0.0.1:9/mcp",
+    );
+    launcher.stop();
+    await until(() => launcher.status().running === null);
+  });
 });
 
 describe("launcher routes", () => {
@@ -166,6 +224,9 @@ describe("launcher routes", () => {
     const body = await listed.json();
     expect(body.running).toBeNull();
     expect(body.agents.map((a: { id: string }) => a.id)).toContain("claude-code");
+    expect(body.agents.find((a: { id: string }) => a.id === "grok")?.supported).toBe(
+      true,
+    );
 
     const unknown = await runtime.app.request("/api/agents/nope/start", {
       method: "POST",
