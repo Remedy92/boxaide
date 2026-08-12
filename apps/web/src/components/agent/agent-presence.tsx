@@ -1,6 +1,5 @@
 "use client";
 
-import { StatusDot } from "@/components/atoms";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { AgentConnection } from "@/lib/hooks/use-agent";
 import type { AgentPresence as Presence } from "@/lib/types";
@@ -14,7 +13,9 @@ import type { AgentPresence as Presence } from "@/lib/types";
  * "connected": an MCP client that has merely configured mailmux, or that is
  * using the mail tools without the chat loop, is invisible here and should be.
  *
- * The words carry the state; the dot is redundant with them (1.4.1).
+ * Shown as a byline, not a status light. A pill and a dot both say "dashboard
+ * widget"; the name of whoever is in the loop is the fact. Idle is absence, not
+ * a grey LED — same rule as the Agent nav row.
  */
 export function AgentPresenceBadge({
   presence,
@@ -26,41 +27,59 @@ export function AgentPresenceBadge({
   const state =
     connection === "offline"
       ? {
-          tone: "danger" as const,
-          label: "Server unreachable",
+          label: "Unreachable",
+          className: "text-danger",
           detail: "mailmux is not answering. Reconnecting.",
         }
       : connection === "unsupported"
         ? {
-            tone: "warning" as const,
-            label: "No agent channel",
+            label: "No channel",
+            className: "text-warning",
             detail:
               "This mailmux server was built without the chat channel. Update it to talk to an agent here.",
           }
         : presence.listening
           ? {
-              tone: "success" as const,
-              label: presence.lastAgent ?? "Agent listening",
+              label: presence.lastAgent
+                ? displayAgentName(presence.lastAgent)
+                : "Listening",
+              className: "font-medium text-fg-secondary",
               detail: presence.waiting
-                ? `Waiting for your message${presence.lastAgent ? ` — ${presence.lastAgent}` : ""}.`
+                ? `Waiting for your message${presence.lastAgent ? ` — ${displayAgentName(presence.lastAgent)}` : ""}.`
                 : "An agent called in within the last few seconds.",
             }
-          : {
-              tone: "muted" as const,
-              label: "No agent listening",
-              detail:
-                "Nothing is polling for your messages. Anything you send is queued and delivered the moment an agent starts listening.",
-            };
+          : null;
+
+  if (!state) return null;
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="flex h-6 items-center gap-1.5 rounded-[var(--radius-full)] border border-border-subtle px-2 text-[11px] leading-4 text-fg-secondary">
-          <StatusDot tone={state.tone} />
-          <span className="max-w-[22ch] truncate">{state.label}</span>
+        <span
+          className={`max-w-[22ch] truncate text-[11px] leading-4 ${state.className}`}
+        >
+          {state.label}
         </span>
       </TooltipTrigger>
       <TooltipContent>{state.detail}</TooltipContent>
     </Tooltip>
   );
+}
+
+/** MCP clientInfo.name is often a slug. The header should read as a name. */
+export function displayAgentName(name: string): string {
+  const known: Record<string, string> = {
+    "claude-code": "Claude Code",
+    "claude-ai": "Claude",
+    "claude-desktop": "Claude Desktop",
+    grok: "Grok",
+    cursor: "Cursor",
+    codex: "Codex",
+  };
+  const mapped = known[name.toLowerCase()];
+  if (mapped) return mapped;
+  if (/[A-Z]/.test(name.slice(1)) || name.includes(" ")) return name;
+  return name
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }

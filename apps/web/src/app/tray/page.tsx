@@ -2,7 +2,8 @@
 
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { BrandGlyph, StatusDot } from "@/components/atoms";
+import { BrandGlyph } from "@/components/atoms";
+import { displayAgentName } from "@/components/agent/agent-presence";
 import {
   getAgentState,
   getLocalBootstrap,
@@ -92,16 +93,15 @@ export default function TrayPage() {
         </span>
         <span
           className={cn(
-            "ml-auto flex items-center gap-1.5 rounded-full border border-border-subtle",
-            "px-2 py-0.5 text-[11px] leading-4 text-fg-secondary",
+            "ml-auto text-[11px] leading-4",
+            presence?.listening ? "text-fg-secondary" : "text-fg-tertiary",
           )}
         >
-          <StatusDot tone={presence?.listening ? "success" : "muted"} />
           {presence?.listening
             ? presence.lastAgent
-              ? `${presence.lastAgent} listening`
-              : "Agent listening"
-            : "No agent listening"}
+              ? displayAgentName(presence.lastAgent)
+              : "Listening"
+            : "Idle"}
         </span>
       </header>
 
