@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { displayAgentName } from "@/components/agent/agent-presence";
 import { Markdown } from "@/lib/format/markdown";
 import { isoAttr, isoTitle } from "@/lib/format/date";
 import type { AgentTurn as Turn } from "@/lib/types";
@@ -50,7 +51,7 @@ export const AgentTurnView = React.memo(function AgentTurnView({
     <div className="min-w-0">
       <p className="mb-1 flex items-baseline gap-2 text-[11px] leading-4 text-fg-tertiary">
         <span className="font-medium text-fg-secondary">
-          {turn.agent ?? "Agent"}
+          {turn.agent ? displayAgentName(turn.agent) : "Agent"}
         </span>
         <time dateTime={isoAttr(turn.at)} title={isoTitle(turn.at)} className="tnum">
           {new Date(turn.at).toLocaleTimeString([], {

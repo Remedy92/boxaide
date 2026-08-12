@@ -66,8 +66,16 @@ export type Presence = {
   /** True while an agent is waiting, or called within the presence window. */
   listening: boolean;
   lastSeenAt: string | null;
-  /** Client name from the most recent call, when it gave one. */
+  /**
+   * Name the header should show: the launched CLI if one is running, else
+   * the last MCP initialize name.
+   */
   lastAgent: string | null;
+  /**
+   * Registry id of the CLI mailmux spawned (sidebar Start). The header uses
+   * this to show a name before the process has called chat_await_message.
+   */
+  launchedAgent: string | null;
 };
 
 type Waiter = {
@@ -81,6 +89,7 @@ export class AgentChannel {
   private waiters: Waiter[] = [];
   private lastSeen: number | null = null;
   private lastAgent: string | null = null;
+  private launchedAgent: string | null = null;
   /** Highest seq handed to listeners. Advanced only by drain(). */
   private broadcastSeq: number;
   private poll: ReturnType<typeof setInterval> | null = null;
@@ -160,7 +169,8 @@ export class AgentChannel {
       listening: this.waiters.length > 0 || fresh,
       lastSeenAt:
         this.lastSeen === null ? null : new Date(this.lastSeen).toISOString(),
-      lastAgent: this.lastAgent,
+      lastAgent: this.launchedAgent ?? this.lastAgent,
+      launchedAgent: this.launchedAgent,
     };
   }
 
@@ -269,7 +279,9 @@ export class AgentChannel {
 
   private touch(agent: string | null): void {
     this.lastSeen = Date.now();
-    if (agent) this.lastAgent = agent;
+    // A launched CLI stamps turns as itself. Do not copy that stamp onto
+    // lastAgent, or Stop loses the last MCP client name.
+    if (agent && !this.launchedAgent) this.lastAgent = agent;
     this.emitPresence();
   }
 
@@ -289,16 +301,28 @@ export class AgentChannel {
    * Best effort, and labelled that way wherever it is shown. HTTP MCP is
    * stateless here — there is no session id tying a later tools/call back to
    * the handshake that named the client — so with two different clients
-   * connected this is whichever initialized most recently. It is used for a
-   * presence label and never for a decision.
+   * connected this is whichever initialized most recently. A launched agent
+   * (setLaunchedAgent) wins the header and new turn stamps while it runs.
    */
   noteClient(name: string | null): void {
-    if (name) this.lastAgent = name;
+    if (!name || name === this.lastAgent) return;
+    this.lastAgent = name;
+    this.emitPresence();
   }
 
-  /** The best-effort client name, for stamping on a turn the agent posts. */
+  /**
+   * The CLI mailmux spawned. Wins the header and new turn stamps until the
+   * process exits. The previous MCP name is kept and returns on Stop.
+   */
+  setLaunchedAgent(id: string | null): void {
+    if (id === this.launchedAgent) return;
+    this.launchedAgent = id;
+    this.emitPresence();
+  }
+
+  /** Who new agent turns are stamped as: the launched CLI, else last initialize. */
   get clientName(): string | null {
-    return this.lastAgent;
+    return this.launchedAgent ?? this.lastAgent;
   }
 
   /* ---- lifecycle -------------------------------------------------------- */

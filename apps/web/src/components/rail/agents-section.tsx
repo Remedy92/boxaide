@@ -22,10 +22,10 @@ import {
  * otherwise: no agent count, no "connected", no activity feed.
  *
  * What became knowable is narrower and is reported elsewhere. An agent parked
- * in `chat_await_message` is holding a request open, and that request is a
- * fact — the Agent nav row and the conversation header call that "listening",
- * and only that. See AgentChannel.presence and AgentPresenceBadge; the wording
- * in both is deliberate and should not be widened to "connected".
+ * in `chat_await_message` is holding a request open — the Agent nav row calls
+ * that "listening", and only that. The conversation header also names the
+ * CLI this process spawned (sidebar Start), which is a different fact: see
+ * AgentChannel.presence.launchedAgent. Neither is "connected".
  */
 export function AgentsSection({
   collapsed = false,

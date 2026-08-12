@@ -105,6 +105,12 @@ export type LaunchContext = {
   bearerToken: string;
   /** Where the agent's empty working directory is created. */
   dataDir: string;
+  /**
+   * Fired when the child starts and when it exits. The conversation channel
+   * uses this so the Agent pane names the CLI the user pressed Start on,
+   * not whichever leftover MCP client last called initialize.
+   */
+  onRunningChange?: (id: string | null) => void;
 };
 
 export type AgentSpec = {
@@ -427,6 +433,7 @@ export class AgentLauncher {
 
     this.child = child;
     this.running = started;
+    this.ctx.onRunningChange?.(spec.id);
     return started;
   }
 
@@ -438,9 +445,11 @@ export class AgentLauncher {
   }
 
   close(): void {
+    const had = this.running !== null;
     this.child?.kill("SIGTERM");
     this.child = null;
     this.running = null;
+    if (had) this.ctx.onRunningChange?.(null);
   }
 
   private noteExit(id: string, code: number | null): void {
@@ -453,6 +462,7 @@ export class AgentLauncher {
     };
     this.running = null;
     this.child = null;
+    this.ctx.onRunningChange?.(null);
   }
 
   /** PATH first (a terminal run wins), then the well-known directories. */
