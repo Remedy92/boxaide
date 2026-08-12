@@ -126,6 +126,68 @@ describe("AgentChannel", () => {
     expect(channel.presence().waiting).toBe(0);
   });
 
+  it("reports work from the hand-off until the answer lands", async () => {
+    const { channel } = make();
+    expect(channel.presence().working).toBeNull();
+
+    const parked = channel.awaitUserTurn({ timeoutMs: 2_000, agent: "grok" });
+    const posted = channel.post({ role: "user", text: "what came in today?" });
+    await parked;
+
+    const working = channel.presence().working;
+    expect(working?.seq).toBe(posted.seq);
+    expect(working?.agent).toBe("grok");
+    expect(working?.tool).toBeNull();
+
+    // An activity line is narration mid-task, not the answer.
+    channel.post({ role: "activity", text: "checking your inbox" });
+    expect(channel.presence().working?.seq).toBe(posted.seq);
+
+    channel.post({ role: "agent", text: "two invoices and a newsletter" });
+    expect(channel.presence().working).toBeNull();
+  });
+
+  it("records a mail tool call as a step only while work is open", async () => {
+    const { channel } = make();
+
+    // Nobody asked anything: a tool call belongs to no question.
+    channel.noteToolCall("messages_list");
+    expect(channel.presence().working).toBeNull();
+
+    const parked = channel.awaitUserTurn({ timeoutMs: 2_000 });
+    channel.post({ role: "user", text: "find the invoice" });
+    await parked;
+
+    channel.noteToolCall("messages_search");
+    expect(channel.presence().working?.tool?.name).toBe("messages_search");
+  });
+
+  it("reports a claimed message as delivered, so the UI never calls it queued", async () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "who emailed me?" });
+    expect(channel.history()[0].delivered).toBe(false);
+
+    await channel.awaitUserTurn({ timeoutMs: 500 });
+
+    // The claim is permanent: this row is never handed to anybody again, so
+    // "waiting for an agent" would be a lie from here on.
+    expect(channel.history()[0].delivered).toBe(true);
+    expect(await channel.awaitUserTurn({ timeoutMs: 500 })).toBeNull();
+  });
+
+  it("drops the work when the agent goes back to the loop unanswered", async () => {
+    const { channel } = make();
+    const parked = channel.awaitUserTurn({ timeoutMs: 2_000 });
+    channel.post({ role: "user", text: "hello" });
+    await parked;
+    expect(channel.presence().working).not.toBeNull();
+
+    // Round two of the loop. Whatever happened to message one, it is over.
+    const next = channel.awaitUserTurn({ timeoutMs: 500 });
+    expect(channel.presence().working).toBeNull();
+    await next;
+  });
+
   it("notifies presence subscribers when an agent parks or speaks", async () => {
     const { channel } = make();
     let n = 0;

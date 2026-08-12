@@ -1,10 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { Menu, Plug, Trash2 } from "lucide-react";
+import { ArrowDown, Menu, Plug, Trash2 } from "lucide-react";
 import { AgentComposer } from "@/components/agent/agent-composer";
 import { AgentPresenceBadge } from "@/components/agent/agent-presence";
-import { AgentTurnView } from "@/components/agent/agent-turn";
+import { AgentRunView, groupRuns } from "@/components/agent/agent-run";
 import { BrandGlyph, TechnicalDetails } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -17,9 +17,13 @@ import { useApp } from "@/lib/hooks/use-app-state";
  *
  * mailmux runs no model. Everything on this pane came from, or is going to, an
  * MCP client the user runs themselves; the server's only job is to hold the
- * conversation and hand messages over. That is why there is no "thinking"
- * indicator and no streaming caret: mailmux genuinely does not know whether an
- * agent is composing a reply, only whether one has asked for a message.
+ * conversation and hand messages over.
+ *
+ * So there is no token stream and no typing caret — an answer arrives whole.
+ * What IS live is the run: mailmux hands a message to exactly one agent and
+ * knows that agent has not answered yet, and it sees every mail tool that agent
+ * calls in the meantime. That is what the working indicator and the step list
+ * are made of. Nothing here is inferred from silence.
  *
  * One measure, centred. The composer is pinned; the log scrolls under it.
  */
@@ -42,27 +46,46 @@ export function AgentView({
   const agent = useAgent();
   const accounts = useAccounts();
   const scroller = React.useRef<HTMLDivElement | null>(null);
-  const bottom = React.useRef<HTMLDivElement | null>(null);
 
   /* Follow the tail only while the user is already at it. Yanking the view down
      while somebody is reading an older answer is the single rudest thing a
      conversation pane can do. */
   const pinned = React.useRef(true);
+  const [atBottom, setAtBottom] = React.useState(true);
   const onScroll = React.useCallback(() => {
     const node = scroller.current;
     if (!node) return;
     const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
     pinned.current = gap < 80;
+    setAtBottom(gap < 80);
   }, []);
 
+  /* Move the scroller itself rather than scrollIntoView() a zero-height
+     sentinel, and land instantly.
+
+     Both details are load-bearing. `scrollIntoView({behavior:"smooth"})` on an
+     empty div is a silent no-op in at least one Chromium build — measured, not
+     assumed — so the tail would simply stop following there. And a tail that
+     animates loses a race it cannot win: another turn lands mid-animation and
+     the pane is already chasing a stale target. */
+  const toBottom = React.useCallback(() => {
+    pinned.current = true;
+    const node = scroller.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, []);
+
+  const runs = React.useMemo(() => groupRuns(agent.turns), [agent.turns]);
+  const work = agent.presence.working;
+
   const lastSeq = agent.turns.at(-1)?.seq ?? 0;
+  // A step arriving is as much a reason to follow the tail as a turn is: the
+  // run block grows under the reader without any new turn being written.
+  const stepKey = work ? `${work.seq}:${work.tool?.at ?? ""}` : "";
   React.useEffect(() => {
     if (!pinned.current) return;
-    bottom.current?.scrollIntoView({
-      block: "end",
-      behavior: app.reducedMotion ? "auto" : "smooth",
-    });
-  }, [lastSeq, app.reducedMotion]);
+    const node = scroller.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [lastSeq, stepKey]);
 
   const empty = agent.turns.length === 0;
   const noMailboxes = !accounts.isPending && (accounts.data ?? []).length === 0;
@@ -84,7 +107,10 @@ export function AgentView({
         <h2 className="text-[13px] leading-[18px] font-medium text-fg">Agent</h2>
 
         <div className="ml-auto flex items-center gap-1.5">
-          <AgentPresenceBadge presence={agent.presence} connection={agent.connection} />
+          <AgentPresenceBadge
+            presence={agent.presence}
+            connection={agent.connection}
+          />
           {!empty && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -104,37 +130,62 @@ export function AgentView({
         </div>
       </header>
 
-      <div
-        ref={scroller}
-        onScroll={onScroll}
-        className="pane-scroll min-h-0 flex-1 overflow-y-auto"
-      >
-        {/* Bottom-anchored. A short conversation belongs against the composer,
-            not stranded at the top of a tall empty pane — the gap reads as
-            "something failed to load". `min-h-full` on the inner column is what
-            lets justify-end have any effect inside a scroller. */}
+      <div className="relative min-h-0 flex-1">
         <div
-          className={`mx-auto flex min-h-full w-full max-w-[720px] flex-col px-5 pb-6 ${
-            empty ? "" : "justify-end"
-          }`}
+          ref={scroller}
+          onScroll={onScroll}
+          className="pane-scroll h-full min-h-0 overflow-y-auto"
         >
-          {empty ? (
-            <EmptyState
-              noMailboxes={noMailboxes}
-              listening={agent.presence.listening}
-              onConnectAgent={() => app.openDialog("agent")}
-              onConnectMailbox={() => app.openDialog("connect")}
-              onPick={(text) => void agent.send(text)}
-            />
-          ) : (
-            <div className="space-y-5 pt-4">
-              {agent.turns.map((turn) => (
-                <AgentTurnView key={turn.seq} turn={turn} />
-              ))}
-            </div>
-          )}
-          <div ref={bottom} />
+          {/* Bottom-anchored. A short conversation belongs against the composer,
+              not stranded at the top of a tall empty pane — the gap reads as
+              "something failed to load". `min-h-full` on the inner column is
+              what lets justify-end have any effect inside a scroller. */}
+          <div
+            className={`mx-auto flex min-h-full w-full max-w-[720px] flex-col px-5 pb-6 ${
+              empty ? "" : "justify-end"
+            }`}
+          >
+            {empty ? (
+              <EmptyState
+                noMailboxes={noMailboxes}
+                listening={agent.presence.listening}
+                onConnectAgent={() => app.openDialog("agent")}
+                onConnectMailbox={() => app.openDialog("connect")}
+                onPick={(text) => void agent.send(text)}
+              />
+            ) : (
+              <div className="space-y-6 pt-4">
+                {runs.map((run) => (
+                  <AgentRunView
+                    key={run.seq}
+                    run={run}
+                    work={work && run.question?.seq === work.seq ? work : null}
+                    listening={agent.presence.listening}
+                    claimed={
+                      run.question !== null && agent.claimed.has(run.question.seq)
+                    }
+                  />
+                ))}
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* Only ever drawn when it has something to do. */}
+        {!atBottom && !empty && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-2 flex justify-center">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={toBottom}
+              className="pointer-events-auto h-7 rounded-[var(--radius-full)] bg-surface-2 px-2.5 text-[12px] shadow-[var(--shadow-overlay)]"
+            >
+              <ArrowDown className="size-3.5" strokeWidth={1.5} />
+              Latest
+            </Button>
+          </div>
+        )}
       </div>
 
       <div className="shrink-0 px-5 pb-4">
@@ -208,13 +259,13 @@ function EmptyState({
         </div>
       )}
 
-      <ul className="mt-7 space-y-1.5">
+      <ul className="mt-7 flex flex-wrap gap-1.5">
         {SUGGESTIONS.map((text) => (
           <li key={text}>
             <button
               type="button"
               onClick={() => onPick(text)}
-              className="w-full rounded-[var(--radius-md)] px-2.5 py-1.5 text-left text-[13px] leading-[18px] text-fg-secondary transition-colors duration-[var(--dur-fast)] hover:bg-surface-hover hover:text-fg"
+              className="rounded-[var(--radius-full)] border border-border-subtle px-3 py-1.5 text-left text-[12px] leading-4 text-fg-secondary transition-colors duration-[var(--dur-fast)] hover:border-border-strong hover:bg-surface-hover hover:text-fg"
             >
               {text}
             </button>

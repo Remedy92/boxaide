@@ -60,6 +60,37 @@ const POLL_MS = 400;
  */
 const PRESENCE_WINDOW_MS = 40_000;
 
+/**
+ * How long a claimed message may stay unanswered before we stop saying an agent
+ * is working on it.
+ *
+ * An agent that took a message and then died leaves no trace: the claim is a
+ * database flag, not an open request. Rather than show a spinner forever, the
+ * claim expires. Five minutes is far longer than any real answer and short
+ * enough that a dead agent does not haunt the pane.
+ */
+const WORK_MAX_MS = 5 * 60_000;
+
+/**
+ * What an agent is doing right now, when it is doing anything.
+ *
+ * This is the one thing about an agent's own work that mailmux can prove. A
+ * message is handed to exactly one agent, and that hand-off is a write this
+ * process performs; the answer that ends it is another. Between the two, the
+ * agent has the message and has not answered — no model is being watched and
+ * nothing is inferred from silence.
+ */
+export type Work = {
+  /** The user turn that was claimed. */
+  seq: number;
+  /** When it was handed over. */
+  since: string;
+  /** The claiming agent's client name, when it gave one. */
+  agent: string | null;
+  /** The last mail tool it called since. Absent until it calls one. */
+  tool: { name: string; at: string } | null;
+};
+
 export type Presence = {
   /** Agents currently blocked in chat_await_message. Provable, not inferred. */
   waiting: number;
@@ -76,11 +107,15 @@ export type Presence = {
    * this to show a name before the process has called chat_await_message.
    */
   launchedAgent: string | null;
+  /** Set while a claimed message is unanswered. Null the rest of the time. */
+  working: Work | null;
 };
 
 type Waiter = {
   resolve: (turn: Turn | null) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** Client name of the parked agent, for the work record it may claim. */
+  agent: string | null;
 };
 
 export class AgentChannel {
@@ -90,6 +125,8 @@ export class AgentChannel {
   private lastSeen: number | null = null;
   private lastAgent: string | null = null;
   private launchedAgent: string | null = null;
+  /** The message an agent has taken and not yet answered. */
+  private work: (Work & { claimedAt: number }) | null = null;
   /** Highest seq handed to listeners. Advanced only by drain(). */
   private broadcastSeq: number;
   private poll: ReturnType<typeof setInterval> | null = null;
@@ -115,6 +152,9 @@ export class AgentChannel {
     const text = input.text.trim();
     if (!text) throw new Error("text is required");
     if (input.role !== "user") this.touch(input.agent ?? null);
+    // The answer is what ends the work. An activity line does not: the agent
+    // is narrating mid-task and is still holding the message.
+    if (input.role === "agent") this.work = null;
 
     const turn = this.store.appendTurn({
       at: new Date().toISOString(),
@@ -162,8 +202,9 @@ export class AgentChannel {
   }
 
   presence(): Presence {
-    const fresh =
-      this.lastSeen !== null && Date.now() - this.lastSeen < PRESENCE_WINDOW_MS;
+    const now = Date.now();
+    const fresh = this.lastSeen !== null && now - this.lastSeen < PRESENCE_WINDOW_MS;
+    if (this.work && now - this.work.claimedAt > WORK_MAX_MS) this.work = null;
     return {
       waiting: this.waiters.length,
       listening: this.waiters.length > 0 || fresh,
@@ -171,7 +212,31 @@ export class AgentChannel {
         this.lastSeen === null ? null : new Date(this.lastSeen).toISOString(),
       lastAgent: this.launchedAgent ?? this.lastAgent,
       launchedAgent: this.launchedAgent,
+      working: this.work
+        ? {
+            seq: this.work.seq,
+            since: this.work.since,
+            agent: this.work.agent,
+            tool: this.work.tool,
+          }
+        : null,
     };
+  }
+
+  /**
+   * Records a mail tool call, so a working agent's steps are visible even when
+   * it never calls `chat_activity`.
+   *
+   * Only kept while a claimed message is open. A client using the mail tools
+   * outside the conversation is not answering anybody, and its calls must not
+   * be drawn as steps under somebody's question.
+   */
+  noteToolCall(tool: string): void {
+    if (this.work) {
+      this.work.tool = { name: tool, at: new Date().toISOString() };
+    }
+    // The call itself is proof the agent is alive, work or no work.
+    this.touch(null);
   }
 
   /* ---- the long poll ---------------------------------------------------- */
@@ -187,12 +252,19 @@ export class AgentChannel {
   awaitUserTurn(
     options: { timeoutMs?: number; agent?: string | null } = {},
   ): Promise<Turn | null> {
-    this.touch(options.agent ?? null);
+    const agent = options.agent ?? null;
+    this.touch(agent);
+    // Back at the loop means done with the last message, answered or abandoned.
+    this.work = null;
     if (this.closed) return Promise.resolve(null);
 
     // Anything typed before the agent got here is already on disk.
     const pending = this.store.claimNextUserTurn();
-    if (pending) return Promise.resolve(pending);
+    if (pending) {
+      this.beginWork(pending, agent);
+      this.emitPresence();
+      return Promise.resolve(pending);
+    }
 
     const ms = Math.min(
       Math.max(options.timeoutMs ?? DEFAULT_WAIT_MS, 1_000),
@@ -200,6 +272,7 @@ export class AgentChannel {
     );
     return new Promise<Turn | null>((resolve) => {
       const waiter: Waiter = {
+        agent,
         resolve,
         timer: setTimeout(() => {
           this.drop(waiter);
@@ -247,10 +320,22 @@ export class AgentChannel {
       const waiter = this.waiters.shift();
       if (!waiter) break;
       clearTimeout(waiter.timer);
+      this.beginWork(turn, waiter.agent);
       waiter.resolve(turn);
       handed = true;
     }
     if (handed) this.emitPresence();
+  }
+
+  /** One agent now holds one message. Ends at its next answer, or by expiry. */
+  private beginWork(turn: Turn, agent: string | null): void {
+    this.work = {
+      seq: turn.seq,
+      since: new Date().toISOString(),
+      claimedAt: Date.now(),
+      agent: agent ?? this.lastAgent,
+      tool: null,
+    };
   }
 
   private ensurePoll(): void {
@@ -330,6 +415,9 @@ export class AgentChannel {
   clear(): void {
     this.store.clearTurns();
     this.broadcastSeq = 0;
+    // The claimed message went with the history; nothing is being answered.
+    this.work = null;
+    this.emitPresence();
   }
 
   /**
@@ -338,6 +426,7 @@ export class AgentChannel {
    */
   close(): void {
     this.closed = true;
+    this.work = null;
     const parked = this.waiters.splice(0);
     for (const waiter of parked) {
       clearTimeout(waiter.timer);

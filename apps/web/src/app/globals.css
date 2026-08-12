@@ -370,6 +370,50 @@
 }
 .mailmux-rise { animation: mailmux-rise 200ms var(--ease-out-expo) both; }
 
+/* ---- the agent run -------------------------------------------------------
+   Three pieces of motion, and all three run only while a message is genuinely
+   claimed by an agent — see AgentChannel.Work. Nothing here animates on a
+   guess, and nothing animates once the answer has landed.
+   ------------------------------------------------------------------------- */
+
+/* The working mark: one ring leaving the dot. Slow, because a fast pulse reads
+   as an alarm and this state can legitimately last a minute. */
+@keyframes mailmux-ping {
+  0%   { transform: scale(0.45); opacity: 0.5; }
+  70%  { transform: scale(1);    opacity: 0; }
+  100% { transform: scale(1);    opacity: 0; }
+}
+.mailmux-ping { animation: mailmux-ping 1800ms var(--ease-out-expo) infinite; }
+
+/* The current step's text. A light sweep across the ink itself, so the line
+   reads as live without a spinner sitting next to every word. */
+@keyframes mailmux-shimmer { to { background-position: -200% 0; } }
+.mailmux-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--text-tertiary) 0%,
+    var(--text-tertiary) 40%,
+    var(--text-primary) 50%,
+    var(--text-tertiary) 60%,
+    var(--text-tertiary) 100%
+  );
+  background-size: 200% 100%;
+  background-position: 0 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: mailmux-shimmer 2200ms linear infinite;
+}
+
+/* An answer arrives whole — mailmux is handed finished text, not tokens. It
+   fades up once on arrival, which is a statement about when it landed, not a
+   pretend stream. */
+@keyframes mailmux-answer-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
+}
+.mailmux-answer { animation: mailmux-answer-in 220ms var(--ease-out-expo) both; }
+
 /* Skeleton blocks breathe rather than shimmer: no travelling highlight, which
    at 8 rows reads as a loading screen pretending to be busy. */
 @keyframes mailmux-pulse {

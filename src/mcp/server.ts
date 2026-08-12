@@ -382,6 +382,9 @@ async function dispatch(
     if (!channel) throw new Error(`${name} is not available on this server`);
     return dispatchChat(channel, name, args);
   }
+  // A mail tool call under an open question is a step the user can watch. The
+  // channel keeps it only while a message is claimed — see noteToolCall.
+  channel?.noteToolCall(name);
   switch (name) {
     case "accounts_list":
       return { accounts: mail.listAccounts() };
@@ -487,6 +490,7 @@ async function dispatchChat(
       const seconds = Number(args.timeoutSeconds ?? DEFAULT_WAIT_MS / 1000);
       const turn = await channel.awaitUserTurn({
         timeoutMs: Number.isFinite(seconds) ? seconds * 1000 : DEFAULT_WAIT_MS,
+        agent: channel.clientName,
       });
       if (!turn) {
         return {

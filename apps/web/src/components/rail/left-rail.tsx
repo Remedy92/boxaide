@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { FilePen, Inbox, MailOpen, Plus, Sparkle } from "lucide-react";
-import { StatusDot } from "@/components/atoms";
+import { WorkingDot } from "@/components/agent/agent-run";
 import { AccountRow, type AccountHealth } from "@/components/rail/account-row";
 import { AgentsSection } from "@/components/rail/agents-section";
 import { BrandMark } from "@/components/rail/brand-mark";
@@ -24,7 +24,6 @@ import { useApp } from "@/lib/hooks/use-app-state";
 import { useConnection } from "@/lib/hooks/use-connection";
 import { useHealth } from "@/lib/hooks/use-health";
 import { useMessages } from "@/lib/hooks/use-messages";
-import { useSettings } from "@/lib/hooks/use-settings";
 import type { MailAccountMeta } from "@/lib/types";
 
 /**
@@ -40,7 +39,6 @@ export function LeftRail({
   gPending?: boolean;
 }) {
   const app = useApp();
-  const settings = useSettings();
   const accounts = useAccounts();
   const health = useHealth();
   const connection = useConnection();
@@ -83,20 +81,24 @@ export function LeftRail({
     <>
       <div className="space-y-px">
         {/* First, and first for a reason: the conversation is the product's
-            front door. The trailing dot is the same fact the Agent header
-            states in words — an agent is parked in an open chat_await_message
-            — and it is absent rather than grey when nothing is listening, so
-            the sidebar never carries a status nobody asked about. */}
+            front door.
+
+            The trailing mark says one thing and only while it is true: an
+            agent has taken a message and has not answered it. That is the fact
+            worth pulling somebody out of their inbox for. Merely having an
+            agent parked and idle is not — it was a permanent green dot here,
+            and the Agent pane states it in words, with a name, at the top of
+            the conversation it belongs to. */}
         <NavItem
           icon={Sparkle}
           label="Agent"
           active={app.view === "agent"}
           onClick={() => app.setView("agent")}
           trailing={
-            agent.presence.listening ? (
+            agent.presence.working ? (
               <span className="flex items-center pr-0.5">
-                <StatusDot tone="success" />
-                <span className="sr-only">An agent is listening</span>
+                <WorkingDot />
+                <span className="sr-only">Your agent is working on a message</span>
               </span>
             ) : undefined
           }
@@ -273,7 +275,6 @@ export function LeftRail({
       <RailFooter
         connection={connection}
         partial={partial}
-        baseUrl={settings.baseUrl}
         density={app.density}
         collapsed={collapsed}
         gPending={gPending}

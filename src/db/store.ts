@@ -35,6 +35,13 @@ export type StoredTurn = {
   text: string;
   /** MCP client name, when the caller identified itself. */
   agent: string | null;
+  /**
+   * User turns only: an agent has taken this one, and no agent will be given
+   * it again. The claim is permanent by design — see claimNextUserTurn — so a
+   * claimed message that never got an answer is not queued, it is dropped, and
+   * the UI has to be able to tell those two apart.
+   */
+  delivered: boolean;
 };
 
 export class Store {
@@ -131,6 +138,7 @@ export class Store {
       role: input.role,
       text: input.text,
       agent: input.agent,
+      delivered: false,
     };
   }
 
@@ -140,7 +148,7 @@ export class Store {
     // the FIRST 200 is the classic version of this bug.
     const rows = this.db
       .prepare(
-        `SELECT seq, at, role, text_enc as textEnc, agent
+        `SELECT seq, at, role, text_enc as textEnc, agent, delivered
          FROM agent_turns
          WHERE seq > ?
          ORDER BY seq DESC
@@ -152,6 +160,7 @@ export class Store {
       role: StoredTurn["role"];
       textEnc: string;
       agent: string | null;
+      delivered: number;
     }>;
     return rows.reverse().map((row) => ({
       seq: row.seq,
@@ -159,6 +168,7 @@ export class Store {
       role: row.role,
       text: decryptSecret(this.masterKey, row.textEnc),
       agent: row.agent,
+      delivered: row.delivered === 1,
     }));
   }
 
@@ -198,6 +208,7 @@ export class Store {
         role: row.role,
         text: decryptSecret(this.masterKey, row.textEnc),
         agent: row.agent,
+        delivered: true,
       };
     });
     return claim();

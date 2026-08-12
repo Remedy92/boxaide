@@ -151,6 +151,13 @@ export type AgentTurn = {
   text: string;
   /** MCP client name. Best effort — see AgentChannel.noteClient on the server. */
   agent: string | null;
+  /**
+   * User turns: an agent has taken this one and no agent will be given it
+   * again. Absent on a server built before the field existed, and false on the
+   * live stream frame, which is written before the hand-off — the client also
+   * remembers what it saw claimed. See useAgent().claimed.
+   */
+  delivered?: boolean;
 };
 
 /**
@@ -169,6 +176,22 @@ export type AgentPresence = {
   lastAgent: string | null;
   /** Registry id of the CLI mailmux spawned. Null when nothing is launched. */
   launchedAgent: string | null;
+  /**
+   * A message an agent took and has not answered yet — see AgentChannel.Work.
+   * Null whenever nothing is in flight, and on a server built before this
+   * field existed, which is why every reader treats absence as "not working".
+   */
+  working: AgentWork | null;
+};
+
+/** The one thing mailmux can prove about an agent's own work. */
+export type AgentWork = {
+  /** The `seq` of the user turn being answered. */
+  seq: number;
+  since: string; // ISO 8601
+  agent: string | null;
+  /** The last mail tool called since the hand-off. */
+  tool: { name: string; at: string } | null;
 };
 
 /** GET /api/agent/state */
