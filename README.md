@@ -107,7 +107,9 @@ On macOS the app also lives in the menu bar. Click the mark for a popover —
 recent mail, whether an agent is listening, one button into the app; the
 popover is the `/tray/` route of the same web export. Right-click for a menu:
 open mailmux, install the Claude connector (opens the bundled `.mcpb` in
-Claude Desktop), quit.
+Claude Desktop), **Start at login** (packaged app only — it registers a macOS
+login item), quit. The menu bar icon stays as long as the app runs, including
+with the window closed.
 
 ```bash
 npm run build                 # repository root: server + UI export
