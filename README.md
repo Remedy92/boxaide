@@ -58,6 +58,15 @@ cd apps/web && npm run build && npm run serve # the real static export
 
 The page runs entirely in your browser and fetches mail directly from your machine.
 
+Three routes exist in the export. Locally they are one screen and two spares;
+on a deployment they are the whole difference between a stranger and a user:
+
+| Route | What it is |
+|---|---|
+| `/` | The inbox. On a deployment `apps/web/vercel.json` redirects it to `/install` — someone who has just found the domain has no server URL or token to type into a setup form yet. |
+| `/install` | The download page. The desktop installer for the visitor's operating system, and the clone-and-run command behind a link. |
+| `/app` | The inbox again, at an address the redirect does not touch. This is the hosted interface; use it wherever this section says "the deployed page". |
+
 **1. Deploy `apps/web`.** On Vercel and equivalents, set the project's **Root Directory** to `apps/web` and leave the build and output commands on auto. That setting is what keeps the CLI's `better-sqlite3` out of the front-end install; it lives in the dashboard and cannot be expressed in a file. Do **not** add a `workspaces` key to the root `package.json`.
 
 No environment variable is required. One optional, non-secret variable exists:
@@ -76,7 +85,7 @@ See the rules and the cost of doing this under [Browser origins](#browser-origin
 
 **3. Copy the token.** `mailmux serve` prints it on first run; it is also in `bearer.token` inside your data directory (`~/.mailmux` by default).
 
-**4. Point the page at your server.** Open the deployed page, click **Set up mailmux**, and enter the Server URL and the token. Both are stored in your browser's localStorage and are sent only to the server URL you entered.
+**4. Point the page at your server.** Open the deployed page at **`/app`**, click **Set up mailmux**, and enter the Server URL and the token. Both are stored in your browser's localStorage and are sent only to the server URL you entered.
 
 **5. Allow local network access (Chrome, Edge, Brave).** Since Chromium 142 the browser asks permission before a website may reach `127.0.0.1`. Allow it when prompted; if you dismissed the prompt, re-enable it under Site settings → *Apps on device*.
 
