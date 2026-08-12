@@ -39,6 +39,16 @@ const smoke = process.argv.includes("--smoke");
 const iconPng = join(here, "..", "build", "icon.png");
 
 /**
+ * The same mark, inset to Apple's 824-of-1024 grid.
+ *
+ * `app.dock.setIcon` paints the bitmap across the whole dock tile, so the
+ * edge-to-edge icon.png — correct for Windows and Linux, which draw their own
+ * margin — makes the unpackaged app stand about a quarter wider than the icons
+ * beside it. The .icns a packaged build uses already carries this inset.
+ */
+const dockIconPng = join(here, "..", "build", "icon-dock.png");
+
+/**
  * The UI export lives outside the asar in a packaged build (`extraResources`),
  * so `serveStatic` reads it from a real directory instead of through Electron's
  * asar shim. The compiled server stays inside the asar, next to node_modules,
@@ -103,8 +113,8 @@ async function start() {
   // macOS takes the dock icon from the bundle once packaged; unpackaged there is
   // no bundle to read, so it has to be set by hand. Windows and Linux get theirs
   // from the BrowserWindow below.
-  if (!app.isPackaged && process.platform === "darwin" && existsSync(iconPng)) {
-    app.dock?.setIcon(nativeImage.createFromPath(iconPng));
+  if (!app.isPackaged && process.platform === "darwin" && existsSync(dockIconPng)) {
+    app.dock?.setIcon(nativeImage.createFromPath(dockIconPng));
   }
   const { startServer } = await import("../server/dist/app.js");
   // host is pinned rather than read from MAILMUX_HOST: a desktop app that binds

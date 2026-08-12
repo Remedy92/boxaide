@@ -109,13 +109,16 @@ export function SectionLabel({
 }
 
 /**
- * The brand mark: three rails of falling height — many mailboxes, one inbox.
- * Monochrome — it takes the ink colour of whatever it sits in, so it never
- * introduces a hue.
+ * The brand mark: braces with one line of mail inside them.
  *
- * The geometry is shared with two files that cannot import it: the desktop app
- * icon (apps/desktop/scripts/make-icons.mjs, which rasterises it) and
- * public/favicon.svg. Change one, change all three.
+ * The mark alone, with no plate. Everywhere else it is engraved into a machined
+ * tile, but this one sits inline at text size and takes the ink colour of what
+ * surrounds it — a plate here would be a coloured chip mid-sentence, and its
+ * chamfer would be mud at 14px.
+ *
+ * The path data is generated from apps/desktop/scripts/lib/mark.mjs, which is
+ * the one definition of the mark. Do not nudge these numbers by hand; change
+ * the geometry there and re-emit.
  */
 export function BrandGlyph({
   size = 14,
@@ -128,14 +131,23 @@ export function BrandGlyph({
     <svg
       width={size}
       height={size}
-      viewBox="0 0 14 14"
+      viewBox="0 0 24 24"
       aria-hidden="true"
       className={cn("shrink-0", className)}
-      fill="currentColor"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
     >
-      <rect x="1.7" y="0" width="2.6" height="14" rx="1.3" />
-      <rect x="6.2" y="2" width="2.6" height="10" rx="1.3" opacity="0.72" />
-      <rect x="10.7" y="4" width="2.6" height="6" rx="1.3" opacity="0.5" />
+      <path
+        d="M10.55 7.78L8.7 7.78L8.7 11.34L7.12 12L8.7 12.66L8.7 16.22L10.55 16.22"
+        strokeWidth={1.24}
+      />
+      <path
+        d="M13.45 7.78L15.3 7.78L15.3 11.34L16.88 12L15.3 12.66L15.3 16.22L13.45 16.22"
+        strokeWidth={1.24}
+      />
+      <path d="M10.81 12L13.19 12" strokeWidth={1.27} />
     </svg>
   );
 }

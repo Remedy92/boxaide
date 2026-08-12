@@ -1,15 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" role="img" aria-label="mailmux">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="mailmux">
   <title>mailmux</title>
-  <!-- Three rails of falling height: many mailboxes, one inbox. Same geometry
-       as the desktop app icon (apps/desktop/scripts/make-icons.mjs) and as
-       BrandGlyph in src/components/atoms.tsx — the mark on its own 14-unit
-       grid, scaled to 56% and centred on the plate. A plate rather than a bare
-       glyph so the mark keeps its contrast on a light and a dark tab strip
-       alike. -->
-  <rect width="14" height="14" rx="3.15" fill="#0E0F11" />
-  <g transform="translate(3.08 3.08) scale(0.56)">
-    <rect x="1.7" y="0" width="2.6" height="14" rx="1.3" fill="#fff" />
-    <rect x="6.2" y="2" width="2.6" height="10" rx="1.3" fill="#fff" opacity="0.72" />
-    <rect x="10.7" y="4" width="2.6" height="6" rx="1.3" fill="#fff" opacity="0.5" />
+  <!-- GENERATED. Written by apps/desktop/scripts/make-icons.mjs, from the
+       geometry in apps/desktop/scripts/lib/mark.mjs. Do not hand-edit: the next
+       `npm run icons` overwrites this file. -->
+  <defs>
+    <linearGradient id="chamfer" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8d949f"/>
+      <stop offset="0.55" stop-color="#2a2e35"/>
+      <stop offset="1" stop-color="#0d0e12"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0.12" y1="0" x2="0.88" y2="1">
+      <stop offset="0" stop-color="#454a55"/>
+      <stop offset="1" stop-color="#171920"/>
+    </linearGradient>
+    <g id="mark">
+      <path d="M455.68 348.16L384 348.16L384 486.4L322.56 512L384 537.6L384 675.84L455.68 675.84" stroke-width="48.13" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      <path d="M568.32 348.16L640 348.16L640 486.4L701.44 512L640 537.6L640 675.84L568.32 675.84" stroke-width="48.13" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      <path d="M465.92 512L558.08 512" stroke-width="49.15" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </g>
+  </defs>
+  <path d="M1024 512L1023.56 683.99L1022.24 738.75L1020.04 778.3L1016.95 810.17L1012.95 837.17L1008.04 860.66L1002.19 881.45L995.37 900.02L987.56 916.73L978.72 931.81L968.79 945.43L957.72 957.72L945.43 968.79L931.81 978.72L916.73 987.56L900.02 995.37L881.45 1002.19L860.66 1008.04L837.17 1012.95L810.17 1016.95L778.3 1020.04L738.75 1022.24L683.99 1023.56L512 1024L340.01 1023.56L285.25 1022.24L245.7 1020.04L213.83 1016.95L186.83 1012.95L163.34 1008.04L142.55 1002.19L123.98 995.37L107.27 987.56L92.19 978.72L78.57 968.79L66.28 957.72L55.21 945.43L45.28 931.81L36.44 916.73L28.63 900.02L21.81 881.45L15.96 860.66L11.05 837.17L7.05 810.17L3.96 778.3L1.76 738.75L0.44 683.99L0 512L0.44 340.01L1.76 285.25L3.96 245.7L7.05 213.83L11.05 186.83L15.96 163.34L21.81 142.55L28.63 123.98L36.44 107.27L45.28 92.19L55.21 78.57L66.28 66.28L78.57 55.21L92.19 45.28L107.27 36.44L123.98 28.63L142.55 21.81L163.34 15.96L186.83 11.05L213.83 7.05L245.7 3.96L285.25 1.76L340.01 0.44L512 0L683.99 0.44L738.75 1.76L778.3 3.96L810.17 7.05L837.17 11.05L860.66 15.96L881.45 21.81L900.02 28.63L916.73 36.44L931.81 45.28L945.43 55.21L957.72 66.28L968.79 78.57L978.72 92.19L987.56 107.27L995.37 123.98L1002.19 142.55L1008.04 163.34L1012.95 186.83L1016.95 213.83L1020.04 245.7L1022.24 285.25L1023.56 340.01Z" fill="url(#chamfer)"/>
+  <g transform="translate(61.44 61.44) scale(0.88)">
+    <path d="M1024 512L1023.56 683.99L1022.24 738.75L1020.04 778.3L1016.95 810.17L1012.95 837.17L1008.04 860.66L1002.19 881.45L995.37 900.02L987.56 916.73L978.72 931.81L968.79 945.43L957.72 957.72L945.43 968.79L931.81 978.72L916.73 987.56L900.02 995.37L881.45 1002.19L860.66 1008.04L837.17 1012.95L810.17 1016.95L778.3 1020.04L738.75 1022.24L683.99 1023.56L512 1024L340.01 1023.56L285.25 1022.24L245.7 1020.04L213.83 1016.95L186.83 1012.95L163.34 1008.04L142.55 1002.19L123.98 995.37L107.27 987.56L92.19 978.72L78.57 968.79L66.28 957.72L55.21 945.43L45.28 931.81L36.44 916.73L28.63 900.02L21.81 881.45L15.96 860.66L11.05 837.17L7.05 810.17L3.96 778.3L1.76 738.75L0.44 683.99L0 512L0.44 340.01L1.76 285.25L3.96 245.7L7.05 213.83L11.05 186.83L15.96 163.34L21.81 142.55L28.63 123.98L36.44 107.27L45.28 92.19L55.21 78.57L66.28 66.28L78.57 55.21L92.19 45.28L107.27 36.44L123.98 28.63L142.55 21.81L163.34 15.96L186.83 11.05L213.83 7.05L245.7 3.96L285.25 1.76L340.01 0.44L512 0L683.99 0.44L738.75 1.76L778.3 3.96L810.17 7.05L837.17 11.05L860.66 15.96L881.45 21.81L900.02 28.63L916.73 36.44L931.81 45.28L945.43 55.21L957.72 66.28L968.79 78.57L978.72 92.19L987.56 107.27L995.37 123.98L1002.19 142.55L1008.04 163.34L1012.95 186.83L1016.95 213.83L1020.04 245.7L1022.24 285.25L1023.56 340.01Z" fill="url(#face)"/>
   </g>
+  <use href="#mark" transform="translate(4.7 11.3)" stroke="#79808c" opacity="0.6"/>
+  <use href="#mark" stroke="#0f1116"/>
 </svg>

@@ -8,7 +8,7 @@
  * page is looked at once, for three seconds, and is allowed one moment.
  *
  * prefers-reduced-motion is handled globally in globals.css, which drops every
- * animation to 0.01ms. `both` keeps the rails at their end state when it does.
+ * animation to 0.01ms. `both` keeps every element at its end state when it does.
  */
 
 /* ---------------------------------------------------------------------------
@@ -141,25 +141,25 @@
   filter: drop-shadow(0 14px 34px rgb(0 0 0 / 0.60));
 }
 
-/* The three rails settle into their heights. Same geometry as
-   apps/desktop/scripts/make-icons.mjs, so this is the icon the visitor is about
-   to have in their dock, not a decoration that resembles it. */
-@keyframes mailmux-mark-rail {
+/* The mark settles into the plate, as if it were being cut. It starts a little
+   large and slightly transparent, then seats — the opposite of the old rails,
+   which grew upward out of nothing. A groove cannot grow; it can only deepen. */
+@keyframes mailmux-mark-engrave {
   from {
     opacity: 0;
-    transform: scaleY(0.28);
+    transform: scale(1.06);
   }
   to {
     opacity: 1;
-    transform: scaleY(1);
+    transform: scale(1);
   }
 }
 
-.mailmux-mark-rail {
-  /* An SVG element has no CSS box, so a percentage transform-origin resolves
+.mailmux-mark-engrave {
+  /* An SVG group has no CSS box, so a percentage transform-origin resolves
      against the viewport box unless fill-box says otherwise — without this the
-     rails scale from a point outside the plate. */
+     mark scales from a point outside the plate. */
   transform-box: fill-box;
   transform-origin: center;
-  animation: mailmux-mark-rail 520ms var(--ease-out-expo) both;
+  animation: mailmux-mark-engrave 520ms var(--ease-out-expo) both;
 }
