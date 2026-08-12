@@ -38,6 +38,10 @@ done
 codesign --force --timestamp --options runtime --entitlements "$ENT" --sign "$ID" "$APP"
 codesign --verify --deep --strict "$APP"
 
+# electron-builder wrote the dmg from the unsigned app. Rebuild the image
+# from this signed copy, or the download still contains an unsigned .app.
+npx electron-builder --mac dmg --prepackaged release/mac-arm64 -c.mac.identity=null
+
 for dmg in release/mailmux-*.dmg; do
   [ -e "$dmg" ] || continue
   codesign --force --timestamp --sign "$ID" "$dmg"

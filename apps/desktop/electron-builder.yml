@@ -21,6 +21,12 @@ files:
   - "!electron-builder.yml"
   # The UI export is shipped unpacked, see extraResources below.
   - "!server/web-next/**"
+  # Never loaded at runtime. Zod's `src/` is the TypeScript original of the
+  # already-shipped `index.js`.
+  - "!**/*.{md,map,d.ts,d.cts,d.mts}"
+  - "!**/node_modules/**/{test,tests,__tests__,docs,example,examples}/**"
+  - "!**/node_modules/better-sqlite3/{deps,src}/**"
+  - "!**/node_modules/zod/src/**"
 
 # `serveStatic` reads the UI with plain fs calls. Keeping the export outside the
 # asar means it is a real directory on disk and never goes through Electron's
@@ -38,9 +44,22 @@ extraResources:
     to: trayTemplate@2x.png
 
 asar: true
-# better-sqlite3 loads a .node binary, which cannot be read from inside an asar.
+# A .node binary cannot be read from inside an asar. Unpack only those files;
+# the JS stays in the archive.
 asarUnpack:
-  - "**/node_modules/better-sqlite3/**"
+  - "**/*.node"
+
+# Chromium ships ~50 languages. The app UI is English; unused .lproj packs
+# are ~47 MB on disk and a large slice of the dmg.
+electronLanguages:
+  - en
+
+# Drop leftover native bits electron-builder cannot filter (other-OS
+# better-sqlite3 prebuilds, software Vulkan). See the script header.
+afterPack: scripts/slim-pack.mjs
+
+# Smaller dmg, slower pack. The download is what the visitor waits on.
+compression: maximum
 
 # Rebuilds better-sqlite3 against Electron's ABI while packaging.
 npmRebuild: true
