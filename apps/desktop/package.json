@@ -1,6 +1,6 @@
 {
   "name": "mailmux-desktop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Desktop shell for mailmux — runs the mailmux server in-process and opens the UI in a window",
   "author": "mailmux contributors",

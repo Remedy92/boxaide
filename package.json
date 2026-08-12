@@ -1,6 +1,6 @@
 {
   "name": "mailmux",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Free self-host multi-mailbox agentic inbox with web UI + MCP for any agent",
   "type": "module",
   "license": "MIT",
