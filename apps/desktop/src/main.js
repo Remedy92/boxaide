@@ -150,12 +150,25 @@ function createTray(url) {
   // popover would become unreachable.
   tray.on("click", () => togglePopover(url));
   tray.on("right-click", () => {
+    // Rebuilt per click so the login checkbox always shows the OS's current
+    // answer, not the answer from when the tray was created.
     tray?.popUpContextMenu(
       Menu.buildFromTemplate([
         { label: "Open mailmux", click: () => openMainWindow() },
         {
           label: "Install Claude connector…",
           click: () => installClaudeConnector(),
+        },
+        { type: "separator" },
+        {
+          label: "Start at login",
+          type: "checkbox",
+          // Unpackaged, the registered login item would be the dev Electron
+          // binary, which is a trap — so the toggle only exists in the real app.
+          visible: app.isPackaged,
+          checked: app.getLoginItemSettings().openAtLogin,
+          click: (item) =>
+            app.setLoginItemSettings({ openAtLogin: item.checked }),
         },
         { type: "separator" },
         { label: "Quit mailmux", role: "quit" },
