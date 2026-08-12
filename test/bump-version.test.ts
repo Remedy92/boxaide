@@ -49,11 +49,13 @@ describe("applyVersion", () => {
   });
 
   it("does not rewrite dependency 0.2.1 lines in the real desktop lockfile", () => {
+    const current = JSON.parse(readFileSync("apps/desktop/package.json", "utf8")).version;
+    const bumped = nextPatch(current);
     const text = readFileSync("apps/desktop/package-lock.json", "utf8");
-    const { text: next } = applyVersion(text, "0.2.1", "0.2.2");
+    const { text: next } = applyVersion(text, current, bumped);
     expect(next).toContain("node-api-version-0.2.1.tgz");
     expect(next).toMatch(/"node_modules\/node-api-version": \{\n {6}"version": "0\.2\.1"/);
-    expect(next.startsWith('{\n  "name": "mailmux-desktop",\n  "version": "0.2.2"')).toBe(true);
+    expect(next.startsWith(`{\n  "name": "mailmux-desktop",\n  "version": "${bumped}"`)).toBe(true);
   });
 
   it("rejects a file whose top-level version does not match", () => {
