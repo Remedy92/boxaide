@@ -9,8 +9,17 @@
  * There is no preload script and no IPC. The renderer is the same static page
  * the browser gets, and it gets no Electron surface at all.
  */
-import { app, BrowserWindow, dialog, nativeImage, shell } from "electron";
-import { existsSync } from "node:fs";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  Menu,
+  nativeImage,
+  screen,
+  shell,
+  Tray,
+} from "electron";
+import { copyFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -45,6 +54,10 @@ let win = null;
 let stopServer = null;
 /** @type {string | null} */
 let serverUrl = null;
+/** @type {Tray | null} */
+let tray = null;
+/** @type {BrowserWindow | null} */
+let popover = null;
 
 if (!app.requestSingleInstanceLock()) {
   // A second launch hands focus to the running one. Two instances would fight
@@ -102,6 +115,199 @@ async function start() {
   stopServer = started.stop;
   serverUrl = started.url;
   createWindow(started.url);
+  // Menu bar presence is macOS-scoped for now: that is where "glance at your
+  // mail and your agents without the window" was asked for, and where the
+  // template-image rendering below is known-correct.
+  if (process.platform === "darwin") createTray(started.url);
+}
+
+/** Raise the main window, recreating it after a close. */
+function openMainWindow() {
+  if (win) {
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    return;
+  }
+  if (serverUrl) createWindow(serverUrl);
+}
+
+/* ---- menu bar ------------------------------------------------------------ */
+
+/** @param {string} url */
+function createTray(url) {
+  // "Template" is a macOS contract: pure black plus alpha, recoloured by the
+  // system for light/dark menu bars and while the icon is highlighted.
+  const image = nativeImage.createFromPath(
+    join(here, "..", "build", "trayTemplate.png"),
+  );
+  image.setTemplateImage(true);
+  tray = new Tray(image);
+  tray.setToolTip("mailmux");
+
+  // Left-click toggles the popover; the menu lives on right-click. Wiring the
+  // menu with `setContextMenu` instead would make BOTH buttons open it and the
+  // popover would become unreachable.
+  tray.on("click", () => togglePopover(url));
+  tray.on("right-click", () => {
+    tray?.popUpContextMenu(
+      Menu.buildFromTemplate([
+        { label: "Open mailmux", click: () => openMainWindow() },
+        {
+          label: "Install Claude connector…",
+          click: () => installClaudeConnector(),
+        },
+        { type: "separator" },
+        { label: "Quit mailmux", role: "quit" },
+      ]),
+    );
+  });
+}
+
+/** @param {string} url */
+function togglePopover(url) {
+  if (popover?.isVisible()) {
+    popover.hide();
+    return;
+  }
+  showPopover(url);
+}
+
+/** @param {string} url */
+function showPopover(url) {
+  if (!popover) {
+    const origin = new URL(url).origin;
+    popover = new BrowserWindow({
+      width: 380,
+      height: 520,
+      show: false,
+      frame: false,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      skipTaskbar: true,
+      alwaysOnTop: true,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webviewTag: false,
+      },
+    });
+    popover.on("blur", () => popover?.hide());
+    popover.on("closed", () => {
+      popover = null;
+    });
+
+    // The page's "Open mailmux" button and every mail row navigate to the
+    // server's root. That navigation IS the popover's exit: catch it, raise
+    // the real window, keep the popover parked on /tray/ for next time.
+    popover.webContents.on("will-navigate", (event, target) => {
+      event.preventDefault();
+      if (originOf(target) === origin) {
+        popover?.hide();
+        openMainWindow();
+        return;
+      }
+      openExternal(target);
+    });
+    popover.webContents.setWindowOpenHandler(({ url: target }) => {
+      openExternal(target);
+      return { action: "deny" };
+    });
+
+    void popover.loadURL(`${url}/tray/`);
+  }
+  // Smoke checks the page load only; showing would steal focus mid-check.
+  if (!smoke) {
+    positionPopover();
+    popover.show();
+  }
+}
+
+/**
+ * The tray leg of `npm run smoke`: the tray exists and the popover page loads
+ * with real text in it. macOS only, like the tray itself.
+ * @param {string} url
+ */
+function smokePopover(url) {
+  if (process.platform !== "darwin") return Promise.resolve();
+  console.log(`smoke: tray ${tray ? "created" : "MISSING"}`);
+  return new Promise((resolve) => {
+    showPopover(url);
+    popover?.webContents.once("did-finish-load", () => {
+      popover?.webContents
+        .executeJavaScript("({ chars: document.body.innerText.length })")
+        .then((page) => {
+          console.log(`smoke: popover loaded /tray/ text-chars=${page.chars}`);
+        })
+        .catch((err) => console.error("smoke: popover read failed", err))
+        .finally(() => resolve(undefined));
+    });
+  });
+}
+
+/**
+ * Under the tray icon, horizontally centred on it, clamped into the work area
+ * so a menu-bar icon near the screen edge does not push the window off-screen.
+ */
+function positionPopover() {
+  if (!popover || !tray) return;
+  const icon = tray.getBounds();
+  const [width, height] = popover.getSize();
+  const area = screen.getDisplayNearestPoint({
+    x: icon.x,
+    y: icon.y,
+  }).workArea;
+  const x = Math.round(
+    Math.min(
+      Math.max(icon.x + icon.width / 2 - width / 2, area.x + 8),
+      area.x + area.width - width - 8,
+    ),
+  );
+  const y = Math.round(Math.min(icon.y + icon.height + 6, area.y + area.height - height));
+  popover.setPosition(x, y, false);
+}
+
+/**
+ * One click from the menu bar to a connected Claude Desktop. The bundle is
+ * already on disk — the server serves it at /mailmux.mcpb from the same
+ * directory — so this hands the file to the OS, and Claude Desktop (the
+ * registered .mcpb handler) opens its install dialog.
+ *
+ * Copied to a temp path first: webRoot sits inside the .app bundle, and
+ * pointing another app into our own Resources directory is fragile across
+ * updates.
+ */
+function installClaudeConnector() {
+  const source = join(webRoot, "mailmux.mcpb");
+  if (!existsSync(source)) {
+    dialog.showErrorBox(
+      "Connector not found",
+      "mailmux.mcpb is missing from this build. Run the root `npm run build` and re-sync the desktop app.",
+    );
+    return;
+  }
+  const target = join(app.getPath("temp"), "mailmux.mcpb");
+  try {
+    copyFileSync(source, target);
+  } catch (err) {
+    dialog.showErrorBox(
+      "Could not stage the connector",
+      err instanceof Error ? err.message : String(err),
+    );
+    return;
+  }
+  void shell.openPath(target).then((problem) => {
+    if (problem) {
+      dialog.showErrorBox(
+        "Could not open the connector",
+        `${problem}\n\nInstall Claude Desktop first, then try again — or open ${target} yourself.`,
+      );
+    }
+  });
 }
 
 /** @param {string} url */
@@ -169,6 +375,7 @@ function createWindow(url) {
             `smoke: loaded ${url} title=${JSON.stringify(page.title)} text-chars=${page.chars}`,
           );
         })
+        .then(() => smokePopover(url))
         .catch((err) => console.error("smoke: read title failed", err))
         .finally(() => app.quit());
     });

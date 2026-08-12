@@ -103,6 +103,12 @@ Nothing. The deployed page has no server-side code: no API routes, no server act
 
 A window instead of a terminal, for people who do not want either. `apps/desktop` is an Electron shell: it starts the same server inside its own process, binds `127.0.0.1`, and uses the same `~/.mailmux` data directory, master key and bearer token. An account connected in the desktop app is the same account your agents reach over MCP.
 
+On macOS the app also lives in the menu bar. Click the mark for a popover —
+recent mail, whether an agent is listening, one button into the app; the
+popover is the `/tray/` route of the same web export. Right-click for a menu:
+open mailmux, install the Claude connector (opens the bundled `.mcpb` in
+Claude Desktop), quit.
+
 ```bash
 npm run build                 # repository root: server + UI export
 cd apps/desktop

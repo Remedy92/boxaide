@@ -273,6 +273,59 @@ writeFileSync(
   ),
 );
 
+/* macOS menu bar. A template image: pure black plus alpha, and nothing else —
+   the system recolours it for light and dark menu bars and for selection. No
+   plate, just the mark, sized so 16pt logical reads at menu-bar weight. */
+function renderTray(size) {
+  const margin = size / 16;
+  const unit = (size - margin * 2) / GRID;
+  const buf = Buffer.alloc(size * size * 4);
+  const step = 1 / SS;
+  const offset = step / 2;
+
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      const inkHits = new Array(BARS.length).fill(0);
+      for (let sy = 0; sy < SS; sy++) {
+        for (let sx = 0; sx < SS; sx++) {
+          const fx = px + sx * step + offset;
+          const fy = py + sy * step + offset;
+          for (let i = 0; i < BARS.length; i++) {
+            const b = BARS[i];
+            if (
+              inRoundRect(
+                fx,
+                fy,
+                margin + b.x * unit,
+                margin + b.y * unit,
+                b.w * unit,
+                b.h * unit,
+                unit,
+              )
+            ) {
+              inkHits[i]++;
+            }
+          }
+        }
+      }
+      // Bars never overlap, so summing per-bar coverage cannot exceed one.
+      let alpha = 0;
+      for (let i = 0; i < BARS.length; i++) {
+        alpha += (inkHits[i] / (SS * SS)) * BARS[i].alpha;
+      }
+      const idx = (py * size + px) * 4;
+      buf[idx] = 0;
+      buf[idx + 1] = 0;
+      buf[idx + 2] = 0;
+      buf[idx + 3] = Math.round(Math.min(alpha, 1) * 255);
+    }
+  }
+  return buf;
+}
+
+writeFileSync(join(buildDir, "trayTemplate.png"), toPng(renderTray(16), 16));
+writeFileSync(join(buildDir, "trayTemplate@2x.png"), toPng(renderTray(32), 32));
+
 /* The same mark as vector, for the web UI's favicon and anywhere a document
    wants it. Kept in this file so the two definitions cannot drift. */
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${GRID} ${GRID}" width="${GRID}" height="${GRID}">
@@ -292,5 +345,7 @@ console.log(
     `icon.ico   ${bytes("icon.ico")} bytes`,
     `icon.png   ${bytes("icon.png")} bytes (1024×1024)`,
     `icon.svg   ${bytes("icon.svg")} bytes`,
+    `trayTemplate.png     ${bytes("trayTemplate.png")} bytes (16×16)`,
+    `trayTemplate@2x.png  ${bytes("trayTemplate@2x.png")} bytes (32×32)`,
   ].join("\n"),
 );
