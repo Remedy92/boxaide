@@ -206,7 +206,9 @@ export class AgentLauncher {
       this.stderrTail = `${this.stderrTail}\n${err.message}`.trim();
       this.noteExit(spec.id, null);
     });
-    child.on("exit", (code) => this.noteExit(spec.id, code));
+    // "close", not "exit": exit fires while stderr may still hold undrained
+    // data (observed on Linux), and the tail is the whole point of capturing.
+    child.on("close", (code) => this.noteExit(spec.id, code));
 
     this.child = child;
     this.running = started;
