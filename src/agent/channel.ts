@@ -152,6 +152,12 @@ export class AgentChannel {
     const text = input.text.trim();
     if (!text) throw new Error("text is required");
     if (input.role !== "user") this.touch(input.agent ?? null);
+    // Stamp before clearing: the claimed seq is the owner, even if another
+    // user turn arrived while this work was open.
+    const replyTo =
+      (input.role === "agent" || input.role === "activity") && this.work
+        ? this.work.seq
+        : null;
     // The answer is what ends the work. An activity line does not: the agent
     // is narrating mid-task and is still holding the message.
     if (input.role === "agent") this.work = null;
@@ -161,6 +167,7 @@ export class AgentChannel {
       role: input.role,
       text,
       agent: input.agent ?? null,
+      replyTo,
     });
     this.store.trimTurns(HISTORY_LIMIT);
 

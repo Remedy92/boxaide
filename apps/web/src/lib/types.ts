@@ -158,6 +158,11 @@ export type AgentTurn = {
    * remembers what it saw claimed. See useAgent().claimed.
    */
   delivered?: boolean;
+  /**
+   * User seq this turn answers. Absent on a server built before the field
+   * existed; null on user rows and unstamped agent/activity.
+   */
+  replyTo?: number | null;
 };
 
 /**

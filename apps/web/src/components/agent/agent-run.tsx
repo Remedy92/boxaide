@@ -7,51 +7,10 @@ import { isoAttr, isoTitle } from "@/lib/format/date";
 import { displayAgentName } from "@/components/agent/agent-presence";
 import { cn } from "@/lib/utils";
 import type { AgentTurn, AgentWork } from "@/lib/types";
+import { groupRuns, type Run } from "./group-runs";
+import { formatClock, stepsHeadline, workStale } from "./steps-copy";
 
-/**
- * One exchange: the question, the steps taken, the answer.
- *
- * A run is assembled from the flat turn log rather than stored — the server
- * appends turns and nothing else, so the grouping lives here. It is the shape
- * the conversation actually has: a user turn, any number of activity lines the
- * agent posted while it worked, then the answer.
- *
- * What is NOT here is a token stream. mailmux runs no model; an answer arrives
- * as one finished `chat_say`. The live part of a run is real all the same — the
- * activity lines and the mail tools being called are events this server
- * handled, so "working" is a fact about a claimed message, not a guess about a
- * model that nobody here can see.
- */
-export type Run = {
-  /** The user turn that opened it. Null when an agent spoke unprompted. */
-  question: AgentTurn | null;
-  /** `activity` turns posted since the question. */
-  steps: AgentTurn[];
-  /** `agent` turns since the question. More than one is allowed. */
-  answers: AgentTurn[];
-  /** Sort key — the earliest turn in the run. */
-  seq: number;
-};
-
-export function groupRuns(turns: AgentTurn[]): Run[] {
-  const runs: Run[] = [];
-  let current: Run | null = null;
-  for (const turn of turns) {
-    if (turn.role === "user" || !current) {
-      current = {
-        question: turn.role === "user" ? turn : null,
-        steps: [],
-        answers: [],
-        seq: turn.seq,
-      };
-      runs.push(current);
-      if (turn.role === "user") continue;
-    }
-    if (turn.role === "activity") current.steps.push(turn);
-    else if (turn.role === "agent") current.answers.push(turn);
-  }
-  return runs;
-}
+export { groupRuns, type Run };
 
 /** Plain words for the mail tools, so a step reads as an action, not an API. */
 const TOOL_WORDS: Record<string, string> = {
@@ -83,13 +42,16 @@ const tookSeconds = (run: Run): number | null => {
 export function AgentRunView({
   run,
   work,
-  listening,
+  waiting,
+  lastSeenAt,
   claimed,
 }: {
   run: Run;
   /** Set when THIS run is the one an agent is answering right now. */
   work: AgentWork | null;
-  listening: boolean;
+  /** Parked `chat_await_message` count — the only proof a next hand-off is ready. */
+  waiting: number;
+  lastSeenAt: string | null;
   /** True once an agent has taken this question — see useAgent().claimed. */
   claimed: boolean;
 }) {
@@ -101,7 +63,12 @@ export function AgentRunView({
       {run.question && <Question turn={run.question} />}
 
       {(run.steps.length > 0 || running) && (
-        <Steps steps={run.steps} work={work} took={tookSeconds(run)} />
+        <Steps
+          steps={run.steps}
+          work={work}
+          lastSeenAt={lastSeenAt}
+          took={tookSeconds(run)}
+        />
       )}
 
       {run.answers.map((answer) => (
@@ -111,7 +78,7 @@ export function AgentRunView({
       {/* No answer, and nothing in flight. Which of the two reasons it is
           changes what the user should do, so they are never merged. */}
       {unanswered && !running && run.question && (
-        <Unanswered listening={listening} claimed={claimed} />
+        <Unanswered waiting={waiting} claimed={claimed} />
       )}
     </div>
   );
@@ -151,57 +118,42 @@ function Answer({ turn }: { turn: AgentTurn }) {
 /**
  * The steps block.
  *
- * While the run is live it is open, and the newest step is the headline: that
- * is the one piece of "what is happening right now" the product has. Once the
- * answer lands it collapses to a summary — the steps were scaffolding, and
- * leaving eight of them stacked above every answer would bury the answer.
- *
- * The count in that summary is the agent's own `chat_activity` lines, and only
- * those. A tool row is a live hint: the channel keeps the LAST call and drops
- * it when the work ends, so a finished run has no tools to count and the list
- * you expand afterwards is exactly the list the number describes. Making the
- * two agree the other way — persisting tool calls as turns — would write rows
- * the agent then reads back through `chat_history` as if it had said them.
+ * The tool is the live headline; the list and the count are the agent's own
+ * `chat_activity` lines. A tool row would vanish when work ends, so the fold
+ * would disagree with the list you expand afterwards. Once the answer lands
+ * the block folds to that count — the steps were scaffolding, and leaving
+ * eight of them stacked above every answer would bury the answer.
  */
 function Steps({
   steps,
   work,
+  lastSeenAt,
   took,
 }: {
   steps: AgentTurn[];
   work: AgentWork | null;
+  lastSeenAt: string | null;
   took: number | null;
 }) {
   const running = work !== null;
   const [open, setOpen] = React.useState(false);
   const expanded = running || open;
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [running]);
 
-  /* Everything that happened, in the order it happened. An activity line is a
-     turn the agent wrote; a tool row is a call this server handled and never
-     wrote down, so it has no seq and only the latest one is known. */
-  const rows: Array<{ key: string; text: string; at: string }> = steps.map(
-    (step) => ({ key: `s${step.seq}`, text: step.text, at: step.at }),
-  );
-  const tool = work?.tool;
-  if (tool && steps.at(-1)?.text !== toolWords(tool.name)) {
-    rows.push({ key: `t${tool.at}`, text: toolWords(tool.name), at: tool.at });
-  }
-  rows.sort((a, b) => a.at.localeCompare(b.at));
-
-  /* Steps read downward, oldest first, the way the rest of the conversation
-     does — the newest one ends up closest to where the answer will land. The
-     headline is therefore a state, not the latest line: putting "now" on top
-     of "before that" made the block read 3, 1, 2.
-
-     Once the answer lands the whole block folds into one summary row. The
-     steps were scaffolding; eight of them stacked over every answer would bury
-     the answer. */
-  const liveKey = running ? rows.at(-1)?.key : undefined;
-  const headline = running
-    ? "Working"
-    : `${steps.length} step${steps.length === 1 ? "" : "s"}${
-        took === null ? "" : ` · ${took}s`
-      }`;
+  const stale = running && workStale(lastSeenAt, now);
+  const headline = stepsHeadline({
+    running,
+    lastSeenAt,
+    toolLabel: work?.tool ? toolWords(work.tool.name) : null,
+    stepCount: steps.length,
+    took,
+    now,
+  });
 
   return (
     <div className="min-w-0">
@@ -209,11 +161,7 @@ function Steps({
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={expanded}
-        aria-label={
-          running
-            ? `Your agent is working. ${rows.at(-1)?.text ?? "No step reported yet"}`
-            : `${headline}. Show what it did.`
-        }
+        aria-label={running ? headline : `${headline}. Show what it did.`}
         disabled={running}
         className={cn(
           "group flex w-full items-center gap-1.5 rounded-[var(--radius-md)] py-0.5 text-left",
@@ -221,8 +169,15 @@ function Steps({
           "hover:text-fg-secondary disabled:cursor-default disabled:hover:text-fg-tertiary",
         )}
       >
-        {running ? (
-          <WorkingDot />
+        {stale ? (
+          <span
+            aria-hidden="true"
+            className="flex size-3.5 shrink-0 items-center justify-center"
+          >
+            <span className="block size-1.5 rounded-[var(--radius-full)] bg-[var(--dot-muted)]" />
+          </span>
+        ) : running ? (
+          <WorkingMark />
         ) : (
           <ChevronRight
             aria-hidden="true"
@@ -233,25 +188,52 @@ function Steps({
             strokeWidth={1.5}
           />
         )}
-        <span className="min-w-0 truncate">{headline}</span>
-        {running && <Elapsed since={work.since} />}
+        <span
+          className={cn(
+            "min-w-0 truncate",
+            running && !stale && "mailmux-shimmer",
+          )}
+        >
+          {headline}
+        </span>
+        {running && !stale && <Elapsed since={work.since} now={now} />}
       </button>
 
-      {expanded && rows.length > 0 && (
-        <ol className="mt-1 ml-[6px] space-y-1 border-l border-border-subtle pl-3.5">
-          {rows.map((row) => (
+      {expanded && steps.length > 0 && (
+        <ol
+          className={cn(
+            /* The rail fades downward, toward where the answer will land —
+               a timeline dissolving into its result, not a box around it. */
+            "relative mt-1.5 ml-[6px] space-y-1.5 pl-4",
+            "before:absolute before:inset-y-[3px] before:left-0 before:w-px",
+            "before:bg-gradient-to-b before:from-[var(--border-strong)] before:to-transparent",
+            /* A settled run can hold a wall of narration. Cap it; the live
+               list stays uncapped so the newest line is never hidden. */
+            !running && "pane-scroll max-h-60 overflow-y-auto",
+          )}
+        >
+          {steps.map((step, index) => (
             <li
-              key={row.key}
+              key={step.seq}
               className={cn(
-                "relative text-[12px] leading-4 before:absolute before:top-[5px] before:-left-[18px] before:size-1 before:rounded-[var(--radius-full)]",
-                // The newest line, while it is still the newest and something
-                // is still happening. Everything above it is settled history.
-                row.key === liveKey
-                  ? "mailmux-shimmer before:bg-accent"
-                  : "text-fg-tertiary before:bg-[var(--dot-muted)]",
+                "mailmux-step-in relative text-[12px] leading-4 text-fg-tertiary",
+                /* Hollow, not filled: a settled step is a checkpoint passed,
+                   and an outline reads quieter than a row of solid dots.
+                   5px, because a 4px ring is one pixel of border around
+                   nothing. */
+                "before:absolute before:top-[5px] before:-left-[18.5px] before:size-[5px]",
+                "before:rounded-[var(--radius-full)] before:border before:border-[var(--dot-muted)]",
+                "before:bg-transparent",
               )}
+              /* Streamed rows enter one by one as they land; a settled list
+                 mounts whole, so it cascades instead of popping. */
+              style={
+                running
+                  ? undefined
+                  : { animationDelay: `${Math.min(index * 25, 200)}ms` }
+              }
             >
-              {row.text}
+              {step.text}
             </li>
           ))}
         </ol>
@@ -272,10 +254,10 @@ function Steps({
  * somebody to wait for that would be telling them to wait for nothing.
  */
 function Unanswered({
-  listening,
+  waiting,
   claimed,
 }: {
-  listening: boolean;
+  waiting: number;
   claimed: boolean;
 }) {
   if (claimed) {
@@ -300,7 +282,7 @@ function Unanswered({
         aria-hidden="true"
         className="block size-1.5 shrink-0 rounded-[var(--radius-full)] bg-[var(--dot-muted)]"
       />
-      {listening
+      {waiting > 0
         ? "Handing this to your agent…"
         : "Waiting for an agent. This is delivered as soon as one starts."}
     </p>
@@ -308,42 +290,67 @@ function Unanswered({
 }
 
 /**
- * The running mark: an accent dot with one ring breathing out of it.
+ * The running mark: the mailmux glyph writing itself, in the accent.
  *
- * Two pieces of motion on the whole screen — this and the shimmer on the step
- * text — and they only ever run while a message is genuinely claimed.
+ * A spinner says "software is busy". This says "mailmux is holding your
+ * message": the same braces-around-a-line the brand mark draws statically,
+ * tracing in stroke by stroke, mail line landing last, then starting over.
+ * Path data mirrors BrandGlyph in atoms.tsx — generated from
+ * apps/desktop/scripts/lib/mark.mjs, never nudged by hand — with pathLength
+ * normalised to 1 so the CSS trace maths is unit-length. The stroke is
+ * heavier than BrandGlyph's: this renders at 14px in the accent colour, and
+ * 1.24 at that size dissolves into the background it is meant to stand out
+ * from.
+ *
+ * It and the shimmer on the headline are the only motion in the pane, and
+ * both run only while a message is genuinely claimed.
  */
-export function WorkingDot({ className }: { className?: string }) {
+export function WorkingMark({
+  size = 14,
+  className,
+}: {
+  size?: number;
+  className?: string;
+}) {
   return (
-    <span
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
       aria-hidden="true"
-      className={cn("relative flex size-3.5 shrink-0 items-center justify-center", className)}
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={cn("shrink-0 text-accent", className)}
     >
-      <span className="mailmux-ping absolute size-3.5 rounded-[var(--radius-full)] bg-accent" />
-      <span className="relative block size-1.5 rounded-[var(--radius-full)] bg-accent" />
-    </span>
+      <path
+        pathLength={1}
+        className="mailmux-trace"
+        d="M10.55 7.78L8.7 7.78L8.7 11.34L7.12 12L8.7 12.66L8.7 16.22L10.55 16.22"
+        strokeWidth={1.9}
+      />
+      <path
+        pathLength={1}
+        className="mailmux-trace"
+        d="M13.45 7.78L15.3 7.78L15.3 11.34L16.88 12L15.3 12.66L15.3 16.22L13.45 16.22"
+        strokeWidth={1.9}
+      />
+      <path
+        className="mailmux-trace-bar"
+        d="M10.81 12L13.19 12"
+        strokeWidth={1.9}
+      />
+    </svg>
   );
 }
 
-/** Seconds since the hand-off. Ticks; the number is the point. */
-function Elapsed({ since }: { since: string }) {
-  const start = React.useMemo(() => new Date(since).getTime(), [since]);
-  const [now, setNow] = React.useState(() => Date.now());
-
-  React.useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1_000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const seconds = Math.max(0, Math.round((now - start) / 1000));
-  const label =
-    seconds < 60
-      ? `${seconds}s`
-      : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
-
+/** Seconds since the hand-off. Parent ticks; the number is the point. */
+function Elapsed({ since, now }: { since: string; now: number }) {
+  const seconds = Math.max(0, Math.round((now - new Date(since).getTime()) / 1000));
   return (
     <span className="tnum ml-auto shrink-0 pl-2 text-[11px] text-fg-tertiary">
-      {label}
+      {formatClock(seconds)}
     </span>
   );
 }

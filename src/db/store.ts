@@ -42,6 +42,11 @@ export type StoredTurn = {
    * the UI has to be able to tell those two apart.
    */
   delivered: boolean;
+  /**
+   * User seq this turn answers. Null on user rows, on agent/activity posted
+   * with no open work, and on rows written before the column existed.
+   */
+  replyTo: number | null;
 };
 
 export class Store {
@@ -105,9 +110,18 @@ export class Store {
         role TEXT NOT NULL,
         text_enc TEXT NOT NULL,
         agent TEXT,
-        delivered INTEGER NOT NULL DEFAULT 0
+        delivered INTEGER NOT NULL DEFAULT 0,
+        reply_to INTEGER
       );
     `);
+    // Only reached by databases created before reply_to existed. Fresh ones
+    // get the column from the CREATE above, so this is a no-op for them.
+    const turnCols = this.db
+      .prepare(`PRAGMA table_info(agent_turns)`)
+      .all() as Array<{ name: string }>;
+    if (!turnCols.some((c) => c.name === "reply_to")) {
+      this.db.exec(`ALTER TABLE agent_turns ADD COLUMN reply_to INTEGER`);
+    }
   }
 
   /* ---- agent conversation ------------------------------------------------
@@ -120,17 +134,20 @@ export class Store {
     role: StoredTurn["role"];
     text: string;
     agent: string | null;
+    replyTo?: number | null;
   }): StoredTurn {
+    const replyTo = input.replyTo ?? null;
     const res = this.db
       .prepare(
-        `INSERT INTO agent_turns (at, role, text_enc, agent, delivered)
-         VALUES (@at, @role, @textEnc, @agent, 0)`,
+        `INSERT INTO agent_turns (at, role, text_enc, agent, delivered, reply_to)
+         VALUES (@at, @role, @textEnc, @agent, 0, @replyTo)`,
       )
       .run({
         at: input.at,
         role: input.role,
         textEnc: encryptSecret(this.masterKey, input.text),
         agent: input.agent,
+        replyTo,
       });
     return {
       seq: Number(res.lastInsertRowid),
@@ -139,6 +156,7 @@ export class Store {
       text: input.text,
       agent: input.agent,
       delivered: false,
+      replyTo,
     };
   }
 
@@ -148,7 +166,7 @@ export class Store {
     // the FIRST 200 is the classic version of this bug.
     const rows = this.db
       .prepare(
-        `SELECT seq, at, role, text_enc as textEnc, agent, delivered
+        `SELECT seq, at, role, text_enc as textEnc, agent, delivered, reply_to as replyTo
          FROM agent_turns
          WHERE seq > ?
          ORDER BY seq DESC
@@ -161,6 +179,7 @@ export class Store {
       textEnc: string;
       agent: string | null;
       delivered: number;
+      replyTo: number | null;
     }>;
     return rows.reverse().map((row) => ({
       seq: row.seq,
@@ -169,6 +188,7 @@ export class Store {
       text: decryptSecret(this.masterKey, row.textEnc),
       agent: row.agent,
       delivered: row.delivered === 1,
+      replyTo: row.role === "user" || row.replyTo == null ? null : row.replyTo,
     }));
   }
 
@@ -183,7 +203,7 @@ export class Store {
     const claim = this.db.transaction((): StoredTurn | null => {
       const row = this.db
         .prepare(
-          `SELECT seq, at, role, text_enc as textEnc, agent
+          `SELECT seq, at, role, text_enc as textEnc, agent, reply_to as replyTo
            FROM agent_turns
            WHERE role = 'user' AND delivered = 0
            ORDER BY seq ASC
@@ -196,6 +216,7 @@ export class Store {
             role: StoredTurn["role"];
             textEnc: string;
             agent: string | null;
+            replyTo: number | null;
           }
         | undefined;
       if (!row) return null;
@@ -209,6 +230,7 @@ export class Store {
         text: decryptSecret(this.masterKey, row.textEnc),
         agent: row.agent,
         delivered: true,
+        replyTo: null,
       };
     });
     return claim();

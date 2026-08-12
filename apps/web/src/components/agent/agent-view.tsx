@@ -28,6 +28,10 @@ import { useApp } from "@/lib/hooks/use-app-state";
  * One measure, centred. The composer is pinned; the log scrolls under it.
  */
 
+function gapFromBottom(node: HTMLElement) {
+  return node.scrollHeight - node.scrollTop - node.clientHeight;
+}
+
 const SUGGESTIONS = [
   "What came in today that needs a reply?",
   "Summarise the unread mail in my work mailbox.",
@@ -46,18 +50,24 @@ export function AgentView({
   const agent = useAgent();
   const accounts = useAccounts();
   const scroller = React.useRef<HTMLDivElement | null>(null);
+  const column = React.useRef<HTMLDivElement | null>(null);
 
   /* Follow the tail only while the user is already at it. Yanking the view down
      while somebody is reading an older answer is the single rudest thing a
      conversation pane can do. */
   const pinned = React.useRef(true);
   const [atBottom, setAtBottom] = React.useState(true);
+  const syncAtBottom = React.useCallback(() => {
+    const node = scroller.current;
+    if (!node) return;
+    setAtBottom(gapFromBottom(node) < 80);
+  }, []);
   const onScroll = React.useCallback(() => {
     const node = scroller.current;
     if (!node) return;
-    const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
-    pinned.current = gap < 80;
-    setAtBottom(gap < 80);
+    const near = gapFromBottom(node) < 80;
+    pinned.current = near;
+    setAtBottom(near);
   }, []);
 
   /* Move the scroller itself rather than scrollIntoView() a zero-height
@@ -87,12 +97,41 @@ export function AgentView({
     if (node) node.scrollTop = node.scrollHeight;
   }, [lastSeq, stepKey]);
 
+  // Expanding a step grows the column without a scroll event.
+  React.useEffect(() => {
+    const node = scroller.current;
+    const inner = column.current;
+    if (!node || !inner) return;
+    const ro = new ResizeObserver(() => {
+      if (pinned.current) node.scrollTop = node.scrollHeight;
+      syncAtBottom();
+    });
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, [syncAtBottom]);
+
   const empty = agent.turns.length === 0;
   const noMailboxes = !accounts.isPending && (accounts.data ?? []).length === 0;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex h-11 shrink-0 items-center gap-2 px-3">
+      <header className="relative flex h-11 shrink-0 items-center gap-2 px-3">
+        {/* A 1px accent sweep along the header's base while a message is
+            claimed — the whole pane's "a run is live", still visible when the
+            run itself is scrolled away. Same keyframes as the list refetch
+            bar, slowed: this is a state, not a fetch. Gone entirely under
+            reduced motion, where the run block's static mark carries it. */}
+        {work && (
+          <div
+            aria-hidden="true"
+            className="absolute inset-x-0 bottom-0 h-px overflow-hidden motion-reduce:hidden"
+          >
+            <div
+              className="mailmux-progress h-full w-full bg-gradient-to-r from-transparent via-[var(--accent)] to-transparent opacity-70"
+              style={{ animationDuration: "2600ms" }}
+            />
+          </div>
+        )}
         {showRailButton && (
           <Button
             type="button"
@@ -141,6 +180,7 @@ export function AgentView({
               "something failed to load". `min-h-full` on the inner column is
               what lets justify-end have any effect inside a scroller. */}
           <div
+            ref={column}
             className={`mx-auto flex min-h-full w-full max-w-[720px] flex-col px-5 pb-6 ${
               empty ? "" : "justify-end"
             }`}
@@ -160,7 +200,8 @@ export function AgentView({
                     key={run.seq}
                     run={run}
                     work={work && run.question?.seq === work.seq ? work : null}
-                    listening={agent.presence.listening}
+                    waiting={agent.presence.waiting}
+                    lastSeenAt={agent.presence.lastSeenAt}
                     claimed={
                       run.question !== null && agent.claimed.has(run.question.seq)
                     }

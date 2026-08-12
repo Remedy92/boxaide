@@ -371,19 +371,63 @@
 .mailmux-rise { animation: mailmux-rise 200ms var(--ease-out-expo) both; }
 
 /* ---- the agent run -------------------------------------------------------
-   Three pieces of motion, and all three run only while a message is genuinely
-   claimed by an agent — see AgentChannel.Work. Nothing here animates on a
-   guess, and nothing animates once the answer has landed.
+   Every piece of motion here runs only while a message is genuinely claimed
+   by an agent — see AgentChannel.Work. Nothing animates on a guess, and
+   nothing animates once the answer has landed.
    ------------------------------------------------------------------------- */
 
-/* The working mark: one ring leaving the dot. Slow, because a fast pulse reads
-   as an alarm and this state can legitimately last a minute. */
-@keyframes mailmux-ping {
-  0%   { transform: scale(0.45); opacity: 0.5; }
-  70%  { transform: scale(1);    opacity: 0; }
-  100% { transform: scale(1);    opacity: 0; }
+/* The working mark: the brand glyph writing itself.
+
+   The braces trace in over the first half of the cycle (pathLength is
+   normalised to 1 in the SVG, so dasharray/dashoffset are unit maths), the
+   mail line inside them lands once the braces are closed, everything holds,
+   then fades and begins again. Slow on purpose — a fast pulse reads as an
+   alarm, and this state can legitimately last a minute. */
+@keyframes mailmux-trace {
+  0%        { stroke-dashoffset: 1; opacity: 1; }
+  48%       { stroke-dashoffset: 0; opacity: 1; }
+  82%       { stroke-dashoffset: 0; opacity: 1; }
+  96%, 100% { stroke-dashoffset: 0; opacity: 0; }
 }
-.mailmux-ping { animation: mailmux-ping 1800ms var(--ease-out-expo) infinite; }
+.mailmux-trace {
+  stroke-dasharray: 1 1;
+  stroke-dashoffset: 1;
+  animation: mailmux-trace 2200ms var(--ease-out-expo) infinite;
+}
+@keyframes mailmux-trace-bar {
+  0%, 40%   { opacity: 0; }
+  56%, 82%  { opacity: 1; }
+  96%, 100% { opacity: 0; }
+}
+.mailmux-trace-bar {
+  opacity: 0;
+  animation: mailmux-trace-bar 2200ms linear infinite;
+}
+
+/* One step arriving. `both` holds the start state through the stagger delay
+   a settled list uses, so late rows do not flash before their turn. */
+@keyframes mailmux-step-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
+}
+.mailmux-step-in { animation: mailmux-step-in 240ms var(--ease-out-expo) both; }
+
+/* The global reduced-motion rule truncates these to their final frame, and
+   the final frame of the trace is "faded out" — an invisible indicator. Pin
+   the drawn, visible state instead, and give shimmered text its ink back. */
+@media (prefers-reduced-motion: reduce) {
+  .mailmux-trace,
+  .mailmux-trace-bar {
+    animation: none;
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  .mailmux-shimmer {
+    animation: none;
+    background: none;
+    color: var(--text-secondary);
+  }
+}
 
 /* The current step's text. A light sweep across the ink itself, so the line
    reads as live without a spinner sitting next to every word. */

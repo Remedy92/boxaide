@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { FilePen, Inbox, MailOpen, Plus, Sparkle } from "lucide-react";
-import { WorkingDot } from "@/components/agent/agent-run";
+import { WorkingMark } from "@/components/agent/agent-run";
 import { AccountRow, type AccountHealth } from "@/components/rail/account-row";
 import { AgentsSection } from "@/components/rail/agents-section";
 import { BrandMark } from "@/components/rail/brand-mark";
@@ -97,7 +97,7 @@ export function LeftRail({
           trailing={
             agent.presence.working ? (
               <span className="flex items-center pr-0.5">
-                <WorkingDot />
+                <WorkingMark />
                 <span className="sr-only">Your agent is working on a message</span>
               </span>
             ) : undefined
