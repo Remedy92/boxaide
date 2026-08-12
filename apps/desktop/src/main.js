@@ -134,13 +134,25 @@ function openMainWindow() {
 
 /* ---- menu bar ------------------------------------------------------------ */
 
+/**
+ * Packaged, the icon lives in Resources via extraResources — the `build`
+ * directory itself is never packed (same reason webRoot moves, above).
+ */
+const trayIconPng = app.isPackaged
+  ? join(process.resourcesPath, "trayTemplate.png")
+  : join(here, "..", "build", "trayTemplate.png");
+
 /** @param {string} url */
 function createTray(url) {
   // "Template" is a macOS contract: pure black plus alpha, recoloured by the
   // system for light/dark menu bars and while the icon is highlighted.
-  const image = nativeImage.createFromPath(
-    join(here, "..", "build", "trayTemplate.png"),
-  );
+  const image = nativeImage.createFromPath(trayIconPng);
+  if (image.isEmpty()) {
+    // A Tray from an empty image is an invisible, unclickable sliver — worse
+    // than no tray, because nothing says why. Shipped this once; never silent.
+    console.error(`tray icon missing or unreadable: ${trayIconPng}`);
+    return;
+  }
   image.setTemplateImage(true);
   tray = new Tray(image);
   tray.setToolTip("mailmux");
