@@ -21,8 +21,34 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+
+/**
+ * Where agent CLIs actually live, beyond PATH.
+ *
+ * A macOS app launched from Finder inherits launchd's PATH —
+ * /usr/bin:/bin:/usr/sbin:/sbin — not the login shell's. Every agent CLI on a
+ * real machine lives outside that (Homebrew, ~/.local/bin, per-tool bins), so
+ * detection that only reads PATH finds nothing exactly when mailmux runs as
+ * the app instead of from a terminal.
+ */
+function wellKnownBinDirs(): string[] {
+  const home = homedir();
+  return [
+    join(home, ".local", "bin"),
+    join(home, ".local", "share", "mise", "shims"),
+    join(home, ".bun", "bin"),
+    join(home, ".grok", "bin"),
+    join(home, ".codex", "bin"),
+    join(home, ".cargo", "bin"),
+    join(home, ".volta", "bin"),
+    join(home, ".asdf", "shims"),
+    join(home, "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+  ];
+}
 
 /**
  * Same loop the Connect-your-agent dialog tells the user to paste — this is
@@ -147,6 +173,7 @@ export class AgentLauncher {
     private ctx: LaunchContext,
     private registry: AgentSpec[] = KNOWN_AGENTS,
     private env: NodeJS.ProcessEnv = process.env,
+    private extraBinDirs: string[] = wellKnownBinDirs(),
   ) {}
 
   list(): ListedAgent[] {
@@ -188,7 +215,9 @@ export class AgentLauncher {
     this.stderrTail = "";
     const child = spawn(bin, spec.args(this.ctx), {
       cwd: workDir,
-      env: { ...this.env },
+      // The widened PATH travels with the agent: launched from the Finder app
+      // the inherited PATH lacks even the directory its own binary sits in.
+      env: { ...this.env, PATH: this.searchDirs().join(delimiter) },
       stdio: ["ignore", "ignore", "pipe"],
     });
     child.stderr?.setEncoding("utf8");
@@ -240,11 +269,16 @@ export class AgentLauncher {
     this.child = null;
   }
 
+  /** PATH first (a terminal run wins), then the well-known directories. */
+  private searchDirs(): string[] {
+    const fromPath = (this.env.PATH ?? "").split(delimiter).filter(Boolean);
+    return [...new Set([...fromPath, ...this.extraBinDirs])];
+  }
+
   private resolveBin(bin: string): string | null {
-    const dirs = (this.env.PATH ?? "").split(delimiter).filter(Boolean);
     const names =
       process.platform === "win32" ? [`${bin}.exe`, `${bin}.cmd`, bin] : [bin];
-    for (const dir of dirs) {
+    for (const dir of this.searchDirs()) {
       for (const name of names) {
         const candidate = join(dir, name);
         if (existsSync(candidate)) return candidate;
