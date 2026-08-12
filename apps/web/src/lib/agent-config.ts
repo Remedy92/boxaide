@@ -24,6 +24,11 @@ export type AgentTarget = {
   /** True when the snippet embeds the bearer token. */
   carriesToken: boolean;
   note: string;
+  /**
+   * One-click path, when the client has one. Rendered as the primary action;
+   * the snippet then becomes the manual alternative.
+   */
+  download?: { href: string; filename: string; action: string };
 };
 
 const TOKEN_PLACEHOLDER = "<your token>";
@@ -74,19 +79,23 @@ export function buildAgentTargets(input: AgentConfigInput): AgentTarget[] {
     {
       id: "claude-desktop",
       label: "Claude Desktop",
-      where:
-        "Settings → Developer → Edit config, then paste this into claude_desktop_config.json and restart the app.",
+      where: "Download the connector, then double-click the file. Claude Desktop opens, shows what it does, and installs it — nothing to configure.",
       kind: "json",
+      // The manual fallback, for a Claude Desktop that cannot open .mcpb
+      // files. It carries no token: the connector reads bearer.token itself.
       snippet: JSON.stringify(
         { mcpServers: { mailmux: { command: "mailmux", args: ["mcp"] } } },
         null,
         2,
       ),
       carriesToken: false,
-      // The stdio CLI is a second entry point into the same MailService, so it
-      // reads the same data directory and needs no token — which is why this
-      // one snippet is safe to paste anywhere.
-      note: "Claude Desktop starts mailmux itself over stdio. No token is involved, and your server does not need to be running.",
+      note: "The connector finds your local server and its token on its own — mailmux just has to be running. The manual snippet goes into claude_desktop_config.json (Settings → Developer → Edit config) and needs the mailmux CLI on your PATH instead.",
+      download: {
+        // Served by the user's own mailmux server, built from apps/mcpb.
+        href: `${normalizeBaseUrl(input.baseUrl)}/mailmux.mcpb`,
+        filename: "mailmux.mcpb",
+        action: "Download for Claude Desktop",
+      },
     },
     {
       id: "cursor",
