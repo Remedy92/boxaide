@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentChannel, Turn } from "../agent/channel.js";
+import { LaunchError, type AgentLauncher } from "../agent/launcher.js";
 import type { MailService } from "../mail/service.js";
 import type { AccountCredentials, DraftInput } from "../provider/types.js";
 import { passwordCredentials } from "../provider/types.js";
@@ -341,6 +342,7 @@ export function createApi(
   bearerToken: string,
   allowedOrigins: readonly string[],
   channel?: AgentChannel,
+  launcher?: AgentLauncher,
 ): Hono {
   const app = new Hono();
 
@@ -618,6 +620,7 @@ export function createApi(
      question: does this server have an agent channel at all?
      --------------------------------------------------------------------- */
   if (channel) registerAgentRoutes(app, channel);
+  if (launcher) registerLauncherRoutes(app, launcher);
 
   return app;
 }
@@ -731,4 +734,31 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
       }
     }),
   );
+}
+
+/**
+ * The local agent launcher. All three routes sit behind the /api/* auth
+ * middleware like everything else in createApi. Only registry ids reach the
+ * launcher; nothing from a request ever becomes part of a command line.
+ */
+function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
+  app.get("/api/agents", (c) =>
+    c.json({ agents: launcher.list(), ...launcher.status() }),
+  );
+
+  app.post("/api/agents/:id/start", (c) => {
+    try {
+      return c.json({ running: launcher.start(c.req.param("id")) }, 201);
+    } catch (err) {
+      if (err instanceof LaunchError) {
+        return c.json({ error: err.message }, err.status);
+      }
+      throw err;
+    }
+  });
+
+  app.post("/api/agents/stop", (c) => {
+    launcher.stop();
+    return c.json({ stopping: true });
+  });
 }

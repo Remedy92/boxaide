@@ -23,6 +23,7 @@ import {
 import { securityHeaders } from "./api/security-headers.js";
 import { handleMcpJsonRpc } from "./mcp/server.js";
 import { AgentChannel } from "./agent/channel.js";
+import { AgentLauncher } from "./agent/launcher.js";
 import type { MailProvider } from "./provider/types.js";
 
 export {
@@ -49,6 +50,7 @@ export type Runtime = {
   mail: MailService;
   provider: MailProvider;
   channel: AgentChannel;
+  launcher: AgentLauncher;
   app: Hono;
 };
 
@@ -77,6 +79,15 @@ export function createRuntime(
 
   const mail = new MailService(store, provider);
   const channel = new AgentChannel(store);
+  // A launched agent connects back over HTTP MCP. The bind host is always
+  // loopback in the desktop app and CLI default; a 0.0.0.0 bind still wants
+  // the agent talking to the loopback interface, not the wildcard address.
+  const launcherHost = isLoopbackBindAddress(config.host) ? config.host : "127.0.0.1";
+  const launcher = new AgentLauncher({
+    mcpUrl: `http://${launcherHost}:${config.port}/mcp`,
+    bearerToken: config.bearerToken,
+    dataDir: config.dataDir,
+  });
   const app = new Hono();
 
   // First middleware registered, so every route below — UI, API, MCP and any
@@ -127,7 +138,13 @@ export function createRuntime(
   });
 
   // Mount API
-  const api = createApi(mail, config.bearerToken, config.allowedOrigins, channel);
+  const api = createApi(
+    mail,
+    config.bearerToken,
+    config.allowedOrigins,
+    channel,
+    launcher,
+  );
   app.route("/", api);
 
   // MCP over HTTP (JSON-RPC POST) — same auth as API
@@ -233,7 +250,7 @@ export function createRuntime(
     }),
   );
 
-  return { config, store, mail, provider, channel, app };
+  return { config, store, mail, provider, channel, launcher, app };
 }
 
 /**
@@ -287,6 +304,9 @@ export async function startServer(
     url: `http://${runtime.config.host}:${runtime.config.port}`,
     stop: async () => {
       server.close();
+      // The launched agent first: it holds an open long poll against the
+      // channel, and an orphaned child process would outlive the app.
+      runtime.launcher.close();
       // Before the store closes: a parked long poll and the SSE drain interval
       // both hold a reference to it, and both would touch a closed handle.
       runtime.channel.close();
