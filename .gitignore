@@ -29,3 +29,6 @@ web-next/
 
 # Playwright MCP scratch
 .playwright-mcp/
+
+# Local agent fixtures (launch.json, worktrees)
+.claude/
