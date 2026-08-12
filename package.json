@@ -11,7 +11,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc && npm run web:build && npm run web:sync",
+    "build": "tsc && npm run web:build && npm run web:sync && npm run mcpb:build",
+    "mcpb:build": "mcpb pack apps/mcpb web-next/mailmux.mcpb",
     "build:server": "tsc",
     "start": "node dist/cli.js serve",
     "dev": "tsx src/cli.ts serve",
@@ -47,6 +48,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@anthropic-ai/mcpb": "^2.1.2",
     "@types/better-sqlite3": "^9.6.0",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^26.2.0",

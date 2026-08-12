@@ -123,6 +123,15 @@ On mac, `dist:mac` signs the app and the dmg with a Developer ID certificate pin
 
 ## Agent MCP (any client)
 
+### Claude Desktop — one click
+
+With mailmux running, open **Connect agent** in the UI and press **Download for
+Claude Desktop**, or fetch `http://127.0.0.1:8787/mailmux.mcpb` directly.
+Double-click the file; Claude Desktop installs it. Nothing to configure: the
+connector is a tiny stdio→HTTP proxy (`apps/mcpb`) that finds your local server
+and reads the token from `~/.mailmux/bearer.token` itself. It is built into
+`web-next/mailmux.mcpb` by `npm run build` (`npm run mcpb:build` on its own).
+
 ### HTTP MCP (Cursor / remote-capable clients)
 
 ```json
@@ -140,7 +149,7 @@ On mac, `dist:mac` signs the app and the dmg with a Developer ID certificate pin
 
 Token lives in `~/.mailmux/bearer.token` (or `MAILMUX_TOKEN`).
 
-### stdio MCP (Claude Desktop / Claude Code)
+### stdio MCP (Claude Code / manual Claude Desktop)
 
 ```bash
 npm run mcp

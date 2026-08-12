@@ -1,0 +1,63 @@
+{
+  "manifest_version": "0.3",
+  "name": "mailmux",
+  "display_name": "mailmux",
+  "version": "0.1.0",
+  "description": "Your mailboxes as MCP tools — read, search, draft and send from mailmux.",
+  "long_description": "Connects Claude to the mailmux app running on this machine. Claude can then read and search mail across every connected mailbox, write drafts, and — only when you ask — send. It also gets the chat tools that let it hold a conversation inside the mailmux window.\n\nNothing to configure: the connector finds your local mailmux server and its access token on its own. Install the mailmux app first, from https://github.com/Remedy92/mailmux.",
+  "author": { "name": "mailmux contributors" },
+  "repository": { "type": "git", "url": "https://github.com/Remedy92/mailmux" },
+  "homepage": "https://github.com/Remedy92/mailmux",
+  "license": "MIT",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.mjs"],
+      "env": {
+        "MAILMUX_URL": "${user_config.server_url}",
+        "MAILMUX_TOKEN": "${user_config.token}"
+      }
+    }
+  },
+  "user_config": {
+    "server_url": {
+      "type": "string",
+      "title": "Server URL",
+      "description": "Where mailmux is listening. Leave the default unless you changed MAILMUX_PORT.",
+      "default": "http://127.0.0.1:8787",
+      "required": false
+    },
+    "token": {
+      "type": "string",
+      "title": "Access token",
+      "description": "Leave empty. The connector reads the token from ~/.mailmux/bearer.token on its own; fill this only for a non-default data directory.",
+      "sensitive": true,
+      "required": false
+    }
+  },
+  "tools": [
+    { "name": "accounts_list", "description": "List connected mail accounts" },
+    { "name": "messages_list", "description": "List messages, unified across mailboxes" },
+    { "name": "messages_search", "description": "Free-text search" },
+    { "name": "message_get", "description": "Read a full message" },
+    { "name": "message_mark_read", "description": "Mark read or unread" },
+    { "name": "draft_create", "description": "Write a draft" },
+    { "name": "draft_update", "description": "Update a draft" },
+    { "name": "drafts_list", "description": "List drafts" },
+    { "name": "draft_delete", "description": "Discard a draft" },
+    { "name": "folders_list", "description": "List folders" },
+    { "name": "message_send", "description": "Send mail (the explicit escalation)" },
+    { "name": "chat_await_message", "description": "Wait for the user in the mailmux window" },
+    { "name": "chat_say", "description": "Answer in the mailmux window" },
+    { "name": "chat_activity", "description": "Post a one-line status" },
+    { "name": "chat_history", "description": "Re-read the conversation" }
+  ],
+  "keywords": ["email", "imap", "smtp", "inbox", "mail", "mcp"],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "node": ">=18" }
+  }
+}
