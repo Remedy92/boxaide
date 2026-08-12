@@ -28,6 +28,14 @@ files:
 extraResources:
   - from: server/web-next
     to: web-next
+  # The tray icon must ship OUTSIDE buildResources: electron-builder never
+  # packs the `build` directory, and a Tray created from a missing file is an
+  # empty, invisible menu bar item. Both sizes travel together so macOS can
+  # pick the @2x on retina.
+  - from: build/trayTemplate.png
+    to: trayTemplate.png
+  - from: build/trayTemplate@2x.png
+    to: trayTemplate@2x.png
 
 asar: true
 # better-sqlite3 loads a .node binary, which cannot be read from inside an asar.
