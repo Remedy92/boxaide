@@ -40,7 +40,9 @@ codesign --verify --deep --strict "$APP"
 
 # electron-builder wrote the dmg from the unsigned app. Rebuild the image
 # from this signed copy, or the download still contains an unsigned .app.
-npx electron-builder --mac dmg --prepackaged release/mac-arm64 -c.mac.identity=null
+# The path is the .app itself — passing the parent folder nests mailmux.app
+# inside another mailmux.app.
+npx electron-builder --mac dmg --prepackaged release/mac-arm64/mailmux.app -c.mac.identity=null
 
 for dmg in release/mailmux-*.dmg; do
   [ -e "$dmg" ] || continue
