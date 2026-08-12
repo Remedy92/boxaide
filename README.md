@@ -129,6 +129,16 @@ npm run dist                  # other platforms — nsis or AppImage
 
 On mac, `dist:mac` signs the app and the dmg with a Developer ID certificate pinned by hash in `scripts/sign-mac.sh` (electron-builder's by-name signing is ambiguous when the keychain holds two same-named certificates). Notarization is a separate, credential-holding step; the commands are at the top of that script. `npm run dist` builds for the platform it runs on. Both scripts re-copy the compiled server and the UI export out of the repository root first, so run the root `npm run build` again after any server change. The port follows `MAILMUX_PORT` (default 8787); if something already holds it — `mailmux serve` in a terminal, or a second copy of the app — the window does not open and the app says so.
 
+The install button serves GitHub `releases/latest`. CI does not upload a dmg. After a merge to master, from the **main checkout** (not a worktree):
+
+```bash
+./scripts/ship_status.sh   # is origin/master what a visitor downloads?
+./scripts/ship.sh          # bump, pack, sign, publish latest
+./scripts/install-hooks.sh # once: remind on pull/checkout of master
+```
+
+`ship.sh` is the only publisher. A git hook only prints the status; it never packs. Pass `--dry-run` to see the plan. Notarize by setting `APPLE_KEYCHAIN_PROFILE`.
+
 ## Agent MCP (any client)
 
 ### Claude Desktop — one click

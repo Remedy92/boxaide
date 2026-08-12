@@ -1,0 +1,12 @@
+#!/bin/sh
+# After switching onto master: same reminder as post-merge.
+# $3 is 1 for a branch checkout, 0 for a file checkout.
+set -eu
+[ "${3:-}" = "1" ] || exit 0
+ROOT="$(git rev-parse --show-toplevel)"
+STATUS="$ROOT/scripts/ship_status.sh"
+[ -x "$STATUS" ] || exit 0
+[ "$(git rev-parse --abbrev-ref HEAD)" = "master" ] || exit 0
+[ "$(git rev-parse --git-dir)" = "$(git rev-parse --git-common-dir)" ] || exit 0
+"$STATUS" --hook || true
+exit 0
