@@ -12,7 +12,7 @@
   },
   "scripts": {
     "build": "tsc && npm run web:build && npm run web:sync && npm run mcpb:build",
-    "mcpb:build": "mcpb pack apps/mcpb web-next/mailmux.mcpb",
+    "mcpb:build": "node scripts/export-mcpb-tools.mjs && mcpb pack apps/mcpb web-next/mailmux.mcpb",
     "build:server": "tsc",
     "start": "node dist/cli.js serve",
     "dev": "tsx src/cli.ts serve",

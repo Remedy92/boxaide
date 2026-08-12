@@ -23,11 +23,14 @@
  */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import process from "node:process";
 
+const here = dirname(fileURLToPath(import.meta.url));
+
 const INSTALL_HINT =
-  "mailmux is not reachable. Open the mailmux app (or run `mailmux serve`), then try again. Get it at https://github.com/Remedy92/mailmux";
+  "mailmux is not running. Open the mailmux app (or run `mailmux serve`), then try again. Get it at https://github.com/Remedy92/mailmux";
 
 const baseUrl = normalizeBaseUrl(process.env.MAILMUX_URL || "http://127.0.0.1:8787");
 const dataDir = expandHome(process.env.MAILMUX_DATA_DIR || "~/.mailmux");
@@ -92,7 +95,7 @@ async function forward(message) {
       }
     }
   } catch {
-    return isRequest ? rpcError(message.id, -32001, INSTALL_HINT) : null;
+    return isRequest ? offlineAnswer(message) : null;
   }
 
   if (response.status === 202) return null;
@@ -120,6 +123,50 @@ async function forward(message) {
 
 function rpcError(id, code, text) {
   return { jsonrpc: "2.0", id: id ?? null, error: { code, message: text } };
+}
+
+/**
+ * What the connector says when the mailmux server is not running.
+ *
+ * The handshake must not fail: Claude Desktop attaches its extensions at its
+ * own startup, and "Could not attach" over an app that is merely closed reads
+ * as a broken install. So `initialize`, `ping` and `tools/list` are answered
+ * here — the tool list from a build-time snapshot of the server's own list
+ * (tools.json, written by scripts/export-mcpb-tools.mjs) — and only an actual
+ * tool CALL tells the user to open mailmux.
+ */
+function offlineAnswer(message) {
+  const id = message.id ?? null;
+  if (message.method === "initialize") {
+    const requested = message.params?.protocolVersion;
+    // Same echo the live server does: mirror the requested version.
+    return {
+      jsonrpc: "2.0",
+      id,
+      result: {
+        protocolVersion:
+          typeof requested === "string" && requested ? requested : "2024-11-05",
+        capabilities: { tools: {} },
+        serverInfo: { name: "mailmux", version: "0.1.0" },
+      },
+    };
+  }
+  if (message.method === "ping") {
+    return { jsonrpc: "2.0", id, result: {} };
+  }
+  if (message.method === "tools/list") {
+    return { jsonrpc: "2.0", id, result: { tools: snapshotTools() } };
+  }
+  return rpcError(id, -32001, INSTALL_HINT);
+}
+
+/** @type {unknown[] | null} */
+let toolsSnapshot = null;
+function snapshotTools() {
+  if (!toolsSnapshot) {
+    toolsSnapshot = JSON.parse(readFileSync(join(here, "tools.json"), "utf8"));
+  }
+  return toolsSnapshot;
 }
 
 /** One write call per line: whole lines cannot interleave on the pipe. */
