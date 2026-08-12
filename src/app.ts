@@ -87,6 +87,7 @@ export function createRuntime(
     mcpUrl: `http://${launcherHost}:${config.port}/mcp`,
     bearerToken: config.bearerToken,
     dataDir: config.dataDir,
+    onRunningChange: (id) => channel.setLaunchedAgent(id),
   });
   const app = new Hono();
 

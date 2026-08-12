@@ -158,6 +158,59 @@ describe("AgentChannel", () => {
     const { channel } = make();
     expect(() => channel.post({ role: "user", text: "   " })).toThrow(/required/);
   });
+
+  it("lets a launched agent own the name without erasing the last MCP client", () => {
+    const { channel } = make();
+    channel.noteClient("claude-code");
+    expect(channel.presence().lastAgent).toBe("claude-code");
+    expect(channel.presence().launchedAgent).toBeNull();
+    expect(channel.clientName).toBe("claude-code");
+
+    channel.setLaunchedAgent("grok");
+    expect(channel.presence().launchedAgent).toBe("grok");
+    expect(channel.presence().lastAgent).toBe("grok");
+    expect(channel.clientName).toBe("grok");
+
+    channel.post({ role: "agent", text: "hi", agent: channel.clientName });
+    expect(channel.history().at(-1)?.agent).toBe("grok");
+
+    channel.noteClient("claude-code");
+    expect(channel.clientName).toBe("grok");
+
+    // Stop returns the leftover MCP name; the grok stamp did not erase it.
+    channel.setLaunchedAgent(null);
+    expect(channel.presence().launchedAgent).toBeNull();
+    expect(channel.presence().lastAgent).toBe("claude-code");
+    expect(channel.clientName).toBe("claude-code");
+  });
+
+  it("notifies presence subscribers when the launched agent changes", () => {
+    const { channel } = make();
+    let n = 0;
+    const off = channel.subscribePresence(() => {
+      n += 1;
+    });
+    channel.setLaunchedAgent("grok");
+    expect(n).toBe(1);
+    channel.setLaunchedAgent("grok");
+    expect(n).toBe(1);
+    channel.setLaunchedAgent(null);
+    expect(n).toBe(2);
+    off();
+  });
+
+  it("notifies presence subscribers when initialize names a client", () => {
+    const { channel } = make();
+    let n = 0;
+    const off = channel.subscribePresence(() => {
+      n += 1;
+    });
+    channel.noteClient("claude-code");
+    expect(n).toBe(1);
+    channel.noteClient("claude-code");
+    expect(n).toBe(1);
+    off();
+  });
 });
 
 describe("chat tools over MCP", () => {
@@ -220,6 +273,28 @@ describe("chat tools over MCP", () => {
       ["activity", "searching two mailboxes"],
       ["agent", "One invoice, unpaid."],
     ]);
+  });
+
+  it("stamps chat_say with the launched agent, not a leftover MCP name", async () => {
+    const service = mail();
+    const { channel } = make();
+
+    await handleMcpJsonRpc(
+      service,
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { clientInfo: { name: "claude-code" } },
+      },
+      channel,
+    );
+    channel.setLaunchedAgent("grok");
+    await call(service, channel, "chat_say", { text: "Seven drafts." });
+
+    const said = channel.history().find((t) => t.role === "agent");
+    expect(said?.text).toBe("Seven drafts.");
+    expect(said?.agent).toBe("grok");
   });
 
   it("returns a timeout as a normal result, not a tool error", async () => {

@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { BrandGlyph } from "@/components/atoms";
-import { displayAgentName } from "@/components/agent/agent-presence";
+import { presenceDisplayName } from "@/components/agent/agent-presence";
 import {
   getAgentState,
   getLocalBootstrap,
@@ -81,6 +81,7 @@ export default function TrayPage() {
   });
 
   const presence = agent.data?.presence;
+  const agentName = presence ? presenceDisplayName(presence) : null;
   const messages = mail.data?.messages ?? [];
   const unread = messages.filter((m) => !m.seen).length;
 
@@ -94,14 +95,10 @@ export default function TrayPage() {
         <span
           className={cn(
             "ml-auto text-[11px] leading-4",
-            presence?.listening ? "text-fg-secondary" : "text-fg-tertiary",
+            agentName ? "text-fg-secondary" : "text-fg-tertiary",
           )}
         >
-          {presence?.listening
-            ? presence.lastAgent
-              ? displayAgentName(presence.lastAgent)
-              : "Listening"
-            : "Idle"}
+          {agentName ?? "Idle"}
         </span>
       </header>
 

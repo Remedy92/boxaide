@@ -89,6 +89,24 @@ describe("AgentLauncher", () => {
     expect(launcher.status().lastExit?.id).toBe("fake");
   });
 
+  it("tells the host which agent is running so the conversation can name it", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const seen: Array<string | null> = [];
+    const launcher = new AgentLauncher(
+      { ...CTX, onRunningChange: (id) => seen.push(id) },
+      specs(),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    launcher.start("fake");
+    expect(seen).toEqual(["fake"]);
+
+    launcher.stop();
+    await until(() => launcher.status().running === null);
+    expect(seen).toEqual(["fake", null]);
+  });
+
   it("refuses a second agent while one runs", async () => {
     const bin = fakeBinDir("fake-agent");
     const launcher = new AgentLauncher(CTX, specs(), { PATH: bin });

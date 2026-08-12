@@ -5,17 +5,16 @@ import type { AgentConnection } from "@/lib/hooks/use-agent";
 import type { AgentPresence as Presence } from "@/lib/types";
 
 /**
- * Whether an agent is listening — and nothing more than the server can prove.
+ * Who the conversation header names.
  *
- * "Listening" means an agent is parked in an open `chat_await_message` call, or
- * called one within the last few seconds. That is a fact about a request that
- * is open right now, not a guess. It deliberately does NOT claim an agent is
- * "connected": an MCP client that has merely configured mailmux, or that is
- * using the mail tools without the chat loop, is invisible here and should be.
+ * Two facts, never a guess that someone is "connected":
+ *   - launchedAgent: mailmux spawned this CLI (sidebar Start).
+ *   - listening / lastAgent: an MCP client is parked in chat_await_message,
+ *     or called it within the presence window. lastAgent is that client's
+ *     initialize name.
  *
- * Shown as a byline, not a status light. A pill and a dot both say "dashboard
- * widget"; the name of whoever is in the loop is the fact. Idle is absence, not
- * a grey LED — same rule as the Agent nav row.
+ * A launched agent wins the label. Start next to Grok says Grok even if
+ * Claude Code is still parked from an earlier session.
  */
 export function AgentPresenceBadge({
   presence,
@@ -24,6 +23,7 @@ export function AgentPresenceBadge({
   presence: Presence;
   connection: AgentConnection;
 }) {
+  const name = presenceDisplayName(presence);
   const state =
     connection === "offline"
       ? {
@@ -38,15 +38,17 @@ export function AgentPresenceBadge({
             detail:
               "This mailmux server was built without the chat channel. Update it to talk to an agent here.",
           }
-        : presence.listening
+        : name
           ? {
-              label: presence.lastAgent
-                ? displayAgentName(presence.lastAgent)
-                : "Listening",
+              label: name,
               className: "font-medium text-fg-secondary",
               detail: presence.waiting
-                ? `Waiting for your message${presence.lastAgent ? ` — ${displayAgentName(presence.lastAgent)}` : ""}.`
-                : "An agent called in within the last few seconds.",
+                ? name === "Listening"
+                  ? "Waiting for your message."
+                  : `Waiting for your message — ${name}.`
+                : presence.launchedAgent && !presence.listening
+                  ? `${name} is running.`
+                  : "An agent called in within the last few seconds.",
             }
           : null;
 
@@ -64,6 +66,16 @@ export function AgentPresenceBadge({
       <TooltipContent>{state.detail}</TooltipContent>
     </Tooltip>
   );
+}
+
+/**
+ * Header / tray label. The spawned CLI wins; else the last MCP client,
+ * and only while that client is actually listening.
+ */
+export function presenceDisplayName(presence: Presence): string | null {
+  if (presence.launchedAgent) return displayAgentName(presence.launchedAgent);
+  if (!presence.listening) return null;
+  return presence.lastAgent ? displayAgentName(presence.lastAgent) : "Listening";
 }
 
 /** MCP clientInfo.name is often a slug. The header should read as a name. */

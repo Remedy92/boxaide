@@ -154,19 +154,21 @@ export type AgentTurn = {
 };
 
 /**
- * Who is listening.
+ * Who is listening, and who mailmux spawned.
  *
- * `waiting` is the only field that is proof: it counts agents parked in an open
- * chat_await_message call. `listening` also accepts an agent that called within
- * the last few seconds, so a normal poll loop does not flicker between
- * iterations. Neither is a claim that any particular client is "connected" —
- * see the capabilities dialog.
+ * `waiting` is the only field that is proof of a parked chat_await_message.
+ * `listening` also accepts an agent that called within the last few seconds,
+ * so a normal poll loop does not flicker. `launchedAgent` is the CLI this
+ * process started (sidebar Start). Neither is a claim that a client is
+ * "connected" — see the capabilities dialog.
  */
 export type AgentPresence = {
   waiting: number;
   listening: boolean;
   lastSeenAt: string | null;
   lastAgent: string | null;
+  /** Registry id of the CLI mailmux spawned. Null when nothing is launched. */
+  launchedAgent: string | null;
 };
 
 /** GET /api/agent/state */
