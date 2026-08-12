@@ -5,7 +5,7 @@
  * mailmux.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -164,7 +164,7 @@ describe("mcpb connector proxy", () => {
     expect(proxy.unread).toBe(0);
   });
 
-  it("answers a request with a helpful error when mailmux is down", async () => {
+  it("attaches while mailmux is down: local initialize, snapshot tools/list", async () => {
     // A port that was just released: nothing is listening on it.
     const { server, url } = await startFake(() => ({ status: 200 }));
     server.close();
@@ -174,11 +174,56 @@ describe("mcpb connector proxy", () => {
       MAILMUX_TOKEN: "",
     });
 
-    proxy.send({ jsonrpc: "2.0", id: 7, method: "initialize" });
+    proxy.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", clientInfo: { name: "claude" } },
+    });
+    const init = JSON.parse(await proxy.nextLine());
+    expect(init.result.serverInfo.name).toBe("mailmux");
+    expect(init.result.protocolVersion).toBe("2025-06-18");
+
+    proxy.send({ jsonrpc: "2.0", id: 8, method: "tools/list" });
+    const list = JSON.parse(await proxy.nextLine());
+    expect(list.result.tools.length).toBeGreaterThan(0);
+    expect(list.result.tools.map((t: { name: string }) => t.name)).toContain(
+      "messages_list",
+    );
+  });
+
+  it("answers a tool call with a helpful error when mailmux is down", async () => {
+    const { server, url } = await startFake(() => ({ status: 200 }));
+    server.close();
+    const proxy = startProxy({
+      MAILMUX_URL: url,
+      MAILMUX_DATA_DIR: tempDataDir("t"),
+      MAILMUX_TOKEN: "",
+    });
+
+    proxy.send({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "tools/call",
+      params: { name: "accounts_list", arguments: {} },
+    });
     const reply = JSON.parse(await proxy.nextLine());
 
-    expect(reply.id).toBe(7);
-    expect(reply.error.message).toMatch(/not reachable/);
+    expect(reply.id).toBe(9);
+    expect(reply.error.message).toMatch(/not running/);
+  });
+
+  it("keeps the baked tool snapshot in sync with the server's list", async () => {
+    const { CHAT_TOOLS, TOOLS } = await import("../src/mcp/server.js");
+    const snapshot = JSON.parse(
+      readFileSync(
+        join(process.cwd(), "apps", "mcpb", "server", "tools.json"),
+        "utf8",
+      ),
+    );
+    // Drift here means someone changed the MCP tools without re-running
+    // `node scripts/export-mcpb-tools.mjs` (npm run mcpb:build does it).
+    expect(snapshot).toEqual([...TOOLS, ...CHAT_TOOLS]);
   });
 
   it("prefers MAILMUX_TOKEN over the token file", async () => {

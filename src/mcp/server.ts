@@ -21,7 +21,13 @@ const DRAFT_ID_DESC =
 const DRAFT_SAFETY =
   "Drafting is the safe default: nothing is delivered and the user can edit or discard it in their own mail client. Prefer this over message_send, which is the explicit escalation and needs the user to say they want the mail sent.";
 
-const TOOLS = [
+/**
+ * Exported for one consumer besides this module: the Claude Desktop connector
+ * (apps/mcpb) bakes this list into its bundle so it can answer `tools/list`
+ * while the server is not running. scripts/export-mcpb-tools.mjs writes the
+ * snapshot; a test keeps the two from drifting.
+ */
+export const TOOLS = [
   {
     name: "accounts_list",
     description: "List connected mail accounts (alias, email, id).",
@@ -241,7 +247,8 @@ const CHAT_LOOP = [
   "Never end your turn after answering once; go straight back to chat_await_message.",
 ].join(" ");
 
-const CHAT_TOOLS = [
+/** Exported with TOOLS for the connector snapshot — see TOOLS above. */
+export const CHAT_TOOLS = [
   {
     name: "chat_await_message",
     description: `Wait for the user's next message in the mailmux window, and return it. ${CHAT_LOOP} A call that returns { "message": null, "timedOut": true } means nobody typed anything yet — that is normal and is NOT an error and NOT a reason to stop; call this tool again immediately. Anything the user typed before you started waiting is queued and comes back on the first call. Each message goes to exactly one agent, so do not run two agents against the same mailmux.`,
