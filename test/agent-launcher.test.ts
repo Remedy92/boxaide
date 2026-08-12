@@ -192,3 +192,21 @@ describe("launcher routes", () => {
     runtime.store.close();
   });
 });
+
+describe("GUI PATH detection", () => {
+  it("finds agents in well-known directories when PATH is launchd-minimal", () => {
+    const bin = fakeBinDir("fake-agent");
+    const launcher = new AgentLauncher(
+      CTX,
+      specs(),
+      { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+      [bin], // stands in for ~/.local/bin etc.
+    );
+    expect(launcher.list()[0].available).toBe(true);
+
+    // And the launched child gets the widened PATH, not launchd's.
+    const running = launcher.start("fake");
+    expect(running.id).toBe("fake");
+    launcher.close();
+  });
+});
