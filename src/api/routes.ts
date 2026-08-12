@@ -682,18 +682,27 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
     streamSSE(c, async (stream) => {
       const queue: Turn[] = [];
       let wake: (() => void) | null = null;
+      let presenceDirty = false;
 
       const unsubscribe = channel.subscribe((turn) => {
         queue.push(turn);
+        wake?.();
+      });
+      const unsubscribePresence = channel.subscribePresence(() => {
+        presenceDirty = true;
         wake?.();
       });
 
       // `onAbort` is the only close signal that fires for a client that simply
       // went away — the write below can stay pending indefinitely otherwise.
       let open = true;
+      const detach = () => {
+        unsubscribe();
+        unsubscribePresence();
+      };
       stream.onAbort(() => {
         open = false;
-        unsubscribe();
+        detach();
         wake?.();
       });
 
@@ -707,9 +716,20 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
           while (queue.length > 0 && open) {
             const turn = queue.shift() as Turn;
             await stream.writeSSE({ event: "turn", data: JSON.stringify(turn) });
+            presenceDirty = true;
           }
           if (!open) break;
-          // Wake on the next turn, or on the heartbeat, whichever lands first.
+          if (presenceDirty) {
+            await stream.writeSSE({
+              event: "presence",
+              data: JSON.stringify(channel.presence()),
+            });
+            presenceDirty = false;
+            // A waiter can land while this frame is flushing; re-check
+            // before parking on the heartbeat.
+            continue;
+          }
+          // Wake on the next turn, a presence change, or the heartbeat.
           await new Promise<void>((resolve) => {
             const timer = setTimeout(() => {
               wake = null;
@@ -722,7 +742,7 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
             };
           });
           if (!open) break;
-          if (queue.length === 0) {
+          if (queue.length === 0 && !presenceDirty) {
             await stream.writeSSE({
               event: "presence",
               data: JSON.stringify(channel.presence()),
@@ -730,7 +750,7 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
           }
         }
       } finally {
-        unsubscribe();
+        detach();
       }
     }),
   );

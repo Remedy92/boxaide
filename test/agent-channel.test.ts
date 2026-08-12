@@ -126,6 +126,27 @@ describe("AgentChannel", () => {
     expect(channel.presence().waiting).toBe(0);
   });
 
+  it("notifies presence subscribers when an agent parks or speaks", async () => {
+    const { channel } = make();
+    let n = 0;
+    const off = channel.subscribePresence(() => {
+      n += 1;
+    });
+
+    const parked = channel.awaitUserTurn({ timeoutMs: 2_000 });
+    expect(n).toBeGreaterThan(0);
+    const afterPark = n;
+
+    channel.post({ role: "user", text: "hello" });
+    await parked;
+    expect(n).toBeGreaterThan(afterPark);
+
+    const afterUser = n;
+    channel.post({ role: "agent", text: "hi" });
+    expect(n).toBeGreaterThan(afterUser);
+    off();
+  });
+
   it("releases parked agents on close", async () => {
     const { channel } = make();
     const parked = channel.awaitUserTurn({ timeoutMs: 60_000 });

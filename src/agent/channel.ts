@@ -77,6 +77,7 @@ type Waiter = {
 
 export class AgentChannel {
   private listeners = new Set<(turn: Turn) => void>();
+  private presenceListeners = new Set<() => void>();
   private waiters: Waiter[] = [];
   private lastSeen: number | null = null;
   private lastAgent: string | null = null;
@@ -137,6 +138,20 @@ export class AgentChannel {
     };
   }
 
+  /**
+   * Presence changes, for the SSE route.
+   *
+   * Turns are not enough: an agent parking in `chat_await_message` produces no
+   * row, and a `chat_say` that the UI already painted still has to flip the
+   * listening badge. No replay — the caller reads `presence()` itself.
+   */
+  subscribePresence(listener: () => void): () => void {
+    this.presenceListeners.add(listener);
+    return () => {
+      this.presenceListeners.delete(listener);
+    };
+  }
+
   presence(): Presence {
     const fresh =
       this.lastSeen !== null && Date.now() - this.lastSeen < PRESENCE_WINDOW_MS;
@@ -183,6 +198,7 @@ export class AgentChannel {
       };
       this.waiters.push(waiter);
       this.ensurePoll();
+      this.emitPresence();
     });
   }
 
@@ -214,14 +230,17 @@ export class AgentChannel {
 
   /** Hands the oldest unclaimed user turn to the longest-waiting agent. */
   private handOff(): void {
+    let handed = false;
     while (this.waiters.length > 0) {
       const turn = this.store.claimNextUserTurn();
-      if (!turn) return;
+      if (!turn) break;
       const waiter = this.waiters.shift();
-      if (!waiter) return;
+      if (!waiter) break;
       clearTimeout(waiter.timer);
       waiter.resolve(turn);
+      handed = true;
     }
+    if (handed) this.emitPresence();
   }
 
   private ensurePoll(): void {
@@ -245,11 +264,23 @@ export class AgentChannel {
     const index = this.waiters.indexOf(waiter);
     if (index >= 0) this.waiters.splice(index, 1);
     this.maybeStopPoll();
+    if (index >= 0) this.emitPresence();
   }
 
   private touch(agent: string | null): void {
     this.lastSeen = Date.now();
     if (agent) this.lastAgent = agent;
+    this.emitPresence();
+  }
+
+  private emitPresence(): void {
+    for (const listener of this.presenceListeners) {
+      try {
+        listener();
+      } catch {
+        // Same rule as drain: a broken SSE writer must not fail the call.
+      }
+    }
   }
 
   /**
