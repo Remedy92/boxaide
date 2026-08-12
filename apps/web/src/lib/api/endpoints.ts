@@ -521,3 +521,58 @@ function parseJson(text: string): unknown {
     return undefined;
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* the local agent launcher                                                   */
+/* -------------------------------------------------------------------------- */
+
+export type LocalAgent = {
+  id: string;
+  label: string;
+  /** The CLI exists on the server machine's PATH. */
+  available: boolean;
+  /** This mailmux build knows how to launch it. */
+  supported: boolean;
+};
+
+export type RunningLocalAgent = { id: string; pid: number; startedAt: string };
+
+export type LocalAgentExit = {
+  id: string;
+  code: number | null;
+  at: string;
+  stderrTail: string;
+};
+
+export type LocalAgentsResponse = {
+  agents: LocalAgent[];
+  running: RunningLocalAgent | null;
+  lastExit: LocalAgentExit | null;
+};
+
+export function listLocalAgents(ctx: Ctx): Promise<LocalAgentsResponse> {
+  return request<LocalAgentsResponse>("/api/agents", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+export function startLocalAgent(
+  id: string,
+  ctx: Ctx,
+): Promise<{ running: RunningLocalAgent }> {
+  return request<{ running: RunningLocalAgent }>(
+    `/api/agents/${encodeURIComponent(id)}/start`,
+    { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+export function stopLocalAgent(ctx: Ctx): Promise<{ stopping: boolean }> {
+  return request<{ stopping: boolean }>("/api/agents/stop", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
