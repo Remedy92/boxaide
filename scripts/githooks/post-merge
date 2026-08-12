@@ -1,0 +1,12 @@
+#!/bin/sh
+# After a pull/merge onto master: say if the download is behind.
+# Never pack. Never fail the git command.
+set -eu
+ROOT="$(git rev-parse --show-toplevel)"
+STATUS="$ROOT/scripts/ship_status.sh"
+[ -x "$STATUS" ] || exit 0
+[ "$(git rev-parse --abbrev-ref HEAD)" = "master" ] || exit 0
+# Worktrees skip — ship lives in the main checkout.
+[ "$(git rev-parse --git-dir)" = "$(git rev-parse --git-common-dir)" ] || exit 0
+"$STATUS" --hook || true
+exit 0

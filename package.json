@@ -19,6 +19,9 @@
     "mcp": "tsx src/cli.ts mcp",
     "test": "vitest run",
     "test:watch": "vitest",
+    "ship": "./scripts/ship.sh",
+    "ship:status": "./scripts/ship_status.sh",
+    "ship:hooks": "./scripts/install-hooks.sh",
     "web:build": "npm --prefix apps/web ci && npm --prefix apps/web run build",
     "web:sync": "rm -rf web-next && cp -R apps/web/out web-next",
     "prepack": "npm run build"
