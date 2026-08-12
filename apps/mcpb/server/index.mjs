@@ -39,10 +39,14 @@ const dataDir = expandHome(process.env.MAILMUX_DATA_DIR || "~/.mailmux");
 const configuredToken = (process.env.MAILMUX_TOKEN || "").trim() || null;
 /** Last token read from bearer.token; refreshed on 401. */
 let fileToken = readTokenFile();
-
-function token() {
-  return configuredToken ?? fileToken;
-}
+/**
+ * Which token requests actually carry. Starts as the extension setting when
+ * one exists, but a 401 walks the alternatives (fresh file read, the other
+ * source) and whatever the server accepts becomes sticky. A stale value once
+ * pasted into the extension's settings must not wedge the connector when the
+ * correct token sits right there in bearer.token.
+ */
+let activeToken = configuredToken ?? fileToken;
 
 function readTokenFile() {
   try {
@@ -73,8 +77,7 @@ function expandHome(p) {
 async function forward(message) {
   const isRequest = message !== null && typeof message === "object" && "id" in message;
 
-  const send = async () => {
-    const bearer = token();
+  const send = async (bearer) => {
     const headers = { "content-type": "application/json" };
     if (bearer) headers.authorization = `Bearer ${bearer}`;
     return fetch(`${baseUrl}/mcp`, {
@@ -86,12 +89,19 @@ async function forward(message) {
 
   let response;
   try {
-    response = await send();
-    if (response.status === 401 && !configuredToken) {
-      const fresh = readTokenFile();
-      if (fresh && fresh !== fileToken) {
-        fileToken = fresh;
-        response = await send();
+    response = await send(activeToken);
+    if (response.status === 401) {
+      fileToken = readTokenFile();
+      // Every token this machine knows, minus the one that just failed.
+      const alternatives = [fileToken, configuredToken].filter(
+        (candidate) => candidate && candidate !== activeToken,
+      );
+      for (const candidate of alternatives) {
+        response = await send(candidate);
+        if (response.status !== 401) {
+          activeToken = candidate;
+          break;
+        }
       }
     }
   } catch {
@@ -104,7 +114,7 @@ async function forward(message) {
       ? rpcError(
           message.id,
           -32001,
-          `mailmux rejected the access token. The connector reads ${join(dataDir, "bearer.token")}; if your data directory is elsewhere, put the token into the extension's "Access token" setting.`,
+          `mailmux rejected every token this connector knows. It reads ${join(dataDir, "bearer.token")} and the extension's "Access token" setting. Clear that setting (the file is found on its own), or paste the current value from the file into it.`,
         )
       : null;
   }
@@ -229,5 +239,5 @@ function handleLine(line) {
 }
 
 process.stderr.write(
-  `mailmux connector: forwarding stdio MCP to ${baseUrl}/mcp (token ${token() ? "found" : "not found yet"})\n`,
+  `mailmux connector: forwarding stdio MCP to ${baseUrl}/mcp (token ${activeToken ? "found" : "not found yet"})\n`,
 );

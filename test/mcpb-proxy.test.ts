@@ -273,3 +273,58 @@ describe("mcpb connector proxy", () => {
     ]);
   });
 });
+
+describe("mcpb connector token fallback", () => {
+  it("falls back to bearer.token when the configured token is rejected, then sticks", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailmux-mcpb-"));
+    writeFileSync(join(dir, "bearer.token"), "good\n");
+    const received: Received[] = [];
+    const server = createServer((req, res) => {
+      let raw = "";
+      req.on("data", (chunk) => (raw += chunk));
+      req.on("end", () => {
+        received.push({ auth: req.headers.authorization, body: JSON.parse(raw) });
+        const ok = req.headers.authorization === "Bearer good";
+        res.statusCode = ok ? 200 : 401;
+        res.setHeader("content-type", "application/json");
+        const id = (JSON.parse(raw) as { id: number }).id;
+        res.end(
+          JSON.stringify(
+            ok ? { jsonrpc: "2.0", id, result: {} } : { error: "unauthorized" },
+          ),
+        );
+      });
+    });
+    const url = await new Promise<string>((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const { port } = server.address() as AddressInfo;
+        resolve(`http://127.0.0.1:${port}`);
+      });
+    });
+
+    const proxy = new Proxy({
+      MAILMUX_URL: url,
+      MAILMUX_DATA_DIR: dir,
+      MAILMUX_TOKEN: "stale-pasted-value",
+    });
+    try {
+      proxy.send({ jsonrpc: "2.0", id: 1, method: "ping" });
+      const first = JSON.parse(await proxy.nextLine());
+      expect(first).toEqual({ jsonrpc: "2.0", id: 1, result: {} });
+
+      // Sticky: the second request goes straight to the working token.
+      proxy.send({ jsonrpc: "2.0", id: 2, method: "ping" });
+      await proxy.nextLine();
+
+      expect(received.map((r) => r.auth)).toEqual([
+        "Bearer stale-pasted-value",
+        "Bearer good",
+        "Bearer good",
+      ]);
+    } finally {
+      proxy.kill();
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
