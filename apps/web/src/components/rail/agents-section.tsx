@@ -2,7 +2,7 @@
 
 import { BookOpen, Plug } from "lucide-react";
 import { toast } from "sonner";
-import { SectionLabel, Spinner, StatusDot } from "@/components/atoms";
+import { SectionLabel, Spinner } from "@/components/atoms";
 import { NavItem } from "@/components/rail/nav-item";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -79,6 +79,10 @@ export function AgentsSection({
  * the launching (POST /api/agents/:id/start) with read and draft tools
  * pre-approved — never message_send. Only installed CLIs appear; installed
  * ones this build cannot launch yet say so instead of hiding.
+ *
+ * No status dot per row. Five rows of grey dots and one green one is a legend
+ * the reader has to learn; "Stop" already means running and "Start" already
+ * means stopped, in words, on the control that changes it.
  */
 function LocalAgentList() {
   const agents = useLocalAgents();
@@ -104,14 +108,13 @@ function LocalAgentList() {
             key={agent.id}
             className="flex h-7 items-center gap-2 rounded-[var(--radius-md)] px-2"
           >
-            <StatusDot
-              tone={isRunning ? "success" : crashed ? "danger" : "muted"}
-            />
             <span
               className={
-                agent.supported
-                  ? "min-w-0 flex-1 truncate text-[13px] text-fg-secondary"
-                  : "min-w-0 flex-1 truncate text-[13px] text-fg-tertiary"
+                isRunning
+                  ? "min-w-0 flex-1 truncate text-[13px] font-medium text-fg"
+                  : agent.supported
+                    ? "min-w-0 flex-1 truncate text-[13px] text-fg-secondary"
+                    : "min-w-0 flex-1 truncate text-[13px] text-fg-tertiary"
               }
               title={crashed ? lastExit?.stderrTail || "exited" : undefined}
             >

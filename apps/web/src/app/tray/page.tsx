@@ -92,13 +92,17 @@ export default function TrayPage() {
         <span className="text-[13px] font-semibold tracking-[-0.01em]">
           mailmux
         </span>
+        {/* Working outranks listening: a message in flight is the one thing
+            worth catching from the corner of an eye. */}
         <span
           className={cn(
             "ml-auto text-[11px] leading-4",
-            agentName ? "text-fg-secondary" : "text-fg-tertiary",
+            presence?.working || agentName
+              ? "text-fg-secondary"
+              : "text-fg-tertiary",
           )}
         >
-          {agentName ?? "Idle"}
+          {presence?.working ? "Working" : (agentName ?? "Idle")}
         </span>
       </header>
 

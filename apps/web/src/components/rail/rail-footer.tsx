@@ -1,30 +1,42 @@
 "use client";
 
-import { Rows2, Rows3, Settings2 } from "lucide-react";
-import { StatusDot, type DotTone } from "@/components/atoms";
+import { Rows2, Rows3, Settings2, TriangleAlert } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ConnectionState } from "@/lib/hooks/use-connection";
 import type { Density } from "@/lib/settings";
-import { hostLabel } from "@/lib/settings";
 import { cn } from "@/lib/utils";
 
 /**
- * §6.2 row 7 and §7.5–7.6. The footer states one thing precisely: whether this
- * browser can talk to the server, and — once a listing has come back — how many
- * mailboxes answered. Per-account health from `errors[]` is the only live
- * signal the product has, and it is the one doing the work here.
+ * §6.2 row 7 and §7.5–7.6. The footer states one thing: whether something is
+ * wrong with the connection to the server.
+ *
+ * It used to state the opposite too — a green dot, `127.0.0.1:8787` and the
+ * word "Connected", permanently. None of that was news. The address is the one
+ * the user typed into settings and can read there; "Connected" is the condition
+ * under which every other pixel on screen already has mail in it. A working
+ * connection is now silent, and the row appears only when it stops working, or
+ * when some of the mailboxes did not answer.
+ *
+ * `tone` and `label` are still returned for a failure so callers (and tests)
+ * have one place that decides precedence.
  */
-export function railFooterState(
+export type FooterAlert = {
+  tone: "warning" | "danger";
+  label: string;
+  detail: string;
+};
+
+export function railFooterAlert(
   connection: ConnectionState,
   partial: { loaded: number; total: number } | null,
-): { tone: DotTone; label: string; detail: string } {
+): FooterAlert | null {
   switch (connection.kind) {
     case "no-base-url":
       return {
-        tone: "muted",
-        label: "Not configured",
+        tone: "warning",
+        label: "No server set",
         detail: "No server URL is set.",
       };
     case "unreachable":
@@ -55,24 +67,19 @@ export function railFooterState(
       if (partial && partial.loaded < partial.total) {
         return {
           tone: "warning",
-          label: `${partial.loaded}/${partial.total} mailboxes`,
-          detail: "Some mailboxes did not load on the last refresh.",
+          label: `${partial.total - partial.loaded} mailbox${
+            partial.total - partial.loaded === 1 ? "" : "es"
+          } did not load`,
+          detail: "Some mailboxes did not answer on the last refresh.",
         };
       }
-      return {
-        tone: "success",
-        label: "Connected",
-        detail: connection.version
-          ? `mailmux ${connection.version}`
-          : "Server reachable.",
-      };
+      return null;
   }
 }
 
 export function RailFooter({
   connection,
   partial,
-  baseUrl,
   density,
   collapsed = false,
   gPending,
@@ -81,41 +88,47 @@ export function RailFooter({
 }: {
   connection: ConnectionState;
   partial: { loaded: number; total: number } | null;
-  baseUrl: string;
   density: Density;
   collapsed?: boolean;
   gPending: boolean;
   onOpenSettings: () => void;
   onToggleDensity: () => void;
 }) {
-  const state = railFooterState(connection, partial);
-  const host = baseUrl ? hostLabel(baseUrl) : "no server set";
-  const connectionLabel = `Connection: ${state.label}. ${state.detail} Open settings.`;
+  const alert = railFooterAlert(connection, partial);
   const DensityIcon = density === "compact" ? Rows2 : Rows3;
   const densityLabel =
     density === "compact"
       ? "Density: compact. Switch to comfortable."
       : "Density: comfortable. Switch to compact.";
 
+  const alertButton = alert && (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={`${alert.label}. ${alert.detail} Open settings.`}
+          onClick={onOpenSettings}
+          className={cn(
+            "flex items-center gap-2 rounded-[var(--radius-md)] hover:bg-surface-hover",
+            alert.tone === "danger" ? "text-danger" : "text-warning",
+            collapsed ? "size-7 justify-center" : "w-full px-1.5 py-1 text-left",
+          )}
+        >
+          <TriangleAlert aria-hidden="true" className="size-3.5 shrink-0" strokeWidth={1.5} />
+          {!collapsed && (
+            <span className="truncate text-[12px] leading-4">{alert.label}</span>
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side={collapsed ? "right" : "top"}>{alert.detail}</TooltipContent>
+    </Tooltip>
+  );
+
   return (
     <div className="border-t border-border-subtle p-3">
       {collapsed ? (
         <div className="flex flex-col items-center gap-1">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                aria-label={connectionLabel}
-                onClick={onOpenSettings}
-                className="flex size-7 items-center justify-center rounded-[var(--radius-md)] hover:bg-surface-hover"
-              >
-                <StatusDot tone={state.tone} />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              {state.label} — {host}
-            </TooltipContent>
-          </Tooltip>
+          {alertButton}
           <FooterIcons
             densityIcon={<DensityIcon className="size-4" strokeWidth={1.5} />}
             densityLabel={densityLabel}
@@ -126,23 +139,8 @@ export function RailFooter({
         </div>
       ) : (
         <>
-          <button
-            type="button"
-            aria-label={connectionLabel}
-            title={state.detail}
-            onClick={onOpenSettings}
-            className="flex w-full items-center gap-2 rounded-[var(--radius-md)] px-1 py-1 text-left hover:bg-surface-hover"
-          >
-            <StatusDot tone={state.tone} />
-            <span className="truncate font-mono text-[11px] leading-4 text-fg-tertiary">
-              {host}
-            </span>
-            <span className="ml-auto shrink-0 text-[11px] leading-4 text-fg-tertiary">
-              {state.label}
-            </span>
-          </button>
-
-          <div className="mt-1 flex items-center gap-1">
+          {alertButton && <div className="mb-1">{alertButton}</div>}
+          <div className="flex items-center gap-1">
             {/* The text node is rendered conditionally, not hidden with
                 opacity: aria-live fires on content mutation, never on a style
                 change, so an always-present "g…" announced nothing at all. */}

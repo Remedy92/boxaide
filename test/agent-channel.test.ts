@@ -1,7 +1,12 @@
 import { describe, expect, it, afterEach } from "vitest";
 import { randomBytes } from "node:crypto";
+import { existsSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import Database from "better-sqlite3";
 import { AgentChannel } from "../src/agent/channel.js";
 import { createRuntime } from "../src/app.js";
+import { encryptSecret } from "../src/crypto/secrets.js";
 import { Store } from "../src/db/store.js";
 import { MailService } from "../src/mail/service.js";
 import { FixtureProvider } from "../src/provider/fixture.js";
@@ -126,6 +131,68 @@ describe("AgentChannel", () => {
     expect(channel.presence().waiting).toBe(0);
   });
 
+  it("reports work from the hand-off until the answer lands", async () => {
+    const { channel } = make();
+    expect(channel.presence().working).toBeNull();
+
+    const parked = channel.awaitUserTurn({ timeoutMs: 2_000, agent: "grok" });
+    const posted = channel.post({ role: "user", text: "what came in today?" });
+    await parked;
+
+    const working = channel.presence().working;
+    expect(working?.seq).toBe(posted.seq);
+    expect(working?.agent).toBe("grok");
+    expect(working?.tool).toBeNull();
+
+    // An activity line is narration mid-task, not the answer.
+    channel.post({ role: "activity", text: "checking your inbox" });
+    expect(channel.presence().working?.seq).toBe(posted.seq);
+
+    channel.post({ role: "agent", text: "two invoices and a newsletter" });
+    expect(channel.presence().working).toBeNull();
+  });
+
+  it("records a mail tool call as a step only while work is open", async () => {
+    const { channel } = make();
+
+    // Nobody asked anything: a tool call belongs to no question.
+    channel.noteToolCall("messages_list");
+    expect(channel.presence().working).toBeNull();
+
+    const parked = channel.awaitUserTurn({ timeoutMs: 2_000 });
+    channel.post({ role: "user", text: "find the invoice" });
+    await parked;
+
+    channel.noteToolCall("messages_search");
+    expect(channel.presence().working?.tool?.name).toBe("messages_search");
+  });
+
+  it("reports a claimed message as delivered, so the UI never calls it queued", async () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "who emailed me?" });
+    expect(channel.history()[0].delivered).toBe(false);
+
+    await channel.awaitUserTurn({ timeoutMs: 500 });
+
+    // The claim is permanent: this row is never handed to anybody again, so
+    // "waiting for an agent" would be a lie from here on.
+    expect(channel.history()[0].delivered).toBe(true);
+    expect(await channel.awaitUserTurn({ timeoutMs: 500 })).toBeNull();
+  });
+
+  it("drops the work when the agent goes back to the loop unanswered", async () => {
+    const { channel } = make();
+    const parked = channel.awaitUserTurn({ timeoutMs: 2_000 });
+    channel.post({ role: "user", text: "hello" });
+    await parked;
+    expect(channel.presence().working).not.toBeNull();
+
+    // Round two of the loop. Whatever happened to message one, it is over.
+    const next = channel.awaitUserTurn({ timeoutMs: 500 });
+    expect(channel.presence().working).toBeNull();
+    await next;
+  });
+
   it("notifies presence subscribers when an agent parks or speaks", async () => {
     const { channel } = make();
     let n = 0;
@@ -210,6 +277,103 @@ describe("AgentChannel", () => {
     channel.noteClient("claude-code");
     expect(n).toBe(1);
     off();
+  });
+
+  it("stamps activity and the answer with the claimed user seq", async () => {
+    const { channel } = make();
+    const parked = channel.awaitUserTurn({ timeoutMs: 2_000 });
+    const asked = channel.post({ role: "user", text: "what came in?" });
+    await parked;
+
+    const step = channel.post({ role: "activity", text: "reading inbox" });
+    const said = channel.post({ role: "agent", text: "two invoices" });
+
+    expect(asked.replyTo).toBeNull();
+    expect(step.replyTo).toBe(asked.seq);
+    expect(said.replyTo).toBe(asked.seq);
+    expect(channel.history().map((t) => t.replyTo)).toEqual([
+      null,
+      asked.seq,
+      asked.seq,
+    ]);
+  });
+
+  it("keeps the first claimed seq when a second question arrives mid-work", async () => {
+    const { channel } = make();
+    const parked = channel.awaitUserTurn({ timeoutMs: 2_000 });
+    const first = channel.post({ role: "user", text: "Q1" });
+    await parked;
+
+    const second = channel.post({ role: "user", text: "Q2" });
+    expect(channel.presence().working?.seq).toBe(first.seq);
+    expect(second.replyTo).toBeNull();
+
+    const said = channel.post({ role: "agent", text: "answer to Q1" });
+    expect(said.replyTo).toBe(first.seq);
+    expect(channel.history().find((t) => t.role === "agent")?.replyTo).toBe(
+      first.seq,
+    );
+  });
+
+  it("leaves unprompted agent turns unstamped", () => {
+    const { channel } = make();
+    const said = channel.post({ role: "agent", text: "hello unprompted" });
+    expect(said.replyTo).toBeNull();
+    expect(channel.history()[0].replyTo).toBeNull();
+  });
+
+  it("migrates an old agent_turns table that has no reply_to", () => {
+    const path = join(
+      tmpdir(),
+      `mailmux-turns-${randomBytes(8).toString("hex")}.db`,
+    );
+    const key = randomBytes(32);
+    const raw = new Database(path);
+    raw.exec(`
+      CREATE TABLE agent_turns (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        role TEXT NOT NULL,
+        text_enc TEXT NOT NULL,
+        agent TEXT,
+        delivered INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    raw
+      .prepare(
+        `INSERT INTO agent_turns (at, role, text_enc, agent, delivered)
+         VALUES (?, 'user', ?, NULL, 0)`,
+      )
+      .run(new Date().toISOString(), encryptSecret(key, "old question"));
+    raw.close();
+
+    let store: Store | undefined;
+    try {
+      store = new Store(key, path);
+      const listed = store.listTurns();
+      expect(listed).toHaveLength(1);
+      expect(listed[0].text).toBe("old question");
+      expect(listed[0].replyTo).toBeNull();
+
+      const added = store.appendTurn({
+        at: new Date().toISOString(),
+        role: "agent",
+        text: "new answer",
+        agent: null,
+        replyTo: listed[0].seq,
+      });
+      expect(added.replyTo).toBe(listed[0].seq);
+      expect(store.listTurns().map((t) => t.replyTo)).toEqual([
+        null,
+        listed[0].seq,
+      ]);
+    } finally {
+      store?.close();
+      for (const suffix of ["", "-wal", "-shm"]) {
+        const file = path + suffix;
+        if (existsSync(file)) unlinkSync(file);
+      }
+    }
   });
 });
 
