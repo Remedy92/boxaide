@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ExternalLink, Eye, EyeOff } from "lucide-react";
+import { ChevronRight, ExternalLink, Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
 import { Field, Spinner, TechnicalDetails } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,8 @@ import {
   DEFAULT_SMTP_PORT,
   GMAIL_PASSWORD_PROBLEM,
   PROVIDER_PRESETS,
+  aliasForEmail,
+  guessHostsForEmail,
   isGoogleAppPassword,
   presetForEmail,
   stripPasswordSpaces,
@@ -61,6 +63,11 @@ function formForPreset(id: string): Form {
 }
 
 /**
+ * Two fields and a button. Everything else — the name, the username, four host
+ * and port boxes — is filled in from the address and hidden behind "More
+ * settings", because the only two answers a person actually holds are their
+ * address and their password.
+ *
  * §6.5. There is no TLS switch: `smtpSecure` is derived as `port === 465`,
  * matching what web/app.js already sends, and `imapSecure` is always true. A
  * fifth toggle to get wrong helps nobody.
@@ -77,6 +84,7 @@ export function ConnectMailboxDialog({
   const [form, setForm] = React.useState<Form>(() => formForPreset(DEFAULT_PRESET));
   const [preset, setPreset] = React.useState(DEFAULT_PRESET);
   const [reveal, setReveal] = React.useState(false);
+  const [advanced, setAdvanced] = React.useState(false);
   const [validation, setValidation] = React.useState<string | null>(null);
   const emailRef = React.useRef<HTMLInputElement | null>(null);
   const passwordRef = React.useRef<HTMLInputElement | null>(null);
@@ -88,9 +96,14 @@ export function ConnectMailboxDialog({
   const pinned = React.useRef(false);
 
   const chosen = PROVIDER_PRESETS.find((entry) => entry.id === preset);
-  const existing = (accounts.data ?? []).find(
-    (entry) => entry.alias === normalizeAlias(form.alias),
-  );
+  /* The name that will be stored: what was typed under More settings, or the
+     part of the address in front of the @. */
+  const alias = form.alias.trim()
+    ? normalizeAlias(form.alias)
+    : form.email.trim()
+      ? aliasForEmail(form.email)
+      : "";
+  const existing = (accounts.data ?? []).find((entry) => entry.alias === alias);
 
   const applyPreset = (id: string) => {
     setPreset(id);
@@ -109,13 +122,32 @@ export function ConnectMailboxDialog({
   const choosePreset = (id: string) => {
     pinned.current = true;
     applyPreset(id);
+    // "Other" carries no hosts of its own. Hiding two empty boxes behind a
+    // toggle would let someone press Connect with nothing to connect to.
+    if (id === "other") setAdvanced(true);
   };
 
   const onEmailChange = (value: string) => {
     setForm((current) => ({ ...current, email: value }));
+    setValidation(null);
     if (pinned.current) return;
     const guess = presetForEmail(value);
-    if (guess && guess.id !== preset) applyPreset(guess.id);
+    if (guess) {
+      if (guess.id !== preset) applyPreset(guess.id);
+      return;
+    }
+    // A domain no preset claims: guess imap./smtp. in front of it rather than
+    // leaving imap.gmail.com sitting under someone's company address.
+    const hosts = guessHostsForEmail(value);
+    if (!hosts) return;
+    setPreset("other");
+    setForm((current) => ({
+      ...current,
+      imapHost: hosts.imapHost,
+      imapPort: String(DEFAULT_IMAP_PORT),
+      smtpHost: hosts.smtpHost,
+      smtpPort: String(DEFAULT_SMTP_PORT),
+    }));
   };
 
   const reset = () => {
@@ -124,6 +156,7 @@ export function ConnectMailboxDialog({
     pinned.current = false;
     setValidation(null);
     setReveal(false);
+    setAdvanced(false);
     create.reset();
   };
 
@@ -140,23 +173,35 @@ export function ConnectMailboxDialog({
   });
 
   const requireBasics = (): boolean => {
-    const missing: Array<[keyof Form, React.RefObject<HTMLInputElement | null>]> = [
-      ["email", emailRef],
-      ["password", passwordRef],
-      ["imapHost", imapRef],
-      ["smtpHost", smtpRef],
-    ];
-    for (const [field, ref] of missing) {
-      if (!form[field].trim()) {
-        ref.current?.focus();
-        setValidation("Fill in email, password, IMAP host and SMTP host first.");
-        return false;
-      }
+    if (!form.email.trim()) {
+      emailRef.current?.focus();
+      setValidation("Type the address of the mailbox you want to read.");
+      return false;
+    }
+    if (!stripPasswordSpaces(form.password)) {
+      passwordRef.current?.focus();
+      setValidation(
+        `Paste the ${(chosen?.passwordName ?? "password").toLowerCase()} for this mailbox.`,
+      );
+      return false;
     }
     if (preset === "gmail" && !isGoogleAppPassword(form.password)) {
       passwordRef.current?.focus();
       setValidation(GMAIL_PASSWORD_PROBLEM);
       return false;
+    }
+    // Only reachable on "Other" with the guess cleared: every preset carries
+    // its own hosts, so this opens the section that holds the empty box.
+    for (const [field, ref] of [
+      ["imapHost", imapRef],
+      ["smtpHost", smtpRef],
+    ] as const) {
+      if (!form[field].trim()) {
+        setAdvanced(true);
+        setValidation("Two more details are needed from your email provider. They are under More settings.");
+        window.setTimeout(() => ref.current?.focus(), 0);
+        return false;
+      }
     }
     setValidation(null);
     return true;
@@ -164,12 +209,8 @@ export function ConnectMailboxDialog({
 
   const onSave = () => {
     if (!requireBasics()) return;
-    if (!form.alias.trim()) {
-      setValidation("Give this mailbox a name.");
-      return;
-    }
     create.mutate(
-      { alias: form.alias.trim(), email: form.email.trim(), ...credentials() },
+      { alias, email: form.email.trim(), ...credentials() },
       {
         onSuccess: () => {
           toast.success("Mailbox connected");
@@ -263,28 +304,7 @@ export function ConnectMailboxDialog({
           ))}
         </div>
 
-        {chosen?.hint && (
-          <p className="rounded-[var(--radius-md)] bg-surface-1 p-3 text-[12px] leading-4 text-fg-secondary">
-            {chosen.hint}
-          </p>
-        )}
-
         <div className="space-y-3">
-          <Field
-            id="connect-alias"
-            label="Name"
-            helper="Shown in the sidebar. Lowercase, no spaces."
-          >
-            <Input
-              id="connect-alias"
-              value={form.alias}
-              autoComplete="off"
-              onChange={(event) =>
-                setForm((value) => ({ ...value, alias: event.target.value }))
-              }
-            />
-          </Field>
-
           <Field id="connect-email" label="Email address">
             <Input
               id="connect-email"
@@ -293,11 +313,16 @@ export function ConnectMailboxDialog({
               value={form.email}
               autoComplete="off"
               spellCheck={false}
+              placeholder="you@example.com"
               onChange={(event) => onEmailChange(event.target.value)}
             />
           </Field>
 
-          <Field id="connect-password" label="Password">
+          <Field
+            id="connect-password"
+            label={chosen?.passwordName ?? "Password"}
+            helper={chosen?.hint || undefined}
+          >
             <div className="relative">
               <Input
                 id="connect-password"
@@ -307,9 +332,10 @@ export function ConnectMailboxDialog({
                 autoComplete="off"
                 placeholder={chosen?.passwordPlaceholder || undefined}
                 className="pr-8"
-                onChange={(event) =>
-                  setForm((value) => ({ ...value, password: event.target.value }))
-                }
+                onChange={(event) => {
+                  setValidation(null);
+                  setForm((value) => ({ ...value, password: event.target.value }));
+                }}
               />
               <button
                 type="button"
@@ -338,71 +364,113 @@ export function ConnectMailboxDialog({
             )}
           </Field>
 
-          <Field id="connect-username" label="Username">
-            <Input
-              id="connect-username"
-              value={form.username}
-              placeholder="Same as email address"
-              autoComplete="off"
-              spellCheck={false}
-              className="font-mono"
-              onChange={(event) =>
-                setForm((value) => ({ ...value, username: event.target.value }))
-              }
+          <button
+            type="button"
+            aria-expanded={advanced}
+            aria-controls="connect-advanced"
+            onClick={() => setAdvanced((value) => !value)}
+            className="flex items-center gap-1 text-[12px] text-fg-tertiary hover:text-fg-secondary"
+          >
+            <ChevronRight
+              aria-hidden="true"
+              className={cn(
+                "size-3.5 transition-transform duration-[var(--dur-fast)]",
+                advanced && "rotate-90",
+              )}
+              strokeWidth={1.5}
             />
-          </Field>
+            More settings
+          </button>
 
-          <div className="grid grid-cols-[1fr_5rem] gap-2">
-            <Field id="connect-imap-host" label="IMAP host">
-              <Input
-                id="connect-imap-host"
-                ref={imapRef}
-                value={form.imapHost}
-                spellCheck={false}
-                className="font-mono"
-                onChange={(event) =>
-                  setForm((value) => ({ ...value, imapHost: event.target.value }))
-                }
-              />
-            </Field>
-            <Field id="connect-imap-port" label="Port">
-              <Input
-                id="connect-imap-port"
-                inputMode="numeric"
-                value={form.imapPort}
-                className="font-mono"
-                onChange={(event) =>
-                  setForm((value) => ({ ...value, imapPort: event.target.value }))
-                }
-              />
-            </Field>
-          </div>
+          {advanced && (
+            <div id="connect-advanced" className="space-y-3">
+              <Field
+                id="connect-alias"
+                label="Name"
+                helper="Shown in the sidebar. Lowercase, no spaces."
+              >
+                <Input
+                  id="connect-alias"
+                  value={form.alias}
+                  autoComplete="off"
+                  placeholder={alias || "Taken from the address"}
+                  onChange={(event) =>
+                    setForm((value) => ({ ...value, alias: event.target.value }))
+                  }
+                />
+              </Field>
 
-          <div className="grid grid-cols-[1fr_5rem] gap-2">
-            <Field id="connect-smtp-host" label="SMTP host">
-              <Input
-                id="connect-smtp-host"
-                ref={smtpRef}
-                value={form.smtpHost}
-                spellCheck={false}
-                className="font-mono"
-                onChange={(event) =>
-                  setForm((value) => ({ ...value, smtpHost: event.target.value }))
-                }
-              />
-            </Field>
-            <Field id="connect-smtp-port" label="Port">
-              <Input
-                id="connect-smtp-port"
-                inputMode="numeric"
-                value={form.smtpPort}
-                className="font-mono"
-                onChange={(event) =>
-                  setForm((value) => ({ ...value, smtpPort: event.target.value }))
-                }
-              />
-            </Field>
-          </div>
+              <Field
+                id="connect-username"
+                label="Username"
+                helper="Only if your provider signs you in with something other than your address."
+              >
+                <Input
+                  id="connect-username"
+                  value={form.username}
+                  placeholder={form.email.trim() || "Same as email address"}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono"
+                  onChange={(event) =>
+                    setForm((value) => ({ ...value, username: event.target.value }))
+                  }
+                />
+              </Field>
+
+              <div className="grid grid-cols-[1fr_5rem] gap-2">
+                <Field id="connect-imap-host" label="Incoming server (IMAP)">
+                  <Input
+                    id="connect-imap-host"
+                    ref={imapRef}
+                    value={form.imapHost}
+                    spellCheck={false}
+                    className="font-mono"
+                    onChange={(event) =>
+                      setForm((value) => ({ ...value, imapHost: event.target.value }))
+                    }
+                  />
+                </Field>
+                <Field id="connect-imap-port" label="Port">
+                  <Input
+                    id="connect-imap-port"
+                    inputMode="numeric"
+                    value={form.imapPort}
+                    className="font-mono"
+                    onChange={(event) =>
+                      setForm((value) => ({ ...value, imapPort: event.target.value }))
+                    }
+                  />
+                </Field>
+              </div>
+
+              <div className="grid grid-cols-[1fr_5rem] gap-2">
+                <Field id="connect-smtp-host" label="Outgoing server (SMTP)">
+                  <Input
+                    id="connect-smtp-host"
+                    ref={smtpRef}
+                    value={form.smtpHost}
+                    spellCheck={false}
+                    className="font-mono"
+                    onChange={(event) =>
+                      setForm((value) => ({ ...value, smtpHost: event.target.value }))
+                    }
+                  />
+                </Field>
+                <Field id="connect-smtp-port" label="Port">
+                  <Input
+                    id="connect-smtp-port"
+                    inputMode="numeric"
+                    value={form.smtpPort}
+                    className="font-mono"
+                    onChange={(event) =>
+                      setForm((value) => ({ ...value, smtpPort: event.target.value }))
+                    }
+                  />
+                </Field>
+              </div>
+            </div>
+          )}
         </div>
 
         {existing && (
@@ -412,24 +480,30 @@ export function ConnectMailboxDialog({
           </p>
         )}
 
-        {validation && (
-          <p className="text-[12px] leading-4 text-danger">{validation}</p>
-        )}
+        <div role="status" aria-live="polite">
+          {validation && (
+            <p className="text-[12px] leading-4 text-danger">{validation}</p>
+          )}
 
-        {create.isError && (
-          <div>
-            <p className="text-[12px] leading-4 text-danger">
-              {friendlyError(
-                create.error instanceof Error ? create.error.message : create.error,
-              )}
-            </p>
-            <TechnicalDetails
-              raw={
-                create.error instanceof Error ? create.error.message : create.error
-              }
-            />
-          </div>
-        )}
+          {create.isError && (
+            <div>
+              <p className="text-[12px] leading-4 text-danger">
+                {friendlyError(
+                  create.error instanceof Error
+                    ? create.error.message
+                    : create.error,
+                )}
+              </p>
+              <TechnicalDetails
+                raw={
+                  create.error instanceof Error
+                    ? create.error.message
+                    : create.error
+                }
+              />
+            </div>
+          )}
+        </div>
 
         <DialogFooter>
           <Button
