@@ -44,6 +44,17 @@ command -v git >/dev/null || die "git is not on PATH"
 command -v gh >/dev/null || die "gh is not on PATH"
 command -v node >/dev/null || die "node is not on PATH"
 command -v npm >/dev/null || die "npm is not on PATH"
+command -v xcrun >/dev/null || die "xcrun is not on PATH"
+
+# A signed but un-notarised dmg installs nowhere. macOS says "Apple could not
+# verify mailmux is free of malware" and offers no Open button. Refuse to
+# publish one. Mint the profile once with:
+#   xcrun notarytool store-credentials mailmux-notary \
+#     --apple-id <apple-id> --team-id 22DPQ7YCAS
+[ -n "${APPLE_KEYCHAIN_PROFILE:-}" ] || \
+  die "APPLE_KEYCHAIN_PROFILE is not set — the dmg would ship un-notarised"
+xcrun notarytool history --keychain-profile "$APPLE_KEYCHAIN_PROFILE" \
+  >/dev/null 2>&1 || die "notary profile $APPLE_KEYCHAIN_PROFILE does not work"
 
 GIT_DIR="$(git rev-parse --git-dir)"
 GIT_COMMON="$(git rev-parse --git-common-dir)"
@@ -104,7 +115,7 @@ if ! npm run build; then
   restore_versions
   die "build failed; version files restored"
 fi
-printf 'packing and signing the Mac dmg\n'
+printf 'packing, signing and notarising the Mac dmg\n'
 if ! ( cd apps/desktop && npm run dist:mac ); then
   restore_versions
   die "dist:mac failed; version files restored"
@@ -114,11 +125,11 @@ fi
   die "expected $DMG"
 }
 
-if [ -n "${APPLE_KEYCHAIN_PROFILE:-}" ]; then
-  printf 'notarising with profile %s\n' "$APPLE_KEYCHAIN_PROFILE"
-  xcrun notarytool submit "$DMG" \
-    --keychain-profile "$APPLE_KEYCHAIN_PROFILE" --wait
-  xcrun stapler staple "$DMG"
+# dist:mac notarised and stapled. Prove it before anything reaches GitHub;
+# a bad dmg on the download page is far more expensive to undo.
+if ! xcrun stapler validate "$DMG"; then
+  restore_versions
+  die "$DMG has no notarisation ticket; nothing was committed or uploaded"
 fi
 
 git add package.json package-lock.json \

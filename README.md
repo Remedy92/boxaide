@@ -137,7 +137,13 @@ The install button serves GitHub `releases/latest`. CI does not upload a dmg. Af
 ./scripts/install-hooks.sh # once: remind on pull/checkout of master
 ```
 
-`ship.sh` is the only publisher. A git hook only prints the status; it never packs. Pass `--dry-run` to see the plan. Notarize by setting `APPLE_KEYCHAIN_PROFILE`.
+`ship.sh` is the only publisher. A git hook only prints the status; it never packs. Pass `--dry-run` to see the plan.
+
+`ship.sh` needs `APPLE_KEYCHAIN_PROFILE` and refuses to run without it. Apple must notarize every macOS download, or the installer says it cannot verify the app. Mint the profile once:
+
+```bash
+xcrun notarytool store-credentials mailmux-notary --apple-id <apple-id> --team-id 22DPQ7YCAS
+```
 
 ## Agent MCP (any client)
 
