@@ -87,10 +87,12 @@ mac:
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
-  # Notarization needs credentials only the owner can mint. One-time setup:
+  # scripts/sign-mac.sh notarises, not electron-builder: the app is signed
+  # after packaging, so electron-builder would upload an unsigned bundle.
+  # One-time setup:
   #   xcrun notarytool store-credentials mailmux-notary \
   #     --apple-id <apple-id> --team-id 22DPQ7YCAS
-  # then build with: APPLE_KEYCHAIN_PROFILE=mailmux-notary npm run dist
+  # then build with: APPLE_KEYCHAIN_PROFILE=mailmux-notary npm run dist:mac
   notarize: false
 
 win:

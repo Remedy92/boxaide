@@ -1,20 +1,26 @@
 #!/bin/sh
-# Signs the packaged mac app and dmg with an explicit certificate hash.
+# Signs and notarises the packaged mac app and dmg.
+#
+# A Developer ID signature alone is not enough. macOS refuses to open a
+# downloaded app that Apple has not notarised: "Apple could not verify
+# mailmux is free of malware." Notarisation is a separate upload to Apple,
+# and the returned ticket must be stapled into the app AND the dmg.
 #
 # Why not electron-builder's own signing: it passes the certificate NAME to
 # codesign, and this keychain holds two same-named Developer ID certificates,
 # which codesign rejects as ambiguous. A SHA-1 hash is never ambiguous.
 #
-# Usage:
-#   npm run dist:mac            # builds unsigned, then runs this script
-#   MAILMUX_SIGN_ID=<sha1> npm run dist:mac   # override the certificate
-#
-# Notarization (one-time credential setup, then per release):
+# One-time credential setup:
 #   xcrun notarytool store-credentials mailmux-notary \
 #     --apple-id <apple-id> --team-id 22DPQ7YCAS
-#   xcrun notarytool submit release/mailmux-*.dmg \
-#     --keychain-profile mailmux-notary --wait
-#   xcrun stapler staple release/mailmux-*.dmg
+#
+# Usage:
+#   APPLE_KEYCHAIN_PROFILE=mailmux-notary npm run dist:mac   # sign + notarise
+#   npm run dist:mac                                          # sign only
+#   MAILMUX_SIGN_ID=<sha1> npm run dist:mac                   # other cert
+#
+# Without APPLE_KEYCHAIN_PROFILE this script signs and skips notarisation.
+# That build is for local testing only. scripts/ship.sh refuses to publish it.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -38,6 +44,23 @@ done
 codesign --force --timestamp --options runtime --entitlements "$ENT" --sign "$ID" "$APP"
 codesign --verify --deep --strict "$APP"
 
+PROFILE="${APPLE_KEYCHAIN_PROFILE:-}"
+
+# Notarise the app before the dmg is built, so the ticket travels inside the
+# image. An app copied out of a dmg that only carries its own ticket needs a
+# network round trip to Apple on first launch; a stapled app never does.
+if [ -n "$PROFILE" ]; then
+  echo "notarising the app with profile $PROFILE"
+  rm -f release/mailmux-app.zip
+  ditto -c -k --keepParent "$APP" release/mailmux-app.zip
+  xcrun notarytool submit release/mailmux-app.zip \
+    --keychain-profile "$PROFILE" --wait
+  xcrun stapler staple "$APP"
+  rm -f release/mailmux-app.zip
+else
+  echo "APPLE_KEYCHAIN_PROFILE is not set — skipping notarisation"
+fi
+
 # electron-builder wrote the dmg from the unsigned app. Rebuild the image
 # from this signed copy, or the download still contains an unsigned .app.
 # The path is the .app itself — passing the parent folder nests mailmux.app
@@ -48,5 +71,18 @@ for dmg in release/mailmux-*.dmg; do
   [ -e "$dmg" ] || continue
   codesign --force --timestamp --sign "$ID" "$dmg"
   codesign --verify "$dmg"
+  [ -n "$PROFILE" ] || continue
+  echo "notarising $dmg"
+  xcrun notarytool submit "$dmg" --keychain-profile "$PROFILE" --wait
+  xcrun stapler staple "$dmg"
 done
-echo "signed with $ID"
+
+if [ -n "$PROFILE" ]; then
+  # The gate the user's Mac applies. Anything else here ships a broken
+  # download, so fail the build instead of the install.
+  spctl --assess --type exec --verbose=2 "$APP"
+  xcrun stapler validate "$APP"
+  echo "signed and notarised with $ID"
+else
+  echo "signed with $ID — NOT notarised, do not publish this build"
+fi
