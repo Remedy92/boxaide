@@ -35,6 +35,20 @@ codesign --force --timestamp --options runtime --sign "$ID" \
   "$APP/Contents/Frameworks/Electron Framework.framework/Versions/A/Helpers/chrome_crashpad_handler"
 find "$APP/Contents/Resources/app.asar.unpacked" -name "*.node" \
   -exec codesign --force --timestamp --options runtime --sign "$ID" {} \;
+
+# A framework can carry its own helper executables, and signing the framework
+# only seals those as resources — it does not sign them as code. Squirrel's
+# updater, Resources/ShipIt, is one, and notarisation rejected the whole app
+# over it. Sweep every Mach-O file under Frameworks rather than naming the
+# ones we know: a new Electron drops in new helpers without warning.
+# The bundle passes below re-sign their own main executables afterwards,
+# entitlements and all, so signing those twice is harmless.
+find "$APP/Contents/Frameworks" -type f -perm -u+x | while IFS= read -r bin; do
+  case "$(file -b "$bin")" in
+    *Mach-O*) codesign --force --timestamp --options runtime --sign "$ID" "$bin" ;;
+  esac
+done
+
 for f in "$APP/Contents/Frameworks/"*.framework; do
   codesign --force --timestamp --options runtime --sign "$ID" "$f"
 done
