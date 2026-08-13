@@ -90,7 +90,7 @@ export default function TrayPage() {
       <header className="flex shrink-0 items-center gap-2 border-b border-border-subtle px-4 py-3">
         <BrandGlyph size={16} />
         <span className="text-[13px] font-semibold tracking-[-0.01em]">
-          mailmux
+          Sley
         </span>
         {/* Working outranks listening: a message in flight is the one thing
             worth catching from the corner of an eye. */}
@@ -110,7 +110,7 @@ export default function TrayPage() {
         {!ctx.ready || mail.isPending ? (
           <TrayHint text="Loading your mail…" />
         ) : mail.isError ? (
-          <TrayHint text="mailmux is not reachable." />
+          <TrayHint text="Sley is not reachable." />
         ) : messages.length === 0 ? (
           <TrayHint text="No mail yet." />
         ) : (
@@ -178,7 +178,7 @@ export default function TrayPage() {
             "transition-opacity duration-[var(--dur-fast)] hover:opacity-90",
           )}
         >
-          Open mailmux
+          Open Sley
         </button>
       </footer>
     </div>

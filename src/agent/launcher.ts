@@ -1,5 +1,5 @@
 /**
- * Local agent launcher: mailmux starts the agent, instead of waiting for one.
+ * Local agent launcher: Sley starts the agent, instead of waiting for one.
  *
  * MCP is client-driven, so the Agent view is silent until some client enters
  * the chat_await_message loop. For GUI clients (Claude Desktop) nothing can
@@ -39,7 +39,7 @@ import { delimiter, join } from "node:path";
  * A macOS app launched from Finder inherits launchd's PATH —
  * /usr/bin:/bin:/usr/sbin:/sbin — not the login shell's. Every agent CLI on a
  * real machine lives outside that (Homebrew, ~/.local/bin, per-tool bins), so
- * detection that only reads PATH finds nothing exactly when mailmux runs as
+ * detection that only reads PATH finds nothing exactly when Sley runs as
  * the app instead of from a terminal.
  */
 function wellKnownBinDirs(): string[] {
@@ -64,18 +64,18 @@ function wellKnownBinDirs(): string[] {
  * the automated version of that manual step. Mirrors
  * apps/web/src/components/dialogs/agent-connect-dialog.tsx (KICKOFF).
  */
-const KICKOFF = `You are my mailmux inbox agent. Use the mailmux MCP tools.
+const KICKOFF = `You are my Sley inbox agent. Use the Sley MCP tools.
 
 Loop: call chat_await_message, do the work, post the answer with chat_say, then
 call chat_await_message again. Keep going until I tell you to stop.
 
-Everything I read appears in the mailmux window, so every answer must go through
+Everything I read appears in the Sley window, so every answer must go through
 chat_say — do not answer here. A chat_await_message that returns no message is
 normal; call it again. Use chat_activity for anything slow. Draft rather than
 send unless I ask you to send.`;
 
 /**
- * Every mailmux tool except message_send. Deliberately a hand-written
+ * Every Sley tool except message_send. Deliberately a hand-written
  * allowlist and not "TOOLS minus send": adding a new server tool must not
  * silently pre-approve it here. Each CLI namespaces these differently.
  */
@@ -97,7 +97,7 @@ const PREAPPROVED_TOOL_NAMES = [
 ];
 
 const CLAUDE_PREAPPROVED_TOOLS = PREAPPROVED_TOOL_NAMES.map(
-  (name) => `mcp__mailmux__${name}`,
+  (name) => `mcp__sley__${name}`,
 );
 
 export type LaunchContext = {
@@ -155,7 +155,7 @@ export type AgentSpec = {
 
 /**
  * Claude Code, headless. --strict-mcp-config keeps the user's other MCP
- * servers out of a process mailmux is responsible for; the allowlist is the
+ * servers out of a process Sley is responsible for; the allowlist is the
  * read/draft boundary (send stays un-approved, which headless mode denies).
  */
 function claudeArgs(ctx: LaunchContext, model?: string): string[] {
@@ -166,7 +166,7 @@ function claudeArgs(ctx: LaunchContext, model?: string): string[] {
     "--mcp-config",
     JSON.stringify({
       mcpServers: {
-        mailmux: {
+        sley: {
           type: "http",
           url: ctx.mcpUrl,
           headers: { Authorization: `Bearer ${ctx.bearerToken}` },
@@ -182,7 +182,7 @@ function claudeArgs(ctx: LaunchContext, model?: string): string[] {
 /**
  * Grok Build, headless. There is no --mcp-config / --strict-mcp-config: MCP
  * servers come from config.toml. We give the process its own GROK_HOME so
- * the user's ~/.grok servers and plugins are not loaded, write mailmux as
+ * the user's ~/.grok servers and plugins are not loaded, write sley as
  * the only server there, and pre-approve read/draft tools under dontAsk
  * (anything else, including message_send, is a silent denial).
  *
@@ -193,7 +193,7 @@ function claudeArgs(ctx: LaunchContext, model?: string): string[] {
  */
 function grokHomeFor(ctx: LaunchContext): string {
   const root =
-    ctx.dataDir === ":memory:" ? join(tmpdir(), "mailmux-agent") : ctx.dataDir;
+    ctx.dataDir === ":memory:" ? join(tmpdir(), "sley-agent") : ctx.dataDir;
   return join(root, "agent-homes", "grok");
 }
 
@@ -210,7 +210,7 @@ function grokArgs(_ctx: LaunchContext): string[] {
     "--disable-web-search",
   ];
   for (const name of PREAPPROVED_TOOL_NAMES) {
-    args.push("--allow", `MCPTool(mailmux__${name})`);
+    args.push("--allow", `MCPTool(sley__${name})`);
   }
   return args;
 }
@@ -218,7 +218,7 @@ function grokArgs(_ctx: LaunchContext): string[] {
 function grokChildEnv(ctx: LaunchContext, _workDir: string): Record<string, string> {
   return {
     GROK_HOME: grokHomeFor(ctx),
-    MAILMUX_TOKEN: ctx.bearerToken,
+    SLEY_TOKEN: ctx.bearerToken,
     GROK_DISABLE_AUTOUPDATER: "1",
     GROK_CLAUDE_MCPS_ENABLED: "0",
     GROK_CURSOR_MCPS_ENABLED: "0",
@@ -254,7 +254,7 @@ function grokPrepare(
   });
 
   // If GROK_HOME is ignored, project config in the empty workdir still
-  // declares mailmux. Same name as the isolated user server, so it does
+  // declares sley. Same name as the isolated user server, so it does
   // not stack a second copy when both are read.
   const projectGrok = join(workDir, ".grok");
   mkdirSync(projectGrok, { recursive: true });
@@ -288,18 +288,18 @@ function grokConfigToml(ctx: LaunchContext): string {
     "agents = false",
     "hooks = false",
     "",
-    "[mcp_servers.mailmux]",
+    "[mcp_servers.sley]",
     `url = ${tomlString(ctx.mcpUrl)}`,
-    `bearer_token_env_var = ${tomlString("MAILMUX_TOKEN")}`,
+    `bearer_token_env_var = ${tomlString("SLEY_TOKEN")}`,
     "",
   ].join("\n");
 }
 
 function grokProjectToml(ctx: LaunchContext): string {
   return [
-    "[mcp_servers.mailmux]",
+    "[mcp_servers.sley]",
     `url = ${tomlString(ctx.mcpUrl)}`,
-    `bearer_token_env_var = ${tomlString("MAILMUX_TOKEN")}`,
+    `bearer_token_env_var = ${tomlString("SLEY_TOKEN")}`,
     "",
   ].join("\n");
 }
@@ -439,7 +439,7 @@ export class AgentLauncher {
     // CLAUDE.md, nothing for the agent to read into the session by accident.
     const workDir =
       this.ctx.dataDir === ":memory:"
-        ? join(tmpdir(), "mailmux-agent")
+        ? join(tmpdir(), "sley-agent")
         : join(this.ctx.dataDir, "agent-workdir");
     mkdirSync(workDir, { recursive: true });
     spec.prepare?.(this.ctx, workDir, this.env);

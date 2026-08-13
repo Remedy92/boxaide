@@ -2,7 +2,7 @@
  * The Claude Desktop connector (apps/mcpb) is a stdio→HTTP proxy with no
  * dependencies, so it is tested the way it runs: spawned as a real process,
  * spoken to over stdin, against a real local HTTP server standing in for
- * mailmux.
+ * Sley.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -131,9 +131,9 @@ describe("mcpb connector proxy", () => {
       body: { jsonrpc: "2.0", id: (body as { id: number }).id, result: { ok: true } },
     }));
     const proxy = startProxy({
-      MAILMUX_URL: url,
-      MAILMUX_DATA_DIR: tempDataDir("filetoken"),
-      MAILMUX_TOKEN: "",
+      SLEY_URL: url,
+      SLEY_DATA_DIR: tempDataDir("filetoken"),
+      SLEY_TOKEN: "",
     });
 
     proxy.send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
@@ -150,9 +150,9 @@ describe("mcpb connector proxy", () => {
       return { status: 200, body: { jsonrpc: "2.0", id: message.id, result: {} } };
     });
     const proxy = startProxy({
-      MAILMUX_URL: url,
-      MAILMUX_DATA_DIR: tempDataDir("t"),
-      MAILMUX_TOKEN: "",
+      SLEY_URL: url,
+      SLEY_DATA_DIR: tempDataDir("t"),
+      SLEY_TOKEN: "",
     });
 
     proxy.send({ jsonrpc: "2.0", method: "notifications/initialized" });
@@ -164,14 +164,14 @@ describe("mcpb connector proxy", () => {
     expect(proxy.unread).toBe(0);
   });
 
-  it("attaches while mailmux is down: local initialize, snapshot tools/list", async () => {
+  it("attaches while Sley is down: local initialize, snapshot tools/list", async () => {
     // A port that was just released: nothing is listening on it.
     const { server, url } = await startFake(() => ({ status: 200 }));
     server.close();
     const proxy = startProxy({
-      MAILMUX_URL: url,
-      MAILMUX_DATA_DIR: tempDataDir("t"),
-      MAILMUX_TOKEN: "",
+      SLEY_URL: url,
+      SLEY_DATA_DIR: tempDataDir("t"),
+      SLEY_TOKEN: "",
     });
 
     proxy.send({
@@ -181,7 +181,7 @@ describe("mcpb connector proxy", () => {
       params: { protocolVersion: "2025-06-18", clientInfo: { name: "claude" } },
     });
     const init = JSON.parse(await proxy.nextLine());
-    expect(init.result.serverInfo.name).toBe("mailmux");
+    expect(init.result.serverInfo.name).toBe("sley");
     expect(init.result.protocolVersion).toBe("2025-06-18");
 
     proxy.send({ jsonrpc: "2.0", id: 8, method: "tools/list" });
@@ -192,13 +192,13 @@ describe("mcpb connector proxy", () => {
     );
   });
 
-  it("answers a tool call with a helpful error when mailmux is down", async () => {
+  it("answers a tool call with a helpful error when Sley is down", async () => {
     const { server, url } = await startFake(() => ({ status: 200 }));
     server.close();
     const proxy = startProxy({
-      MAILMUX_URL: url,
-      MAILMUX_DATA_DIR: tempDataDir("t"),
-      MAILMUX_TOKEN: "",
+      SLEY_URL: url,
+      SLEY_DATA_DIR: tempDataDir("t"),
+      SLEY_TOKEN: "",
     });
 
     proxy.send({
@@ -226,15 +226,15 @@ describe("mcpb connector proxy", () => {
     expect(snapshot).toEqual([...TOOLS, ...CHAT_TOOLS]);
   });
 
-  it("prefers MAILMUX_TOKEN over the token file", async () => {
+  it("prefers SLEY_TOKEN over the token file", async () => {
     const { url, received } = await fake(({ body }) => ({
       status: 200,
       body: { jsonrpc: "2.0", id: (body as { id: number }).id, result: {} },
     }));
     const proxy = startProxy({
-      MAILMUX_URL: url,
-      MAILMUX_DATA_DIR: tempDataDir("filetoken"),
-      MAILMUX_TOKEN: "envtoken",
+      SLEY_URL: url,
+      SLEY_DATA_DIR: tempDataDir("filetoken"),
+      SLEY_TOKEN: "envtoken",
     });
 
     proxy.send({ jsonrpc: "2.0", id: 3, method: "ping" });
@@ -250,9 +250,9 @@ describe("mcpb connector proxy", () => {
       return { status: 200, body: { jsonrpc: "2.0", id: (body as { id: number }).id, result: {} } };
     });
     const proxy = startProxy({
-      MAILMUX_URL: url,
-      MAILMUX_DATA_DIR: dir,
-      MAILMUX_TOKEN: "",
+      SLEY_URL: url,
+      SLEY_DATA_DIR: dir,
+      SLEY_TOKEN: "",
     });
 
     // First request pins the stale token in the proxy before the rotation —
@@ -303,9 +303,9 @@ describe("mcpb connector token fallback", () => {
     });
 
     const proxy = new Proxy({
-      MAILMUX_URL: url,
-      MAILMUX_DATA_DIR: dir,
-      MAILMUX_TOKEN: "stale-pasted-value",
+      SLEY_URL: url,
+      SLEY_DATA_DIR: dir,
+      SLEY_TOKEN: "stale-pasted-value",
     });
     try {
       proxy.send({ jsonrpc: "2.0", id: 1, method: "ping" });

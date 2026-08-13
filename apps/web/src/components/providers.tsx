@@ -4,8 +4,11 @@ import * as React from "react";
 import { ThemeProvider } from "next-themes";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ApiError } from "@/lib/api/errors";
+import { adoptLegacyTheme, SETTINGS_KEYS } from "@/lib/settings";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+
+adoptLegacyTheme();
 
 export function Providers({ children }: { children: React.ReactNode }) {
   // useState so a single client survives every re-render.
@@ -42,7 +45,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
         defaultTheme="system"
         enableSystem
         disableTransitionOnChange
-        storageKey="mailmux.theme"
+        storageKey={SETTINGS_KEYS.theme}
       >
         <TooltipProvider delayDuration={400} skipDelayDuration={200}>
           {children}

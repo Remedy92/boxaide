@@ -6,7 +6,7 @@ import { MailService } from "../src/mail/service.js";
 import { encryptSecret, decryptSecret } from "../src/crypto/secrets.js";
 import { handleMcpJsonRpc } from "../src/mcp/server.js";
 import { createRuntime } from "../src/app.js";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -539,8 +539,36 @@ describe("HTTP API via createRuntime (shipped app)", () => {
     });
     expect(mcpInit.status).toBe(200);
     const mcpBody = await mcpInit.json();
-    expect(mcpBody.result.serverInfo.name).toBe("mailmux");
+    expect(mcpBody.result.serverInfo.name).toBe("sley");
 
     runtime.store.close();
+  });
+});
+
+describe("Store.open database name", () => {
+  it("opens sley.db when neither file exists", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sley-db-"));
+    const store = Store.open(dir, randomBytes(32));
+    store.close();
+    expect(existsSync(join(dir, "sley.db"))).toBe(true);
+    expect(existsSync(join(dir, "mailmux.db"))).toBe(false);
+  });
+
+  it("keeps using mailmux.db when sley.db is absent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sley-db-"));
+    const key = randomBytes(32);
+    writeFileSync(join(dir, "mailmux.db"), "");
+    const first = new Store(key, join(dir, "mailmux.db"));
+    first.appendTurn({
+      at: new Date().toISOString(),
+      role: "user",
+      text: "legacy",
+      agent: null,
+    });
+    first.close();
+    const store = Store.open(dir, key);
+    expect(store.listTurns().map((t) => t.text)).toEqual(["legacy"]);
+    store.close();
+    expect(existsSync(join(dir, "sley.db"))).toBe(false);
   });
 });

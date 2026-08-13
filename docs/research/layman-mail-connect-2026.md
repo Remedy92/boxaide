@@ -4,16 +4,16 @@ Research date: 2026-08-10. Primary sources preferred (Google, Microsoft, product
 
 ## Executive answer
 
-**No.** A non-developer cannot get Superhuman / Apple Mail / Outlook-class “Sign in with Google” UX into a product like mailmux without **someone else** owning a production OAuth client (and, for Gmail restricted mail scopes, Google verification + usually CASA).
+**No.** A non-developer cannot get Superhuman / Apple Mail / Outlook-class “Sign in with Google” UX into a product like Sley (formerly Mailmux) without **someone else** owning a production OAuth client (and, for Gmail restricted mail scopes, Google verification + usually CASA).
 
 | What the layperson does | Who paid the verification cost | Works for strangers? |
 | --- | --- | --- |
-| App password + IMAP form (mailmux today) | Nobody | Partially — fails often (2SV, Workspace policy, Advanced Protection) |
-| “Sign in with Google” using **mailmux’s** OAuth client | mailmux project (or a paid proxy that already verified) | Yes, after Google production verification |
+| App password + IMAP form (Sley today) | Nobody | Partially — fails often (2SV, Workspace policy, Advanced Protection) |
+| “Sign in with Google” using **Sley’s** OAuth client | Sley project (or a paid proxy that already verified) | Yes, after Google production verification |
 | User creates their own Google Cloud project | Each user | Yes for that user only — **not** layman UX |
 | Nylas / Unipile (or similar) connect proxy | SaaS vendor (+ often your own app still) | Yes — paid, not zero-SaaS-core |
 
-**Decision for mailmux:** ship **Path D (hybrid)** as the product target — OAuth presets for Gmail/Microsoft, keep IMAP/app-password for Fastmail/generic/advanced. Path A stays the zero-dependency core. Path B is the hard part (verification, not code). Path C is an optional plug-in for people who will not run verification themselves.
+**Decision for Sley:** ship **Path D (hybrid)** as the product target — OAuth presets for Gmail/Microsoft, keep IMAP/app-password for Fastmail/generic/advanced. Path A stays the zero-dependency core. Path B is the hard part (verification, not code). Path C is an optional plug-in for people who will not run verification themselves.
 
 **Critical architecture fork:** Gmail **IMAP XOAUTH2** requires `https://mail.google.com/`. Google treats that as a **restricted** scope and, in verification FAQ language, steers apps that do not need permanent delete-bypassing-trash toward the **Gmail API** and narrower restricted scopes. Staying IMAP-only for Gmail makes verification harder and may be rejected on least-privilege grounds. Microsoft is cleaner: IMAP XOAUTH2 **or** Graph are both documented first-class paths.
 
@@ -33,7 +33,7 @@ What “bad” (developer / power-user) looks like:
 - Create a Google Cloud project → enable APIs → OAuth consent screen → create credentials → download JSON → paste client id/secret into self-hosted config.
 - Weekly re-auth because the OAuth app is still in **Testing**.
 
-mailmux today is the second column for Gmail/Outlook personal accounts (app passwords). That is fine for developers and Fastmail users. It is not consumer UX.
+Sley today is the second column for Gmail/Outlook personal accounts (app passwords). That is fine for developers and Fastmail users. It is not consumer UX.
 
 ## Why app passwords fail non-developers
 
@@ -58,7 +58,7 @@ Microsoft / consumer Outlook: basic auth is largely retired for Exchange Online;
 | Path | Layman UX | Per-user developer setup? | Core stays free of paid SaaS? | Verification burden | Fits multi-provider IMAP stack? |
 | --- | --- | --- | --- | --- | --- |
 | A. App passwords only (current) | Poor for Gmail/Outlook | Low technical, high friction | Yes | None | Yes (current) |
-| B. mailmux-owned OAuth client (desktop/public + PKCE or hosted relay) | Good after verification | No for end user | Yes for core | **High** (Google restricted; Microsoft lighter) | Partial — Gmail may need Gmail API |
+| B. Sley-owned OAuth client (desktop/public + PKCE or hosted relay) | Good after verification | No for end user | Yes for core | **High** (Google restricted; Microsoft lighter) | Partial — Gmail may need Gmail API |
 | C. Paid connect proxy (Nylas, Unipile, …) | Good | No | **No** for that path | Vendor / contract add-on | Via their API, not raw IMAP |
 | D. Hybrid (OAuth presets + IMAP advanced) | Good for big two; OK elsewhere | No for presets | Yes if B is self-run | Same as B for presets | Yes |
 | E. Each self-hoster brings own OAuth client | Good only for that hoster | **Yes — worse than app passwords** | Yes | Each operator | Yes |
@@ -82,7 +82,7 @@ Microsoft / consumer Outlook: basic auth is largely retired for Exchange Online;
   - Sensitive: `gmail.send` (send-only)
   - Restricted full: `https://mail.google.com/` (permanent delete beyond trash — avoid unless required)
 - Least privilege for read+label+send without permanent purge: typically **`gmail.modify`** (and maybe `gmail.send` depending on design) — still **restricted**, so still full verification path, but more defensible than `mail.google.com/`.
-- Requires a Gmail API client in mailmux (not only ImapFlow). That is a second mail backend for Gmail, not a small auth tweak.
+- Requires a Gmail API client in Sley (not only ImapFlow). That is a second mail backend for Gmail, not a small auth tweak.
 
 ### Microsoft: Graph vs IMAP XOAUTH2
 
@@ -131,11 +131,11 @@ Google’s installed-app flow is the sanctioned model:
 
 Microsoft parallel: public client + system browser + `http://localhost` redirect; MSAL patterns.
 
-**mailmux shape:** local Node process already binds `127.0.0.1:8787`. OAuth loopback can use that origin or a short-lived extra port. No public HTTPS domain required for the **redirect** on desktop/public clients. A separate **hosted auth relay** is only needed if you insist on a confidential web client (client secret server-side) for every self-hoster — worse fit for local-first.
+**Sley shape:** local Node process already binds `127.0.0.1:8787`. OAuth loopback can use that origin or a short-lived extra port. No public HTTPS domain required for the **redirect** on desktop/public clients. A separate **hosted auth relay** is only needed if you insist on a confidential web client (client secret server-side) for every self-hoster — worse fit for local-first.
 
 ## Google OAuth verification reality
 
-### Scope classes that matter for mailmux
+### Scope classes that matter for Sley
 
 | Scope | Class (Gmail API docs / restricted list) | Typical use |
 | --- | --- | --- |
@@ -175,7 +175,7 @@ Estimates are **not guarantees**; depend on developer responsiveness and whether
 
 - Restricted scopes that **store or transmit** restricted data **on servers** require an annual security assessment under the **App Defense Alliance CASA** framework.
 - Google **does not charge** a fee; **authorized assessors** do. Cost is private between developer and lab (not published by Google). Community reports vary widely (hundreds USD for Tier 2 self-scan + validation up to much higher for full lab work) — treat dollar amounts as **uncertain**.
-- If mailmux is **purely local** (tokens + mail cache only on the user’s machine, no mailmux-operated backend that sees mail), argue **no third-party server** holds restricted data. Uncertainty: Google still requires restricted-scope verification for external users; whether CASA is waived for pure desktop local-only is **not clearly free** in the docs — mark as open with Trust & Safety when submitting. A **hosted auth relay that only sees OAuth codes/tokens** is still a third-party server for secrets, if not for mail bodies.
+- If Sley is **purely local** (tokens + mail cache only on the user’s machine, no Sley-operated backend that sees mail), argue **no third-party server** holds restricted data. Uncertainty: Google still requires restricted-scope verification for external users; whether CASA is waived for pure desktop local-only is **not clearly free** in the docs — mark as open with Trust & Safety when submitting. A **hosted auth relay that only sees OAuth codes/tokens** is still a third-party server for secrets, if not for mail bodies.
 - Self-hosted multi-user deployments where an operator’s server holds many users’ Gmail tokens **look like** the CASA “server stores restricted data” case.
 
 ### Limited Use and agentic / MCP products (policy risk)
@@ -184,7 +184,7 @@ Google API Services User Data Policy + Workspace AI clarifications (FAQ):
 
 - Restricted-scope data: **Limited Use** — only user-facing features disclosed in the privacy policy; no ads, no data brokers, no training **foundational / frontier** models on Gmail content.
 - Personalized / on-device / single-user models for a user-directed feature are treated differently from training shared foundation models.
-- **mailmux MCP agents** that send full mailbox content to arbitrary third-party LLMs need careful product design and privacy-policy wording. Risk of verification rejection or later suspension if “agent” implies unrestricted export of mail to external model trainers.
+- **Sley MCP agents** that send full mailbox content to arbitrary third-party LLMs need careful product design and privacy-policy wording. Risk of verification rejection or later suspension if “agent” implies unrestricted export of mail to external model trainers.
 
 ### Workspace admins
 
@@ -193,7 +193,7 @@ Even a verified external app can be **blocked, limited, or trusted** per tenant.
 ## Microsoft path (brief)
 
 1. Register multi-tenant (and personal Microsoft account if desired) Entra app.
-2. Public client for local mailmux; confidential client only if you run a real backend.
+2. Public client for local Sley; confidential client only if you run a real backend.
 3. Prefer **authorization code + PKCE + offline_access**.
 4. For least change to ImapFlow: IMAP XOAUTH2 scopes on `outlook.office.com`.
 5. For better product: Graph `Mail.ReadWrite` + `Mail.Send`.
@@ -202,7 +202,7 @@ Even a verified external app can be **blocked, limited, or trusted** per tenant.
 
 Outlook.com + M365 consumer UX can match Gmail OAuth once the Entra app is production-ready. Cost is mostly engineering + support, not a security assessment market.
 
-## Fit to mailmux principles
+## Fit to Sley principles
 
 From product stance (`README`: MIT, self-hosted, **no paid SaaS required for core** receive+send, local process, multi-mailbox, MCP for agents):
 
@@ -215,7 +215,7 @@ From product stance (`README`: MIT, self-hosted, **no paid SaaS required for cor
 | MCP agents reuse one store | Yes | Yes | Possible via adapter | Yes |
 | Layman Gmail/Outlook | No | Yes **after** verification | Yes | Yes |
 
-**Tension:** “Sign in with Google for any stranger who `npm install`s mailmux” **requires** a project-owned verified client (Path B). That is operational cost on the **maintainer**, not on the user. It does not force a paid SaaS into the data path if tokens stay local.
+**Tension:** “Sign in with Google for any stranger who `npm install`s Sley” **requires** a project-owned verified client (Path B). That is operational cost on the **maintainer**, not on the user. It does not force a paid SaaS into the data path if tokens stay local.
 
 **Tension:** Google Limited Use vs “any MCP tool may read mail and ship it to any model.” Product policy must constrain default agent behavior or verification and ToS risk rise.
 
@@ -229,7 +229,7 @@ From product stance (`README`: MIT, self-hosted, **no paid SaaS required for cor
    - Implementation phase 2: Gmail via **Gmail API** provider (prefer over IMAP XOAUTH2 for verification).  
    - Keep Path A code paths for Fastmail, iCloud, generic.
 
-2. **Path B — mailmux-owned OAuth (required substrate for D)**  
+2. **Path B — Sley-owned OAuth (required substrate for D)**  
    - One Desktop (or public) client embedded/configurable; loopback PKCE on the local server.  
    - Maintainer runs Google verification when ready for public Gmail OAuth.  
    - Until verified: OAuth feature behind “dev/test users only” or disabled in release notes — do not ship broken 7-day tokens as production UX.
@@ -250,9 +250,9 @@ From product stance (`README`: MIT, self-hosted, **no paid SaaS required for cor
 User clicks Connect Gmail
         │
         ▼
-mailmux (local) generates PKCE verifier/challenge
+Sley (local) generates PKCE verifier/challenge
 opens system browser → Google authorize URL
-  client_id = mailmux production desktop client
+  client_id = Sley production desktop client
   redirect_uri = http://127.0.0.1:<port>/oauth/google/callback
   scope = gmail.modify … (or mail.google.com if IMAP — not preferred)
   access_type=offline&prompt=consent (first time, for refresh_token)
@@ -265,22 +265,22 @@ Google redirects to loopback → local HTTP handler
 exchanges code + code_verifier → access_token + refresh_token
         │
         ▼
-Store refresh_token with existing AES-GCM secret store (~/.mailmux)
+Store refresh_token with existing AES-GCM secret store (~/.sley)
 Refresh access_token before IMAP/API calls; re-auth UX on invalid_grant
 ```
 
 **What each user does *not* do:** open Google Cloud Console, create OAuth clients, or paste client secrets.
 
-**What the mailmux project must do:**
+**What the Sley project must do:**
 
 1. Own a Google Cloud project + branding (homepage, privacy policy URL, support email).
 2. Create **Desktop** OAuth client; ship `client_id` (and desktop client secret if Google still requires it on token endpoint — treat as public).
 3. Complete brand + restricted scope verification before marketing “Sign in with Google.”
 4. Answer Limited Use / data handling for local storage + MCP.
 5. Expect annual re-verification / possible CASA if Google classifies the deployment as server-held restricted data.
-6. Optional: allow override env `MAILMUX_GOOGLE_CLIENT_ID` for BYO / Internal Workspace apps.
+6. Optional: allow override env `SLEY_GOOGLE_CLIENT_ID` for BYO / Internal Workspace apps.
 
-**Hosted auth relay variant (usually worse for mailmux):** a small public HTTPS service that holds the confidential client secret and returns tokens to localhost. Adds ToS surface, availability dependency, and a server that sees refresh tokens — only justified if Desktop client type is rejected for your verification package (unlikely if you truthfully ship a local app).
+**Hosted auth relay variant (usually worse for Sley):** a small public HTTPS service that holds the confidential client secret and returns tokens to localhost. Adds ToS surface, availability dependency, and a server that sees refresh tokens — only justified if Desktop client type is rejected for your verification package (unlikely if you truthfully ship a local app).
 
 ### Token storage (local-first)
 
@@ -347,7 +347,7 @@ Refresh access_token before IMAP/API calls; re-auth UX on invalid_grant
 - [Unipile email overview](https://developer.unipile.com/docs/emails) / marketing OAuth pages — hosted connect; optional vendor Google credentials.
 - [EmailEngine](https://emailengine.app/) / [OAuth2 configuration](https://learn.emailengine.app/docs/configuration/oauth2-configuration) — self-hosted OAuth + IMAP proxy pattern.
 
-### mailmux context
+### Sley context
 
 - `README.md` (this repo) — MIT; no paid SaaS for core; app-password connect flow; ImapFlow/Nodemailer; local secrets.
 

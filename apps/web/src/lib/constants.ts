@@ -65,7 +65,7 @@ export type ProviderPreset = {
  * web/app.js:389 so the two UIs cannot drift.
  *
  * Every provider here refuses a normal account password over IMAP. That is not
- * a mailmux rule and there is no way around it, so the wizard leads with it
+ * a Sley rule and there is no way around it, so the wizard leads with it
  * rather than letting a login fail first.
  */
 export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
@@ -86,7 +86,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       "Open myaccount.google.com and pick Security in the left menu.",
       "Turn on 2-Step Verification if it is off. Google hides app passwords until you do.",
       "Go to myaccount.google.com/apppasswords. Search for “app passwords” in the same Security page if the link bounces you.",
-      "Type mailmux as the name and press Create.",
+      "Type Sley as the name and press Create.",
       "Google shows 16 letters in four groups. Copy them — spaces do not matter — and paste them below. You will not see them again.",
     ],
   },
@@ -127,7 +127,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     steps: [
       "Open account.apple.com and sign in.",
       "Choose Sign-In and Security, then App-Specific Passwords.",
-      "Press the plus button, type mailmux as the label, and confirm with your Apple Account password.",
+      "Press the plus button, type Sley as the label, and confirm with your Apple Account password.",
       "Copy the password Apple shows — four groups of four letters — and paste it below.",
       "Use your full @icloud.com address as the email, even if you normally sign in with something else.",
     ],
@@ -148,7 +148,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     steps: [
       "Open Fastmail in a browser and go to Settings.",
       "Choose Privacy & Security, then App Passwords.",
-      "Press New App Password, name it mailmux, and allow it Mail (IMAP/SMTP) access.",
+      "Press New App Password, name it Sley, and allow it Mail (IMAP/SMTP) access.",
       "Copy the password Fastmail shows and paste it below.",
     ],
   },
@@ -167,7 +167,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     domains: [],
     steps: [
       "Find your provider's IMAP and SMTP settings — they are usually on a page called “IMAP settings” or “Mail client setup”.",
-      "If your provider offers app passwords, make one for mailmux rather than using your account password.",
+      "If your provider offers app passwords, make one for Sley rather than using your account password.",
       "Fill in both host names below. Port 993 for IMAP and 465 or 587 for SMTP covers nearly everyone.",
     ],
   },

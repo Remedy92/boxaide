@@ -1,5 +1,5 @@
-appId: app.mailmux.desktop
-productName: mailmux
+appId: app.sley.desktop
+productName: Sley
 copyright: MIT licensed
 
 directories:
@@ -73,7 +73,7 @@ publish: null
 # /releases/latest/download/<name> and never be edited again. The names are
 # repeated in apps/web/src/app/install/page.tsx — change one, change the other.
 mac:
-  artifactName: mailmux-mac.dmg
+  artifactName: sley-mac.dmg
   target: dmg
   category: public.app-category.productivity
   # Signs with the Developer ID Application identity from the login keychain
@@ -89,14 +89,14 @@ mac:
   entitlementsInherit: build/entitlements.mac.plist
   # scripts/sign-mac.sh notarises, not electron-builder: the app is signed
   # after packaging, so electron-builder would upload an unsigned bundle.
-  # One-time setup:
+  # One-time setup. The keychain profile name is historical (mailmux-notary).
   #   xcrun notarytool store-credentials mailmux-notary \
   #     --apple-id <apple-id> --team-id 22DPQ7YCAS
   # then build with: APPLE_KEYCHAIN_PROFILE=mailmux-notary npm run dist:mac
   notarize: false
 
 win:
-  artifactName: mailmux-windows-setup.exe
+  artifactName: sley-windows-setup.exe
   target: nsis
   icon: build/icon.ico
 
@@ -106,7 +106,7 @@ nsis:
   allowToChangeInstallationDirectory: true
 
 linux:
-  artifactName: mailmux-linux.AppImage
+  artifactName: sley-linux.AppImage
   target: AppImage
   category: Network
   icon: build/icon.png

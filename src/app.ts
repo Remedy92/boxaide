@@ -103,7 +103,7 @@ export function createRuntime(
   app.get("/health", (c) => {
     const denied = corsGate(c, config.allowedOrigins);
     if (denied) return denied;
-    return c.json({ ok: true, service: "mailmux", fixture: config.fixtureMode });
+    return c.json({ ok: true, service: "sley", fixture: config.fixtureMode });
   });
 
   // Localhost-only bootstrap so the web UI can pick up the token without copy-paste
@@ -213,17 +213,17 @@ export function createRuntime(
         command: "npx",
         args: ["tsx", "src/cli.ts", "mcp"],
         env: {
-          MAILMUX_DATA_DIR: config.dataDir,
-          MAILMUX_TOKEN: config.bearerToken,
+          SLEY_DATA_DIR: config.dataDir,
+          SLEY_TOKEN: config.bearerToken,
         },
       },
       claudeDesktop: {
         mcpServers: {
-          mailmux: {
+          sley: {
             command: "npx",
             args: ["tsx", join(process.cwd(), "src/cli.ts"), "mcp"],
             env: {
-              MAILMUX_DATA_DIR: config.dataDir,
+              SLEY_DATA_DIR: config.dataDir,
             },
           },
         },
@@ -237,7 +237,7 @@ export function createRuntime(
     const index = join(webRoot, "index.html");
     if (!existsSync(index)) {
       return c.text(
-        "mailmux UI missing. Build it with: npm run build",
+        "Sley UI missing. Build it with: npm run build",
         500,
       );
     }

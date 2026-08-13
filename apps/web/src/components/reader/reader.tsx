@@ -24,7 +24,7 @@ export function Reader() {
   const nav = useMessageNavigation();
   const markRead = useMarkRead();
   const queryClient = useQueryClient();
-  /** In-memory drafts, keyed by mailmux message id. Never localStorage —
+  /** In-memory drafts, keyed by Sley message id. Never localStorage —
       drafts are message content. */
   const drafts = React.useRef(new Map<string, Draft>());
 

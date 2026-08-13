@@ -28,12 +28,12 @@ describe("nextPatch", () => {
 describe("applyVersion", () => {
   it("moves the package version and leaves a 0.2.1 dependency alone", () => {
     const lock = `{
-  "name": "mailmux-desktop",
+  "name": "sley-desktop",
   "version": "0.2.1",
   "lockfileVersion": 3,
   "packages": {
     "": {
-      "name": "mailmux-desktop",
+      "name": "sley-desktop",
       "version": "0.2.1"
     },
     "node_modules/node-api-version": {
@@ -55,7 +55,7 @@ describe("applyVersion", () => {
     const { text: next } = applyVersion(text, current, bumped);
     expect(next).toContain("node-api-version-0.2.1.tgz");
     expect(next).toMatch(/"node_modules\/node-api-version": \{\n {6}"version": "0\.2\.1"/);
-    expect(next.startsWith(`{\n  "name": "mailmux-desktop",\n  "version": "${bumped}"`)).toBe(true);
+    expect(next.startsWith(`{\n  "name": "sley-desktop",\n  "version": "${bumped}"`)).toBe(true);
   });
 
   it("rejects a file whose top-level version does not match", () => {

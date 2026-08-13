@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { encryptSecret, decryptSecret } from "../crypto/secrets.js";
 import type { AccountCredentials, MailAuth } from "../provider/types.js";
@@ -62,7 +63,10 @@ export class Store {
   }
 
   static open(dataDir: string, masterKey: Buffer): Store {
-    return new Store(masterKey, join(dataDir, "mailmux.db"));
+    const next = join(dataDir, "sley.db");
+    const prev = join(dataDir, "mailmux.db");
+    const dbPath = existsSync(next) || !existsSync(prev) ? next : prev;
+    return new Store(masterKey, dbPath);
   }
 
   private migrate(): void {

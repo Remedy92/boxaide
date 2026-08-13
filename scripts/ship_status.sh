@@ -19,7 +19,7 @@ cd "$ROOT"
 
 say() {
   if [ "$HOOK" -eq 1 ]; then
-    printf 'mailmux: %s\n' "$*"
+    printf 'sley: %s\n' "$*"
   else
     printf '%s\n' "$*"
   fi

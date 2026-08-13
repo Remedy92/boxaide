@@ -24,7 +24,7 @@ import "./install.css";
  * here, on the one page that needs it.
  */
 
-const REPO_URL = "https://github.com/Remedy92/mailmux";
+const REPO_URL = "https://github.com/Remedy92/sley";
 
 /**
  * GitHub keeps this path pointing at the newest release for ever, so the button
@@ -57,7 +57,7 @@ const DOWNLOADS: Record<
 > = {
   mac: {
     name: "Mac",
-    file: "mailmux-mac.dmg",
+    file: "sley-mac.dmg",
     // Apple silicon only. `electron-builder --mac dmg` builds for the host
     // architecture, and this was built on an M-series machine; `lipo -archs`
     // on the packaged binary reports arm64 alone. Saying "macOS 12 or later"
@@ -68,7 +68,7 @@ const DOWNLOADS: Record<
     // check with Apple. Right-click → Open stopped working for this in Sequoia;
     // Privacy & Security is the only route now. Delete the sentence the day the
     // release carries a stapled, notarised dmg — not before.
-    next: "Drag mailmux into Applications. On first open macOS asks — allow it in System Settings → Privacy & Security.",
+    next: "Drag Sley into Applications. On first open macOS asks — allow it in System Settings → Privacy & Security.",
   },
   windows: {
     name: "Windows",
@@ -94,8 +94,8 @@ function downloadHref(id: Platform): string {
 const ORDER: readonly Platform[] = ["mac", "windows", "linux"];
 
 const COMMAND_LINES = [
-  "git clone https://github.com/Remedy92/mailmux.git",
-  "cd mailmux && npm install && npm run dev",
+  "git clone https://github.com/Remedy92/sley.git",
+  "cd sley && npm install && npm run dev",
 ] as const;
 
 const COMMAND = COMMAND_LINES.join("\n");
@@ -177,7 +177,7 @@ export default function InstallPage() {
           <span className="flex items-center gap-2 text-fg">
             <BrandGlyph size={13} />
             <span className="text-[13px] font-medium tracking-[-0.006em]">
-              mailmux
+              Sley
             </span>
           </span>
           <ThemeToggle />
@@ -237,8 +237,8 @@ export default function InstallPage() {
               : platform === "phone"
                 ? "See it on GitHub"
                 : current
-                  ? "Get mailmux"
-                  : "Download mailmux"}
+                  ? "Get Sley"
+                  : "Download Sley"}
           </a>
 
           {/* One line, two states: what it needs, then what to do with the file
@@ -255,7 +255,7 @@ export default function InstallPage() {
               {started && current?.file
                 ? current.next
                 : platform === "phone"
-                  ? "mailmux runs on your computer. Open this page there to install it."
+                  ? "Sley runs on your computer. Open this page there to install it."
                   : current && !current.file
                     ? `There is no ${current.name} installer yet. Run it from source below — it takes two commands.`
                     : `Free and open source · ${current?.needs ?? "macOS, Windows and Linux"}`}

@@ -8,10 +8,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "../src/config.js";
+import { envFirst, loadConfig } from "../src/config.js";
 
 const PASSPHRASE = "correct horse battery staple";
-/** sha256(PASSPHRASE) — what mailmux used as the key before scrypt. */
+/** sha256(PASSPHRASE) — what Sley used as the key before scrypt. */
 const LEGACY_SHA256_OF_PASSPHRASE =
   "c4bbcb1fbec99d65bf59d85c8cb62ee2db963f0fe106f483d9afa73bd4e39a8a";
 
@@ -20,15 +20,22 @@ function newDir(): string {
 }
 
 function keyFor(envKey: string, dir = newDir()): Buffer {
-  process.env.MAILMUX_MASTER_KEY = envKey;
+  process.env.SLEY_MASTER_KEY = envKey;
   return loadConfig({ dataDir: dir }).masterKey;
 }
 
 afterEach(() => {
+  delete process.env.SLEY_MASTER_KEY;
   delete process.env.MAILMUX_MASTER_KEY;
+  delete process.env.SLEY_DATA_DIR;
+  delete process.env.MAILMUX_DATA_DIR;
+  delete process.env.SLEY_HOST;
+  delete process.env.MAILMUX_HOST;
+  delete process.env.SLEY_TOKEN;
+  delete process.env.MAILMUX_TOKEN;
 });
 
-describe("MAILMUX_MASTER_KEY", () => {
+describe("SLEY_MASTER_KEY", () => {
   it("uses a 64-char hex value as the key verbatim", () => {
     const hex = "a".repeat(64);
     expect(keyFor(hex).toString("hex")).toBe(hex);
@@ -86,6 +93,36 @@ describe("MAILMUX_MASTER_KEY", () => {
     const saltPath = join(dir, "master.salt");
     expect(existsSync(saltPath)).toBe(true);
     expect(statSync(saltPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("falls back to MAILMUX_MASTER_KEY when SLEY_MASTER_KEY is unset", () => {
+    process.env.MAILMUX_MASTER_KEY = "c".repeat(64);
+    expect(loadConfig({ dataDir: newDir() }).masterKey.toString("hex")).toBe(
+      "c".repeat(64),
+    );
+  });
+
+  it("prefers SLEY_MASTER_KEY over MAILMUX_MASTER_KEY", () => {
+    process.env.SLEY_MASTER_KEY = "a".repeat(64);
+    process.env.MAILMUX_MASTER_KEY = "b".repeat(64);
+    expect(loadConfig({ dataDir: newDir() }).masterKey.toString("hex")).toBe(
+      "a".repeat(64),
+    );
+  });
+});
+
+describe("envFirst and data dir", () => {
+  it("reads SLEY_* before MAILMUX_*", () => {
+    process.env.SLEY_HOST = "10.0.0.1";
+    process.env.MAILMUX_HOST = "10.0.0.2";
+    expect(envFirst("SLEY_HOST", "MAILMUX_HOST")).toBe("10.0.0.1");
+    expect(loadConfig({ dataDir: newDir() }).host).toBe("10.0.0.1");
+  });
+
+  it("uses MAILMUX_DATA_DIR when SLEY_DATA_DIR is unset", () => {
+    const dir = newDir();
+    process.env.MAILMUX_DATA_DIR = dir;
+    expect(loadConfig().dataDir).toBe(dir);
   });
 });
 

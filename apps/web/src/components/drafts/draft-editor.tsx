@@ -344,7 +344,7 @@ function DraftForm({
               pane sends only the plain text, which drops it. */}
           {draft.bodyHtml && (
             <p className="text-[12px] leading-4 text-warning">
-              This draft also has an HTML part. mailmux never renders sender
+              This draft also has an HTML part. Sley never renders sender
               HTML, and saving here replaces the draft with the plain text
               above.
             </p>

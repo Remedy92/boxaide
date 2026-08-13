@@ -39,13 +39,14 @@ export type Settings = {
 };
 
 /**
- * The bundled web/ UI stored the token under `mailmux_token`. The Next build
- * replaces that UI at the same origin, so without a one-time read every
- * self-hosted user would silently lose their saved token on upgrade.
+ * Pre-rename keys. The Next build used to write `mailmux.*`, and the bundled
+ * web/ UI stored the token under `mailmux_token`. Reads fall back to these
+ * once so an upgrade does not drop a saved token or preference. Writes go
+ * only to `sley.*`.
  */
-const LEGACY_TOKEN_KEY = "mailmux_token";
+export const LEGACY_TOKEN_KEY = "mailmux_token";
 
-export const SETTINGS_KEYS = {
+const LEGACY_SETTINGS_KEYS = {
   baseUrl: "mailmux.baseUrl",
   token: "mailmux.token",
   density: "mailmux.density",
@@ -53,8 +54,19 @@ export const SETTINGS_KEYS = {
   recentCommands: "mailmux.recentCommands",
   onboarded: "mailmux.onboarded",
   agentModel: "mailmux.agentModel",
-  /** Owned by next-themes, listed here so the key namespace is documented. */
   theme: "mailmux.theme",
+} as const;
+
+export const SETTINGS_KEYS = {
+  baseUrl: "sley.baseUrl",
+  token: "sley.token",
+  density: "sley.density",
+  railCollapsed: "sley.railCollapsed",
+  recentCommands: "sley.recentCommands",
+  onboarded: "sley.onboarded",
+  agentModel: "sley.agentModel",
+  /** Owned by next-themes, listed here so the key namespace is documented. */
+  theme: "sley.theme",
 } as const;
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -68,7 +80,7 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 /** Fired on the window after any write, so same-tab listeners can react. */
-export const SETTINGS_EVENT = "mailmux:settings";
+export const SETTINGS_EVENT = "sley:settings";
 
 function storage(): Storage | null {
   if (typeof window === "undefined") return null;
@@ -82,6 +94,29 @@ function storage(): Storage | null {
 
 function readString(key: string): string | null {
   return storage()?.getItem(key) ?? null;
+}
+
+/** Prefer the current `sley.*` key, then the pre-rename `mailmux.*` key. */
+function readPref(key: keyof typeof SETTINGS_KEYS): string | null {
+  return readString(SETTINGS_KEYS[key]) ?? readString(LEGACY_SETTINGS_KEYS[key]);
+}
+
+/**
+ * Copy `mailmux.theme` onto `sley.theme` once. next-themes only reads its
+ * `storageKey`, so a fallback that lives only in this module would never run.
+ */
+export function adoptLegacyTheme(): void {
+  const store = storage();
+  if (!store) return;
+  if (store.getItem(SETTINGS_KEYS.theme) !== null) return;
+  const prev = store.getItem(LEGACY_SETTINGS_KEYS.theme);
+  if (prev !== null) {
+    try {
+      store.setItem(SETTINGS_KEYS.theme, prev);
+    } catch {
+      // Quota or a blocked store: the app keeps working without the old pick.
+    }
+  }
 }
 
 /** Trailing slashes are stripped so `${base}${path}` never doubles up. */
@@ -130,10 +165,11 @@ function parseRecentCommands(raw: string | null): string[] {
  */
 export function readSettings(): Settings {
   if (!storage()) return { ...DEFAULT_SETTINGS };
-  const stored = readString(SETTINGS_KEYS.baseUrl);
-  const token = readString(SETTINGS_KEYS.token) ?? readString(LEGACY_TOKEN_KEY);
-  const density = readString(SETTINGS_KEYS.density);
-  const railCollapsed = readString(SETTINGS_KEYS.railCollapsed);
+  const stored = readPref("baseUrl");
+  const token =
+    readPref("token") ?? readString(LEGACY_TOKEN_KEY);
+  const density = readPref("density");
+  const railCollapsed = readPref("railCollapsed");
   /* Validated on the way OUT, not only on the way in. isValidBaseUrl runs in
      the settings dialog, but localStorage is writable by anything with script
      access to this origin, and the value is rendered as an href by the
@@ -152,14 +188,14 @@ export function readSettings(): Settings {
     token: token ?? DEFAULT_SETTINGS.token,
     density: density === "compact" ? "compact" : "comfortable",
     railCollapsed: railCollapsed === "1",
-    recentCommands: parseRecentCommands(readString(SETTINGS_KEYS.recentCommands)),
+    recentCommands: parseRecentCommands(readPref("recentCommands")),
     /* A pre-existing token means this browser was already set up before the
        wizard shipped. Treating that as "onboarded" is the difference between an
        upgrade and being sent back to a first-run screen. */
     onboarded:
-      readString(SETTINGS_KEYS.onboarded) === "1" ||
+      readPref("onboarded") === "1" ||
       (token ?? "").length > 0,
-    agentModel: readString(SETTINGS_KEYS.agentModel) ?? "",
+    agentModel: readPref("agentModel") ?? "",
   };
 }
 
@@ -218,7 +254,13 @@ export function rememberCommand(id: string, current: string[]): string[] {
 export function subscribeToSettings(onChange: () => void): () => void {
   if (typeof window === "undefined") return () => {};
   const onStorage = (event: StorageEvent) => {
-    if (event.key === null || event.key.startsWith("mailmux.")) onChange();
+    if (
+      event.key === null ||
+      event.key.startsWith("sley.") ||
+      event.key.startsWith("mailmux.")
+    ) {
+      onChange();
+    }
   };
   window.addEventListener(SETTINGS_EVENT, onChange);
   window.addEventListener("storage", onStorage);

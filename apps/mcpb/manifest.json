@@ -1,13 +1,13 @@
 {
   "manifest_version": "0.3",
-  "name": "mailmux",
-  "display_name": "mailmux",
+  "name": "sley",
+  "display_name": "Sley",
   "version": "0.2.5",
-  "description": "Your mailboxes as MCP tools — read, search, draft and send from mailmux.",
-  "long_description": "Connects Claude to the mailmux app running on this machine. Claude can then read and search mail across every connected mailbox, write drafts, and — only when you ask — send. It also gets the chat tools that let it hold a conversation inside the mailmux window.\n\nNothing to configure: the connector finds your local mailmux server and its access token on its own. Install the mailmux app first, from https://github.com/Remedy92/mailmux.",
-  "author": { "name": "mailmux contributors" },
-  "repository": { "type": "git", "url": "https://github.com/Remedy92/mailmux" },
-  "homepage": "https://github.com/Remedy92/mailmux",
+  "description": "Your mailboxes as MCP tools — read, search, draft and send from Sley.",
+  "long_description": "Connects Claude to the Sley app running on this machine. Claude can then read and search mail across every connected mailbox, write drafts, and — only when you ask — send. It also gets the chat tools that let it hold a conversation inside the Sley window.\n\nNothing to configure: the connector finds your local Sley server and its access token on its own. Install the Sley app first, from https://github.com/Remedy92/sley.",
+  "author": { "name": "Sley contributors" },
+  "repository": { "type": "git", "url": "https://github.com/Remedy92/sley" },
+  "homepage": "https://github.com/Remedy92/sley",
   "license": "MIT",
   "icon": "icon.png",
   "server": {
@@ -17,8 +17,8 @@
       "command": "node",
       "args": ["${__dirname}/server/index.mjs"],
       "env": {
-        "MAILMUX_URL": "${user_config.server_url}",
-        "MAILMUX_TOKEN": "${user_config.token}"
+        "SLEY_URL": "${user_config.server_url}",
+        "SLEY_TOKEN": "${user_config.token}"
       }
     }
   },
@@ -26,14 +26,14 @@
     "server_url": {
       "type": "string",
       "title": "Server URL",
-      "description": "Where mailmux is listening. Leave the default unless you changed MAILMUX_PORT.",
+      "description": "Where Sley is listening. Leave the default unless you changed SLEY_PORT.",
       "default": "http://127.0.0.1:8787",
       "required": false
     },
     "token": {
       "type": "string",
       "title": "Access token",
-      "description": "Leave empty. The connector reads the token from ~/.mailmux/bearer.token on its own; fill this only for a non-default data directory.",
+      "description": "Leave empty. The connector reads the token from ~/.sley/bearer.token on its own; fill this only for a non-default data directory.",
       "sensitive": true,
       "required": false
     }
@@ -50,8 +50,8 @@
     { "name": "draft_delete", "description": "Discard a draft" },
     { "name": "folders_list", "description": "List folders" },
     { "name": "message_send", "description": "Send mail (the explicit escalation)" },
-    { "name": "chat_await_message", "description": "Wait for the user in the mailmux window" },
-    { "name": "chat_say", "description": "Answer in the mailmux window" },
+    { "name": "chat_await_message", "description": "Wait for the user in the Sley window" },
+    { "name": "chat_say", "description": "Answer in the Sley window" },
     { "name": "chat_activity", "description": "Post a one-line status" },
     { "name": "chat_history", "description": "Re-read the conversation" }
   ],

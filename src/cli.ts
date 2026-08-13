@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig } from "./config.js";
+import { envFirst, loadConfig } from "./config.js";
 import { createRuntime, startServer } from "./app.js";
 import { tokenLine } from "./cli-output.js";
 import { runStdioMcp } from "./mcp/server.js";
@@ -17,7 +17,8 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "serve") {
-    const fixture = rest.includes("--fixture") || process.env.MAILMUX_FIXTURE === "1";
+    const fixture =
+      rest.includes("--fixture") || envFirst("SLEY_FIXTURE", "MAILMUX_FIXTURE") === "1";
     const { runtime, stop } = await startServer({ fixtureMode: fixture });
     for (const signal of ["SIGINT", "SIGTERM"] as const) {
       process.once(signal, () => {
@@ -29,18 +30,18 @@ async function main(): Promise<void> {
       await seedFixtureDemo(runtime.mail, runtime.provider, runtime.store);
     }
     const { host, port, dataDir, bearerToken } = runtime.config;
-    console.log(`mailmux listening on http://${host}:${port}`);
+    console.log(`sley listening on http://${host}:${port}`);
     console.log(`data dir: ${dataDir}`);
     console.log(tokenLine(bearerToken, dataDir));
     console.log(`MCP HTTP: POST http://${host}:${port}/mcp  (Authorization: Bearer <token>)`);
-    console.log(`stdio MCP: mailmux mcp`);
+    console.log(`stdio MCP: sley mcp`);
     if (fixture) console.log("fixture mode: demo mailboxes seeded");
     return;
   }
 
   if (cmd === "mcp") {
     const config = loadConfig({
-      fixtureMode: process.env.MAILMUX_FIXTURE === "1",
+      fixtureMode: envFirst("SLEY_FIXTURE", "MAILMUX_FIXTURE") === "1",
     });
     const runtime = createRuntime(config);
     if (
@@ -61,7 +62,7 @@ async function main(): Promise<void> {
     if (!existsSync(config.dataDir)) mkdirSync(config.dataDir, { recursive: true });
     writeFileSync(
       envExample,
-      `# mailmux\nMAILMUX_DATA_DIR=${config.dataDir}\nMAILMUX_HOST=127.0.0.1\nMAILMUX_PORT=8787\n# MAILMUX_TOKEN=\n# MAILMUX_MASTER_KEY=\n# MAILMUX_FIXTURE=1\n`,
+      `# sley\nSLEY_DATA_DIR=${config.dataDir}\nSLEY_HOST=127.0.0.1\nSLEY_PORT=8787\n# SLEY_TOKEN=\n# SLEY_MASTER_KEY=\n# SLEY_FIXTURE=1\n`,
     );
     console.log(`Initialized data dir: ${config.dataDir}`);
     console.log(tokenLine(config.bearerToken, config.dataDir));
@@ -143,22 +144,23 @@ async function seedFixtureDemo(
 }
 
 function printHelp(): void {
-  console.log(`mailmux — free multi-mailbox agentic inbox
+  console.log(`sley — free multi-mailbox agentic inbox
 
 Usage:
-  mailmux serve [--fixture]   Start web UI + API + MCP HTTP
-  mailmux mcp                 stdio MCP server for agents
-  mailmux init                Create data dir + print token
-  mailmux help
+  sley serve [--fixture]   Start web UI + API + MCP HTTP
+  sley mcp                 stdio MCP server for agents
+  sley init                Create data dir + print token
+  sley help
 
 Env:
-  MAILMUX_DATA_DIR   default ~/.mailmux
-  MAILMUX_HOST       default 127.0.0.1
-  MAILMUX_PORT       default 8787
-  MAILMUX_TOKEN      API/MCP bearer token
-  MAILMUX_MASTER_KEY secret encryption key (64 hex chars preferred; any
-                     other value is a passphrase, stretched with scrypt)
-  MAILMUX_FIXTURE=1  use in-memory demo mailboxes (no real IMAP)
+  SLEY_DATA_DIR     default ~/.sley (or ~/.mailmux if that exists and ~/.sley does not)
+  SLEY_HOST         default 127.0.0.1
+  SLEY_PORT         default 8787
+  SLEY_TOKEN        API/MCP bearer token
+  SLEY_MASTER_KEY   secret encryption key (64 hex chars preferred; any
+                    other value is a passphrase, stretched with scrypt)
+  SLEY_FIXTURE=1    use in-memory demo mailboxes (no real IMAP)
+  MAILMUX_*         still read when the matching SLEY_* is unset
 `);
 }
 

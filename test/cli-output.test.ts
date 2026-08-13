@@ -14,6 +14,7 @@ function setTTY(value: boolean | undefined): void {
 
 afterEach(() => {
   setTTY(realTTY);
+  delete process.env.SLEY_TOKEN;
   delete process.env.MAILMUX_TOKEN;
 });
 
@@ -34,9 +35,16 @@ describe("tokenLine", () => {
 
   it("names the env var instead of a path when the token came from one", () => {
     setTTY(false);
-    process.env.MAILMUX_TOKEN = TOKEN;
+    process.env.SLEY_TOKEN = TOKEN;
     const line = tokenLine(TOKEN, DIR);
     expect(line).not.toContain(TOKEN);
+    expect(line).toBe("bearer token: set via SLEY_TOKEN (not printed)");
+  });
+
+  it("falls back to MAILMUX_TOKEN when SLEY_TOKEN is unset", () => {
+    setTTY(false);
+    process.env.MAILMUX_TOKEN = TOKEN;
+    const line = tokenLine(TOKEN, DIR);
     expect(line).toBe("bearer token: set via MAILMUX_TOKEN (not printed)");
   });
 

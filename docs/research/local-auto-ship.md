@@ -8,10 +8,10 @@
 The install button is a static URL:
 
 ```
-https://github.com/Remedy92/mailmux/releases/latest/download/mailmux-mac.dmg
+https://github.com/Remedy92/sley/releases/latest/download/sley-mac.dmg
 ```
 
-Pinned in `apps/web/src/app/install/page.tsx` (`RELEASE_BASE`) and `apps/desktop/electron-builder.yml` (`artifactName: mailmux-mac.dmg`). GitHub keeps `/releases/latest` on the newest published release ([GitHub: linking to releases](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)).
+Pinned in `apps/web/src/app/install/page.tsx` (`RELEASE_BASE`) and `apps/desktop/electron-builder.yml` (`artifactName: sley-mac.dmg`). GitHub keeps `/releases/latest` on the newest published release ([GitHub: linking to releases](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)).
 
 CI (`.github/workflows/ci.yml`) runs on push and PR to `master`. It typechecks, tests, lints, and builds the web export. It does not pack a dmg, sign, or call `gh release`. Ubuntu runners cannot use the Developer ID in this Mac's login keychain.
 
@@ -33,10 +33,10 @@ A release is a local, ordered pipeline. Nothing in git or Actions runs it.
 2. `npm run build` at the repo root — server, Next export, `web-next/`, `.mcpb`.
 3. `npm run dist:mac` in `apps/desktop` — `sync-server.mjs` copies `dist/` + `web-next/` into `apps/desktop/server/`, electron-builder writes an unsigned dmg (`-c.mac.identity=null`), `scripts/sign-mac.sh` codesigns the app inside-out with cert hash `403ADC00F0A6E8A510184F01AA2D670FA1988B54`, rebuilds the dmg from the signed `.app`, signs the dmg.
 4. Optional notarization (`xcrun notarytool submit` / `stapler staple`). Comments in `sign-mac.sh` and `electron-builder.yml`; `notarize: false` today. The install page still tells the visitor to allow the app in Privacy & Security.
-5. `gh release create vX.Y.Z --latest apps/desktop/release/mailmux-mac.dmg` ([`gh release create`](https://cli.github.com/manual/gh_release_create)). `--latest` is what the download button follows.
+5. `gh release create vX.Y.Z --latest apps/desktop/release/sley-mac.dmg` ([`gh release create`](https://cli.github.com/manual/gh_release_create)). `--latest` is what the download button follows.
 6. `publish: null` in electron-builder on purpose: a `GH_TOKEN` in the environment made electron-builder try to publish and crash after the dmg was written.
 
-This needs: this Mac, an unlocked login keychain, the Developer ID, Node 22, and `gh` authenticated to Remedy92/mailmux. It is minutes, not seconds (`compression: maximum`).
+This needs: this Mac, an unlocked login keychain, the Developer ID, Node 22, and `gh` authenticated to Remedy92/sley. It is minutes, not seconds (`compression: maximum`).
 
 ## Options
 
@@ -72,7 +72,7 @@ A hook that *runs electron-builder* is the wrong tool.
 `core.hooksPath = scripts/githooks` (repo-local, shared). `post-merge` and `post-checkout`:
 
 - If the current branch is `master` **and** this worktree is the main checkout.
-- Compare `git rev-parse HEAD` to `gh api repos/Remedy92/mailmux/releases/latest --jq .target_commitish` (or the tag's peeled commit).
+- Compare `git rev-parse HEAD` to `gh api repos/Remedy92/sley/releases/latest --jq .target_commitish` (or the tag's peeled commit).
 - If they differ, print: `download is still v0.2.1 — run ./scripts/ship.sh`.
 - Exit 0. Never pack. Never fail the git command.
 
@@ -86,7 +86,7 @@ Even if signing works, every master push (dependabot, "Cut", docs) would publish
 
 ### 5. Overwrite the v0.2.1 asset without a new tag — no
 
-`gh release upload --clobber` can replace `mailmux-mac.dmg` on an existing release. The download URL stays the same, but the file no longer matches the tag, the version in About, or the cut commit. Visitors cannot tell what they have. Do not.
+`gh release upload --clobber` can replace `sley-mac.dmg` on an existing release. The download URL stays the same, but the file no longer matches the tag, the version in About, or the cut commit. Visitors cannot tell what they have. Do not.
 
 ## Recommendation
 

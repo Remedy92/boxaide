@@ -1,7 +1,7 @@
 /**
  * The only module in this app that calls fetch.
  *
- * Every request goes from the browser straight to the user's own mailmux
+ * Every request goes from the browser straight to the user's own Sley
  * server. There is no proxy, no route handler and no server action anywhere in
  * apps/web, so the host serving this page never sees the bearer token, the
  * mail credentials, or a message body.

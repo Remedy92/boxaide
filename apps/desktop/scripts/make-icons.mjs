@@ -129,8 +129,8 @@ function toSvg(size = 1024) {
   const stroke = (d, w) =>
     `<path d="${d}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`;
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" role="img" aria-label="mailmux">
-  <title>mailmux</title>
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" role="img" aria-label="Sley">
+  <title>Sley</title>
   <defs>
     <linearGradient id="chamfer" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#8d949f"/>
@@ -183,7 +183,7 @@ writeFileSync(
 
 /* `app.dock.setIcon` paints its bitmap across the whole dock tile rather than
    applying the system grid an .icns gets, so the dev dock needs the mac inset
-   baked in. Handing it icon.png makes mailmux stand a quarter wider than every
+   baked in. Handing it icon.png makes Sley stand a quarter wider than every
    neighbour. */
 writeFileSync(
   join(buildDir, "icon-dock.png"),
@@ -215,8 +215,8 @@ const faviconPath = join(here, "..", "..", "web", "public", "favicon.svg");
 writeFileSync(
   faviconPath,
   svg.replace(
-    "  <title>mailmux</title>\n",
-    `  <title>mailmux</title>
+    "  <title>Sley</title>\n",
+    `  <title>Sley</title>
   <!-- GENERATED. Written by apps/desktop/scripts/make-icons.mjs, from the
        geometry in apps/desktop/scripts/lib/mark.mjs. Do not hand-edit: the next
        \`npm run icons\` overwrites this file. -->\n`,

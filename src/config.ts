@@ -1,12 +1,23 @@
 import { randomBytes, scryptSync } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
+ * First non-empty environment value: the Sley name, then the Mailmux fallback.
+ */
+export function envFirst(sleyKey: string, mailmuxKey: string): string | undefined {
+  const next = process.env[sleyKey];
+  if (next) return next;
+  const prev = process.env[mailmuxKey];
+  if (prev) return prev;
+  return undefined;
+}
+
+/**
  * Origins the browser UI may be served from, beyond loopback.
- * Comma-separated absolute origins in MAILMUX_ALLOWED_ORIGINS, e.g.
- *   https://mailmux-web.vercel.app,https://mail.example.com
+ * Comma-separated absolute origins in SLEY_ALLOWED_ORIGINS (MAILMUX_* if
+ * unset), e.g. https://sley.vercel.app,https://mail.example.com
  * Defaults to closed: an unset value keeps today's loopback-only behaviour.
  * "*" is deliberately dropped — an any-origin allowlist removes the only
  * defence left against DNS rebinding on a loopback service.
@@ -43,7 +54,8 @@ export type AppConfig = {
   fixtureMode: boolean;
   /**
    * Extra browser origins allowed to call the authenticated API, from
-   * MAILMUX_ALLOWED_ORIGINS. Empty by default: loopback only.
+   * SLEY_ALLOWED_ORIGINS (MAILMUX_ALLOWED_ORIGINS if unset). Empty by
+   * default: loopback only.
    */
   allowedOrigins: string[];
   /**
@@ -71,7 +83,7 @@ function ensureDir(dir: string): void {
  * The three files this manages — master key, scrypt salt, bearer token — are
  * generated once and then depended on forever, so first-run creation must not
  * race. Checking existence and then writing loses that race: two processes
- * starting together (the desktop app and a `mailmux serve`, say) both find no
+ * starting together (the desktop app and a `sley serve`, say) both find no
  * file, both generate, both write, and the loser proceeds with a value that is
  * no longer the one on disk. For the master key or the salt that means
  * deriving a key that does not match the one the stored mail passwords were
@@ -131,8 +143,9 @@ function loadOrCreateSalt(dataDir: string): Buffer {
  * attacker cannot buy their way around cheaply, and cost about 0.2s once at
  * startup on a 2024 laptop.
  *
- * A 64-char random hex MAILMUX_MASTER_KEY skips derivation altogether and
- * stays the documented recommendation.
+ * A 64-char random hex SLEY_MASTER_KEY skips derivation altogether and
+ * stays the documented recommendation. MAILMUX_MASTER_KEY is still read
+ * when SLEY_MASTER_KEY is unset.
  */
 function deriveKeyFromPassphrase(passphrase: string, salt: Buffer): Buffer {
   return scryptSync(passphrase.normalize("NFKC"), salt, 32, {
@@ -144,7 +157,7 @@ function deriveKeyFromPassphrase(passphrase: string, salt: Buffer): Buffer {
 }
 
 function loadOrCreateKey(dataDir: string): Buffer {
-  const envKey = process.env.MAILMUX_MASTER_KEY;
+  const envKey = envFirst("SLEY_MASTER_KEY", "MAILMUX_MASTER_KEY");
   if (envKey) {
     if (/^[0-9a-fA-F]{64}$/.test(envKey)) return Buffer.from(envKey, "hex");
     return deriveKeyFromPassphrase(envKey, loadOrCreateSalt(dataDir));
@@ -156,16 +169,29 @@ function loadOrCreateKey(dataDir: string): Buffer {
 }
 
 function loadOrCreateToken(dataDir: string): string {
-  if (process.env.MAILMUX_TOKEN) return process.env.MAILMUX_TOKEN;
+  const envToken = envFirst("SLEY_TOKEN", "MAILMUX_TOKEN");
+  if (envToken) return envToken;
   return loadOrCreateSecretFile(join(dataDir, "bearer.token"), () =>
     randomBytes(24).toString("base64url"),
   );
 }
 
+/**
+ * SLEY_DATA_DIR, else MAILMUX_DATA_DIR, else ~/.sley if it exists, else
+ * ~/.mailmux if it exists, else ~/.sley.
+ */
+export function resolveDefaultDataDir(): string {
+  const fromEnv = envFirst("SLEY_DATA_DIR", "MAILMUX_DATA_DIR");
+  if (fromEnv) return expandHome(fromEnv);
+  const next = join(homedir(), ".sley");
+  const prev = join(homedir(), ".mailmux");
+  if (existsSync(next)) return next;
+  if (existsSync(prev)) return prev;
+  return next;
+}
+
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
-  const dataDir = expandHome(
-    overrides.dataDir ?? process.env.MAILMUX_DATA_DIR ?? "~/.mailmux",
-  );
+  const dataDir = expandHome(overrides.dataDir ?? resolveDefaultDataDir());
   const memory = dataDir === ":memory:";
   if (!memory) ensureDir(dataDir);
   const masterKey =
@@ -174,19 +200,18 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const bearerToken =
     overrides.bearerToken ??
     (memory ? randomBytes(16).toString("base64url") : loadOrCreateToken(dataDir));
+  const fixture = envFirst("SLEY_FIXTURE", "MAILMUX_FIXTURE");
   return {
     dataDir,
-    host: overrides.host ?? process.env.MAILMUX_HOST ?? "127.0.0.1",
-    port: overrides.port ?? Number(process.env.MAILMUX_PORT ?? 8787),
+    host: overrides.host ?? envFirst("SLEY_HOST", "MAILMUX_HOST") ?? "127.0.0.1",
+    port: overrides.port ?? Number(envFirst("SLEY_PORT", "MAILMUX_PORT") ?? 8787),
     masterKey,
     bearerToken,
     fixtureMode:
-      overrides.fixtureMode ??
-      (process.env.MAILMUX_FIXTURE === "1" ||
-        process.env.MAILMUX_FIXTURE === "true"),
+      overrides.fixtureMode ?? (fixture === "1" || fixture === "true"),
     allowedOrigins:
       overrides.allowedOrigins ??
-      parseAllowedOrigins(process.env.MAILMUX_ALLOWED_ORIGINS),
-    webRoot: overrides.webRoot ?? process.env.MAILMUX_WEB_ROOT,
+      parseAllowedOrigins(envFirst("SLEY_ALLOWED_ORIGINS", "MAILMUX_ALLOWED_ORIGINS")),
+    webRoot: overrides.webRoot ?? envFirst("SLEY_WEB_ROOT", "MAILMUX_WEB_ROOT"),
   };
 }

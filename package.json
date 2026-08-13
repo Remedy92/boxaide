@@ -1,18 +1,18 @@
 {
-  "name": "mailmux",
+  "name": "sley",
   "version": "0.2.5",
   "description": "Free self-host multi-mailbox agentic inbox with web UI + MCP for any agent",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "mailmux": "./dist/cli.js"
+    "sley": "./dist/cli.js"
   },
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "build": "tsc && npm run web:build && npm run web:sync && npm run mcpb:build",
-    "mcpb:build": "node scripts/export-mcpb-tools.mjs && mcpb pack apps/mcpb web-next/mailmux.mcpb",
+    "mcpb:build": "node scripts/export-mcpb-tools.mjs && mcpb pack apps/mcpb web-next/sley.mcpb",
     "build:server": "tsc",
     "start": "node dist/cli.js serve",
     "dev": "tsx src/cli.ts serve",

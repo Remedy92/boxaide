@@ -287,9 +287,9 @@ describe("HTTP security surface (shipped app)", () => {
   });
 });
 
-const VERCEL = "https://mailmux-web.vercel.app";
+const VERCEL = "https://sley.vercel.app";
 
-describe("parseAllowedOrigins (MAILMUX_ALLOWED_ORIGINS)", () => {
+describe("parseAllowedOrigins (SLEY_ALLOWED_ORIGINS)", () => {
   it("defaults closed on an unset or empty value", () => {
     expect(parseAllowedOrigins(undefined)).toEqual([]);
     expect(parseAllowedOrigins("")).toEqual([]);
@@ -303,9 +303,9 @@ describe("parseAllowedOrigins (MAILMUX_ALLOWED_ORIGINS)", () => {
   });
 
   it("drops http and unparsable entries", () => {
-    expect(parseAllowedOrigins("http://mailmux-web.vercel.app")).toEqual([]);
+    expect(parseAllowedOrigins("http://sley.vercel.app")).toEqual([]);
     expect(parseAllowedOrigins("not a url")).toEqual([]);
-    expect(parseAllowedOrigins("mailmux-web.vercel.app")).toEqual([]);
+    expect(parseAllowedOrigins("sley.vercel.app")).toEqual([]);
   });
 
   it("trims, lowercases, and reduces each entry to its origin", () => {
@@ -338,9 +338,9 @@ describe("isApiOriginAllowed (allowlist gate)", () => {
   it("passes an exact allowlist match and rejects near misses", () => {
     const allowed = [VERCEL];
     expect(isApiOriginAllowed(VERCEL, allowed)).toBe(true);
-    expect(isApiOriginAllowed("https://mailmux-web.vercel.app.evil.com", allowed)).toBe(false);
-    expect(isApiOriginAllowed("http://mailmux-web.vercel.app", allowed)).toBe(false);
-    expect(isApiOriginAllowed("https://mailmux-web.vercel.app:8443", allowed)).toBe(false);
+    expect(isApiOriginAllowed("https://sley.vercel.app.evil.com", allowed)).toBe(false);
+    expect(isApiOriginAllowed("http://sley.vercel.app", allowed)).toBe(false);
+    expect(isApiOriginAllowed("https://sley.vercel.app:8443", allowed)).toBe(false);
     expect(isApiOriginAllowed("https://evil.com", allowed)).toBe(false);
     expect(isApiOriginAllowed("not a url", allowed)).toBe(false);
   });

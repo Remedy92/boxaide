@@ -3,29 +3,29 @@
 #
 # A Developer ID signature alone is not enough. macOS refuses to open a
 # downloaded app that Apple has not notarised: "Apple could not verify
-# mailmux is free of malware." Notarisation is a separate upload to Apple,
+# Sley is free of malware." Notarisation is a separate upload to Apple,
 # and the returned ticket must be stapled into the app AND the dmg.
 #
 # Why not electron-builder's own signing: it passes the certificate NAME to
 # codesign, and this keychain holds two same-named Developer ID certificates,
 # which codesign rejects as ambiguous. A SHA-1 hash is never ambiguous.
 #
-# One-time credential setup:
+# One-time credential setup. The keychain profile name is historical.
 #   xcrun notarytool store-credentials mailmux-notary \
 #     --apple-id <apple-id> --team-id 22DPQ7YCAS
 #
 # Usage:
 #   APPLE_KEYCHAIN_PROFILE=mailmux-notary npm run dist:mac   # sign + notarise
 #   npm run dist:mac                                          # sign only
-#   MAILMUX_SIGN_ID=<sha1> npm run dist:mac                   # other cert
+#   SLEY_SIGN_ID=<sha1> npm run dist:mac                      # other cert
 #
 # Without APPLE_KEYCHAIN_PROFILE this script signs and skips notarisation.
 # That build is for local testing only. scripts/ship.sh refuses to publish it.
 set -eu
 cd "$(dirname "$0")/.."
 
-ID="${MAILMUX_SIGN_ID:-403ADC00F0A6E8A510184F01AA2D670FA1988B54}"
-APP=release/mac-arm64/mailmux.app
+ID="${SLEY_SIGN_ID:-${MAILMUX_SIGN_ID:-403ADC00F0A6E8A510184F01AA2D670FA1988B54}}"
+APP=release/mac-arm64/Sley.app
 ENT=build/entitlements.mac.plist
 
 # Inside-out: leaf binaries, frameworks, helpers, then the app itself.
@@ -65,23 +65,23 @@ PROFILE="${APPLE_KEYCHAIN_PROFILE:-}"
 # network round trip to Apple on first launch; a stapled app never does.
 if [ -n "$PROFILE" ]; then
   echo "notarising the app with profile $PROFILE"
-  rm -f release/mailmux-app.zip
-  ditto -c -k --keepParent "$APP" release/mailmux-app.zip
-  xcrun notarytool submit release/mailmux-app.zip \
+  rm -f release/sley-app.zip
+  ditto -c -k --keepParent "$APP" release/sley-app.zip
+  xcrun notarytool submit release/sley-app.zip \
     --keychain-profile "$PROFILE" --wait
   xcrun stapler staple "$APP"
-  rm -f release/mailmux-app.zip
+  rm -f release/sley-app.zip
 else
   echo "APPLE_KEYCHAIN_PROFILE is not set — skipping notarisation"
 fi
 
 # electron-builder wrote the dmg from the unsigned app. Rebuild the image
 # from this signed copy, or the download still contains an unsigned .app.
-# The path is the .app itself — passing the parent folder nests mailmux.app
-# inside another mailmux.app.
-npx electron-builder --mac dmg --prepackaged release/mac-arm64/mailmux.app -c.mac.identity=null
+# The path is the .app itself — passing the parent folder nests Sley.app
+# inside another Sley.app.
+npx electron-builder --mac dmg --prepackaged release/mac-arm64/Sley.app -c.mac.identity=null
 
-for dmg in release/mailmux-*.dmg; do
+for dmg in release/sley-*.dmg; do
   [ -e "$dmg" ] || continue
   codesign --force --timestamp --sign "$ID" "$dmg"
   codesign --verify "$dmg"

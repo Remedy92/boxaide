@@ -1,9 +1,9 @@
 {
-  "name": "mailmux-desktop",
+  "name": "sley-desktop",
   "version": "0.2.5",
   "private": true,
-  "description": "Desktop shell for mailmux — runs the mailmux server in-process and opens the UI in a window",
-  "author": "mailmux contributors",
+  "description": "Desktop shell for Sley — runs the Sley server in-process and opens the UI in a window",
+  "author": "Sley contributors",
   "license": "MIT",
   "type": "module",
   "main": "src/main.js",

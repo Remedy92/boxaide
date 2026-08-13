@@ -47,8 +47,8 @@ command -v npm >/dev/null || die "npm is not on PATH"
 command -v xcrun >/dev/null || die "xcrun is not on PATH"
 
 # A signed but un-notarised dmg installs nowhere. macOS says "Apple could not
-# verify mailmux is free of malware" and offers no Open button. Refuse to
-# publish one. Mint the profile once with:
+# verify Sley is free of malware" and offers no Open button. Refuse to
+# publish one. Mint the profile once with (profile name is historical):
 #   xcrun notarytool store-credentials mailmux-notary \
 #     --apple-id <apple-id> --team-id 22DPQ7YCAS
 [ -n "${APPLE_KEYCHAIN_PROFILE:-}" ] || \
@@ -86,7 +86,7 @@ if [ -z "$VER" ]; then
   VER="$(node scripts/lib/bump-version.mjs --print)"
 fi
 
-DMG="apps/desktop/release/mailmux-mac.dmg"
+DMG="apps/desktop/release/sley-mac.dmg"
 NOTES="$(git log --format='- %s' "${TAG}..HEAD")"
 
 printf 'ship %s\n' "$VER"
@@ -137,18 +137,18 @@ git add package.json package-lock.json \
   apps/web/package.json apps/web/package-lock.json \
   apps/mcpb/manifest.json
 git commit -m "Cut $VER" -m "The download is now this commit."
-git tag -a "v$VER" -m "mailmux $VER"
+git tag -a "v$VER" -m "sley $VER"
 
 git push origin master
 git push origin "v$VER"
 
 BODY="$(printf '%s\n\n%s\n' "## What is new" "$NOTES")"
 gh release create "v$VER" \
-  --title "mailmux $VER" \
+  --title "Sley $VER" \
   --notes "$BODY" \
   --latest \
   "$DMG"
 
-printf 'shipped https://github.com/Remedy92/mailmux/releases/latest/download/mailmux-mac.dmg\n'
+printf 'shipped https://github.com/Remedy92/sley/releases/latest/download/sley-mac.dmg\n'
 printf 'commit  %s\n' "$(git rev-parse --short HEAD)"
 ./scripts/ship_status.sh

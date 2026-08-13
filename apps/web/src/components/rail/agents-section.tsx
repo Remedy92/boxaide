@@ -15,10 +15,10 @@ import {
 } from "@/lib/hooks/use-local-agents";
 
 /**
- * mailmux still cannot tell you whether an agent is CONNECTED.
+ * Sley still cannot tell you whether an agent is CONNECTED.
  *
  * POST /mcp is stateless: it handles `initialize`, stores nothing and mints no
- * session id, so a client that has configured mailmux and gone quiet is
+ * session id, so a client that has configured Sley and gone quiet is
  * indistinguishable from one that was never started. Nothing here claims
  * otherwise: no agent count, no "connected", no activity feed.
  *

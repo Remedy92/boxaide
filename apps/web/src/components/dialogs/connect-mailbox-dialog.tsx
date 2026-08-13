@@ -249,7 +249,7 @@ export function ConnectMailboxDialog({
             Connect a mailbox
           </DialogTitle>
           <DialogDescription>
-            mailmux stores these credentials encrypted on your own machine and
+            Sley stores these credentials encrypted on your own machine and
             never sends them anywhere else.
           </DialogDescription>
         </DialogHeader>

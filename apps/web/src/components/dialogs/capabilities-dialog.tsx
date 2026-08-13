@@ -27,7 +27,7 @@ const CAN = [
 ];
 
 const CANNOT = [
-  "Answer you by itself — mailmux runs no model and never calls one",
+  "Answer you by itself — Sley runs no model and never calls one",
   "Archive, delete, or move messages",
   "Star, flag, label, or tag",
   "Snooze or remind",
@@ -75,7 +75,7 @@ export function CapabilitiesDialog({
         </DialogHeader>
 
         <section className="space-y-2">
-          <SectionLabel>mailmux can</SectionLabel>
+          <SectionLabel>Sley can</SectionLabel>
           <ul className="space-y-1">
             {CAN.map((line) => (
               <li key={line} className="text-[13px] leading-[18px] text-fg-secondary">
@@ -86,7 +86,7 @@ export function CapabilitiesDialog({
         </section>
 
         <section className="space-y-2">
-          <SectionLabel>mailmux can&rsquo;t</SectionLabel>
+          <SectionLabel>Sley can&rsquo;t</SectionLabel>
           <ul className="space-y-1">
             {CANNOT.map((line) => (
               <li key={line} className="text-[13px] leading-[18px] text-fg-tertiary">

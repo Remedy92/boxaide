@@ -7,7 +7,7 @@ import { Slot } from "radix-ui"
 import { cn } from "@/lib/utils"
 
 /**
- * §6.9. Variants are remapped onto the mailmux tokens; nothing here carries a
+ * §6.9. Variants are remapped onto the Sley tokens; nothing here carries a
  * hard-coded colour. Focus is deliberately NOT styled here — globals.css draws
  * a 2px accent outline on :focus-visible for everything, and a local
  * `outline-none` would silently win over it because utilities outrank the base

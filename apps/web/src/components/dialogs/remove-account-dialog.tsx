@@ -55,7 +55,7 @@ export function RemoveAccountDialog() {
         <AlertDialogHeader>
           <AlertDialogTitle>Remove {account.alias}?</AlertDialogTitle>
           <AlertDialogDescription>
-            mailmux stops fetching this mailbox and forgets its credentials.
+            Sley stops fetching this mailbox and forgets its credentials.
             Mail on the server is untouched.
           </AlertDialogDescription>
         </AlertDialogHeader>

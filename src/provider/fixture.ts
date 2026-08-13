@@ -112,8 +112,8 @@ export class FixtureProvider implements MailProvider {
     if (!this.boxes.has(accountId)) {
       this.seedAccount(accountId, email, [
         {
-          subject: "Welcome to mailmux",
-          from: "mailmux@local",
+          subject: "Welcome to Sley",
+          from: "sley@local",
           bodyText: "Your fixture inbox is ready.",
           seen: false,
         },

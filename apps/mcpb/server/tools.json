@@ -305,7 +305,7 @@
   },
   {
     "name": "chat_await_message",
-    "description": "Wait for the user's next message in the mailmux window, and return it. This is a LOOP, and you must keep running it until the user tells you to stop: call chat_await_message → do the work → chat_say the answer → call chat_await_message again. Never end your turn after answering once; go straight back to chat_await_message. A call that returns { \"message\": null, \"timedOut\": true } means nobody typed anything yet — that is normal and is NOT an error and NOT a reason to stop; call this tool again immediately. Anything the user typed before you started waiting is queued and comes back on the first call. Each message goes to exactly one agent, so do not run two agents against the same mailmux.",
+    "description": "Wait for the user's next message in the Sley window, and return it. This is a LOOP, and you must keep running it until the user tells you to stop: call chat_await_message → do the work → chat_say the answer → call chat_await_message again. Never end your turn after answering once; go straight back to chat_await_message. A call that returns { \"message\": null, \"timedOut\": true } means nobody typed anything yet — that is normal and is NOT an error and NOT a reason to stop; call this tool again immediately. Anything the user typed before you started waiting is queued and comes back on the first call. Each message goes to exactly one agent, so do not run two agents against the same Sley.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -320,7 +320,7 @@
   },
   {
     "name": "chat_say",
-    "description": "Post a message to the user in the mailmux window. This is how the user reads your answer — text you write in your own terminal or chat client is NOT visible to them, so every answer to a chat_await_message has to go through here. Write it as a reply to a person: plain sentences, no tool-call transcripts, no JSON. This is a LOOP, and you must keep running it until the user tells you to stop: call chat_await_message → do the work → chat_say the answer → call chat_await_message again. Never end your turn after answering once; go straight back to chat_await_message.",
+    "description": "Post a message to the user in the Sley window. This is how the user reads your answer — text you write in your own terminal or chat client is NOT visible to them, so every answer to a chat_await_message has to go through here. Write it as a reply to a person: plain sentences, no tool-call transcripts, no JSON. This is a LOOP, and you must keep running it until the user tells you to stop: call chat_await_message → do the work → chat_say the answer → call chat_await_message again. Never end your turn after answering once; go straight back to chat_await_message.",
     "inputSchema": {
       "type": "object",
       "properties": {

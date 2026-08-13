@@ -1,7 +1,7 @@
 /**
- * mailmux desktop shell.
+ * Sley desktop shell.
  *
- * The whole app is the mailmux server started in this process plus a window
+ * The whole app is the Sley server started in this process plus a window
  * pointed at it. Because the window loads `http://127.0.0.1:<port>`, the page
  * is same-origin with the API: `/api/local-bootstrap` works exactly as it does
  * in a browser, so the token never has to be shown to the user.
@@ -71,7 +71,7 @@ let popover = null;
 
 if (!app.requestSingleInstanceLock()) {
   // A second launch hands focus to the running one. Two instances would fight
-  // over the port and over the SQLite file in ~/.mailmux.
+  // over the port and over the SQLite file in ~/.sley.
   app.quit();
 } else {
   app.on("second-instance", () => {
@@ -117,9 +117,9 @@ async function start() {
     app.dock?.setIcon(nativeImage.createFromPath(dockIconPng));
   }
   const { startServer } = await import("../server/dist/app.js");
-  // host is pinned rather than read from MAILMUX_HOST: a desktop app that binds
+  // host is pinned rather than read from SLEY_HOST: a desktop app that binds
   // a non-loopback address would put decrypted mail credentials on the LAN.
-  // Everything else — port, ~/.mailmux, the bearer token, the master key — is
+  // Everything else — port, ~/.sley, the bearer token, the master key — is
   // the server's own configuration, untouched.
   const started = await startServer({ host: "127.0.0.1", webRoot });
   stopServer = started.stop;
@@ -165,7 +165,7 @@ function createTray(url) {
   }
   image.setTemplateImage(true);
   tray = new Tray(image);
-  tray.setToolTip("mailmux");
+  tray.setToolTip("Sley");
 
   // Left-click toggles the popover; the menu lives on right-click. Wiring the
   // menu with `setContextMenu` instead would make BOTH buttons open it and the
@@ -176,7 +176,7 @@ function createTray(url) {
     // answer, not the answer from when the tray was created.
     tray?.popUpContextMenu(
       Menu.buildFromTemplate([
-        { label: "Open mailmux", click: () => openMainWindow() },
+        { label: "Open Sley", click: () => openMainWindow() },
         {
           label: "Install Claude connector…",
           click: () => installClaudeConnector(),
@@ -193,7 +193,7 @@ function createTray(url) {
             app.setLoginItemSettings({ openAtLogin: item.checked }),
         },
         { type: "separator" },
-        { label: "Quit mailmux", role: "quit" },
+        { label: "Quit Sley", role: "quit" },
       ]),
     );
   });
@@ -236,7 +236,7 @@ function showPopover(url) {
       popover = null;
     });
 
-    // The page's "Open mailmux" button and every mail row navigate to the
+    // The page's "Open Sley" button and every mail row navigate to the
     // server's root. That navigation IS the popover's exit: catch it, raise
     // the real window, keep the popover parked on /tray/ for next time.
     popover.webContents.on("will-navigate", (event, target) => {
@@ -308,7 +308,7 @@ function positionPopover() {
 
 /**
  * One click from the menu bar to a connected Claude Desktop. The bundle is
- * already on disk — the server serves it at /mailmux.mcpb from the same
+ * already on disk — the server serves it at /sley.mcpb from the same
  * directory — so this hands the file to the OS, and Claude Desktop (the
  * registered .mcpb handler) opens its install dialog.
  *
@@ -317,15 +317,15 @@ function positionPopover() {
  * updates.
  */
 function installClaudeConnector() {
-  const source = join(webRoot, "mailmux.mcpb");
+  const source = join(webRoot, "sley.mcpb");
   if (!existsSync(source)) {
     dialog.showErrorBox(
       "Connector not found",
-      "mailmux.mcpb is missing from this build. Run the root `npm run build` and re-sync the desktop app.",
+      "sley.mcpb is missing from this build. Run the root `npm run build` and re-sync the desktop app.",
     );
     return;
   }
-  const target = join(app.getPath("temp"), "mailmux.mcpb");
+  const target = join(app.getPath("temp"), "sley.mcpb");
   try {
     copyFileSync(source, target);
   } catch (err) {
@@ -354,7 +354,7 @@ function createWindow(url) {
     height: 860,
     minWidth: 960,
     minHeight: 620,
-    title: "mailmux",
+    title: "Sley",
     // Ignored on macOS, which reads the bundle. Set unconditionally rather than
     // behind a platform check so a Windows or Linux dev run is not the stock
     // Electron diamond.
@@ -449,11 +449,11 @@ function fatal(err) {
   const message = err instanceof Error ? err.message : String(err);
   const busy = /EADDRINUSE/.test(message);
   const detail = busy
-    ? `The port is already in use.\n\nmailmux is probably already running — check for another mailmux window, or a "mailmux serve" in a terminal.\n\n${message}`
+    ? `The port is already in use.\n\nSley is probably already running — check for another Sley window, or a "sley serve" in a terminal.\n\n${message}`
     : message;
-  console.error(`mailmux could not start: ${detail}`);
+  console.error(`sley could not start: ${detail}`);
   // `showErrorBox` is modal and waits for a click, which is right in front of a
   // person and a hang in `npm run smoke`.
-  if (!smoke) dialog.showErrorBox("mailmux could not start", detail);
+  if (!smoke) dialog.showErrorBox("Sley could not start", detail);
   app.exit(1);
 }

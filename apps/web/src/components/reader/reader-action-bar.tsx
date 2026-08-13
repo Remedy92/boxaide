@@ -165,9 +165,9 @@ export function ReaderActionBar({
               : "This message has no Message-ID"}
           </DropdownMenuItem>
           <DropdownMenuItem
-            onSelect={() => message && void copy(message.id, "mailmux ID")}
+            onSelect={() => message && void copy(message.id, "Sley ID")}
           >
-            Copy mailmux ID
+            Copy Sley ID
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => setSource("text")}>
             View plain text source
@@ -214,7 +214,7 @@ export function ReaderActionBar({
             </DialogTitle>
             <DialogDescription>
               {source === "html"
-                ? "Shown as escaped text. mailmux never renders sender HTML."
+                ? "Shown as escaped text. Sley never renders sender HTML."
                 : "The bodyText the server returned, verbatim."}
             </DialogDescription>
           </DialogHeader>

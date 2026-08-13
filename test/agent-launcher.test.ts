@@ -193,14 +193,14 @@ describe("AgentLauncher", () => {
     const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code");
     const args = claude!.args!(CTX);
     const allowed = args[args.indexOf("--allowedTools") + 1];
-    expect(allowed).toContain("mcp__mailmux__draft_create");
-    expect(allowed).toContain("mcp__mailmux__chat_await_message");
+    expect(allowed).toContain("mcp__sley__draft_create");
+    expect(allowed).toContain("mcp__sley__chat_await_message");
     expect(allowed).not.toContain("message_send");
     // The agent must not inherit the user's other MCP servers.
     expect(args).toContain("--strict-mcp-config");
   });
 
-  it("launches Grok with an isolated config and a mailmux-only allowlist", () => {
+  it("launches Grok with an isolated config and a sley-only allowlist", () => {
     const grok = KNOWN_AGENTS.find((s) => s.id === "grok");
     expect(grok?.args).toBeTypeOf("function");
     const ctx = {
@@ -213,8 +213,8 @@ describe("AgentLauncher", () => {
     expect(args).toContain("--permission-mode");
     expect(args[args.indexOf("--permission-mode") + 1]).toBe("dontAsk");
     expect(args).toContain("--allow");
-    expect(args).toContain("MCPTool(mailmux__draft_create)");
-    expect(args).toContain("MCPTool(mailmux__chat_await_message)");
+    expect(args).toContain("MCPTool(sley__draft_create)");
+    expect(args).toContain("MCPTool(sley__chat_await_message)");
     expect(args.join("\0")).not.toContain("message_send");
     expect(args.join("\0")).not.toContain(ctx.bearerToken);
 
@@ -222,13 +222,15 @@ describe("AgentLauncher", () => {
     mkdirSync(workDir, { recursive: true });
     grok!.prepare!(ctx, workDir, { PATH: "/usr/bin" });
     const env = grok!.childEnv!(ctx, workDir);
-    expect(env.MAILMUX_TOKEN).toBe(ctx.bearerToken);
+    expect(env.SLEY_TOKEN).toBe(ctx.bearerToken);
     expect(env.GROK_HOME).toBe(join(ctx.dataDir, "agent-homes", "grok"));
     expect(env.GROK_CLAUDE_MCPS_ENABLED).toBe("0");
     expect(env.GROK_CURSOR_MCPS_ENABLED).toBe("0");
 
     const toml = readFileSync(join(env.GROK_HOME, "config.toml"), "utf8");
     expect(toml).toContain(ctx.mcpUrl);
+    expect(toml).toContain("[mcp_servers.sley]");
+    expect(toml).toContain("SLEY_TOKEN");
     expect(toml).toContain("bearer_token_env_var");
     expect(toml).not.toContain(ctx.bearerToken);
     expect(toml).toMatch(/compat\.claude[\s\S]*mcps = false/);

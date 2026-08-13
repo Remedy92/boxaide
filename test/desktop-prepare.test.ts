@@ -48,7 +48,7 @@ describe("needsNpmInstall", () => {
     const dir = tempDir();
     mkdirSync(join(dir, "node_modules"));
     writeFileSync(join(dir, "package-lock.json"), "{}");
-    writeFileSync(join(dir, "node_modules", ".mailmux-lock"), "stale");
+    writeFileSync(join(dir, "node_modules", ".sley-lock"), "stale");
     expect(await needsNpmInstall(dir)).toBe(true);
   });
 
@@ -174,7 +174,7 @@ describe("webExportStale", () => {
   it("writeStamp is what markWebExport uses", async () => {
     const dir = tempDir();
     webTree(dir);
-    await writeStamp(join(dir, "apps", "web", ".mailmux-export"), "not-the-hash");
+    await writeStamp(join(dir, "apps", "web", ".sley-export"), "not-the-hash");
     expect(await webExportStale(dir)).toBe(true);
   });
 });

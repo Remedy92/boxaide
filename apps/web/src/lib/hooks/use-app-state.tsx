@@ -183,7 +183,7 @@ const DRAFT_HASH_PATTERN = /^#\/a\/([^/]+)\/d\/(.+)$/;
  * history.replaceState fires neither `hashchange` nor `popstate`, so the store
  * below would never see a programmatic selection. This event closes that gap.
  */
-const HASH_EVENT = "mailmux:hash";
+const HASH_EVENT = "sley:hash";
 
 function subscribeToHash(onChange: () => void): () => void {
   if (typeof window === "undefined") return () => {};
@@ -387,7 +387,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     if (typeof window === "undefined") return;
     // Only pop an entry this app actually pushed. Otherwise back() would walk
     // off the app — the entry behind a replaceState selection is whatever page
-    // the user was on before mailmux.
+    // the user was on before Sley.
     if (narrow && window.location.hash && pushedSelection.current) {
       pushedSelection.current = false;
       window.history.back();
