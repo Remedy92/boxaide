@@ -112,22 +112,16 @@ login item), quit. The menu bar icon stays as long as the app runs, including
 with the window closed.
 
 ```bash
-npm run build                 # repository root: server + UI export
-cd apps/desktop
-npm install                   # its own package.json and lockfile
-npm run dev                   # opens the window
+npm run desktop
 ```
 
-`npm install` rebuilds `better-sqlite3` against Electron's ABI (`electron-builder install-app-deps`). If Electron's own binary is missing afterwards — this repo blocks install scripts unless `allowScripts` names them — run `node node_modules/electron/install.js` once.
-
-Installers:
+That compiles the server, installs Electron deps only when the lockfile changed, downloads the Electron binary once, copies `dist/` and `web-next/` into the app if they changed, and opens the window. A second run skips the install and the download. The web UI rebuilds only when `apps/web/src` no longer matches the last `web:sync` stamp.
 
 ```bash
-npm run dist:mac              # mac: signed dmg in apps/desktop/release/
-npm run dist                  # other platforms — nsis or AppImage
+npm run desktop:dist          # same prepare, then signed mac dmg in apps/desktop/release/
 ```
 
-On mac, `dist:mac` signs the app and the dmg with a Developer ID certificate pinned by hash in `scripts/sign-mac.sh` (electron-builder's by-name signing is ambiguous when the keychain holds two same-named certificates). Notarization is a separate, credential-holding step; the commands are at the top of that script. `npm run dist` builds for the platform it runs on. Both scripts re-copy the compiled server and the UI export out of the repository root first, so run the root `npm run build` again after any server change. The port follows `MAILMUX_PORT` (default 8787); if something already holds it — `mailmux serve` in a terminal, or a second copy of the app — the window does not open and the app says so.
+On mac, signing uses a Developer ID certificate pinned by hash in `apps/desktop/scripts/sign-mac.sh` (electron-builder's by-name signing is ambiguous when the keychain holds two same-named certificates). Notarization is a separate, credential-holding step; the commands are at the top of that script. The port follows `MAILMUX_PORT` (default 8787); if something already holds it — `mailmux serve` in a terminal, or a second copy of the app — the window does not open and the app says so.
 
 The install button serves GitHub `releases/latest`. CI does not upload a dmg. After a merge to master, from the **main checkout** (not a worktree):
 

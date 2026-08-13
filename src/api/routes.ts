@@ -766,9 +766,23 @@ function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
     c.json({ agents: launcher.list(), ...launcher.status() }),
   );
 
-  app.post("/api/agents/:id/start", (c) => {
+  app.post("/api/agents/:id/start", async (c) => {
+    // Body is optional: { model?: string }. The launcher validates the id
+    // against its own registry; this only rejects non-string shapes.
+    let model: string | undefined;
     try {
-      return c.json({ running: launcher.start(c.req.param("id")) }, 201);
+      const body = await c.req.json<{ model?: unknown }>();
+      if (body && typeof body === "object" && body.model !== undefined) {
+        if (typeof body.model !== "string") {
+          return c.json({ error: "model must be a string" }, 400);
+        }
+        model = body.model;
+      }
+    } catch {
+      // No body, or not JSON — start on the CLI's default model.
+    }
+    try {
+      return c.json({ running: launcher.start(c.req.param("id"), model) }, 201);
     } catch (err) {
       if (err instanceof LaunchError) {
         return c.json({ error: err.message }, err.status);

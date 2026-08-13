@@ -30,7 +30,8 @@ export function useStartLocalAgent() {
   const ctx = useApiCtx();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => startLocalAgent(id, ctx),
+    mutationFn: ({ id, model }: { id: string; model?: string }) =>
+      startLocalAgent(id, ctx, model),
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["local-agents"] });
     },

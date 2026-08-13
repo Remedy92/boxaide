@@ -3,6 +3,7 @@
 import * as React from "react";
 import { ArrowUp } from "lucide-react";
 import { Spinner } from "@/components/atoms";
+import { AgentModelSelect } from "@/components/agent/agent-model-select";
 import { cn } from "@/lib/utils";
 
 /** Matches MAX_CHAT_CHARS on the server, which returns 400 past it. */
@@ -121,19 +122,25 @@ export function AgentComposer({
       />
 
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
-        <p id="mailmux-agent-hint" className="pl-1 text-[11px] leading-4 text-fg-tertiary">
-          {overLimit ? (
-            <span className="text-danger">
-              {text.length.toLocaleString()} of {MAX_CHARS.toLocaleString()} characters
-            </span>
-          ) : (
-            <>
-              <kbd className="font-sans">Enter</kbd> to send,{" "}
-              <kbd className="font-sans">Shift</kbd>+<kbd className="font-sans">Enter</kbd>{" "}
-              for a new line
-            </>
-          )}
-        </p>
+        <div className="flex min-w-0 items-center gap-2">
+          <AgentModelSelect />
+          <p
+            id="mailmux-agent-hint"
+            className="truncate pl-1 text-[11px] leading-4 text-fg-tertiary"
+          >
+            {overLimit ? (
+              <span className="text-danger">
+                {text.length.toLocaleString()} of {MAX_CHARS.toLocaleString()} characters
+              </span>
+            ) : (
+              <>
+                <kbd className="font-sans">Enter</kbd> to send,{" "}
+                <kbd className="font-sans">Shift</kbd>+
+                <kbd className="font-sans">Enter</kbd> for a new line
+              </>
+            )}
+          </p>
+        </div>
         <button
           type="submit"
           aria-label="Send to your agent"
