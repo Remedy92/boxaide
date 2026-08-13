@@ -209,6 +209,33 @@ export function isGoogleAppPassword(value: string): boolean {
 export const GMAIL_PASSWORD_PROBLEM =
   "That looks like your normal Google password. Gmail needs the 16-letter code — use the Open Google settings button above.";
 
+/**
+ * The name a mailbox gets when nobody types one: the part in front of the @,
+ * which is what a person would have called it anyway. The server normalises an
+ * alias exactly this way (service.ts:53), so what is shown is what is stored.
+ */
+export function aliasForEmail(email: string): string {
+  const local = email.trim().split("@")[0] ?? "";
+  return local.toLowerCase().replace(/\s+/g, "-") || "mailbox";
+}
+
+/**
+ * Host names to try for a domain no preset claims. `imap.` and `smtp.` in
+ * front of the domain is what most providers hand out, and the connect button
+ * tests the guess before anything is saved — a wrong guess costs one failed
+ * login, not a broken mailbox.
+ *
+ * Only a finished-looking domain gets a guess. Half-typed addresses must not
+ * flip the form onto hosts that cannot exist yet.
+ */
+export function guessHostsForEmail(
+  email: string,
+): { imapHost: string; smtpHost: string } | null {
+  const domain = email.trim().toLowerCase().split("@")[1] ?? "";
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/.test(domain)) return null;
+  return { imapHost: `imap.${domain}`, smtpHost: `smtp.${domain}` };
+}
+
 /** Fallback IMAP port when the user leaves the field empty (§6.5). */
 export const DEFAULT_IMAP_PORT = 993;
 /** Fallback SMTP port when the user leaves the field empty (§6.5). */

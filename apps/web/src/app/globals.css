@@ -466,12 +466,16 @@
 }
 .mailmux-pulse { animation: mailmux-pulse 1600ms ease-in-out infinite; }
 
-/* The rail collapses to a 52px icon rail between 760px and 1099px. The width
-   change is a custom-property write and is deliberately not animated: animated
-   reflow at a breakpoint reads as jank. */
-@media (min-width: 760px) and (max-width: 1099px) {
-  .shell { --rail-w: var(--rail-w-collapsed); }
-}
+/* The rail collapses to a 52px icon rail between 760px and 1099px, and that
+   breakpoint is watched in one place only: app-shell writes data-rail, which
+   the rule above turns into the width. This block used to set the width here
+   as well, from the same media query — two answers to one question. They agree
+   only while the script is running: served but not yet hydrated, or hydrated
+   and broken, the column took the 52px from CSS while the markup still held
+   the full-width labels, and the rail rendered its own text clipped against
+   the border. Width and contents now come from the same source, so they cannot
+   disagree. The remaining cost is one frame of a wide rail before hydration,
+   which is a rail, not a defect. */
 
 /* Below 760px, one pane at a time. The attribute selector is repeated because
    `.shell[data-view="agent"]` above outranks a bare `.shell` here, media query

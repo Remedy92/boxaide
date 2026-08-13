@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, ExternalLink, Eye, EyeOff, Plug } from "lucide-react";
+import { ArrowLeft, Download, ExternalLink, Eye, EyeOff, Plug } from "lucide-react";
 import { toast } from "sonner";
 import {
   BrandGlyph,
@@ -19,6 +19,8 @@ import {
   DEFAULT_SMTP_PORT,
   GMAIL_PASSWORD_PROBLEM,
   PROVIDER_PRESETS,
+  aliasForEmail,
+  guessHostsForEmail,
   isGoogleAppPassword,
   presetForEmail,
   stripPasswordSpaces,
@@ -143,6 +145,10 @@ function ServerStep({
   const [reveal, setReveal] = React.useState(false);
   const [probe, setProbe] = React.useState<Probe>({ status: "idle" });
   const [auth, setAuth] = React.useState<Auth>({ status: "idle" });
+  /* The address box is off by default. It is the answer to a question almost
+     nobody has — mailmux runs on one computer, at one address, and the probe
+     below already knows it. It appears when someone says it is wrong. */
+  const [showAddress, setShowAddress] = React.useState(false);
   /* "detecting" is the first render: one quiet line while the page finds and
      signs into its own server. Most people never see the form below — it is
      the fallback for a remotely hosted page or a server that is not running,
@@ -164,7 +170,7 @@ function ServerStep({
     if (!isValidBaseUrl(url)) {
       setProbe({
         status: "fail",
-        message: "That is not a full address. It should look like http://127.0.0.1:8787.",
+        message: "That does not look like a full address. It should start with http://.",
         raw: "",
       });
       return false;
@@ -242,45 +248,77 @@ function ServerStep({
     onDoneRef.current = onDone;
   }, [runProbe, adoptLocalToken, verifyStored, onDone]);
 
-  React.useEffect(() => {
-    let cancelled = false;
-    void (async () => {
+  /**
+   * The whole of step one, when it can be done without a human: find a live
+   * server, then sign in with a token that is already ours to have. It runs on
+   * mount and again behind the "Look again" button, which is the only control
+   * this screen needs while mailmux is simply not started yet.
+   *
+   * `alive` reports whether it found the seam a human has to close, so the
+   * caller can leave the spinner up on success rather than flashing the form.
+   */
+  const detect = React.useCallback(
+    async (alive: () => boolean): Promise<void> => {
       const stored = settings.baseUrl;
       let live: string | null = null;
       if (stored && (await probeRef.current(stored))) {
         live = normalizeBaseUrl(stored);
       }
-      if (!live && !cancelled && pageOrigin && pageOrigin !== normalizeBaseUrl(stored)) {
+      if (!live && alive() && pageOrigin && pageOrigin !== normalizeBaseUrl(stored)) {
         if (await probeRef.current(pageOrigin)) {
-          if (!cancelled) setBaseUrl(pageOrigin);
+          if (alive()) setBaseUrl(pageOrigin);
           live = pageOrigin;
         }
       }
-      if (!cancelled && live) {
+      if (alive() && live) {
         // Signed in without a human: a still-valid stored token, or the
         // server's own page vouching for itself. Either way there is no
         // decision left on this screen, so it does not appear.
         if (settings.token) {
           if (await verifyStoredRef.current(live, settings.token)) {
-            if (!cancelled) onDoneRef.current();
+            if (alive()) onDoneRef.current();
             return;
           }
         } else if (pageOrigin && isSameServer(pageOrigin, live)) {
           if (await adoptRef.current(pageOrigin)) {
-            if (!cancelled) onDoneRef.current();
+            if (alive()) onDoneRef.current();
             return;
           }
         }
       }
-      if (!cancelled) setPhase("manual");
-    })();
+      if (alive()) setPhase("manual");
+    },
+    [pageOrigin, settings.baseUrl, settings.token],
+  );
+  const detectRef = React.useRef(detect);
+  React.useEffect(() => {
+    detectRef.current = detect;
+  }, [detect]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void detectRef.current(() => !cancelled);
     return () => {
       cancelled = true;
     };
-    // Once, on mount: re-probing on every keystroke would hammer a server that
-    // is not there.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Once, on mount, through the ref: re-probing on every keystroke would
+    // hammer a server that is not there.
   }, []);
+
+  /**
+   * "Look again": probe the address in hand — the detected one, or one typed
+   * into the box below. A server that is this page's own origin still hands
+   * over its token without being asked, so someone who starts mailmux and
+   * presses this never sees the token field at all.
+   */
+  const look = async () => {
+    setAuth({ status: "idle" });
+    const reachable = await runProbe(baseUrl);
+    if (!reachable) return;
+    if (pageOrigin && isSameServer(pageOrigin, baseUrl)) {
+      if (await adoptLocalToken(normalizeBaseUrl(baseUrl))) onDone();
+    }
+  };
 
   const verify = async () => {
     const reachable = await runProbe(baseUrl);
@@ -288,7 +326,8 @@ function ServerStep({
     if (!token.trim()) {
       setAuth({
         status: "fail",
-        message: "Paste the token first — it is the line mailmux serve prints.",
+        message:
+          "Paste the connection code first — mailmux shows it where you started it.",
         raw: "",
       });
       return;
@@ -299,12 +338,15 @@ function ServerStep({
       const api = await getApiHealth(ctx);
       setAuth({ status: "ok", version: api.version });
       update({ baseUrl: ctx.baseUrl, token: ctx.token });
+      // Signed in is the whole point of this screen. A second button to press
+      // afterwards is a step, not a confirmation.
+      onDone();
     } catch (error) {
       setAuth({
         status: "fail",
         message:
           error instanceof ApiError && error.kind === "unauthorized"
-            ? "Your server said no to that token. Copy the whole line, with no spaces."
+            ? "That code did not match. Copy the whole line again, with no spaces."
             : describe(error, hostLabel(baseUrl)),
         raw: error instanceof ApiError ? error.raw : String(error ?? ""),
       });
@@ -325,130 +367,90 @@ function ServerStep({
     );
   }
 
+  /* Two screens, not one form. Either mailmux is running and the only thing
+     missing is the line it printed, or it is not running and no field on this
+     page can fix that. Showing both boxes in both cases is what made this look
+     like configuration. */
+  const found = probe.status === "ok";
+  const busy = auth.status === "checking" || probe.status === "checking";
+  /* This page came off a server on this machine, so the app is on this machine
+     — it is just not running. Offering a download to someone who already has
+     it installed is noise, and worse, it reads as "your copy is broken". */
+  const installed = pageOrigin !== null && isLoopbackUrl(pageOrigin);
+
   return (
     <section aria-labelledby="wizard-step-1">
       <h1
         id="wizard-step-1"
         className="text-[15px] leading-5 font-semibold tracking-[var(--tracking-tight)] text-fg"
       >
-        Find your mailmux
+        {found ? "Let this page in" : "mailmux isn’t open yet"}
       </h1>
       <p className="mt-1.5 text-[13px] leading-[18px] text-fg-secondary">
-        mailmux runs on your own computer. This page talks to it directly —
-        nothing about your mail passes through anyone else.
+        {found
+          ? "mailmux is open on this computer. It shows a code when it starts, and this page needs that code before it can show your mail."
+          : installed
+            ? "mailmux is an app on this computer, and it is not running. Open it, then press Try again."
+            : "mailmux is an app you open on your own computer. Your mail stays there. Get it below, open it, and this page finds it by itself."}
       </p>
 
       <div className="mt-6 space-y-4">
-        <div className="rounded-[var(--radius-md)] border border-border-subtle bg-surface-2 p-3">
-          <div className="flex items-center gap-2">
-            {probe.status === "checking" ? (
-              <Spinner className="text-fg-tertiary" />
-            ) : (
-              <StatusDot
-                tone={
-                  probe.status === "ok"
-                    ? "success"
-                    : probe.status === "fail"
-                      ? "danger"
-                      : "muted"
-                }
-              />
+        {found ? (
+          <>
+            {probe.fixture && (
+              <p className="text-[12px] leading-4 text-warning">
+                It is running in demo mode, so the mail you will see is made up.
+              </p>
             )}
-            <span className="text-[13px] leading-[18px] text-fg">
-              {probe.status === "checking"
-                ? `Looking for ${hostLabel(baseUrl)}…`
-                : probe.status === "ok"
-                  ? sameOrigin
-                    ? "Found it — this page is served by your mailmux."
-                    : `Found mailmux at ${hostLabel(baseUrl)}.`
-                  : probe.status === "fail"
-                    ? "No mailmux answered."
-                    : "Not checked yet."}
-            </span>
-          </div>
 
-          {probe.status === "ok" && probe.fixture && (
-            <p className="mt-1.5 text-[12px] leading-4 text-warning">
-              It is running in demo mode, so the mail you will see is made up.
-            </p>
-          )}
-
-          {probe.status === "fail" && (
-            <>
-              <p className="mt-1.5 text-[12px] leading-4 text-fg-secondary">
+            <Field
+              id="wizard-token"
+              label="Connection code"
+              helper="mailmux shows this code where you started it, on the line that begins “bearer token:”. Copy the whole line."
+            >
+              <div className="relative">
+                <Input
+                  id="wizard-token"
+                  type={reveal ? "text" : "password"}
+                  value={token}
+                  spellCheck={false}
+                  autoCapitalize="none"
+                  autoComplete="off"
+                  className="pr-8 font-mono"
+                  placeholder="Paste it here"
+                  onChange={(event) => {
+                    setToken(event.target.value);
+                    setAuth({ status: "idle" });
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void verify();
+                  }}
+                />
+                <button
+                  type="button"
+                  aria-label={reveal ? "Hide token" : "Show token"}
+                  onClick={() => setReveal((value) => !value)}
+                  className="absolute top-1/2 right-1.5 flex size-5 -translate-y-1/2 items-center justify-center rounded-[var(--radius-sm)] text-fg-tertiary hover:bg-surface-hover hover:text-fg"
+                >
+                  {reveal ? (
+                    <EyeOff className="size-3.5" strokeWidth={1.5} />
+                  ) : (
+                    <Eye className="size-3.5" strokeWidth={1.5} />
+                  )}
+                </button>
+              </div>
+            </Field>
+          </>
+        ) : (
+          probe.status === "fail" && (
+            <div className="rounded-[var(--radius-md)] border border-border-subtle bg-surface-2 p-3.5">
+              <p className="text-[12px] leading-4 text-fg-secondary">
                 {probe.message}
               </p>
-              <p className="mt-1.5 text-[12px] leading-4 text-fg-tertiary">
-                Open a terminal and run{" "}
-                <code className="font-mono text-fg-secondary">mailmux serve</code>
-                , then press Check again.
-              </p>
               <TechnicalDetails raw={probe.raw} />
-            </>
-          )}
-        </div>
-
-        <Field
-          id="wizard-base-url"
-          label="Server address"
-          helper={
-            sameOrigin
-              ? "This is the address you are reading this page on."
-              : "The address mailmux printed when it started."
-          }
-        >
-          <Input
-            id="wizard-base-url"
-            value={baseUrl}
-            spellCheck={false}
-            autoCapitalize="none"
-            autoCorrect="off"
-            className="font-mono"
-            placeholder="http://127.0.0.1:8787"
-            onChange={(event) => {
-              setBaseUrl(event.target.value);
-              setProbe({ status: "idle" });
-              setAuth({ status: "idle" });
-            }}
-          />
-        </Field>
-
-        <Field
-          id="wizard-token"
-          label="Access token"
-          helper="mailmux serve prints this on its third line. It is also in the file bearer.token inside your data folder."
-        >
-          <div className="relative">
-            <Input
-              id="wizard-token"
-              type={reveal ? "text" : "password"}
-              value={token}
-              spellCheck={false}
-              autoCapitalize="none"
-              autoComplete="off"
-              className="pr-8 font-mono"
-              onChange={(event) => {
-                setToken(event.target.value);
-                setAuth({ status: "idle" });
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void verify();
-              }}
-            />
-            <button
-              type="button"
-              aria-label={reveal ? "Hide token" : "Show token"}
-              onClick={() => setReveal((value) => !value)}
-              className="absolute top-1/2 right-1.5 flex size-5 -translate-y-1/2 items-center justify-center rounded-[var(--radius-sm)] text-fg-tertiary hover:bg-surface-hover hover:text-fg"
-            >
-              {reveal ? (
-                <EyeOff className="size-3.5" strokeWidth={1.5} />
-              ) : (
-                <Eye className="size-3.5" strokeWidth={1.5} />
-              )}
-            </button>
-          </div>
-        </Field>
+            </div>
+          )
+        )}
 
         <div role="status" aria-live="polite">
           {auth.status === "ok" && (
@@ -467,28 +469,78 @@ function ServerStep({
             </div>
           )}
         </div>
+
+        {/* The address of the machine mailmux runs on. Hidden until someone
+            says the found one is wrong, because for everyone else it is the
+            answer to a question they never asked. */}
+        {showAddress ? (
+          <div className="space-y-3">
+            <Field
+              id="wizard-base-url"
+              label="Where mailmux is running"
+              helper={
+                sameOrigin
+                  ? "This is the address you are reading this page on."
+                  : "The address mailmux printed when it started."
+              }
+            >
+              <Input
+                id="wizard-base-url"
+                value={baseUrl}
+                spellCheck={false}
+                autoCapitalize="none"
+                autoCorrect="off"
+                className="font-mono"
+                placeholder="http://127.0.0.1:8787"
+                onChange={(event) => {
+                  setBaseUrl(event.target.value);
+                  setProbe({ status: "idle" });
+                  setAuth({ status: "idle" });
+                }}
+              />
+            </Field>
+            {/* The command, for the one audience that has a terminal open
+                already. It is true for them and meaningless to everyone else,
+                which is why it lives behind the same link as the address. */}
+            {!found && (
+              <p className="text-[12px] leading-4 text-fg-tertiary">
+                Running it from a terminal? Start it there with{" "}
+                <code className="font-mono text-fg-secondary">mailmux serve</code>
+                , then press Try again.
+              </p>
+            )}
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setShowAddress(true)}
+            className="text-[12px] text-fg-tertiary hover:text-fg-secondary"
+          >
+            {found ? `Not ${hostLabel(baseUrl)}?` : "It runs somewhere else"}
+          </button>
+        )}
       </div>
 
       <div className="mt-8 flex items-center gap-2">
         <Button
           type="button"
-          variant="secondary"
-          disabled={auth.status === "checking" || probe.status === "checking"}
-          aria-busy={auth.status === "checking" || undefined}
-          onClick={() => void verify()}
+          disabled={busy}
+          aria-busy={busy || undefined}
+          onClick={() => void (found ? verify() : look())}
         >
-          {(auth.status === "checking" || probe.status === "checking") && (
-            <Spinner />
-          )}
-          Check
+          {busy && <Spinner />}
+          {found ? "Connect" : "Try again"}
         </Button>
-        <Button
-          type="button"
-          disabled={auth.status !== "ok"}
-          onClick={onDone}
-        >
-          Continue
-        </Button>
+        {/* The one thing that actually helps a visitor with no app: the
+            download page, which already picks the right file for them. */}
+        {!found && !installed && (
+          <Button asChild variant="secondary">
+            <a href="/install">
+              <Download className="size-4" strokeWidth={1.5} />
+              Get mailmux
+            </a>
+          </Button>
+        )}
         <button
           type="button"
           onClick={onSkip}
@@ -558,7 +610,21 @@ function MailboxStep({
     setProblem(null);
     if (pinned.current) return;
     const guess = presetForEmail(value);
-    if (guess && guess.id !== preset.id) applyPreset(guess);
+    if (guess) {
+      if (guess.id !== preset.id) applyPreset(guess);
+      return;
+    }
+    // A domain no preset claims: guess imap./smtp. in front of it rather than
+    // leaving imap.gmail.com sitting under someone's company address. Connect
+    // tests the guess, so a wrong one costs one failed login.
+    const hosts = guessHostsForEmail(value);
+    if (!hosts) return;
+    const other = PROVIDER_PRESETS.find((entry) => entry.id === "other");
+    if (other && preset.id !== "other") applyPreset(other);
+    setImapHost(hosts.imapHost);
+    setImapPort(String(DEFAULT_IMAP_PORT));
+    setSmtpHost(hosts.smtpHost);
+    setSmtpPort(String(DEFAULT_SMTP_PORT));
   };
 
   const credentials = () => ({
@@ -588,7 +654,7 @@ function MailboxStep({
       return false;
     }
     if (!imapHost.trim() || !smtpHost.trim()) {
-      setProblem("Fill in both server names under More settings.");
+      setProblem("Two more details are needed from your email provider. They are under More settings.");
       setAdvanced(true);
       return false;
     }
@@ -602,7 +668,7 @@ function MailboxStep({
       {
         // The alias is the part of the address before the @, which is what a
         // person would have called it anyway. The server normalises it again.
-        alias: aliasFor(email),
+        alias: aliasForEmail(email),
         email: email.trim(),
         ...credentials(),
       },
@@ -968,13 +1034,6 @@ function isSameServer(a: string, b: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** The server normalises an alias exactly this way (service.ts:49). */
-function aliasFor(email: string): string {
-  const local = email.trim().split("@")[0] ?? "";
-  const alias = local.toLowerCase().replace(/\s+/g, "-");
-  return alias || "mailbox";
 }
 
 function errorText(error: unknown): string {
