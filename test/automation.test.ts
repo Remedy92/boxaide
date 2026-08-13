@@ -23,7 +23,7 @@ import {
   type OneShotResult,
 } from "../src/agent/launcher.js";
 import { AutomationScheduler, type OneShotLauncher } from "../src/automation/scheduler.js";
-import { AutomationStore, nextRunAfter } from "../src/automation/store.js";
+import { AutomationStore, nextRunAfter, RUN_STALE_MS } from "../src/automation/store.js";
 import { AUTOMATION_TOOLS, dispatchAutomationTool } from "../src/automation/tools.js";
 import type { Platform } from "../src/platform.js";
 
@@ -36,6 +36,22 @@ const KEY = randomBytes(32);
 
 function newStore(): AutomationStore {
   const db = new Database(":memory:");
+  cleanups.push(() => db.close());
+  return new AutomationStore(db, KEY);
+}
+
+/**
+ * Two stores over ONE database file: the only way to test the cross-process
+ * lock. `:memory:` cannot be shared between connections, so a second store
+ * over `:memory:` would be a second empty database and prove nothing.
+ */
+function newSharedStores(): [AutomationStore, AutomationStore] {
+  const path = join(tempDir(), "automations.db");
+  return [openStore(path), openStore(path)];
+}
+
+function openStore(path: string): AutomationStore {
+  const db = new Database(path);
   cleanups.push(() => db.close());
   return new AutomationStore(db, KEY);
 }
@@ -193,6 +209,45 @@ describe("AutomationStore", () => {
     const after = store.get(a.id)!;
     expect(after.lastRunAt).toBe(at.toISOString());
     expect(new Date(after.nextRunAt!).getTime()).toBeGreaterThan(at.getTime());
+  });
+
+  it("refuses a claim while another process holds a fresh run", () => {
+    // Two stores, one file = `mailmux serve` and a stdio `mailmux mcp`, each
+    // with its own in-process FIFO. Only the DB lock sees both.
+    const [serve, mcp] = newSharedStores();
+    const a = serve.create({ name: "a", cron: "0 8 * * *", prompt: "p" });
+    const b = serve.create({ name: "b", cron: "0 8 * * *", prompt: "p" });
+
+    const held = serve.claimRun(a.id);
+    expect(held).not.toBeNull();
+    // Same automation and a different one: one run at a time, globally.
+    expect(mcp.claimRun(a.id)).toBeNull();
+    expect(mcp.claimRun(b.id)).toBeNull();
+    // The young row is untouched — the other process is really using it.
+    expect(mcp.listRuns({})).toHaveLength(1);
+    expect(mcp.listRuns({})[0].status).toBe("running");
+
+    serve.finishRun(held!.id, { status: "ok", exitCode: 0 });
+    expect(mcp.claimRun(b.id)).not.toBeNull();
+  });
+
+  it("sweeps a stale running row to killed, which frees the next claim", () => {
+    const [crashed, restarted] = newSharedStores();
+    const a = crashed.create({ name: "a", cron: "0 8 * * *", prompt: "p" });
+    const longAgo = new Date(Date.now() - RUN_STALE_MS - 60_000);
+    // The process that owned this row never came back to finish it.
+    const abandoned = crashed.claimRun(a.id, { now: longAgo })!;
+    expect(abandoned).not.toBeNull();
+
+    const claimed = restarted.claimRun(a.id);
+    expect(claimed).not.toBeNull();
+
+    const swept = restarted
+      .listRuns({ automationId: a.id })
+      .find((run) => run.id === abandoned.id)!;
+    expect(swept.status).toBe("killed");
+    expect(swept.finishedAt).toBeTruthy();
+    expect(swept.log).toContain("marked killed");
   });
 });
 
@@ -407,6 +462,42 @@ describe("AutomationScheduler", () => {
 
     scheduler.stop();
     expect(launcher.killed).toBe(1);
+  });
+
+  it("keeps a due job queued while another process holds the run lock", async () => {
+    const [serve, other] = newSharedStores();
+    const launcher = new FakeLauncher();
+    const scheduler = new AutomationScheduler(serve, launcher);
+    const a = serve.create({ name: "a", cron: "0 * * * *", prompt: "p", now: past });
+    // The other process starts its run first; this scheduler's FIFO cannot see it.
+    const held = other.claimRun(a.id)!;
+
+    await scheduler.tick(now);
+    expect(launcher.calls).toEqual([]);
+    expect(scheduler.state()).toEqual({ active: null, queued: [a.id] });
+
+    other.finishRun(held.id, { status: "ok", exitCode: 0 });
+    await scheduler.tick(now);
+    expect(launcher.calls).toHaveLength(1);
+    expect(scheduler.state().queued).toEqual([]);
+  });
+
+  it("sweeps a run abandoned by a crashed process when it constructs", async () => {
+    const [crashed, restarted] = newSharedStores();
+    const a = crashed.create({ name: "a", cron: "0 * * * *", prompt: "p", now: past });
+    const abandoned = crashed.claimRun(a.id, {
+      now: new Date(Date.now() - RUN_STALE_MS - 60_000),
+    })!;
+
+    const launcher = new FakeLauncher();
+    const scheduler = new AutomationScheduler(restarted, launcher);
+    const swept = restarted.listRuns({ automationId: a.id })[0];
+    expect(swept.id).toBe(abandoned.id);
+    expect(swept.status).toBe("killed");
+
+    // And the freed lock lets the next scheduled run through.
+    await scheduler.tick(now);
+    expect(launcher.calls).toHaveLength(1);
   });
 });
 

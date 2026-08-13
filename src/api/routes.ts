@@ -183,7 +183,10 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
 }
 
 /** CORS response headers shared by preflight and real responses. */
-const CORS_METHODS = "GET, POST, DELETE, OPTIONS";
+// PATCH is here because the web UI edits automations and outreach campaigns
+// with it (/api/automations/:id, /api/outreach/campaigns/:id); an allowlisted
+// hosted origin cannot reach those routes if the preflight omits the method.
+const CORS_METHODS = "GET, POST, PATCH, DELETE, OPTIONS";
 const CORS_HEADERS = "authorization, content-type";
 const CORS_MAX_AGE = "600";
 
@@ -552,8 +555,10 @@ export function createApi(
     }
   });
 
-  // POST, not PUT: the CORS allow-list of methods is deliberately short, and a
-  // draft update is a replace-and-delete rather than an idempotent write.
+  // POST, not PUT: the CORS allow-list of methods carries only the verbs the
+  // UI actually sends (PATCH is there for automations and campaigns; PUT is
+  // not), and a draft update is a replace-and-delete rather than an idempotent
+  // write.
   app.post("/api/drafts/:accountId/:draftId", async (c) => {
     const body = await c.req.json<DraftBody>();
     try {
@@ -598,18 +603,27 @@ export function createApi(
       bcc?: string;
       inReplyTo?: string;
       references?: string;
+      overrideSuppression?: unknown;
     }>();
+    // The suppression override is a human decision, so only this REST route
+    // reads it — the MCP message_send tool has no such flag. Strict `=== true`
+    // keeps a stray "false", 0, or null from ever reading as consent.
+    const overrideSuppression = body.overrideSuppression === true;
     try {
-      const result = await mail.sendMessage(body.account, {
-        to: body.to,
-        subject: body.subject,
-        text: body.text,
-        html: body.html,
-        cc: body.cc,
-        bcc: body.bcc,
-        inReplyTo: body.inReplyTo,
-        references: body.references,
-      });
+      const result = await mail.sendMessage(
+        body.account,
+        {
+          to: body.to,
+          subject: body.subject,
+          text: body.text,
+          html: body.html,
+          cc: body.cc,
+          bcc: body.bcc,
+          inReplyTo: body.inReplyTo,
+          references: body.references,
+        },
+        { overrideSuppression },
+      );
       return c.json({ result }, 201);
     } catch (err) {
       return c.json(

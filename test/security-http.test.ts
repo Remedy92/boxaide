@@ -429,6 +429,9 @@ describe("CORS allowlist over HTTP", () => {
     expect(res.headers.get("vary")).toBe("Origin");
     expect(res.headers.get("access-control-allow-methods")).toContain("POST");
     expect(res.headers.get("access-control-allow-methods")).toContain("DELETE");
+    // The UI edits automations and campaigns with PATCH; a preflight that
+    // omits it locks an allowlisted hosted origin out of those routes.
+    expect(res.headers.get("access-control-allow-methods")).toContain("PATCH");
     expect(res.headers.get("access-control-allow-headers")).toContain(
       "authorization",
     );
@@ -437,6 +440,20 @@ describe("CORS allowlist over HTTP", () => {
     );
     expect(res.headers.get("access-control-allow-credentials")).toBeNull();
     expect(await res.text()).toBe("");
+  });
+
+  it("answers a PATCH preflight for the automation route", async () => {
+    const res = await open.app.request("/api/automations/some-id", {
+      method: "OPTIONS",
+      headers: {
+        Origin: VERCEL,
+        "Access-Control-Request-Method": "PATCH",
+        "Access-Control-Request-Headers": "authorization, content-type",
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe(VERCEL);
+    expect(res.headers.get("access-control-allow-methods")).toContain("PATCH");
   });
 
   it("rejects a preflight from a non-allowlisted origin", async () => {
@@ -646,6 +663,77 @@ describe("limit validation on list endpoints", () => {
     );
     expect(ok.status).toBe(200);
   });
+});
+
+describe("suppression override on POST /api/messages/send", () => {
+  let runtime: Runtime;
+  let accountId: string;
+
+  const BLOCKED = "blocked@example.test";
+
+  async function send(extra: Record<string, unknown>): Promise<Response> {
+    return runtime.app.request("/api/messages/send", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        account: "all",
+        to: BLOCKED,
+        subject: "s",
+        text: "t",
+        ...extra,
+      }),
+    });
+  }
+
+  beforeEach(async () => {
+    runtime = makeRuntime();
+    const res = await runtime.app.request("/api/accounts", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        alias: "personal",
+        email: "you@personal.test",
+        username: "you@personal.test",
+        password: "ok",
+        imapHost: "fixture",
+        smtpHost: "fixture",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const account = (await res.json()) as { account: { id: string } };
+    accountId = account.account.id;
+    runtime.platform.outreachStore.addSuppression(BLOCKED, "manual");
+  });
+
+  afterEach(() => {
+    runtime.store.close();
+  });
+
+  it("blocks a send to a suppressed recipient with no flag", async () => {
+    const res = await send({ account: accountId });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/recipient suppressed/);
+  });
+
+  it("lets a human through with overrideSuppression: true", async () => {
+    const res = await send({ account: accountId, overrideSuppression: true });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toHaveProperty("result");
+  });
+
+  // Anything that is not the boolean true is not consent: a string "false", a
+  // truthy string, or a 1 must all still hit the guard.
+  it.each([["false"], ["true"], [1], [{}]])(
+    "treats %o as no override",
+    async (value) => {
+      const res = await send({
+        account: accountId,
+        overrideSuppression: value,
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/recipient suppressed/);
+    },
+  );
 });
 
 describe("security response headers", () => {

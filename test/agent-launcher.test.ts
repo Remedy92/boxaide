@@ -200,6 +200,33 @@ describe("AgentLauncher", () => {
     expect(args).toContain("--strict-mcp-config");
   });
 
+  it("pre-approves the platform tools for the interactive agent too", () => {
+    // The Automations UI tells users to ask the in-app agent to create an
+    // automation; before this, only the scheduled path knew those tools.
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const args = claude.args!(CTX);
+    const allowed = args[args.indexOf("--allowedTools") + 1];
+    expect(allowed).toContain("mcp__sley__automation_create");
+    expect(allowed).toContain("mcp__sley__crm_contact_upsert");
+    expect(allowed).toContain("mcp__sley__outbox_queue_draft");
+    expect(allowed).not.toContain("mcp__sley__message_send");
+
+    const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
+    const grokArgs = grok.args!(CTX);
+    expect(grokArgs).toContain("MCPTool(sley__automation_create)");
+    expect(grokArgs).toContain("MCPTool(sley__crm_contact_upsert)");
+    expect(grokArgs.join("\0")).not.toContain("message_send");
+  });
+
+  it("leaves Grok's own web tools at the CLI default on a one-shot run", () => {
+    const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
+    expect(grok.runArgs!(CTX, "do the thing")).not.toContain(
+      "--disable-web-search",
+    );
+    // The chat loop keeps its existing behavior.
+    expect(grok.args!(CTX)).toContain("--disable-web-search");
+  });
+
   it("launches Grok with an isolated config and a sley-only allowlist", () => {
     const grok = KNOWN_AGENTS.find((s) => s.id === "grok");
     expect(grok?.args).toBeTypeOf("function");

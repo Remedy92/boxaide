@@ -4,7 +4,10 @@
  *
  * - cron-parser computes next_run_at; a 30s tick enqueues due automations.
  * - Exactly ONE run executes at a time (spec invariant 4), and a run waits
- *   behind an interactive chat agent.
+ *   behind an interactive chat agent. Two gates enforce that: the in-process
+ *   FIFO here, and underneath it AutomationStore.claimRun, which locks on the
+ *   'running' row so a second process (a stdio `mailmux mcp` with its own
+ *   scheduler over the same file) cannot start an overlapping run.
  * - Runs use AgentLauncher's one-shot path (runOnce): fixed preamble +
  *   automation prompt, pre-approved read/draft/CRM/outreach-queue tools,
  *   NEVER message_send, 15-minute timeout.
@@ -39,7 +42,14 @@ export class AutomationScheduler {
   constructor(
     private store: AutomationStore,
     private launcher: OneShotLauncher,
-  ) {}
+  ) {
+    // A quit or crash mid-run leaves its row 'running' forever: stop() kills
+    // the child, but SQLite closes before the close handler can persist
+    // 'killed'. Sweeping at construction means the next process to start
+    // cleans up after the one that died — and, since a live 'running' row now
+    // blocks claims, an unswept row would also wedge every later run.
+    this.store.sweepStaleRuns();
+  }
 
   start(): void {
     if (this.timer) return;
@@ -103,17 +113,29 @@ export class AutomationScheduler {
       // to a chat session that can last hours.
       if (this.launcher.busy()) return;
       const id = this.queue.shift()!;
-      await this.runOne(id);
+      const outcome = await this.runOne(id);
+      // Another process holds the DB run lock. Put the job back at the head
+      // and stop draining: the next tick (or runNow) retries it, exactly like
+      // the chat-agent case above.
+      if (outcome === "deferred") {
+        this.queue.unshift(id);
+        return;
+      }
     }
   }
 
-  private async runOne(id: string): Promise<void> {
+  private async runOne(id: string): Promise<"ran" | "skipped" | "deferred"> {
     const automation = this.store.get(id);
     // Deleted or disabled while queued: drop it, no run row.
-    if (!automation || !automation.enabled) return;
+    if (!automation || !automation.enabled) return "skipped";
+
+    // Second gate under the FIFO: the FIFO only knows about this process, the
+    // claim also excludes a run started by a `mailmux mcp` stdio process on
+    // the same database (spec invariant 4).
+    const run = this.store.claimRun(id);
+    if (!run) return "deferred";
 
     this.active = id;
-    const run = this.store.startRun(id);
     try {
       const result = await this.launcher.runOnce({
         agentId: automation.agentId,
@@ -155,5 +177,6 @@ export class AutomationScheduler {
       }
       this.store.noteRun(id, finished, nextRunAt);
     }
+    return "ran";
   }
 }

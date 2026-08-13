@@ -63,6 +63,25 @@ export const LOG_LIMIT = 64 * 1024;
 export const LOG_TAIL_LIMIT = 4 * 1024;
 
 /**
+ * Mirrors ONESHOT_TIMEOUT_MS in src/agent/launcher.ts. It is duplicated, not
+ * imported: launcher.ts imports automation/tools.ts, which imports this file,
+ * so importing the launcher here would close an import cycle.
+ */
+const RUN_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * A 'running' row older than this belongs to a process that died: the launcher
+ * hard-kills its own child at RUN_TIMEOUT_MS, and the grace covers the SIGKILL
+ * plus the finishRun write. Younger rows are never swept — another live
+ * process may own them.
+ */
+export const RUN_STALE_MS = RUN_TIMEOUT_MS + 5 * 60 * 1000;
+
+/** Appended to a run log when the sweep finalizes a row nobody finished. */
+export const STALE_RUN_NOTE =
+  "[mailmux] marked killed: the process running this automation exited without finishing the run.";
+
+/**
  * A cron field count of 5 is the contract (spec DDL), and it is enforced here
  * rather than left to cron-parser: the parser also accepts a 6-field form
  * whose first field is seconds, so "* * * * * *" would silently become an
@@ -293,6 +312,79 @@ export class AutomationStore {
       )
       .run(run.id, run.automationId, run.startedAt);
     return run;
+  }
+
+  /**
+   * Takes the cross-process run lock and opens the run row, or returns null.
+   *
+   * The in-process FIFO only serializes runs inside one process, but a stdio
+   * `mailmux mcp` process has its own scheduler over the same SQLite file
+   * (automation_run_now), so two processes could overlap runs and break spec
+   * invariant 4. The 'running' row is therefore the lock: sweep dead rows,
+   * count live ones and insert, all in ONE transaction. Callers that get null
+   * must keep the job queued and retry — the lock holder is still working.
+   */
+  claimRun(
+    automationId: string,
+    opts: { now?: Date; staleMs?: number } = {},
+  ): AutomationRun | null {
+    const now = opts.now ?? new Date();
+    const staleMs = opts.staleMs ?? RUN_STALE_MS;
+    // .immediate(): a deferred transaction begins read-only and only takes the
+    // write lock at the INSERT — precisely the window where the other process
+    // could read "nothing running" and insert as well. IMMEDIATE takes the
+    // write lock up front, so the count and the insert are one atomic step
+    // against every other connection to this file.
+    return this.db.transaction((): AutomationRun | null => {
+      this.sweepStaleRunsAt(now, staleMs);
+      const live = this.db
+        .prepare(`SELECT COUNT(*) AS n FROM automation_runs WHERE status = 'running'`)
+        .get() as { n: number };
+      // Only fresh rows are left after the sweep, so any survivor is a run
+      // someone is really executing right now.
+      if (live.n > 0) return null;
+      return this.startRun(automationId, now);
+    }).immediate();
+  }
+
+  /**
+   * Finalizes 'running' rows nobody will ever finish (a quit or crash mid-run
+   * leaves them 'running' forever). Runs inside claimRun, and once when a
+   * scheduler constructs, so whichever process touches automations next cleans
+   * up after the one that died. Returns how many rows it closed.
+   */
+  sweepStaleRuns(opts: { now?: Date; staleMs?: number } = {}): number {
+    const now = opts.now ?? new Date();
+    const staleMs = opts.staleMs ?? RUN_STALE_MS;
+    return this.db
+      .transaction(() => this.sweepStaleRunsAt(now, staleMs))
+      .immediate();
+  }
+
+  private sweepStaleRunsAt(now: Date, staleMs: number): number {
+    const cutoff = new Date(now.getTime() - staleMs).toISOString();
+    const stale = this.db
+      .prepare(
+        `SELECT id, log_enc FROM automation_runs
+          WHERE status = 'running' AND started_at <= ?`,
+      )
+      .all(cutoff) as { id: string; log_enc: string | null }[];
+    for (const row of stale) {
+      // Keep whatever output the dead process managed to persist and say why
+      // the row closed, so a user reading the run does not see a bare 'killed'.
+      const previous = row.log_enc ? decryptSecret(this.masterKey, row.log_enc) : "";
+      const log = (previous ? `${previous}\n${STALE_RUN_NOTE}` : STALE_RUN_NOTE).slice(
+        -LOG_LIMIT,
+      );
+      this.db
+        .prepare(
+          `UPDATE automation_runs
+              SET finished_at = ?, status = 'killed', log_enc = ?
+            WHERE id = ? AND status = 'running'`,
+        )
+        .run(now.toISOString(), encryptSecret(this.masterKey, log), row.id);
+    }
+    return stale.length;
   }
 
   finishRun(

@@ -14,7 +14,8 @@
  *  - Only binaries from the fixed registry below are ever spawned, resolved
  *    from PATH, with argv built entirely in this file. No request input
  *    reaches a command line.
- *  - Read and draft tools are pre-approved. `message_send` is NOT in the
+ *  - Read, draft and platform (CRM / automation / outreach) tools are
+ *    pre-approved. `message_send` is NOT in the
  *    allowlist, so a launched agent that tries to send hits the client's own
  *    permission wall, which in headless mode is a denial.
  *  - One agent at a time. The channel hands each user message to exactly one
@@ -99,9 +100,6 @@ const PREAPPROVED_TOOL_NAMES = [
   "chat_history",
 ];
 
-const CLAUDE_PREAPPROVED_TOOLS = PREAPPROVED_TOOL_NAMES.map(
-  (name) => `mcp__sley__${name}`,
-);
 
 /** The chat loop's own tools. A scheduled run has nobody to talk to. */
 const CHAT_TOOL_NAMES = new Set([
@@ -124,26 +122,49 @@ export const AUTOMATION_RUN_PREAMBLE =
 const RUN_AUTOMATION_READ_TOOLS = ["automations_list", "automation_runs_list"];
 
 /**
- * Pre-approved tools for a headless automation run.
+ * The one allowlist builder both spawn paths go through.
  *
- * Computed per call rather than frozen at import: the module-level tool sets
- * come from three other modules, and a function keeps this honest about the
- * lists as they actually are at spawn time. The chat tools drop out (no user
- * on the other end) and message_send is deleted last, unconditionally — the
- * one rule that survives any future addition to those sets.
+ * Interactive and scheduled agents used to compute their allowlists
+ * separately, and drifted: the chat agent never got the platform tools, so
+ * "ask the agent to create an automation" — which the Automations UI tells
+ * users to do — hit the permission wall. Both paths derive from the same
+ * sources here so they cannot drift again.
+ *
+ * The mail/chat base list stays hand-written above; only the platform lists
+ * are derived from their owning modules. Computed per call rather than frozen
+ * at import, so the result is honest about those sets at spawn time.
+ * message_send is deleted last, unconditionally — the one rule that survives
+ * any future addition to any of these sets.
  */
-export function runPreapprovedToolNames(): string[] {
+function preapprovedToolNames(opts: {
+  /** The chat loop's tools. Only an interactive agent has a user to talk to. */
+  chat: boolean;
+  /** A run may read the schedule; only the chat agent may edit it. */
+  automation: "all" | "read";
+}): string[] {
   const names = new Set<string>();
   for (const name of PREAPPROVED_TOOL_NAMES) {
-    if (!CHAT_TOOL_NAMES.has(name)) names.add(name);
+    if (opts.chat || !CHAT_TOOL_NAMES.has(name)) names.add(name);
   }
   for (const name of CRM_TOOL_NAMES) names.add(name);
-  for (const name of RUN_AUTOMATION_READ_TOOLS) {
-    if (AUTOMATION_TOOL_NAMES.has(name)) names.add(name);
+  for (const name of AUTOMATION_TOOL_NAMES) {
+    if (opts.automation === "all" || RUN_AUTOMATION_READ_TOOLS.includes(name)) {
+      names.add(name);
+    }
   }
   for (const name of OUTREACH_TOOL_NAMES) names.add(name);
   names.delete("message_send");
   return [...names];
+}
+
+/** Pre-approved tools for the interactive in-app agent. */
+export function chatPreapprovedToolNames(): string[] {
+  return preapprovedToolNames({ chat: true, automation: "all" });
+}
+
+/** Pre-approved tools for a headless automation run. */
+export function runPreapprovedToolNames(): string[] {
+  return preapprovedToolNames({ chat: false, automation: "read" });
 }
 
 export type LaunchContext = {
@@ -211,7 +232,12 @@ export type AgentSpec = {
  * read/draft boundary (send stays un-approved, which headless mode denies).
  */
 function claudeArgs(ctx: LaunchContext, model?: string): string[] {
-  return claudeArgsFor(ctx, KICKOFF, CLAUDE_PREAPPROVED_TOOLS, model);
+  return claudeArgsFor(
+    ctx,
+    KICKOFF,
+    chatPreapprovedToolNames().map((name) => `mcp__sley__${name}`),
+    model,
+  );
 }
 
 /**
@@ -227,7 +253,7 @@ function claudeRunArgs(
   return claudeArgsFor(
     ctx,
     prompt,
-    runPreapprovedToolNames().map((name) => `mcp__mailmux__${name}`),
+    runPreapprovedToolNames().map((name) => `mcp__sley__${name}`),
     model,
   );
 }
@@ -277,14 +303,26 @@ function grokHomeFor(ctx: LaunchContext): string {
 }
 
 function grokArgs(_ctx: LaunchContext): string[] {
-  return grokArgsFor(KICKOFF, PREAPPROVED_TOOL_NAMES);
+  return grokArgsFor(KICKOFF, chatPreapprovedToolNames(), {
+    disableWebSearch: true,
+  });
 }
 
 function grokRunArgs(_ctx: LaunchContext, prompt: string): string[] {
-  return grokArgsFor(prompt, runPreapprovedToolNames());
+  // Spec (Scheduler): the CLI's own web tools stay at the CLI's defaults on a
+  // run — we neither grant nor deny them. An automation that must look
+  // something up is exactly the case --disable-web-search would break, and
+  // the chat path's flag was inherited here by accident.
+  return grokArgsFor(prompt, runPreapprovedToolNames(), {
+    disableWebSearch: false,
+  });
 }
 
-function grokArgsFor(prompt: string, allowed: readonly string[]): string[] {
+function grokArgsFor(
+  prompt: string,
+  allowed: readonly string[],
+  opts: { disableWebSearch: boolean },
+): string[] {
   const args = [
     "-p",
     prompt,
@@ -294,7 +332,7 @@ function grokArgsFor(prompt: string, allowed: readonly string[]): string[] {
     "--no-subagents",
     "--no-plan",
     "--no-memory",
-    "--disable-web-search",
+    ...(opts.disableWebSearch ? ["--disable-web-search"] : []),
   ];
   for (const name of allowed) {
     args.push("--allow", `MCPTool(sley__${name})`);
