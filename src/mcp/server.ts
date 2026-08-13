@@ -7,7 +7,29 @@ import {
 import type { AgentChannel } from "../agent/channel.js";
 import { DEFAULT_WAIT_MS, MAX_WAIT_MS } from "../agent/channel.js";
 import type { MailService } from "../mail/service.js";
+import type { Platform } from "../platform.js";
+import { CRM_TOOLS, CRM_TOOL_NAMES, dispatchCrmTool } from "../crm/tools.js";
+import {
+  AUTOMATION_TOOLS,
+  AUTOMATION_TOOL_NAMES,
+  dispatchAutomationTool,
+} from "../automation/tools.js";
+import {
+  OUTREACH_TOOLS,
+  OUTREACH_TOOL_NAMES,
+  dispatchOutreachTool,
+} from "../outreach/tools.js";
 import type { DraftInput } from "../provider/types.js";
+
+/**
+ * The platform tool surface, exported for the mcpb connector snapshot
+ * (scripts/export-mcpb-tools.mjs) alongside TOOLS and CHAT_TOOLS.
+ */
+export const PLATFORM_TOOLS = [
+  ...CRM_TOOLS,
+  ...AUTOMATION_TOOLS,
+  ...OUTREACH_TOOLS,
+];
 
 const PROTOCOL_VERSION = "2024-11-05";
 
@@ -308,8 +330,9 @@ export const CHAT_TOOLS = [
 
 const CHAT_TOOL_NAMES = new Set(CHAT_TOOLS.map((t) => t.name));
 
-function toolsFor(channel?: AgentChannel) {
-  return channel ? [...TOOLS, ...CHAT_TOOLS] : TOOLS;
+function toolsFor(channel?: AgentChannel, platform?: Platform) {
+  const base = channel ? [...TOOLS, ...CHAT_TOOLS] : [...TOOLS];
+  return platform ? [...base, ...PLATFORM_TOOLS] : base;
 }
 
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
@@ -317,6 +340,7 @@ const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
 export function createMcpServer(
   mail: MailService,
   channel?: AgentChannel,
+  platform?: Platform,
 ): Server {
   const server = new Server(
     { name: "sley", version: "0.1.0" },
@@ -324,7 +348,7 @@ export function createMcpServer(
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: toolsFor(channel),
+    tools: toolsFor(channel, platform),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -332,7 +356,7 @@ export function createMcpServer(
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
 
     try {
-      const result = await dispatch(mail, name, args, channel);
+      const result = await dispatch(mail, name, args, channel, platform);
       return {
         content: [
           {
@@ -377,10 +401,24 @@ async function dispatch(
   name: string,
   args: Record<string, unknown>,
   channel?: AgentChannel,
+  platform?: Platform,
 ): Promise<unknown> {
   if (CHAT_TOOL_NAMES.has(name)) {
     if (!channel) throw new Error(`${name} is not available on this server`);
     return dispatchChat(channel, name, args);
+  }
+  if (
+    CRM_TOOL_NAMES.has(name) ||
+    AUTOMATION_TOOL_NAMES.has(name) ||
+    OUTREACH_TOOL_NAMES.has(name)
+  ) {
+    if (!platform) throw new Error(`${name} is not available on this server`);
+    channel?.noteToolCall(name);
+    if (CRM_TOOL_NAMES.has(name)) return dispatchCrmTool(platform, name, args);
+    if (AUTOMATION_TOOL_NAMES.has(name)) {
+      return dispatchAutomationTool(platform, name, args);
+    }
+    return dispatchOutreachTool(platform, name, args);
   }
   // A mail tool call under an open question is a step the user can watch. The
   // channel keeps it only while a message is claimed — see noteToolCall.
@@ -544,8 +582,9 @@ async function dispatchChat(
 export async function runStdioMcp(
   mail: MailService,
   channel?: AgentChannel,
+  platform?: Platform,
 ): Promise<void> {
-  const server = createMcpServer(mail, channel);
+  const server = createMcpServer(mail, channel, platform);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -560,6 +599,7 @@ export async function handleMcpJsonRpc(
     params?: unknown;
   },
   channel?: AgentChannel,
+  platform?: Platform,
 ): Promise<unknown> {
   const id = message.id ?? null;
   if (message.method === "initialize") {
@@ -590,7 +630,11 @@ export async function handleMcpJsonRpc(
     return { jsonrpc: "2.0", id, result: {} };
   }
   if (message.method === "tools/list") {
-    return { jsonrpc: "2.0", id, result: { tools: toolsFor(channel) } };
+    return {
+      jsonrpc: "2.0",
+      id,
+      result: { tools: toolsFor(channel, platform) },
+    };
   }
   if (message.method === "tools/call") {
     const params = message.params as {
@@ -599,7 +643,11 @@ export async function handleMcpJsonRpc(
     };
     const known =
       TOOL_NAMES.has(params.name) ||
-      (channel !== undefined && CHAT_TOOL_NAMES.has(params.name));
+      (channel !== undefined && CHAT_TOOL_NAMES.has(params.name)) ||
+      (platform !== undefined &&
+        (CRM_TOOL_NAMES.has(params.name) ||
+          AUTOMATION_TOOL_NAMES.has(params.name) ||
+          OUTREACH_TOOL_NAMES.has(params.name)));
     if (!known) {
       return {
         jsonrpc: "2.0",
@@ -613,6 +661,7 @@ export async function handleMcpJsonRpc(
         params.name,
         params.arguments ?? {},
         channel,
+        platform,
       );
       return {
         jsonrpc: "2.0",

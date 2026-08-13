@@ -24,6 +24,7 @@ import { securityHeaders } from "./api/security-headers.js";
 import { handleMcpJsonRpc } from "./mcp/server.js";
 import { AgentChannel } from "./agent/channel.js";
 import { AgentLauncher } from "./agent/launcher.js";
+import { createPlatform, type Platform } from "./platform.js";
 import type { MailProvider } from "./provider/types.js";
 
 export {
@@ -51,6 +52,7 @@ export type Runtime = {
   provider: MailProvider;
   channel: AgentChannel;
   launcher: AgentLauncher;
+  platform: Platform;
   app: Hono;
 };
 
@@ -89,6 +91,17 @@ export function createRuntime(
     dataDir: config.dataDir,
     onRunningChange: (id) => channel.setLaunchedAgent(id),
   });
+  // The agent platform (CRM, automations, outreach) shares the Store's SQLite
+  // handle. Constructed here so every entry point has the tools; its timers
+  // start only in startServer — a stdio `mailmux mcp` process must never run
+  // a second scheduler against the same database.
+  const platform = createPlatform({
+    db: store.db,
+    masterKey: config.masterKey,
+    mail,
+    launcher,
+  });
+
   const app = new Hono();
 
   // First middleware registered, so every route below — UI, API, MCP and any
@@ -145,6 +158,7 @@ export function createRuntime(
     config.allowedOrigins,
     channel,
     launcher,
+    platform,
   );
   app.route("/", api);
 
@@ -171,7 +185,7 @@ export function createRuntime(
     const messages = Array.isArray(body) ? body : [body];
     const results = [];
     for (const msg of messages) {
-      const res = await handleMcpJsonRpc(mail, msg, channel);
+      const res = await handleMcpJsonRpc(mail, msg, channel, platform);
       if (res != null) results.push(res);
     }
     // A JSON-RPC notification has no id and takes no reply. The streamable-HTTP
@@ -251,7 +265,7 @@ export function createRuntime(
     }),
   );
 
-  return { config, store, mail, provider, channel, launcher, app };
+  return { config, store, mail, provider, channel, launcher, platform, app };
 }
 
 /**
@@ -286,6 +300,9 @@ export async function startServer(
   overrides: Partial<AppConfig> = {},
 ): Promise<{ runtime: Runtime; url: string; stop: () => Promise<void> }> {
   const runtime = createRuntime(overrides);
+  // The serve process is the one place platform timers run (CRM sync,
+  // automation scheduler, outreach engine).
+  runtime.platform.start();
   const server = await new Promise<ServerType>((resolve, reject) => {
     const s = serve(
       {
@@ -305,6 +322,9 @@ export async function startServer(
     url: `http://${runtime.config.host}:${runtime.config.port}`,
     stop: async () => {
       server.close();
+      // Platform timers before the launcher: a scheduler tick that fires
+      // mid-shutdown would spawn a child the close below never sees.
+      runtime.platform.stop();
       // The launched agent first: it holds an open long poll against the
       // channel, and an orphaned child process would outlive the app.
       runtime.launcher.close();

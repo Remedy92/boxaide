@@ -11,11 +11,12 @@
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CHAT_TOOLS, TOOLS } from "../dist/mcp/server.js";
+import { CHAT_TOOLS, PLATFORM_TOOLS, TOOLS } from "../dist/mcp/server.js";
 
-// The HTTP server always runs with an agent channel, so the connector's
-// offline answer is the full list — mail tools plus chat tools.
-const all = [...TOOLS, ...CHAT_TOOLS];
+// The HTTP server always runs with an agent channel and the agent platform,
+// so the connector's offline answer is the full list — mail tools plus chat
+// tools plus CRM/automation/outreach tools.
+const all = [...TOOLS, ...CHAT_TOOLS, ...PLATFORM_TOOLS];
 const here = dirname(fileURLToPath(import.meta.url));
 const target = join(here, "..", "apps", "mcpb", "server", "tools.json");
 writeFileSync(target, `${JSON.stringify(all, null, 2)}\n`);

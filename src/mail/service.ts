@@ -39,11 +39,24 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Veto hook run before every send. The platform (src/platform.ts) installs a
+ * guard that throws on suppressed recipients; `override` is the human's
+ * explicit "send anyway" and only the REST send route can set it.
+ */
+export type SendGuard = (recipients: string[], override: boolean) => void;
+
 export class MailService {
+  private sendGuard: SendGuard | null = null;
+
   constructor(
     private store: Store,
     private provider: MailProvider,
   ) {}
+
+  setSendGuard(guard: SendGuard): void {
+    this.sendGuard = guard;
+  }
 
   listAccounts() {
     return this.store.listAccounts();
@@ -159,7 +172,18 @@ export class MailService {
   async sendMessage(
     accountRef: string,
     input: SendMessageInput,
+    opts: { overrideSuppression?: boolean } = {},
   ): Promise<SendResult> {
+    if (this.sendGuard) {
+      const recipients = [input.to, input.cc, input.bcc]
+        .filter((v): v is string => Boolean(v))
+        .flatMap((v) => v.split(","))
+        .map((v) => v.trim().toLowerCase())
+        // "Name <a@b>" and bare "a@b" both reduce to the address.
+        .map((v) => /<([^>]+)>/.exec(v)?.[1]?.toLowerCase() ?? v)
+        .filter((v) => v.includes("@"));
+      this.sendGuard(recipients, opts.overrideSuppression === true);
+    }
     return this.provider.sendMessage(this.resolve(accountRef), input);
   }
 

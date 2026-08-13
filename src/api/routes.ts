@@ -5,6 +5,10 @@ import { streamSSE } from "hono/streaming";
 import type { AgentChannel, Turn } from "../agent/channel.js";
 import { LaunchError, type AgentLauncher } from "../agent/launcher.js";
 import type { MailService } from "../mail/service.js";
+import type { Platform } from "../platform.js";
+import { registerCrmRoutes } from "../crm/routes.js";
+import { registerAutomationRoutes } from "../automation/routes.js";
+import { registerOutreachRoutes } from "../outreach/routes.js";
 import type { AccountCredentials, DraftInput } from "../provider/types.js";
 import { passwordCredentials } from "../provider/types.js";
 
@@ -343,6 +347,7 @@ export function createApi(
   allowedOrigins: readonly string[],
   channel?: AgentChannel,
   launcher?: AgentLauncher,
+  platform?: Platform,
 ): Hono {
   const app = new Hono();
 
@@ -621,6 +626,13 @@ export function createApi(
      --------------------------------------------------------------------- */
   if (channel) registerAgentRoutes(app, channel);
   if (launcher) registerLauncherRoutes(app, launcher);
+  // Agent platform routes (CRM, automations, outreach). Registered inside
+  // createApi so the /api/* auth middleware above gates all of them.
+  if (platform) {
+    registerCrmRoutes(app, platform);
+    registerAutomationRoutes(app, platform);
+    registerOutreachRoutes(app, platform);
+  }
 
   return app;
 }
