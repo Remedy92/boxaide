@@ -6,6 +6,7 @@ import { SectionLabel, Spinner } from "@/components/atoms";
 import { NavItem } from "@/components/rail/nav-item";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useSettings } from "@/lib/hooks/use-settings";
 import { friendlyError } from "@/lib/api/errors";
 import {
   useLocalAgents,
@@ -88,6 +89,8 @@ function LocalAgentList() {
   const agents = useLocalAgents();
   const start = useStartLocalAgent();
   const stop = useStopLocalAgent();
+  // Picked in the composer's model select, stored in settings.
+  const { agentModel } = useSettings();
 
   const rows = (agents.data?.agents ?? []).filter((a) => a.available);
   if (rows.length === 0) return null;
@@ -99,6 +102,11 @@ function LocalAgentList() {
     <div className="space-y-0.5 pb-1">
       {rows.map((agent) => {
         const isRunning = running?.id === agent.id;
+        // Only pass the pick to an agent that offers it; others start on
+        // their default instead of failing the launch.
+        const model = agent.models.some((m) => m.id === agentModel)
+          ? agentModel
+          : undefined;
         // A crash is only worth surfacing on the agent it belongs to, and
         // only until the next successful start replaces it.
         const crashed =
@@ -133,12 +141,17 @@ function LocalAgentList() {
                     stop.mutate();
                     return;
                   }
-                  start.mutate(agent.id, {
-                    onError: (err) =>
-                      toast.error(
-                        friendlyError(err instanceof Error ? err.message : String(err)),
-                      ),
-                  });
+                  start.mutate(
+                    { id: agent.id, model },
+                    {
+                      onError: (err) =>
+                        toast.error(
+                          friendlyError(
+                            err instanceof Error ? err.message : String(err),
+                          ),
+                        ),
+                    },
+                  );
                 }}
               >
                 {busy && <Spinner />}

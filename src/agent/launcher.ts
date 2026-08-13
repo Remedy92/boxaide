@@ -113,17 +113,29 @@ export type LaunchContext = {
   onRunningChange?: (id: string | null) => void;
 };
 
+/**
+ * A model the user may pick for an agent. The id is what reaches the CLI's
+ * command line, so ids exist only in this file — a request can select one,
+ * never define one.
+ */
+export type ModelOption = { id: string; label: string };
+
 export type AgentSpec = {
   id: string;
   label: string;
   /** Binary name looked up on PATH. */
   bin: string;
   /**
+   * Models this CLI accepts via a flag we have verified. Absent means the
+   * CLI always runs on its own default and the UI shows no picker.
+   */
+  models?: ModelOption[];
+  /**
    * Only specs with an args builder can be launched. The others are listed so
    * the UI can say "found, not wired up yet" instead of pretending they do
    * not exist.
    */
-  args?: (ctx: LaunchContext) => string[];
+  args?: (ctx: LaunchContext, model?: string) => string[];
   /**
    * Extra child env, overlayed on the inherited env (and the widened PATH).
    * Grok has no --strict-mcp-config; GROK_HOME plus these flags keep the
@@ -146,10 +158,11 @@ export type AgentSpec = {
  * servers out of a process mailmux is responsible for; the allowlist is the
  * read/draft boundary (send stays un-approved, which headless mode denies).
  */
-function claudeArgs(ctx: LaunchContext): string[] {
+function claudeArgs(ctx: LaunchContext, model?: string): string[] {
   return [
     "-p",
     KICKOFF,
+    ...(model ? ["--model", model] : []),
     "--mcp-config",
     JSON.stringify({
       mcpServers: {
@@ -312,8 +325,25 @@ function refreshLink(from: string, to: string): void {
   }
 }
 
+/**
+ * Models the `claude` CLI's --model flag accepts. Aliases ("sonnet") float
+ * with CLI updates; full ids pin the choice the user actually made.
+ */
+const CLAUDE_MODELS: ModelOption[] = [
+  { id: "claude-fable-5", label: "Fable 5" },
+  { id: "claude-opus-5", label: "Opus 5" },
+  { id: "claude-sonnet-5", label: "Sonnet 5" },
+  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+];
+
 export const KNOWN_AGENTS: AgentSpec[] = [
-  { id: "claude-code", label: "Claude Code", bin: "claude", args: claudeArgs },
+  {
+    id: "claude-code",
+    label: "Claude Code",
+    bin: "claude",
+    args: claudeArgs,
+    models: CLAUDE_MODELS,
+  },
   {
     id: "grok",
     label: "Grok",
@@ -336,9 +366,17 @@ export type ListedAgent = {
   available: boolean;
   /** This build knows how to launch it. */
   supported: boolean;
+  /** Models the user may pick from. Empty means no picker. */
+  models: ModelOption[];
 };
 
-export type RunningAgent = { id: string; pid: number; startedAt: string };
+export type RunningAgent = {
+  id: string;
+  pid: number;
+  startedAt: string;
+  /** The picked model id, or null for the CLI's own default. */
+  model: string | null;
+};
 
 export type LastExit = {
   id: string;
@@ -369,6 +407,7 @@ export class AgentLauncher {
       label: spec.label,
       available: this.resolveBin(spec.bin) !== null,
       supported: spec.args !== undefined,
+      models: spec.models ?? [],
     }));
   }
 
@@ -377,7 +416,7 @@ export class AgentLauncher {
   }
 
   /** Throws with a message fit for the API response. */
-  start(id: string): RunningAgent {
+  start(id: string, model?: string): RunningAgent {
     if (this.running) {
       throw new LaunchError(409, `${this.running.id} is already running`);
     }
@@ -385,6 +424,11 @@ export class AgentLauncher {
     if (!spec) throw new LaunchError(404, `unknown agent: ${id}`);
     if (!spec.args) {
       throw new LaunchError(400, `${spec.label} cannot be launched yet`);
+    }
+    // The model id becomes an argv element, so only ids from this file's
+    // registry pass — the same rule that protects the agent id itself.
+    if (model !== undefined && !spec.models?.some((m) => m.id === model)) {
+      throw new LaunchError(400, `${spec.label} does not offer that model`);
     }
     const bin = this.resolveBin(spec.bin);
     if (!bin) {
@@ -401,7 +445,7 @@ export class AgentLauncher {
     spec.prepare?.(this.ctx, workDir, this.env);
 
     this.stderrTail = "";
-    const child = spawn(bin, spec.args(this.ctx), {
+    const child = spawn(bin, spec.args(this.ctx, model), {
       cwd: workDir,
       // The widened PATH travels with the agent: launched from the Finder app
       // the inherited PATH lacks even the directory its own binary sits in.
@@ -421,6 +465,7 @@ export class AgentLauncher {
       id: spec.id,
       pid: child.pid ?? -1,
       startedAt: new Date().toISOString(),
+      model: model ?? null,
     };
     child.on("error", (err) => {
       // Spawn failures (ENOENT, EACCES) surface as an exit, not an exception.

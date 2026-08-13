@@ -30,6 +30,12 @@ export type Settings = {
    * no token.
    */
   onboarded: boolean;
+  /**
+   * Model id the launcher should pass on the next agent start. Empty string
+   * means the CLI's own default. The server validates it against its own
+   * registry, so a stale stored id fails loudly instead of launching wrong.
+   */
+  agentModel: string;
 };
 
 /**
@@ -46,6 +52,7 @@ export const SETTINGS_KEYS = {
   railCollapsed: "mailmux.railCollapsed",
   recentCommands: "mailmux.recentCommands",
   onboarded: "mailmux.onboarded",
+  agentModel: "mailmux.agentModel",
   /** Owned by next-themes, listed here so the key namespace is documented. */
   theme: "mailmux.theme",
 } as const;
@@ -57,6 +64,7 @@ export const DEFAULT_SETTINGS: Settings = {
   railCollapsed: false,
   recentCommands: [],
   onboarded: false,
+  agentModel: "",
 };
 
 /** Fired on the window after any write, so same-tab listeners can react. */
@@ -151,6 +159,7 @@ export function readSettings(): Settings {
     onboarded:
       readString(SETTINGS_KEYS.onboarded) === "1" ||
       (token ?? "").length > 0,
+    agentModel: readString(SETTINGS_KEYS.agentModel) ?? "",
   };
 }
 
@@ -176,6 +185,9 @@ export function writeSettings(patch: Partial<Settings>): Settings {
   }
   if (patch.onboarded !== undefined) {
     writeString(SETTINGS_KEYS.onboarded, patch.onboarded ? "1" : "0");
+  }
+  if (patch.agentModel !== undefined) {
+    writeString(SETTINGS_KEYS.agentModel, patch.agentModel);
   }
   if (patch.recentCommands !== undefined) {
     writeString(

@@ -10,14 +10,12 @@
   "scripts": {
     "sync": "node scripts/sync-server.mjs",
     "icons": "node scripts/make-icons.mjs",
-    "predev": "npm run sync",
-    "dev": "electron .",
-    "presmoke": "npm run sync",
-    "smoke": "electron . --smoke",
+    "dev": "node ../../scripts/desktop.mjs",
+    "smoke": "node ../../scripts/desktop.mjs --smoke",
     "predist": "npm run sync",
     "dist": "electron-builder",
     "postinstall": "electron-builder install-app-deps",
-    "dist:mac": "npm run sync && electron-builder --mac dmg -c.mac.identity=null && sh scripts/sign-mac.sh"
+    "dist:mac": "node ../../scripts/desktop.mjs --dist"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.0",

@@ -526,6 +526,8 @@ function parseJson(text: string): unknown {
 /* the local agent launcher                                                   */
 /* -------------------------------------------------------------------------- */
 
+export type LocalAgentModel = { id: string; label: string };
+
 export type LocalAgent = {
   id: string;
   label: string;
@@ -533,9 +535,16 @@ export type LocalAgent = {
   available: boolean;
   /** This mailmux build knows how to launch it. */
   supported: boolean;
+  /** Models the server lets you pick from. Empty means no picker. */
+  models: LocalAgentModel[];
 };
 
-export type RunningLocalAgent = { id: string; pid: number; startedAt: string };
+export type RunningLocalAgent = {
+  id: string;
+  pid: number;
+  startedAt: string;
+  model: string | null;
+};
 
 export type LocalAgentExit = {
   id: string;
@@ -561,10 +570,17 @@ export function listLocalAgents(ctx: Ctx): Promise<LocalAgentsResponse> {
 export function startLocalAgent(
   id: string,
   ctx: Ctx,
+  model?: string,
 ): Promise<{ running: RunningLocalAgent }> {
   return request<{ running: RunningLocalAgent }>(
     `/api/agents/${encodeURIComponent(id)}/start`,
-    { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+      body: model ? { model } : undefined,
+    },
   );
 }
 

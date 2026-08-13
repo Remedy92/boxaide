@@ -70,8 +70,8 @@ describe("AgentLauncher", () => {
       { PATH: bin },
     );
     expect(launcher.list()).toEqual([
-      { id: "fake", label: "Fake Agent", available: true, supported: true },
-      { id: "ghost", label: "Ghost", available: false, supported: false },
+      { id: "fake", label: "Fake Agent", available: true, supported: true, models: [] },
+      { id: "ghost", label: "Ghost", available: false, supported: false, models: [] },
     ]);
   });
 
@@ -143,6 +143,50 @@ describe("AgentLauncher", () => {
 
     const empty = new AgentLauncher(CTX, specs(), { PATH: tempDir() });
     expect(() => empty.start("fake")).toThrowError(/not installed/);
+  });
+
+  it("passes only registry model ids to the command line", async () => {
+    const bin = fakeBinDir("fake-agent");
+    let seenArgs: string[] = [];
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({
+        models: [{ id: "model-a", label: "Model A" }],
+        args: (_ctx, model) => {
+          seenArgs = model ? ["--model", model] : [];
+          return seenArgs;
+        },
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    expect(() => launcher.start("fake", "model-b")).toThrowError(
+      /does not offer that model/,
+    );
+
+    const running = launcher.start("fake", "model-a");
+    expect(running.model).toBe("model-a");
+    expect(seenArgs).toEqual(["--model", "model-a"]);
+    expect(launcher.list()[0].models).toEqual([{ id: "model-a", label: "Model A" }]);
+    launcher.stop();
+    await until(() => launcher.status().running === null);
+  });
+
+  it("rejects a model on an agent that offers none", () => {
+    const bin = fakeBinDir("fake-agent");
+    const launcher = new AgentLauncher(CTX, specs(), { PATH: bin });
+    expect(() => launcher.start("fake", "anything")).toThrowError(
+      /does not offer that model/,
+    );
+  });
+
+  it("adds --model to the Claude command line only when picked", () => {
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    expect(claude.args!(CTX)).not.toContain("--model");
+    const withModel = claude.args!(CTX, "claude-fable-5");
+    expect(withModel[withModel.indexOf("--model") + 1]).toBe("claude-fable-5");
+    expect(claude.models?.map((m) => m.id)).toContain("claude-fable-5");
   });
 
   it("pre-approves read and draft tools and never message_send", () => {
@@ -259,6 +303,29 @@ describe("launcher routes", () => {
       headers: auth,
     });
     expect(unsupported.status).toBe(400);
+
+    // Model validation happens before anything resolves or spawns, so these
+    // are safe to hit even on a machine with the real CLI installed.
+    const badModelType = await runtime.app.request(
+      "/api/agents/claude-code/start",
+      {
+        method: "POST",
+        headers: { ...auth, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: 123 }),
+      },
+    );
+    expect(badModelType.status).toBe(400);
+
+    const unknownModel = await runtime.app.request(
+      "/api/agents/claude-code/start",
+      {
+        method: "POST",
+        headers: { ...auth, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "not-a-registry-model" }),
+      },
+    );
+    expect(unknownModel.status).toBe(400);
+    expect((await unknownModel.json()).error).toMatch(/does not offer/);
 
     const stopped = await runtime.app.request("/api/agents/stop", {
       method: "POST",

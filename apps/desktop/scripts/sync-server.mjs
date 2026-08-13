@@ -9,9 +9,10 @@
  * the native module would refuse to load. Importing a copy that sits inside
  * `apps/desktop` puts the resolution walk in the right tree.
  */
-import { cp, mkdir, readFile, rm, stat } from "node:fs/promises";
+import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { exists, sourceNeedsCopy } from "../../../scripts/lib/stale.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(here, "..");
@@ -22,24 +23,15 @@ const sources = [
     from: join(repoRoot, "dist"),
     to: join(desktopRoot, "server", "dist"),
     probe: "app.js",
-    fix: "npm run build:server   # in the repository root",
+    fix: "npm run desktop",
   },
   {
     from: join(repoRoot, "web-next"),
     to: join(desktopRoot, "server", "web-next"),
     probe: "index.html",
-    fix: "npm run build          # in the repository root",
+    fix: "npm run desktop",
   },
 ];
-
-async function exists(path) {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * The desktop package restates the server's runtime dependencies instead of
@@ -47,7 +39,7 @@ async function exists(path) {
  * That restatement is the one thing here that can silently drift, so it is
  * checked on every sync rather than trusted.
  */
-async function assertServerDepsMatch() {
+export async function assertServerDepsMatch() {
   const [root, desktop] = await Promise.all([
     readFile(join(repoRoot, "package.json"), "utf8").then(JSON.parse),
     readFile(join(desktopRoot, "package.json"), "utf8").then(JSON.parse),
@@ -67,27 +59,30 @@ async function assertServerDepsMatch() {
     throw new Error(
       `apps/desktop/package.json dependencies have drifted from the root package.json:\n` +
         problems.map((p) => `  - ${p}`).join("\n") +
-        `\nEdit apps/desktop/package.json to match, then run npm install here.`,
+        `\nEdit apps/desktop/package.json to match, then run npm install there.`,
     );
   }
 }
 
-async function main() {
+export async function syncServer() {
   await assertServerDepsMatch();
   for (const { from, probe, fix } of sources) {
     if (!(await exists(join(from, probe)))) {
       throw new Error(`Missing ${join(from, probe)}.\nBuild it first:\n  ${fix}`);
     }
   }
-  await rm(join(desktopRoot, "server"), { recursive: true, force: true });
   await mkdir(join(desktopRoot, "server"), { recursive: true });
   for (const { from, to } of sources) {
+    if (!(await sourceNeedsCopy(from, to))) continue;
+    await rm(to, { recursive: true, force: true });
     await cp(from, to, { recursive: true });
     console.log(`synced ${from} -> ${to}`);
   }
 }
 
-main().catch((err) => {
-  console.error(err.message);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  syncServer().catch((err) => {
+    console.error(err.message);
+    process.exit(1);
+  });
+}

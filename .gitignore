@@ -27,6 +27,14 @@ apps/web/node_modules/
 # `npm run web:sync` copies apps/web/out here for the self-hosted server.
 web-next/
 
+# Incremental tsc cache for `npm run desktop`
+.tsbuildinfo
+apps/web/.mailmux-export
+
+# Desktop pack output and the copied server/UI tree
+apps/desktop/release/
+apps/desktop/server/
+
 # Playwright MCP scratch
 .playwright-mcp/
 
