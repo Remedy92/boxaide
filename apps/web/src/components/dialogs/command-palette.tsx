@@ -4,6 +4,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   ChevronRight,
+  Columns3,
   Copy,
   Folder,
   Inbox,
@@ -17,11 +18,14 @@ import {
   ReplyAll,
   Rows3,
   Search,
+  Send,
   Server,
   Settings2,
   Sparkle,
   SunMoon,
+  Timer,
   Trash2,
+  Users,
   FilePen,
   Forward as ForwardIcon,
   Keyboard,
@@ -244,6 +248,37 @@ function Palette({
       icon: <FilePen />,
       hint: "g d",
       action: () => app.setView("drafts"),
+    },
+    /* No `hint`: People and Pipeline have no `g` chord. The shortcuts sheet is
+       the one list of those, and inventing a binding here would put a key in
+       the palette that does nothing when pressed. */
+    {
+      id: "go-people",
+      group: "Go to",
+      label: "People",
+      icon: <Users />,
+      action: () => app.setView("people"),
+    },
+    {
+      id: "go-pipeline",
+      group: "Go to",
+      label: "Pipeline",
+      icon: <Columns3 />,
+      action: () => app.setView("pipeline"),
+    },
+    {
+      id: "go-automations",
+      group: "Go to",
+      label: "Automations",
+      icon: <Timer />,
+      action: () => app.setView("automations"),
+    },
+    {
+      id: "go-outreach",
+      group: "Go to",
+      label: "Outreach",
+      icon: <Send />,
+      action: () => app.setView("outreach"),
     },
     ...list.map((account, index) => ({
       id: `go-account-${account.id}`,

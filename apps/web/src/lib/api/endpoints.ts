@@ -21,8 +21,18 @@ import type {
   AgentStateResponse,
   AgentTurn,
   ApiHealthResponse,
+  Automation,
+  AutomationRun,
   ConnectionTestResult,
   CreatedAccount,
+  CrmContact,
+  CrmContactDetail,
+  CrmDeal,
+  CrmInteraction,
+  CrmNote,
+  CrmOrganization,
+  CrmPipelineBoard,
+  CrmSyncResult,
   DraftInput,
   DraftRef,
   HealthResponse,
@@ -32,7 +42,13 @@ import type {
   MailAccountMeta,
   MessageListResponse,
   MetaResponse,
+  OutboxRow,
+  OutboxStatus,
+  OutreachBadge,
+  OutreachCampaign,
+  CampaignStatus,
   SendResult,
+  SuppressionRow,
 } from "@/lib/types";
 
 /** Everything an endpoint needs: which server, which token, how to cancel. */
@@ -484,6 +500,445 @@ export function streamAgent(
         // conversation. The next one re-states presence anyway.
       }
     },
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* CRM — /api/crm/*                                                           */
+/* -------------------------------------------------------------------------- */
+
+export type CrmContactsQuery = {
+  /** Free text over name, email and org name. */
+  query?: string;
+  tag?: string;
+  /** 1–200. Anything outside that range is a 400, not a clamp. */
+  limit?: number;
+};
+
+export async function listCrmContacts(
+  o: CrmContactsQuery,
+  ctx: Ctx,
+): Promise<CrmContact[]> {
+  const data = await request<{ contacts: CrmContact[] }>(
+    `/api/crm/contacts${query({
+      query: o.query,
+      tag: o.tag,
+      limit: o.limit ?? DEFAULT_LIMIT,
+    })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+  return data.contacts;
+}
+
+export type CrmContactBody = {
+  email: string;
+  name?: string;
+  title?: string;
+  /** Org NAME. The server resolves or creates it; `orgDomain` only helps match. */
+  org?: string;
+  orgDomain?: string;
+  /**
+   * ADDITIVE. `store.addTags` is INSERT OR IGNORE and the REST surface exposes
+   * no removal, so sending a shorter list does not untag anything.
+   */
+  tags?: string[];
+  source?: string;
+};
+
+/**
+ * Upsert by lowercase email — re-POSTing an address EDITS that contact rather
+ * than creating a second one, which is what makes this both "create" and
+ * "edit". The route passes `force: true`, so an explicit name always wins over
+ * the longest-name-seen rule that mail-derived rows follow.
+ */
+export async function upsertCrmContact(
+  body: CrmContactBody,
+  ctx: Ctx,
+): Promise<CrmContact> {
+  const data = await request<{ contact: CrmContact }>("/api/crm/contacts", {
+    method: "POST",
+    body,
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+  return data.contact;
+}
+
+/** The detail body is NOT wrapped in a key — see CrmContactDetail. */
+export function getCrmContact(
+  contactId: string,
+  ctx: Ctx,
+  limit?: number,
+): Promise<CrmContactDetail> {
+  return request<CrmContactDetail>(
+    `/api/crm/contacts/${encodeURIComponent(contactId)}${query({ limit })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+/** A 404 means it was already gone; normalised rather than thrown. */
+export async function deleteCrmContact(
+  contactId: string,
+  ctx: Ctx,
+): Promise<{ deleted: boolean }> {
+  try {
+    return await request<{ deleted: boolean }>(
+      `/api/crm/contacts/${encodeURIComponent(contactId)}`,
+      {
+        method: "DELETE",
+        baseUrl: ctx.baseUrl,
+        token: ctx.token,
+        signal: ctx.signal,
+      },
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return { deleted: false };
+    throw err;
+  }
+}
+
+export async function addCrmNote(
+  contactId: string,
+  text: string,
+  ctx: Ctx,
+): Promise<CrmNote> {
+  const data = await request<{ note: CrmNote }>(
+    `/api/crm/contacts/${encodeURIComponent(contactId)}/notes`,
+    {
+      method: "POST",
+      body: { text },
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.note;
+}
+
+export async function listCrmInteractions(
+  contactId: string,
+  ctx: Ctx,
+  limit?: number,
+): Promise<CrmInteraction[]> {
+  const data = await request<{ interactions: CrmInteraction[] }>(
+    `/api/crm/contacts/${encodeURIComponent(contactId)}/interactions${query({
+      limit,
+    })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+  return data.interactions;
+}
+
+export async function listCrmOrgs(ctx: Ctx): Promise<CrmOrganization[]> {
+  const data = await request<{ orgs: CrmOrganization[] }>("/api/crm/orgs", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+  return data.orgs;
+}
+
+export async function createCrmOrg(
+  body: { name: string; domain?: string | null },
+  ctx: Ctx,
+): Promise<CrmOrganization> {
+  const data = await request<{ org: CrmOrganization }>("/api/crm/orgs", {
+    method: "POST",
+    body,
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+  return data.org;
+}
+
+export async function getCrmPipeline(ctx: Ctx): Promise<CrmPipelineBoard> {
+  const data = await request<{ stages: CrmPipelineBoard }>("/api/crm/pipeline", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+  return data.stages;
+}
+
+export type CrmDealBody = {
+  /** Present ⇒ patch. Absent ⇒ create. An unknown id is a 404, never a create. */
+  dealId?: string;
+  title?: string;
+  contactId?: string | null;
+  orgId?: string | null;
+  stageId?: string;
+  value?: number | null;
+  currency?: string | null;
+};
+
+export async function upsertCrmDeal(
+  body: CrmDealBody,
+  ctx: Ctx,
+): Promise<CrmDeal> {
+  const data = await request<{ deal: CrmDeal }>("/api/crm/deals", {
+    method: "POST",
+    body,
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+  return data.deal;
+}
+
+/** `position` is the index within the target stage; omitted means append. */
+export async function moveCrmDeal(
+  dealId: string,
+  stageId: string,
+  ctx: Ctx,
+  position?: number,
+): Promise<CrmDeal> {
+  const data = await request<{ deal: CrmDeal }>(
+    `/api/crm/deals/${encodeURIComponent(dealId)}/move`,
+    {
+      method: "POST",
+      body: position === undefined ? { stageId } : { stageId, position },
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.deal;
+}
+
+export async function deleteCrmDeal(
+  dealId: string,
+  ctx: Ctx,
+): Promise<{ deleted: boolean }> {
+  try {
+    return await request<{ deleted: boolean }>(
+      `/api/crm/deals/${encodeURIComponent(dealId)}`,
+      {
+        method: "DELETE",
+        baseUrl: ctx.baseUrl,
+        token: ctx.token,
+        signal: ctx.signal,
+      },
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return { deleted: false };
+    throw err;
+  }
+}
+
+/**
+ * Walks INBOX and Sent per mailbox server-side, so it can take seconds. The
+ * counts are rows touched by THIS run, not the size of the CRM.
+ */
+export function syncCrm(ctx: Ctx): Promise<CrmSyncResult> {
+  return request<CrmSyncResult>("/api/crm/sync", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* automations — /api/automations/*                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Deliberately absent from this file: POST /api/automations and
+ * DELETE /api/automations/:id. Automations are written by talking to the agent
+ * (spec: Web UI) — the UI has no create form, so it gets no create call.
+ */
+export async function listAutomations(ctx: Ctx): Promise<Automation[]> {
+  const data = await request<{ automations: Automation[] }>("/api/automations", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+  return data.automations;
+}
+
+/**
+ * PATCH — a partial write. The UI sends only `enabled`; every other field is
+ * the agent's to author. A bad cron or a duplicate name is a 400, not a 500.
+ */
+export async function updateAutomation(
+  automationId: string,
+  patch: { enabled?: boolean; name?: string; cron?: string; prompt?: string },
+  ctx: Ctx,
+): Promise<Automation> {
+  const data = await request<{ automation: Automation }>(
+    `/api/automations/${encodeURIComponent(automationId)}`,
+    {
+      method: "PATCH",
+      body: patch,
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.automation;
+}
+
+/**
+ * 202 {queued:true} — the run is enqueued, NOT finished. Runs are serialized
+ * one at a time server-side, so this can sit behind another agent for minutes.
+ * Read the outcome back from the run list.
+ */
+export function runAutomationNow(
+  automationId: string,
+  ctx: Ctx,
+): Promise<{ queued: boolean }> {
+  return request<{ queued: boolean }>(
+    `/api/automations/${encodeURIComponent(automationId)}/run`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
+/** `limit` defaults to 20 server-side; each run carries the last 4 KiB of log. */
+export async function listAutomationRuns(
+  automationId: string,
+  ctx: Ctx,
+  limit?: number,
+): Promise<AutomationRun[]> {
+  const data = await request<{ runs: AutomationRun[] }>(
+    `/api/automations/${encodeURIComponent(automationId)}/runs${query({ limit })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+  return data.runs;
+}
+
+/* -------------------------------------------------------------------------- */
+/* outreach — /api/outreach/*                                                 */
+/* -------------------------------------------------------------------------- */
+
+export async function listCampaigns(ctx: Ctx): Promise<OutreachCampaign[]> {
+  const data = await request<{ campaigns: OutreachCampaign[] }>(
+    "/api/outreach/campaigns",
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+  return data.campaigns;
+}
+
+/**
+ * Status only, from this app: steps may be replaced while a campaign is a
+ * draft, but they are the agent's to author and no GET returns them, so the UI
+ * has nothing to send back. Activating a campaign kicks the engine server-side,
+ * which queues step 0 — as pending outbox rows, never as sent mail.
+ */
+export async function updateCampaignStatus(
+  campaignId: string,
+  status: CampaignStatus,
+  ctx: Ctx,
+): Promise<OutreachCampaign> {
+  const data = await request<{ campaign: OutreachCampaign }>(
+    `/api/outreach/campaigns/${encodeURIComponent(campaignId)}`,
+    {
+      method: "PATCH",
+      body: { status },
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.campaign;
+}
+
+export async function listOutbox(
+  o: { status?: OutboxStatus; limit?: number },
+  ctx: Ctx,
+): Promise<OutboxRow[]> {
+  const data = await request<{ outbox: OutboxRow[] }>(
+    `/api/outreach/outbox${query({ status: o.status, limit: o.limit })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+  return data.outbox;
+}
+
+/**
+ * The human decision, and the only one there is: no MCP tool approves, rejects
+ * or sends an outbox row (spec invariant 1). Approving hands the row to the
+ * engine, which sends it under the per-account daily cap and the 60s gap — so a
+ * 200 here means "approved", never "delivered".
+ *
+ * Only a `pending` row can be decided; anything else is a 400 from the server.
+ */
+export async function decideOutbox(
+  outboxId: string,
+  decision: "approve" | "reject",
+  ctx: Ctx,
+): Promise<OutboxRow> {
+  const data = await request<{ outbox: OutboxRow }>(
+    `/api/outreach/outbox/${encodeURIComponent(outboxId)}/${decision}`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.outbox;
+}
+
+export async function listSuppression(ctx: Ctx): Promise<SuppressionRow[]> {
+  const data = await request<{ suppression: SuppressionRow[] }>(
+    "/api/outreach/suppression",
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+  return data.suppression;
+}
+
+/** Suppression is enforced inside MailService.sendMessage, not by this UI. */
+export async function addSuppression(
+  email: string,
+  reason: string,
+  ctx: Ctx,
+): Promise<SuppressionRow> {
+  const data = await request<{ suppressed: SuppressionRow }>(
+    "/api/outreach/suppression",
+    {
+      method: "POST",
+      body: { email, reason },
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.suppressed;
+}
+
+/** A 404 means the address was not on the list; normalised rather than thrown. */
+export async function removeSuppression(
+  email: string,
+  ctx: Ctx,
+): Promise<{ deleted: boolean }> {
+  try {
+    return await request<{ deleted: boolean }>(
+      `/api/outreach/suppression/${encodeURIComponent(email)}`,
+      {
+        method: "DELETE",
+        baseUrl: ctx.baseUrl,
+        token: ctx.token,
+        signal: ctx.signal,
+      },
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return { deleted: false };
+    throw err;
+  }
+}
+
+/** One COUNT. Polled every 30s by the rail badge; it must stay this cheap. */
+export function getOutreachBadge(ctx: Ctx): Promise<OutreachBadge> {
+  return request<OutreachBadge>("/api/outreach/badge", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
   });
 }
 

@@ -1,7 +1,17 @@
 "use client";
 
 import * as React from "react";
-import { FilePen, Inbox, MailOpen, Plus, Sparkle } from "lucide-react";
+import {
+  Columns3,
+  FilePen,
+  Inbox,
+  MailOpen,
+  Plus,
+  Send,
+  Sparkle,
+  Timer,
+  Users,
+} from "lucide-react";
 import { WorkingMark } from "@/components/agent/agent-run";
 import { AccountRow, type AccountHealth } from "@/components/rail/account-row";
 import { AgentsSection } from "@/components/rail/agents-section";
@@ -10,7 +20,8 @@ import { ComposeButton } from "@/components/rail/compose-button";
 import { FolderList } from "@/components/rail/folder-list";
 import { NavItem } from "@/components/rail/nav-item";
 import { RailFooter } from "@/components/rail/rail-footer";
-import { SectionLabel } from "@/components/atoms";
+import { SectionLabel, StatusDot } from "@/components/atoms";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -24,6 +35,7 @@ import { useApp } from "@/lib/hooks/use-app-state";
 import { useConnection } from "@/lib/hooks/use-connection";
 import { useHealth } from "@/lib/hooks/use-health";
 import { useMessages } from "@/lib/hooks/use-messages";
+import { useOutreachBadge } from "@/lib/hooks/use-outreach";
 import type { MailAccountMeta } from "@/lib/types";
 
 /**
@@ -43,6 +55,7 @@ export function LeftRail({
   const health = useHealth();
   const connection = useConnection();
   const agent = useAgent();
+  const badge = useOutreachBadge();
   const messages = useMessages({
     account: app.account,
     folder: app.folder,
@@ -76,6 +89,7 @@ export function LeftRail({
   }, [app.account, errors.length, hasResponse, list.length]);
 
   const inMail = app.view === "mail";
+  const pending = badge.data?.pending ?? 0;
 
   const viewsAndFolders = (
     <>
@@ -131,13 +145,59 @@ export function LeftRail({
           active={app.view === "drafts"}
           onClick={() => app.setView("drafts")}
         />
+        {/* The CRM. People is a list and a detail pane, the same shape as mail;
+            Pipeline is a board and takes the whole width. Neither carries a
+            count: the endpoints return rows, not totals, and counting the page
+            we happened to fetch is a different number. */}
+        <NavItem
+          icon={Users}
+          label="People"
+          active={app.view === "people"}
+          onClick={() => app.setView("people")}
+        />
+        <NavItem
+          icon={Columns3}
+          label="Pipeline"
+          active={app.view === "pipeline"}
+          onClick={() => app.setView("pipeline")}
+        />
+        <NavItem
+          icon={Timer}
+          label="Automations"
+          active={app.view === "automations"}
+          onClick={() => app.setView("automations")}
+        />
+        {/* The one count in this rail, and the one the spec asks for: emails an
+            agent wrote that nobody has decided on. It is a number the server
+            returns — GET /api/outreach/badge, polled every 30s — not a count of
+            the page we happened to fetch, and it is a person's queue, not a
+            notification. Silent when there is nothing to decide. */}
+        <NavItem
+          icon={Send}
+          label="Outreach"
+          active={app.view === "outreach"}
+          onClick={() => app.setView("outreach")}
+          ariaLabel={
+            pending > 0
+              ? `Outreach, ${pending} waiting for approval`
+              : undefined
+          }
+          trailing={
+            pending > 0 ? (
+              <Badge variant="accent" className="tnum px-1.5">
+                {pending}
+              </Badge>
+            ) : undefined
+          }
+        />
       </div>
 
-      {/* Not rendered in the Agent view. Folders scope the message list, and in
-          a conversation there is no list to scope — the section would sit there
-          explaining that it needs a mailbox picked, about a pane that is not on
-          screen. Drafts still shows it, disabled, because Drafts IS a list. */}
-      {app.view !== "agent" && (
+      {/* Mail and Drafts only. Folders scope the MESSAGE list; in a
+          conversation, in People and on the Pipeline there is no such list to
+          scope — the section would sit there explaining that it needs a mailbox
+          picked, about a pane that is not on screen. Drafts still shows it,
+          disabled, because Drafts IS a list of mail. */}
+      {(inMail || app.view === "drafts") && (
         <FolderList
           accountRef={app.account}
           activeFolder={app.folder}
@@ -181,10 +241,24 @@ export function LeftRail({
                     type="button"
                     variant="ghost"
                     size="icon"
-                    aria-label="Views and folders"
-                    className="w-full"
+                    aria-label={
+                      pending > 0
+                        ? `Views and folders, ${pending} waiting for approval`
+                        : "Views and folders"
+                    }
+                    className="relative w-full"
                   >
                     <Inbox className="size-4" strokeWidth={1.5} />
+                    {/* The collapsed rail has no room for the Outreach row, so
+                        the count it carries becomes a dot on the control that
+                        opens it. The number itself is one click away, and the
+                        accessible name above already says it. */}
+                    {pending > 0 && (
+                      <StatusDot
+                        tone="accent"
+                        className="absolute top-1.5 right-1.5"
+                      />
+                    )}
                   </Button>
                 </PopoverTrigger>
               </TooltipTrigger>

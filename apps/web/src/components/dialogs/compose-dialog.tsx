@@ -46,6 +46,7 @@ import {
   useDeleteDraft,
   useUpdateDraft,
 } from "@/lib/hooks/use-drafts";
+import { useDecideOutbox } from "@/lib/hooks/use-outreach-mutations";
 import { missingRecipients, useSend } from "@/lib/hooks/use-send";
 
 /**
@@ -88,6 +89,7 @@ function ComposeForm({
   const createDraft = useCreateDraft();
   const updateDraft = useUpdateDraft();
   const deleteDraft = useDeleteDraft();
+  const decideOutbox = useDecideOutbox();
   const list = accounts.data ?? [];
 
   const [account, setAccount] = React.useState(
@@ -242,6 +244,24 @@ function ComposeForm({
               },
             );
             if (app.selectedDraft?.draftId === gone.draftId) app.clearSelection();
+          }
+          /* Same rule for a queued outreach row this composer was opened to
+             edit: the human has now sent their version, so the queued copy is
+             rejected — after the send, never before — or the engine would post
+             the agent's original as well. */
+          if (seed.outboxId) {
+            const queued = seed.outboxId;
+            decideOutbox.mutate(
+              { outboxId: queued, decision: "reject" },
+              {
+                onError: () =>
+                  toast.warning("Sent, but the queued copy is still waiting", {
+                    description:
+                      "Reject it in the Outreach queue so it cannot go out twice.",
+                  }),
+              },
+            );
+            if (app.selectedOutbox === queued) app.selectOutbox(null);
           }
           onOpenChange(false);
         },

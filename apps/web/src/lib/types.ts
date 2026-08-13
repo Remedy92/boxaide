@@ -205,6 +205,194 @@ export type AgentStateResponse = {
   presence: AgentPresence;
 };
 
+/* -------------------------------------------------------------------------- */
+/* CRM — contacts, orgs, notes, interactions, pipeline                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Field-for-field from src/crm/store.ts. Two things are load-bearing here.
+ *
+ * Identity fields (email, name, org name/domain) arrive in plaintext — the spec
+ * keeps them out of the encrypted set because UNIQUE and search need them.
+ * Mail-derived text (note bodies, interaction subjects and snippets) is stored
+ * encrypted and decrypted by the store on the way out, so what lands here is
+ * already readable and must never be persisted by this client.
+ */
+export type CrmOrganization = {
+  id: string;
+  name: string;
+  domain: string | null;
+  createdAt: string;
+};
+
+/** Rows from GET /api/crm/contacts. `orgName` is joined, not stored. */
+export type CrmContact = {
+  id: string;
+  email: string; // lowercase
+  name: string | null;
+  title: string | null;
+  orgId: string | null;
+  orgName: string | null;
+  source: string; // 'mail' | 'agent' | 'manual'
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CrmNote = {
+  id: string;
+  contactId: string;
+  at: string;
+  text: string; // decrypted server-side
+};
+
+export type CrmInteraction = {
+  id: string;
+  contactId: string;
+  accountId: string;
+  messageId: string; // accountId:folder:uid — NOT fetchable without the folder
+  direction: "in" | "out";
+  at: string;
+  subject: string | null; // decrypted server-side
+  snippet: string | null; // decrypted server-side
+};
+
+export type CrmPipelineStage = { id: string; name: string; position: number };
+
+export type CrmDeal = {
+  id: string;
+  title: string;
+  contactId: string | null;
+  orgId: string | null;
+  stageId: string;
+  value: number | null;
+  currency: string | null;
+  position: number; // order within the stage
+  createdAt: string;
+  updatedAt: string;
+};
+
+/**
+ * GET /api/crm/contacts/:id. The ONLY response in the CRM surface that is not
+ * wrapped in a named key — routes.ts returns the detail object itself.
+ */
+export type CrmContactDetail = {
+  contact: CrmContact;
+  tags: string[];
+  notes: CrmNote[];
+  interactions: CrmInteraction[];
+  deals: CrmDeal[];
+};
+
+/** GET /api/crm/pipeline → { stages: CrmPipelineBoard }. Stages in board order. */
+export type CrmPipelineBoard = Array<CrmPipelineStage & { deals: CrmDeal[] }>;
+
+/** POST /api/crm/sync — counts touched, not counts held. */
+export type CrmSyncResult = { contacts: number; interactions: number };
+
+/* -------------------------------------------------------------------------- */
+/* automations — /api/automations/*                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Field-for-field from src/automation/store.ts.
+ *
+ * `prompt` is user-authored instructions to a future agent run and is stored in
+ * plaintext by design; run logs are NOT — they quote mail, so they are
+ * encrypted at rest and arrive here already decrypted and tail-trimmed.
+ */
+export type Automation = {
+  id: string;
+  name: string;
+  /** 5-field cron. The server rejects anything else, including the 6-field form. */
+  cron: string;
+  prompt: string;
+  /** Launcher AgentSpec id. Null ⇒ the first available agent runs it. */
+  agentId: string | null;
+  enabled: boolean;
+  createdAt: string;
+  lastRunAt: string | null;
+  /** Null while disabled or unschedulable — never a claim that a run is due. */
+  nextRunAt: string | null;
+};
+
+export type AutomationRunStatus = "running" | "ok" | "error" | "killed";
+
+export type AutomationRun = {
+  id: string;
+  automationId: string;
+  startedAt: string;
+  /** Null while the run is still going. */
+  finishedAt: string | null;
+  status: AutomationRunStatus;
+  exitCode: number | null;
+  /** Decrypted server-side, LAST 4 KiB only. "" when nothing was captured. */
+  log: string;
+};
+
+/* -------------------------------------------------------------------------- */
+/* outreach — /api/outreach/*                                                 */
+/* -------------------------------------------------------------------------- */
+
+export type CampaignStatus = "draft" | "active" | "paused" | "done";
+
+/**
+ * A campaign row from GET /api/outreach/campaigns. `counts` is keyed by
+ * campaign-contact state ('active' | 'replied' | 'opted_out' | 'done' |
+ * 'suppressed') and OMITS states with no rows — never read it as a full map.
+ *
+ * The sequence steps are not on this response. No GET returns them: they are
+ * authored through the agent, and PATCH echoes them back.
+ */
+export type OutreachCampaign = {
+  id: string;
+  name: string;
+  accountId: string;
+  status: CampaignStatus;
+  createdAt: string;
+  counts: Record<string, number>;
+};
+
+export type OutboxStatus =
+  | "pending"
+  | "approved"
+  | "sent"
+  | "rejected"
+  | "failed";
+
+/**
+ * One queued outreach email. `subject` and `body` are stored encrypted and
+ * arrive decrypted — mail content, rendered as TEXT and never as HTML, and
+ * never persisted by this client.
+ *
+ * There is no route that edits a row: the queue offers approve and reject, and
+ * "edit" means the human takes the text into the composer and sends it
+ * themselves.
+ */
+export type OutboxRow = {
+  id: string;
+  accountId: string;
+  campaignId: string | null;
+  contactId: string | null;
+  stepPosition: number | null;
+  to: string;
+  subject: string;
+  body: string;
+  status: OutboxStatus;
+  createdAt: string;
+  decidedAt: string | null;
+  sentAt: string | null;
+  error: string | null;
+};
+
+export type SuppressionRow = {
+  email: string; // lowercase
+  reason: string; // 'reply-stop' | 'manual' | 'bounce' | 'agent'
+  at: string;
+};
+
+/** GET /api/outreach/badge — a COUNT of pending rows and nothing else. */
+export type OutreachBadge = { pending: number };
+
 /** Union of every error body shape the server can emit. */
 export type ErrorBody =
   | { error: string }

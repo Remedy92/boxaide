@@ -15,6 +15,7 @@ import {
   dialog,
   Menu,
   nativeImage,
+  Notification,
   screen,
   shell,
   Tray,
@@ -68,6 +69,17 @@ let serverUrl = null;
 let tray = null;
 /** @type {BrowserWindow | null} */
 let popover = null;
+/** @type {NodeJS.Timeout | null} */
+let badgeTimer = null;
+/**
+ * Pending count from the previous poll, or null before the first one.
+ *
+ * Null is not zero: at launch every pending draft is old work the user left
+ * behind, not something that arrived while they were looking away. The first
+ * poll therefore paints the badge and stays quiet; only a later rise notifies.
+ * @type {number | null}
+ */
+let lastPending = null;
 
 if (!app.requestSingleInstanceLock()) {
   // A second launch hands focus to the running one. Two instances would fight
@@ -97,6 +109,9 @@ if (!app.requestSingleInstanceLock()) {
   // store and the listener are already closed, so there is nothing left to
   // unwind gracefully.
   app.on("will-quit", (event) => {
+    // Before the early return: the poll must stop even when the server never
+    // started, or a tick fires against a half-torn-down process.
+    stopBadgePoll();
     if (!stopServer) return;
     const stop = stopServer;
     stopServer = null;
@@ -129,6 +144,87 @@ async function start() {
   // mail and your agents without the window" was asked for, and where the
   // template-image rendering below is known-correct.
   if (process.platform === "darwin") createTray(started.url);
+  // The token is right here in the runtime config — the same file-backed bearer
+  // token the page picks up from /api/local-bootstrap — so the main process
+  // reads it directly rather than going through the renderer.
+  if (!smoke) startBadgePoll(started.url, started.runtime.config.bearerToken);
+}
+
+/* ---- approval badge ------------------------------------------------------ */
+
+/** How often the main process asks the local server for the pending count. */
+const BADGE_POLL_MS = 60_000;
+
+/**
+ * Outreach never sends by itself: a draft sits in the outbox until a human
+ * approves it. The badge is what tells that human there is something waiting
+ * while the window is closed or behind other apps.
+ *
+ * @param {string} url
+ * @param {string} token
+ */
+function startBadgePoll(url, token) {
+  const endpoint = `${url}/api/outreach/badge`;
+  const poll = () => {
+    void pollBadge(endpoint, token);
+  };
+  poll();
+  badgeTimer = setInterval(poll, BADGE_POLL_MS);
+}
+
+function stopBadgePoll() {
+  if (!badgeTimer) return;
+  clearInterval(badgeTimer);
+  badgeTimer = null;
+}
+
+/**
+ * @param {string} endpoint
+ * @param {string} token
+ */
+async function pollBadge(endpoint, token) {
+  let pending;
+  try {
+    const response = await fetch(endpoint, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) return;
+    const body = await response.json();
+    pending = typeof body?.pending === "number" ? body.pending : null;
+  } catch {
+    // The server runs in this process, so a failed poll means a shutdown race
+    // or a socket that was not listening yet — both transient, both resolved by
+    // the next tick. Logging them would fill the console during a normal quit.
+    // The last seen count is left untouched so the poll that recovers does not
+    // re-notify for drafts the user has already been told about.
+    return;
+  }
+  if (pending === null || !Number.isFinite(pending) || pending < 0) return;
+  applyBadge(pending);
+}
+
+/** @param {number} pending */
+function applyBadge(pending) {
+  // Only a rise notifies, and the comparison is against the previous count
+  // rather than against zero: working through the queue lowers the count, and a
+  // count that merely stays high is work the user has already been told about.
+  const rose = lastPending !== null && pending > lastPending;
+  lastPending = pending;
+  // setBadgeCount(0) is how the dock badge is cleared, so the call is
+  // unconditional. It is a no-op on Windows, where Electron has no badge API.
+  app.setBadgeCount(pending);
+  if (!rose || !Notification.isSupported()) return;
+  const notification = new Notification({
+    title: "mailmux",
+    body:
+      pending === 1
+        ? "1 draft awaits your approval"
+        : `${pending} drafts await your approval`,
+  });
+  // The notification is only useful if it leads somewhere: clicking it opens
+  // the window the user would otherwise have to find.
+  notification.on("click", () => openMainWindow());
+  notification.show();
 }
 
 /** Raise the main window, recreating it after a close. */

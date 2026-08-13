@@ -214,7 +214,9 @@ describe("mcpb connector proxy", () => {
   });
 
   it("keeps the baked tool snapshot in sync with the server's list", async () => {
-    const { CHAT_TOOLS, TOOLS } = await import("../src/mcp/server.js");
+    const { CHAT_TOOLS, PLATFORM_TOOLS, TOOLS } = await import(
+      "../src/mcp/server.js"
+    );
     const snapshot = JSON.parse(
       readFileSync(
         join(process.cwd(), "apps", "mcpb", "server", "tools.json"),
@@ -223,7 +225,7 @@ describe("mcpb connector proxy", () => {
     );
     // Drift here means someone changed the MCP tools without re-running
     // `node scripts/export-mcpb-tools.mjs` (npm run mcpb:build does it).
-    expect(snapshot).toEqual([...TOOLS, ...CHAT_TOOLS]);
+    expect(snapshot).toEqual([...TOOLS, ...CHAT_TOOLS, ...PLATFORM_TOOLS]);
   });
 
   it("prefers SLEY_TOKEN over the token file", async () => {

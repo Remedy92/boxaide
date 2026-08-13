@@ -32,6 +32,9 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { CRM_TOOL_NAMES } from "../crm/tools.js";
+import { AUTOMATION_TOOL_NAMES } from "../automation/tools.js";
+import { OUTREACH_TOOL_NAMES } from "../outreach/tools.js";
 
 /**
  * Where agent CLIs actually live, beyond PATH.
@@ -100,6 +103,49 @@ const CLAUDE_PREAPPROVED_TOOLS = PREAPPROVED_TOOL_NAMES.map(
   (name) => `mcp__sley__${name}`,
 );
 
+/** The chat loop's own tools. A scheduled run has nobody to talk to. */
+const CHAT_TOOL_NAMES = new Set([
+  "chat_await_message",
+  "chat_say",
+  "chat_activity",
+  "chat_history",
+]);
+
+/**
+ * Prepended verbatim to every automation prompt (spec: Scheduler / Run
+ * preamble). It states the two boundaries the allowlist also enforces —
+ * no chat, no sending — because a model that understands why it is being
+ * refused writes a draft instead of retrying the wall.
+ */
+export const AUTOMATION_RUN_PREAMBLE =
+  "You are a scheduled mailmux automation. Do the task below using the mailmux MCP tools, then exit. You cannot talk to the user: do not call chat tools; write nothing to the user. Never send email: queue outreach with outbox_queue_draft or save with draft_create and a human will review.";
+
+/** Automation tools a run may call: reads only. It must not edit the schedule. */
+const RUN_AUTOMATION_READ_TOOLS = ["automations_list", "automation_runs_list"];
+
+/**
+ * Pre-approved tools for a headless automation run.
+ *
+ * Computed per call rather than frozen at import: the module-level tool sets
+ * come from three other modules, and a function keeps this honest about the
+ * lists as they actually are at spawn time. The chat tools drop out (no user
+ * on the other end) and message_send is deleted last, unconditionally — the
+ * one rule that survives any future addition to those sets.
+ */
+export function runPreapprovedToolNames(): string[] {
+  const names = new Set<string>();
+  for (const name of PREAPPROVED_TOOL_NAMES) {
+    if (!CHAT_TOOL_NAMES.has(name)) names.add(name);
+  }
+  for (const name of CRM_TOOL_NAMES) names.add(name);
+  for (const name of RUN_AUTOMATION_READ_TOOLS) {
+    if (AUTOMATION_TOOL_NAMES.has(name)) names.add(name);
+  }
+  for (const name of OUTREACH_TOOL_NAMES) names.add(name);
+  names.delete("message_send");
+  return [...names];
+}
+
 export type LaunchContext = {
   mcpUrl: string;
   bearerToken: string;
@@ -137,6 +183,12 @@ export type AgentSpec = {
    */
   args?: (ctx: LaunchContext, model?: string) => string[];
   /**
+   * Headless one-shot form used by automation runs: the same wiring as `args`
+   * with the automation prompt and the run allowlist. Absent means this CLI
+   * cannot carry a scheduled run, even when it can carry the chat loop.
+   */
+  runArgs?: (ctx: LaunchContext, prompt: string, model?: string) => string[];
+  /**
    * Extra child env, overlayed on the inherited env (and the widened PATH).
    * Grok has no --strict-mcp-config; GROK_HOME plus these flags keep the
    * process from picking up the user's other MCP servers.
@@ -159,9 +211,36 @@ export type AgentSpec = {
  * read/draft boundary (send stays un-approved, which headless mode denies).
  */
 function claudeArgs(ctx: LaunchContext, model?: string): string[] {
+  return claudeArgsFor(ctx, KICKOFF, CLAUDE_PREAPPROVED_TOOLS, model);
+}
+
+/**
+ * One-shot form: identical wiring, different prompt and allowlist. Same
+ * `-p` headless mode — the chat loop only exists because KICKOFF tells the
+ * model to loop, so a plain prompt already exits after the work is done.
+ */
+function claudeRunArgs(
+  ctx: LaunchContext,
+  prompt: string,
+  model?: string,
+): string[] {
+  return claudeArgsFor(
+    ctx,
+    prompt,
+    runPreapprovedToolNames().map((name) => `mcp__mailmux__${name}`),
+    model,
+  );
+}
+
+function claudeArgsFor(
+  ctx: LaunchContext,
+  prompt: string,
+  allowedTools: string[],
+  model?: string,
+): string[] {
   return [
     "-p",
-    KICKOFF,
+    prompt,
     ...(model ? ["--model", model] : []),
     "--mcp-config",
     JSON.stringify({
@@ -175,7 +254,7 @@ function claudeArgs(ctx: LaunchContext, model?: string): string[] {
     }),
     "--strict-mcp-config",
     "--allowedTools",
-    CLAUDE_PREAPPROVED_TOOLS.join(","),
+    allowedTools.join(","),
   ];
 }
 
@@ -198,9 +277,17 @@ function grokHomeFor(ctx: LaunchContext): string {
 }
 
 function grokArgs(_ctx: LaunchContext): string[] {
+  return grokArgsFor(KICKOFF, PREAPPROVED_TOOL_NAMES);
+}
+
+function grokRunArgs(_ctx: LaunchContext, prompt: string): string[] {
+  return grokArgsFor(prompt, runPreapprovedToolNames());
+}
+
+function grokArgsFor(prompt: string, allowed: readonly string[]): string[] {
   const args = [
     "-p",
-    KICKOFF,
+    prompt,
     "--verbatim",
     "--permission-mode",
     "dontAsk",
@@ -209,7 +296,7 @@ function grokArgs(_ctx: LaunchContext): string[] {
     "--no-memory",
     "--disable-web-search",
   ];
-  for (const name of PREAPPROVED_TOOL_NAMES) {
+  for (const name of allowed) {
     args.push("--allow", `MCPTool(sley__${name})`);
   }
   return args;
@@ -342,6 +429,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     label: "Claude Code",
     bin: "claude",
     args: claudeArgs,
+    runArgs: claudeRunArgs,
     models: CLAUDE_MODELS,
   },
   {
@@ -349,6 +437,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     label: "Grok",
     bin: "grok",
     args: grokArgs,
+    runArgs: grokRunArgs,
     childEnv: grokChildEnv,
     prepare: grokPrepare,
   },
@@ -388,11 +477,48 @@ export type LastExit = {
 
 const STDERR_TAIL_LIMIT = 4_096;
 
+/** What a finished one-shot automation run reports back to the scheduler. */
+export type OneShotResult = {
+  status: "ok" | "error" | "killed";
+  /** Null when the process was signalled (including the timeout SIGKILL). */
+  exitCode: number | null;
+  /** stdout and stderr interleaved, tail-capped at ONESHOT_LOG_LIMIT. */
+  log: string;
+};
+
+export type OneShotOptions = {
+  /** AgentSpec id, or null/undefined for the first launchable installed CLI. */
+  agentId?: string | null;
+  /** The automation prompt. The run preamble is prepended here, not by callers. */
+  prompt: string;
+  /** Overridable for tests only; production runs use ONESHOT_TIMEOUT_MS. */
+  timeoutMs?: number;
+};
+
+/** Spec: 15-minute hard timeout, then SIGKILL and status 'killed'. */
+export const ONESHOT_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * The tail is what gets kept, not the head: a run that failed says why in its
+ * last lines, and the interesting part of a run that succeeded is the summary
+ * it prints at the end.
+ */
+const ONESHOT_LOG_LIMIT = 64 * 1024;
+
 export class AgentLauncher {
   private child: ChildProcess | null = null;
   private running: RunningAgent | null = null;
   private lastExit: LastExit | null = null;
   private stderrTail = "";
+  /**
+   * The in-flight automation run. Separate from `child`/`running`, which stay
+   * the interactive chat agent's state: the Agent pane's presence, the
+   * /api/agents status, and stop() must not start reporting on a scheduled run
+   * that the user never pressed Start on.
+   */
+  private oneShot: ChildProcess | null = null;
+  /** Set while a one-shot is alive; closes over that run's kill/status flag. */
+  private killOneShot: (() => void) | null = null;
 
   constructor(
     private ctx: LaunchContext,
@@ -415,10 +541,21 @@ export class AgentLauncher {
     return { running: this.running, lastExit: this.lastExit };
   }
 
+  /**
+   * True while any agent process this launcher owns is alive — chat or
+   * automation run. The scheduler asks before dequeuing (spec invariant 4).
+   */
+  busy(): boolean {
+    return this.running !== null || this.oneShot !== null;
+  }
+
   /** Throws with a message fit for the API response. */
   start(id: string, model?: string): RunningAgent {
     if (this.running) {
       throw new LaunchError(409, `${this.running.id} is already running`);
+    }
+    if (this.oneShot) {
+      throw new LaunchError(409, "an automation run is in progress");
     }
     const spec = this.registry.find((s) => s.id === id);
     if (!spec) throw new LaunchError(404, `unknown agent: ${id}`);
@@ -435,25 +572,12 @@ export class AgentLauncher {
       throw new LaunchError(400, `${spec.label} is not installed (no ${spec.bin} on PATH)`);
     }
 
-    // An empty, dedicated working directory: no repository context, no
-    // CLAUDE.md, nothing for the agent to read into the session by accident.
-    const workDir =
-      this.ctx.dataDir === ":memory:"
-        ? join(tmpdir(), "sley-agent")
-        : join(this.ctx.dataDir, "agent-workdir");
-    mkdirSync(workDir, { recursive: true });
-    spec.prepare?.(this.ctx, workDir, this.env);
+    const workDir = this.prepareWorkDir(spec);
 
     this.stderrTail = "";
     const child = spawn(bin, spec.args(this.ctx, model), {
       cwd: workDir,
-      // The widened PATH travels with the agent: launched from the Finder app
-      // the inherited PATH lacks even the directory its own binary sits in.
-      env: {
-        ...this.env,
-        PATH: this.searchDirs().join(delimiter),
-        ...spec.childEnv?.(this.ctx, workDir),
-      },
+      env: this.childEnvFor(spec, workDir),
       stdio: ["ignore", "ignore", "pipe"],
     });
     child.stderr?.setEncoding("utf8");
@@ -482,6 +606,91 @@ export class AgentLauncher {
     return started;
   }
 
+  /**
+   * One headless run of an automation prompt, resolved when the CLI exits.
+   *
+   * Everything except the prompt, the allowlist and the output capture is the
+   * chat path: same binary resolution, same MCP config, same widened PATH,
+   * same isolated workdir and per-CLI prepare step.
+   *
+   * Refuses while any agent is alive rather than queueing internally — the
+   * scheduler owns the queue and its FIFO order, and a launcher that blocked
+   * here would hold a run row open for an unbounded chat session.
+   */
+  async runOnce(opts: OneShotOptions): Promise<OneShotResult> {
+    if (this.running) {
+      throw new LaunchError(409, `${this.running.id} is already running`);
+    }
+    if (this.oneShot) {
+      throw new LaunchError(409, "an automation run is in progress");
+    }
+    const spec = this.resolveRunSpec(opts.agentId);
+    const bin = this.resolveBin(spec.bin);
+    if (!bin) {
+      throw new LaunchError(
+        400,
+        `${spec.label} is not installed (no ${spec.bin} on PATH)`,
+      );
+    }
+    const workDir = this.prepareWorkDir(spec);
+    const prompt = `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
+
+    const child = spawn(bin, spec.runArgs!(this.ctx, prompt), {
+      cwd: workDir,
+      env: this.childEnvFor(spec, workDir),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    this.oneShot = child;
+
+    let log = "";
+    const capture = (chunk: string) => {
+      log = (log + chunk).slice(-ONESHOT_LOG_LIMIT);
+    };
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", capture);
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", capture);
+
+    let killed = false;
+    const timer = setTimeout(() => {
+      killed = true;
+      // SIGKILL, not SIGTERM: the deadline has already passed, and a CLI that
+      // ignores a polite signal would hold the single run slot indefinitely.
+      child.kill("SIGKILL");
+    }, opts.timeoutMs ?? ONESHOT_TIMEOUT_MS);
+    timer.unref?.();
+    this.killOneShot = () => {
+      killed = true;
+      child.kill("SIGKILL");
+    };
+
+    return await new Promise<OneShotResult>((resolve) => {
+      const finish = (code: number | null) => {
+        clearTimeout(timer);
+        this.oneShot = null;
+        this.killOneShot = null;
+        resolve({
+          status: killed ? "killed" : code === 0 ? "ok" : "error",
+          exitCode: code,
+          log,
+        });
+      };
+      child.on("error", (err) => {
+        // Spawn failures (ENOENT, EACCES) never reach "close" with a code.
+        capture(`\n${err.message}`);
+        finish(null);
+      });
+      // "close", not "exit": exit can fire while stdout/stderr still hold
+      // undrained data, and the log is the whole point of capturing.
+      child.on("close", (code) => finish(code));
+    });
+  }
+
+  /** Kills an in-flight automation run. No-op when none is running. */
+  killRun(): void {
+    this.killOneShot?.();
+  }
+
   /** Idempotent: stopping with nothing running is a no-op. */
   stop(): void {
     this.child?.kill("SIGTERM");
@@ -494,7 +703,56 @@ export class AgentLauncher {
     this.child?.kill("SIGTERM");
     this.child = null;
     this.running = null;
+    this.killRun();
     if (had) this.ctx.onRunningChange?.(null);
+  }
+
+  /**
+   * An empty, dedicated working directory: no repository context, no
+   * CLAUDE.md, nothing for the agent to read into the session by accident.
+   * Shared by the chat agent and automation runs — they never overlap.
+   */
+  private prepareWorkDir(spec: AgentSpec): string {
+    const workDir =
+      this.ctx.dataDir === ":memory:"
+        ? join(tmpdir(), "sley-agent")
+        : join(this.ctx.dataDir, "agent-workdir");
+    mkdirSync(workDir, { recursive: true });
+    spec.prepare?.(this.ctx, workDir, this.env);
+    return workDir;
+  }
+
+  private childEnvFor(spec: AgentSpec, workDir: string): NodeJS.ProcessEnv {
+    return {
+      ...this.env,
+      // The widened PATH travels with the agent: launched from the Finder app
+      // the inherited PATH lacks even the directory its own binary sits in.
+      PATH: this.searchDirs().join(delimiter),
+      ...spec.childEnv?.(this.ctx, workDir),
+    };
+  }
+
+  /**
+   * Which CLI carries a run. A null agentId means "first available", which is
+   * resolved in registry order against what is actually installed — an
+   * automation saved on a machine that later loses that CLI still runs.
+   */
+  private resolveRunSpec(agentId?: string | null): AgentSpec {
+    if (agentId) {
+      const spec = this.registry.find((s) => s.id === agentId);
+      if (!spec) throw new LaunchError(404, `unknown agent: ${agentId}`);
+      if (!spec.runArgs) {
+        throw new LaunchError(400, `${spec.label} cannot run automations yet`);
+      }
+      return spec;
+    }
+    const found = this.registry.find(
+      (s) => s.runArgs !== undefined && this.resolveBin(s.bin) !== null,
+    );
+    if (!found) {
+      throw new LaunchError(400, "no agent CLI is installed to run automations");
+    }
+    return found;
   }
 
   private noteExit(id: string, code: number | null): void {

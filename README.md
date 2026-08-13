@@ -3,6 +3,8 @@
 **Free, self-hosted multi-mailbox agentic inbox.**  
 Connect any IMAP/SMTP mail. One unified inbox in the browser. One MCP surface for every agent.
 
+On top of the inbox: a CRM derived from your own mail, scheduled agent automations, and outreach that no agent can send on its own. See [Agent work platform](#agent-work-platform--crm-automations-outreach).
+
 No paid SaaS required for core receive + send. MIT licensed.
 
 Formerly Mailmux. The repo is [Remedy92/sley](https://github.com/Remedy92/sley). A local checkout may still be named `mailmux`.
@@ -208,6 +210,16 @@ Agents that speak TOML use `[mcp_servers.sley]`. Tool calls show up as `mcp__sle
 | `chat_activity` | Post a one-line "here is what I am doing" |
 | `chat_history` | Re-read the conversation |
 
+The platform modules add their own tools. Full list in [Agent work platform](#agent-work-platform--crm-automations-outreach).
+
+| Group | Tools |
+|------|---------|
+| CRM | `crm_sync`, `crm_contacts_search`, `crm_contact_get`, `crm_contact_upsert`, `crm_contact_delete`, `crm_note_add`, `crm_org_upsert`, `crm_orgs_list`, `crm_interactions_list`, `crm_pipeline_get`, `crm_deal_upsert`, `crm_deal_move`, `crm_deal_delete` |
+| Automations | `automation_create`, `automation_update`, `automation_delete`, `automations_list`, `automation_run_now`, `automation_runs_list` |
+| Outreach | `campaign_create`, `campaign_update`, `campaigns_list`, `campaign_add_contacts`, `outbox_queue_draft`, `outbox_list`, `suppression_add`, `suppression_list` |
+
+There is **no tool that approves, rejects or sends an outbox row**. That is a human action in the web UI.
+
 Accounts are connected once in the web UI (or API). Agents reuse the same store — **no per-agent OAuth**.
 
 ## Talking to your agent inside Sley
@@ -245,6 +257,100 @@ so do not point two at the same server. The conversation is stored in
 `~/.sley/sley.db`, encrypted with the same master key as the account
 passwords, because an agent summarising an inbox puts mail content in those rows.
 
+## Agent work platform — CRM, automations, outreach
+
+Three modules ship with the inbox. They are free, MIT, and run only on your machine. There is no sync, no tracking pixel, no click redirect, and no account anywhere else.
+
+| Module | What it is | Where you see it |
+|---|---|---|
+| **CRM** | Contacts, organisations, notes, an interaction timeline and a deal pipeline, all derived from mail you already have. | **People** and **Pipeline** views |
+| **Automations** | Named prompts on a cron. Each run is a one-shot headless agent with the mailmux tools and no user to talk to. | **Automations** view |
+| **Outreach** | Campaigns of timed steps that produce drafts. Every draft waits for you. | **Outreach** view |
+
+### CRM: derived, not entered
+
+You do not type your contacts in. `crm_sync` walks INBOX and the Sent folder of each account and records who you actually mail with: contact per address, one interaction row per message, organisation per non-free email domain. It runs every 10 minutes while `mailmux serve` is up, and on demand from the tool or `POST /api/crm/sync`.
+
+Free-provider domains (gmail.com, outlook.com, proton.me, …) never create an organisation. Automated senders (`no-reply@`, `postmaster@`, bounce addresses) are skipped. You can still add or correct anything by hand, or ask the agent to.
+
+### Automations are created by talking to the agent
+
+The Automations view has no create form. This is deliberate: an automation *is* a prompt, and writing a good one is a conversation, not a text field.
+
+Say what you want to whichever MCP client you already use:
+
+> Every weekday at 8, look at yesterday's unread mail, update the CRM, and queue a follow-up draft for anyone in the "warm" tag I have not mailed in two weeks.
+
+The agent calls `automation_create` with a name, a 5-field cron and the prompt it just wrote for a future run of itself. The view then owns the automation: enable and disable it, see next and last run, run it now, read the log of any past run.
+
+What a run may do:
+
+| | |
+|---|---|
+| Can | read mail, search, read and write CRM, save drafts, queue outreach into the outbox |
+| Cannot | talk to you (no chat tools — there is no one at the window), call `message_send`, approve anything |
+| Limits | one run at a time, queued if another is going; 15-minute hard timeout, then killed |
+
+Run logs are stored encrypted, like everything else mail-derived.
+
+#### Importing Claude Desktop scheduled tasks
+
+Claude Desktop keeps each scheduled task as a folder under `~/.claude/scheduled-tasks/<name>/SKILL.md`, with a name and description in front matter and the instructions in the body. Those are exactly the two things `automation_create` needs, minus a schedule.
+
+Ask the agent to do the move:
+
+> Read ~/.claude/scheduled-tasks/*/SKILL.md and recreate each one as a mailmux automation.
+
+It reads the folder itself with its own file tools and calls `automation_create` per task: `name` from the front matter, `prompt` from the body. A `SKILL.md` does not carry a cron, so the agent asks you for the schedule of each one, or proposes one from the description. Nothing is imported silently, and nothing is deleted on the Claude Desktop side.
+
+Why this is a conversation and not an importer: the two systems do not have the same permissions. A Claude Desktop task can talk to you and reach everything on your machine. A mailmux automation cannot talk to anyone and works through the mailmux tools. A task that assumed it could ask a question needs rewriting before it makes sense on a cron here, and the agent that reads it is the thing best placed to rewrite it.
+
+### No auto-send
+
+**No agent sends outreach. Not a scheduled one, not the one you are chatting to, not by mistake.**
+
+An agent's only route toward delivery is `outbox_queue_draft`, and the outreach engine's timed steps use the same table. Both land as `pending` rows in the outbox. The Outreach view shows each one in full — recipient, subject, body — with **Approve**, **Edit** or **Reject**. Approval is REST only, from the browser, by you.
+
+The MCP surface has no approve, reject or send tool at all. This is not a permission you can grant; the tool does not exist.
+
+| Step | Who |
+|---|---|
+| Write the draft | agent |
+| Queue it into the outbox | agent |
+| Read it, edit it, approve or reject it | you, in the browser |
+| Put it on the wire | server, after approval |
+
+The rail badges the pending count, and the desktop app raises a notification and a dock badge when it rises. You are told about waiting drafts; you are never told after the fact about sent ones.
+
+Sending is throttled server-side even after approval: at least 60 seconds between engine sends with jitter, and at most `MAILMUX_SEND_DAILY_CAP` (default 50) per account per UTC day. Over the cap, an approved row simply goes out the next day.
+
+### Suppression is a server rule, not a checkbox
+
+`suppression` is a table of addresses that must not be mailed. The check lives inside `MailService.sendMessage`, so it applies to every path — outreach, a manual compose, an agent's `message_send`. A suppressed recipient fails the send with `recipient suppressed: <email>`.
+
+| Reason | How an address gets there |
+|---|---|
+| `reply-stop` | Someone replied "stop", "unsubscribe" or "opt out" to a campaign. Detected on the inbound message; the campaign contact stops immediately. |
+| `manual` | You added it in the Outreach view. |
+| `bounce` | A send failed hard. |
+| `agent` | An agent added it with `suppression_add`. |
+
+Only a human can override, and only through REST: `POST /api/messages/send` accepts `overrideSuppression: true`. The MCP `message_send` tool does not expose the flag, so no agent can override a suppression at all.
+
+Every outreach step, including the first, ends with a plain-text opt-out line telling the recipient to reply with "stop". There are no open pixels and no click-tracking links — they conflict with the privacy posture and are out of scope on purpose.
+
+### Everything stays on your machine
+
+Same store, same master key, same file as the rest of mailmux: `~/.mailmux/mailmux.db`.
+
+| Data | At rest |
+|---|---|
+| Note text, interaction subjects and snippets, campaign step subjects and bodies, outbox subjects and bodies, automation run logs | encrypted, AES-256-GCM, same master key as your mail passwords |
+| Contact email and name, organisation name and domain, tags, deal titles, suppression addresses | plaintext — they are CRM identity, needed for UNIQUE and for search |
+| Automation prompts | plaintext — you wrote them, they are not mail content |
+
+Nothing leaves the process. There is no sync, no telemetry and no hosted component. Back up `~/.mailmux` and you have backed up all of it.
+
 ## Install options
 
 | Method | Command |
@@ -267,6 +373,7 @@ Each `SLEY_*` name is preferred. The matching `MAILMUX_*` name is still read whe
 | `SLEY_MASTER_KEY` | auto file | AES key for passwords — see below |
 | `SLEY_FIXTURE` | off | Demo provider |
 | `SLEY_ALLOWED_ORIGINS` | empty | Extra browser origins allowed to call the API — see below |
+| `SLEY_SEND_DAILY_CAP` | `50` | Approved outreach sends per account per UTC day |
 
 ### Bind address (`SLEY_HOST`)
 
@@ -344,6 +451,9 @@ Tests call **shipped** `MailService`, crypto, HTTP app, and MCP handlers with an
 - Passwords encrypted at rest; master key in `~/.sley/master.key` (mode 0600). A passphrase in `SLEY_MASTER_KEY` is stretched with scrypt against `~/.sley/master.salt`.
 - Prefer app passwords over primary account passwords.
 - Keep `message_send` behind agent confirmation.
+- Outreach cannot be sent by an agent. Approval is REST-only and human; no MCP tool approves, rejects or sends an outbox row.
+- Suppression is enforced inside `MailService.sendMessage`, so it covers every send path. Only REST can override it.
+- Mail-derived text in CRM, outreach and automation rows is encrypted with the same master key as your passwords.
 
 ## License
 

@@ -288,10 +288,13 @@
 }
 .shell[data-rail="collapsed"] { --rail-w: var(--rail-w-collapsed); }
 
-/* The Agent view has no message list. Two tracks, not a third one collapsed to
-   zero: a 0px column still creates a grid line the border-r of the sidebar
-   would sit against twice. */
-.shell[data-view="agent"] {
+/* The Agent view has no message list, and the Pipeline is one board across the
+   whole width. Two tracks, not a third one collapsed to zero: a 0px column
+   still creates a grid line the border-r of the sidebar would sit against
+   twice. */
+.shell[data-view="agent"],
+.shell[data-view="pipeline"],
+.shell[data-view="automations"] {
   grid-template-columns: var(--rail-w) minmax(0, 1fr);
 }
 
@@ -482,5 +485,7 @@
    or not — specificity is not affected by the @media wrapper. */
 @media (max-width: 759px) {
   .shell,
-  .shell[data-view="agent"] { grid-template-columns: minmax(0, 1fr); }
+  .shell[data-view="agent"],
+  .shell[data-view="pipeline"],
+  .shell[data-view="automations"] { grid-template-columns: minmax(0, 1fr); }
 }

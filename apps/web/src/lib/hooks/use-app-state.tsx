@@ -42,6 +42,13 @@ export type ComposeSeed = {
    */
   draftId?: string;
   draftAccountId?: string;
+  /**
+   * Set when the composer was opened to EDIT a queued outreach row. No REST
+   * route rewrites an outbox row, so "edit" means the human takes the text and
+   * sends it themselves; on a successful send the composer rejects the queued
+   * copy, so the same mail cannot also go out through the engine.
+   */
+  outboxId?: string;
 };
 
 export type DialogName =
@@ -61,8 +68,31 @@ export type SettingsFocus = "baseUrl" | "token" | null;
  * `agent` is the default and is a different SHAPE from the other two, not a
  * different filter: it has no message list, so the shell drops to two columns.
  * Drafts are a separate collection, not a folder.
+ *
+ * `people` has the same two-pane shape as mail — a list and a detail pane — but
+ * over CRM rows rather than messages. `pipeline` is a board and has no list
+ * column at all, so it drops to two tracks like the agent view, and so does
+ * `automations`, which is one column of schedules and their run history.
+ *
+ * `outreach` is two-pane again: the middle column is the approval queue (or the
+ * campaigns and suppression lists), and the pane is the full text of the queued
+ * email a person is about to approve.
  */
-export type View = "agent" | "mail" | "drafts";
+export type View =
+  | "agent"
+  | "mail"
+  | "drafts"
+  | "people"
+  | "pipeline"
+  | "automations"
+  | "outreach";
+
+/**
+ * Which list the Outreach middle column is showing. All three are the same
+ * view — they share a pane and a keyboard map — so this is a filter, not a
+ * route.
+ */
+export type OutreachTab = "queue" | "campaigns" | "suppression";
 
 export type Selection = { accountId: string; messageId: string };
 
@@ -94,6 +124,32 @@ type AppStateValue = {
   /* view */
   view: View;
   setView: (value: View) => void;
+
+  /* People. The filters live here, not in the pane, for the same reason the
+     mail filters do: the list header owns the controls and the shell owns the
+     keyboard map that walks the rows they produce. */
+  setPeopleRawQuery: (value: string) => void;
+  /** Debounced by 300ms; this is what the request uses. */
+  peopleQuery: string;
+  peopleTag: string | null;
+  setPeopleTag: (value: string | null) => void;
+  /**
+   * The open contact, as a CRM row id. Plain state rather than a URL hash: the
+   * hash names a message or a draft on a mail server, and a contact id is a
+   * row in this machine's SQLite file with no equivalent outside it. Sharing
+   * the one hash slot would also let a contact and a message both be "open".
+   */
+  selectedContact: string | null;
+  selectContact: (value: string | null) => void;
+
+  /* Outreach. Same reasoning as People: the list column owns the tabs and the
+     shell owns the keyboard map that walks the queue they produce. The open
+     row is a local outbox id, which has no meaning outside this machine, so it
+     stays out of the URL hash. */
+  outreachTab: OutreachTab;
+  setOutreachTab: (value: OutreachTab) => void;
+  selectedOutbox: string | null;
+  selectOutbox: (value: string | null) => void;
 
   /* selection */
   selected: Selection | null;
@@ -172,6 +228,13 @@ const SearchQueryContext = React.createContext<string>("");
 
 export function useSearchQuery(): string {
   return React.useContext(SearchQueryContext);
+}
+
+/** The People search box, split off for the same reason. Only its header reads it. */
+const PeopleQueryContext = React.createContext<string>("");
+
+export function usePeopleSearchQuery(): string {
+  return React.useContext(PeopleQueryContext);
 }
 
 const HASH_PATTERN = /^#\/a\/([^/]+)\/m\/(.+)$/;
@@ -262,6 +325,17 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [unreadOnly, setUnreadOnlyState] = React.useState(false);
   const [rawQuery, setRawQuery] = React.useState("");
   const [query, setQuery] = React.useState("");
+  const [peopleRawQuery, setPeopleRawQuery] = React.useState("");
+  const [peopleQuery, setPeopleQuery] = React.useState("");
+  const [peopleTag, setPeopleTag] = React.useState<string | null>(null);
+  const [selectedContact, setSelectedContact] = React.useState<string | null>(
+    null,
+  );
+  const [outreachTab, setOutreachTabState] =
+    React.useState<OutreachTab>("queue");
+  const [selectedOutbox, setSelectedOutbox] = React.useState<string | null>(
+    null,
+  );
   const [dialog, setDialog] = React.useState<DialogName | null>(null);
   const [palettePage, setPalettePage] = React.useState<PalettePage>("root");
   const [removalTarget, setRemovalTarget] =
@@ -308,6 +382,30 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     if (!rawQueryRef.current) return false;
     setRawQuery("");
     return true;
+  }, []);
+
+  /* Same 300ms, same reason. Separate timer because the two boxes are separate
+     controls: typing in one must not re-issue the other's request. */
+  React.useEffect(() => {
+    const timer = setTimeout(() => setPeopleQuery(peopleRawQuery), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [peopleRawQuery]);
+
+  const selectContact = React.useCallback(
+    (value: string | null) => setSelectedContact(value),
+    [],
+  );
+
+  const selectOutbox = React.useCallback(
+    (value: string | null) => setSelectedOutbox(value),
+    [],
+  );
+
+  /* The pane belongs to the queue. Leaving a row open while the column shows
+     campaigns would put an approve button beside a list it is not about. */
+  const setOutreachTab = React.useCallback((value: OutreachTab) => {
+    setOutreachTabState(value);
+    if (value !== "queue") setSelectedOutbox(null);
   }, []);
 
   /* ---- breakpoints. Two, and they snap (§5.3) ------------------------ */
@@ -426,6 +524,12 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     if (viewRef.current === next) return;
     viewRef.current = next;
     clearSelectionRefForView.current();
+    // The contact pane is the People view's right column and nothing else's.
+    // Leaving it set would restore a stale contact on the way back in.
+    setSelectedContact(null);
+    // Same for the queued email in the Outreach pane — and that one carries an
+    // Approve button, so a stale row there is worth more than a stale name.
+    setSelectedOutbox(null);
     setViewState(next);
   }, []);
 
@@ -524,6 +628,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       threadingUnavailable: seed?.threadingUnavailable,
       draftId: seed?.draftId,
       draftAccountId: seed?.draftAccountId,
+      outboxId: seed?.outboxId,
     });
     setDialog("compose");
   }, []);
@@ -617,6 +722,16 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       searching: query.trim().length > 0,
       view,
       setView,
+      setPeopleRawQuery,
+      peopleQuery,
+      peopleTag,
+      setPeopleTag,
+      selectedContact,
+      selectContact,
+      outreachTab,
+      setOutreachTab,
+      selectedOutbox,
+      selectOutbox,
       selected,
       select,
       clearSelection,
@@ -666,6 +781,14 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       setUnreadOnly,
       clearSearch,
       query,
+      peopleQuery,
+      peopleTag,
+      selectedContact,
+      selectContact,
+      outreachTab,
+      setOutreachTab,
+      selectedOutbox,
+      selectOutbox,
       selected,
       select,
       clearSelection,
@@ -708,7 +831,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   return (
     <AppStateContext.Provider value={value}>
       <SearchQueryContext.Provider value={rawQuery}>
-        {children}
+        <PeopleQueryContext.Provider value={peopleRawQuery}>
+          {children}
+        </PeopleQueryContext.Provider>
       </SearchQueryContext.Provider>
     </AppStateContext.Provider>
   );

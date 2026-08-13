@@ -3,7 +3,9 @@ import { randomBytes } from "node:crypto";
 import { Store } from "../src/db/store.js";
 import { FixtureProvider } from "../src/provider/fixture.js";
 import { MailService } from "../src/mail/service.js";
-import { handleMcpJsonRpc } from "../src/mcp/server.js";
+import { handleMcpJsonRpc, PLATFORM_TOOLS, TOOLS } from "../src/mcp/server.js";
+import { createPlatform } from "../src/platform.js";
+import type { AgentLauncher } from "../src/agent/launcher.js";
 
 const ALL_TOOLS = [
   "accounts_list",
@@ -50,12 +52,13 @@ function payloadOf(res: unknown): any {
 }
 
 describe("MCP tool surface", () => {
+  let store: Store;
   let mail: MailService;
   let provider: FixtureProvider;
   let messageId: string;
 
   beforeEach(async () => {
-    const store = new Store(randomBytes(32), ":memory:");
+    store = new Store(randomBytes(32), ":memory:");
     provider = new FixtureProvider();
     mail = new MailService(store, provider);
     const account = await mail.connectAccount({
@@ -87,6 +90,32 @@ describe("MCP tool surface", () => {
     expect(names.sort()).toEqual([...ALL_TOOLS].sort());
     for (const tool of listed.result.tools) {
       expect(tool.inputSchema, tool.name).toBeTruthy();
+    }
+  });
+
+  it("advertises the platform tools only when a platform is wired, and never an outbox approval tool", async () => {
+    const platform = createPlatform({
+      db: store.db,
+      masterKey: randomBytes(32),
+      mail,
+      // tools/list never touches the launcher; dispatch tests live in
+      // test/automation.test.ts with a real fake.
+      launcher: {} as AgentLauncher,
+    });
+    const listed = (await handleMcpJsonRpc(
+      mail,
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      undefined,
+      platform,
+    )) as { result: { tools: Array<{ name: string }> } };
+    const names = listed.result.tools.map((t) => t.name);
+    expect(names.sort()).toEqual(
+      [...TOOLS, ...PLATFORM_TOOLS].map((t) => t.name).sort(),
+    );
+    // Invariant 1: an agent must never approve its own email — no MCP tool
+    // approves, rejects, or sends outbox rows.
+    for (const name of names) {
+      expect(name).not.toMatch(/outbox.*(approve|reject|send)/);
     }
   });
 

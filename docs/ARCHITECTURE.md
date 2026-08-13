@@ -115,3 +115,44 @@ Two directives are deliberately looser than they look, and `SECURITY.md` states 
 - `connect-src` allows loopback on any port plus `https:`. The Server URL is user-configurable — the page ships pointing at `127.0.0.1:8787` and is reachable on whatever port you launched. `'self'` alone blocks the app's own health check whenever those differ, which is a real failure caught in a browser, not a hypothetical. Plain `http:` to a remote host stays blocked.
 
 The static deployment gets the same set from `apps/web/vercel.json`. Its `connect-src` is the same, since talking to your machine is the point.
+
+## Agent work platform — CRM, automations, outreach
+
+**Date:** 2026-08-13 · **Status:** accepted
+
+Full spec: [docs/specs/agent-platform.md](specs/agent-platform.md). It owns the schema, the tool names, the REST paths and the derivation rules. This section records the decisions and does not repeat them.
+
+mailmux grows from an agentic inbox into a local agent work platform. Three modules ship together, all free, MIT and fully local, with no sync.
+
+| Module | Directory | Owns |
+|---|---|---|
+| CRM | `src/crm/` | contacts, orgs, tags, notes, interactions, pipeline stages, deals |
+| Automations | `src/automation/` | cron'd prompts, serialized runs, run logs |
+| Outreach | `src/outreach/` | campaigns, sequence steps, outbox, suppression |
+
+Each module is a store, a service or engine, a `<MODULE>_TOOLS` + dispatcher pair, and a `register*Routes`. Nothing else in the tree changes shape.
+
+### Decisions
+
+| Decision | Reason |
+|---|---|
+| **No auto-send. Agent-written outreach lands in `outbox` as `pending`, and only REST approves it** | The failure this closes is not "the agent writes a bad email", it is "the agent decides for itself that the email was good". Approval is a different actor, reached over a different surface, in the browser. |
+| **No MCP tool approves, rejects or sends an outbox row** | A tool that exists is a tool that can be called. Absence is the enforcement; a permission flag is not. `outbox_queue_draft` is the only route toward delivery, and its description says so to the agent. |
+| **Suppression enforced in `MailService.sendMessage`, not in the outreach engine** | The engine is one caller of three. Putting the guard at the send seam covers manual compose and `message_send` as well, so there is no path that forgets. |
+| **`overrideSuppression` is REST-only** | Overriding a "stop" is a human decision with a human's accountability. The MCP tool schema does not carry the flag, so an agent cannot pass it. |
+| **Mail-derived text encrypted at rest, contact identity in plaintext** | Subjects, snippets, note text, campaign bodies, outbox bodies and run logs are mail content and get `_enc` columns via `encryptSecret`/`decryptSecret`. Emails, names, org names and domains stay plaintext because UNIQUE constraints and search need them, and because they are CRM data the user typed or the user's mail header carried in the clear anyway. |
+| **CRM is derived from mail, not entered** | A CRM you have to fill in is a CRM that goes stale. `CrmService.syncFromMail` reads INBOX and Sent, so the contact list is a fact about your mail rather than a claim about it. Manual and agent-authored records are still allowed and are marked with `source`. |
+| **Free email providers never create an organisation** | A gmail.com "organisation" with 400 unrelated contacts is worse than no organisation. The list is explicit, in the spec. |
+| **One automation run at a time, in an in-process FIFO** | Runs are full agents with tool access to one SQLite file and one set of mailboxes. Concurrency here buys throughput nobody asked for and costs interleaved writes and duplicate outreach. |
+| **A run is a one-shot headless CLI agent, not a model call from inside mailmux** | mailmux runs no model. That is true of the Agent view and stays true here: an automation reuses `AgentLauncher` and the same MCP wiring, so there is still no API key and no inference in this process. |
+| **A run cannot talk to the user and cannot `message_send`** | There is no one at the window at 03:00. The fixed preamble says so, and the pre-approved tool set omits the chat tools and `message_send` so the statement is backed by the wiring. |
+| **15-minute hard timeout, then SIGKILL and status `killed`** | An agent that hangs holds the queue. A killed run with a log is more useful than a stuck one. |
+| **Automations have no create form in the web UI** | An automation is a prompt. Prompts are written by conversation and revision, and the agent that writes one is the agent that will run it. The empty state says exactly that and points at the Agent view. The UI owns everything after creation: enable, disable, next/last run, run now, log history. |
+| **Claude Desktop scheduled tasks are imported by the agent, not by an importer** | `~/.claude/scheduled-tasks/*/SKILL.md` carries a name, a description and a body — everything `automation_create` needs except a cron. The agent reads the files with its own file tools and calls `automation_create` per task, asking for the schedule. Writing an importer would mean shipping a parser for another product's format and pretending the two execution contexts match. They do not: a Claude Desktop task may ask the user a question and touch the whole machine, a mailmux automation may do neither. That rewrite is judgement, so it belongs to the agent and the user, in a conversation. |
+| **Send throttling server-side: ≥60s gap with jitter, `MAILMUX_SEND_DAILY_CAP` per account per UTC day** | Approval is per-message; deliverability is per-account. A human approving forty drafts in one sitting should not produce forty sends in one minute. Over the cap a row stays `approved` and goes the next day. |
+| **Opt-out footer on every step including the first; no tracking pixels, no click redirects** | The privacy posture is the product. Tracking is out of scope, not deferred. |
+| **Failed sends do not retry in v1** | A retry loop against SMTP without human eyes is how one bad address becomes a reputation problem. Status `failed` with the error recorded, and a human decides. |
+| **Modules keep their own DDL and share the `Store` SQLite handle** | Same file, same WAL, same transaction semantics as the mail tables. `CREATE TABLE IF NOT EXISTS` in each store constructor means there is no migration step and no ordering requirement between modules. |
+| **All module routes register inside `createApi` after the auth middleware** | The bearer token gates the platform exactly as it gates mail. There is no second auth model and no unauthenticated read. |
+
+Residual risk: an automation run is a full agent with mail read access and CRM write access. It cannot send and cannot speak, but a prompt that says "summarise every message and put it in a note" will faithfully copy mail content into note rows — encrypted, but copied. Prompts are user-authored and that is the intended trade.

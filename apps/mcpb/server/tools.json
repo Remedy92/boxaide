@@ -365,5 +365,628 @@
       },
       "additionalProperties": false
     }
+  },
+  {
+    "name": "crm_sync",
+    "description": "Derive contacts and interactions from the connected mailboxes now, and return how many were new. This already runs every ten minutes on its own, so call it only when the user just connected an account or explicitly asks for a refresh — not before every read, where it only adds latency.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_contacts_search",
+    "description": "Search contacts by name, email address or organisation name, optionally narrowed to one tag. This is the way to find a contact id. It returns identity rows only — no notes, interactions or deals — so follow up with crm_contact_get when you need the history of one person. An empty query lists the most recently touched contacts.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Free text matched against name, email and org name."
+        },
+        "tag": {
+          "type": "string",
+          "description": "Exact tag, case-sensitive."
+        },
+        "limit": {
+          "type": "number",
+          "default": 50
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_contact_get",
+    "description": "Read one contact in full: identity, organisation, tags, notes, recent mail interactions and deals. Pass contactId or email, not both. Returns an error when nobody matches — that is a real answer, not a reason to create the contact.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "contactId": {
+          "type": "string",
+          "description": "Contact id from crm_contacts_search or crm_contact_get. Not an email address."
+        },
+        "email": {
+          "type": "string",
+          "description": "Email address, matched case-insensitively."
+        },
+        "limit": {
+          "type": "number",
+          "description": "How many interactions to return, newest first.",
+          "default": 50
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_contact_upsert",
+    "description": "Create a contact, or fill in details on one that already exists, keyed by email address. Use it for people the user tells you about; contacts that appear in mail are created by crm_sync on their own, so do not mirror an inbox by hand. Tags are added, never replaced. Passing `org` links the contact to that organisation, creating it when it is new.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string",
+          "description": "Job title."
+        },
+        "org": {
+          "type": "string",
+          "description": "Organisation name. Created when unknown."
+        },
+        "orgDomain": {
+          "type": "string",
+          "description": "Mail domain of the organisation, e.g. 'acme.com'. Improves matching against orgs derived from mail."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "type": "string",
+          "default": "agent"
+        }
+      },
+      "required": [
+        "email"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_contact_delete",
+    "description": "Delete a contact together with its tags, notes and interaction history. This cannot be undone and the next crm_sync will recreate a bare contact if the person is still in the mailbox, so prefer a tag or a note when the user only wants the record set aside. Deals survive with an empty contact field.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "contactId": {
+          "type": "string",
+          "description": "Contact id from crm_contacts_search or crm_contact_get. Not an email address."
+        }
+      },
+      "required": [
+        "contactId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_note_add",
+    "description": "Append a dated note to a contact. Notes are for what a person said or agreed, written for the user to read later. They are stored encrypted and never sent anywhere — this is not a way to message the contact.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "contactId": {
+          "type": "string",
+          "description": "Contact id from crm_contacts_search or crm_contact_get. Not an email address."
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contactId",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_org_upsert",
+    "description": "Create or rename an organisation. Give the domain whenever you know it: orgs derived from mail are keyed by domain, and one without a domain will not merge with them later.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string",
+          "description": "Mail domain, e.g. 'acme.com'."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_orgs_list",
+    "description": "List every organisation with its domain. Use it to pick an orgId for a deal; to find people at a company, search their org name with crm_contacts_search instead.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_interactions_list",
+    "description": "List one contact's mail interactions, newest first, with decrypted subject and snippet. These are derived summaries, not the mail itself — to read a full message body use message_get with the returned messageId.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "contactId": {
+          "type": "string",
+          "description": "Contact id from crm_contacts_search or crm_contact_get. Not an email address."
+        },
+        "limit": {
+          "type": "number",
+          "default": 50
+        }
+      },
+      "required": [
+        "contactId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_pipeline_get",
+    "description": "Read the whole deal board: every stage in order, each with its deals in board order. Call this before crm_deal_move so you use a stage id that exists.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_deal_upsert",
+    "description": "Create a deal, or edit one by passing dealId. A new deal lands at the bottom of its stage, defaulting to 'lead'. Omitted fields are left as they are on an edit. To change only the stage or the board position, use crm_deal_move.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dealId": {
+          "type": "string",
+          "description": "Edit this deal. Omit to create a new one."
+        },
+        "title": {
+          "type": "string"
+        },
+        "contactId": {
+          "type": "string",
+          "description": "Contact id from crm_contacts_search or crm_contact_get. Not an email address."
+        },
+        "orgId": {
+          "type": "string",
+          "description": "Organisation id from crm_orgs_list."
+        },
+        "stageId": {
+          "type": "string",
+          "description": "Stage id from crm_pipeline_get.",
+          "default": "lead"
+        },
+        "value": {
+          "type": "number"
+        },
+        "currency": {
+          "type": "string",
+          "description": "ISO code, e.g. 'EUR'."
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_deal_move",
+    "description": "Move a deal to another stage, optionally to a given index inside it. Position 0 is the top. Use this rather than crm_deal_upsert for stage changes: it renumbers both columns so the board keeps a stable order.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dealId": {
+          "type": "string"
+        },
+        "stageId": {
+          "type": "string",
+          "description": "Stage id from crm_pipeline_get."
+        },
+        "position": {
+          "type": "number",
+          "description": "0-based index within the stage. Omit to append."
+        }
+      },
+      "required": [
+        "dealId",
+        "stageId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_deal_delete",
+    "description": "Delete a deal permanently. A deal that ended is normally moved to the 'won' or 'lost' stage instead — that keeps the history the user wants to look back on, so only delete when they ask for the record to be gone.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dealId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "dealId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "automation_create",
+    "description": "Schedule a recurring agent run. Write prompt as standalone instructions to a different agent that will run later with NO memory of this conversation and NO user to ask: name the accounts, folders, search terms, contacts and thresholds explicitly instead of saying 'the ones we discussed', and say what to produce (a note, a CRM update, a queued draft). The run cannot talk to anyone and cannot send email. Use this only when the user wants work to repeat on a schedule — for something to do right now, just do it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique, human-readable."
+        },
+        "cron": {
+          "type": "string",
+          "description": "5-field cron in server local time: 'minute hour day-of-month month day-of-week'. Example: '0 8 * * 1-5' is 08:00 on weekdays. Rejected if it does not parse."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "Instructions for the future run. Write prompt as standalone instructions to a different agent that will run later with NO memory of this conversation and NO user to ask: name the accounts, folders, search terms, contacts and thresholds explicitly instead of saying 'the ones we discussed', and say what to produce (a note, a CRM update, a queued draft). The run cannot talk to anyone and cannot send email."
+        },
+        "agentId": {
+          "type": "string",
+          "description": "Agent CLI id from the mailmux Agents list. Omit to use the first installed one."
+        }
+      },
+      "required": [
+        "name",
+        "cron",
+        "prompt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "automation_update",
+    "description": "Change an existing automation. Only the fields you pass change. Set enabled false to pause it — prefer that over automation_delete, which loses the prompt and the run history. Write prompt as standalone instructions to a different agent that will run later with NO memory of this conversation and NO user to ask: name the accounts, folders, search terms, contacts and thresholds explicitly instead of saying 'the ones we discussed', and say what to produce (a note, a CRM update, a queued draft). The run cannot talk to anyone and cannot send email.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "automationId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "cron": {
+          "type": "string",
+          "description": "5-field cron in server local time: 'minute hour day-of-month month day-of-week'. Example: '0 8 * * 1-5' is 08:00 on weekdays. Rejected if it does not parse."
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "agentId": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "automationId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "automation_delete",
+    "description": "Delete an automation and its run history, permanently. To stop it temporarily use automation_update with enabled false instead.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "automationId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "automationId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "automations_list",
+    "description": "List every automation with its schedule, prompt, and last/next run times.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "automation_run_now",
+    "description": "Queue an automation to run immediately, without changing its schedule. Returns once it is queued, not once it has finished — read automation_runs_list for the outcome. One run happens at a time, so it may wait.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "automationId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "automationId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "automation_runs_list",
+    "description": "Run history with status, exit code, and the tail of each run's output. Use it to find out why an automation is not doing what the user expected.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "automationId": {
+          "type": "string",
+          "description": "Omit for recent runs across all automations."
+        },
+        "limit": {
+          "type": "number",
+          "default": 20
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "campaign_create",
+    "description": "Create an outreach campaign with its email sequence. The campaign starts as a draft and queues nothing until a human sets it active. Step 0 is the first email; every later step waits waitDays after the previous one. Subjects and bodies are templates: {{name}}, {{email}} and {{org}} are filled per contact.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique campaign name."
+        },
+        "account": {
+          "type": "string",
+          "description": "Sending account alias or id."
+        },
+        "steps": {
+          "type": "array",
+          "description": "Sequence in order; the first entry is the initial mail.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "subject": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string",
+                "description": "Plain text. No HTML."
+              },
+              "waitDays": {
+                "type": "number",
+                "description": "Days after the previous step. Ignored on step 0.",
+                "default": 0
+              }
+            },
+            "required": [
+              "subject",
+              "body"
+            ]
+          }
+        }
+      },
+      "required": [
+        "name",
+        "account",
+        "steps"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "campaign_update",
+    "description": "Rename a campaign, change its status ('draft'|'active'|'paused'|'done'), or replace its steps. Steps can only be replaced while the campaign is still a draft — once contacts are moving through a sequence, rewriting it would send them mail nobody approved the campaign for.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "campaignId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "active",
+            "paused",
+            "done"
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "subject": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              },
+              "waitDays": {
+                "type": "number",
+                "default": 0
+              }
+            },
+            "required": [
+              "subject",
+              "body"
+            ]
+          }
+        }
+      },
+      "required": [
+        "campaignId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "campaigns_list",
+    "description": "List campaigns with their sending account, status, and contact counts per state (active, replied, opted_out, done, suppressed).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "campaign_add_contacts",
+    "description": "Add CRM contacts (ids from crm_contacts_search) to a campaign. Suppressed addresses are refused and reported back, never quietly enrolled.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "campaignId": {
+          "type": "string"
+        },
+        "contactIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "campaignId",
+        "contactIds"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "outbox_queue_draft",
+    "description": "Queue one email for human review. This is the ONLY way an automation or agent gets outreach toward delivery; a human reviews it in the mailmux Outreach view before anything is sent. Nothing here sends mail, and there is no tool that approves or sends a queued row — do not look for one. An opt-out footer is appended automatically.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "account": {
+          "type": "string",
+          "description": "Sending account alias or id."
+        },
+        "to": {
+          "type": "string",
+          "description": "One recipient address."
+        },
+        "subject": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string",
+          "description": "Plain text. No HTML, no links to trackers."
+        },
+        "contactId": {
+          "type": "string",
+          "description": "CRM contact id, when known."
+        },
+        "campaignId": {
+          "type": "string",
+          "description": "Campaign this belongs to, when any."
+        }
+      },
+      "required": [
+        "account",
+        "to",
+        "subject",
+        "body"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "outbox_list",
+    "description": "List queued outreach with decrypted subject and body. Use it to check what is still waiting for a human ('pending') or what already went out ('sent'). Reading is all an agent can do here.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "approved",
+            "sent",
+            "rejected",
+            "failed"
+          ]
+        },
+        "limit": {
+          "type": "number",
+          "default": 50
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "suppression_add",
+    "description": "Never contact this address again. Adding is one-way from here: removing an address is a human decision in the Outreach view. Use it the moment someone asks to be left alone.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "reply-stop",
+            "manual",
+            "bounce",
+            "agent"
+          ],
+          "default": "agent"
+        }
+      },
+      "required": [
+        "email"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "suppression_list",
+    "description": "List every suppressed address with the reason and the date.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
   }
 ]

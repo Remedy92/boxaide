@@ -285,6 +285,26 @@ describe("HTTP security surface (shipped app)", () => {
     });
     expect(bare.status).toBe(401);
   });
+
+  it("gates the agent-platform routes behind the same token", async () => {
+    // One representative read per module. Registered inside createApi, so the
+    // /api/* auth middleware must cover them — a regression here exposes CRM
+    // data and the outreach approval surface to anything on localhost.
+    const routes = [
+      "/api/crm/contacts",
+      "/api/automations",
+      "/api/outreach/outbox",
+      "/api/outreach/badge",
+    ];
+    for (const route of routes) {
+      const anon = await runtime.app.request(route);
+      expect(anon.status, route).toBe(401);
+      const authed = await runtime.app.request(route, {
+        headers: authHeaders,
+      });
+      expect(authed.status, route).toBe(200);
+    }
+  });
 });
 
 const VERCEL = "https://sley.vercel.app";

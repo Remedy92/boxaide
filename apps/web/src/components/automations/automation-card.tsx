@@ -1,0 +1,179 @@
+"use client";
+
+import * as React from "react";
+import { ChevronDown, ChevronRight, Play } from "lucide-react";
+import { toast } from "sonner";
+import { Spinner } from "@/components/atoms";
+import { RunHistory } from "@/components/automations/run-history";
+import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { friendlyError } from "@/lib/api/errors";
+import { describeCron } from "@/lib/format/automation";
+import { formatReaderDate, isoAttr, isoTitle } from "@/lib/format/date";
+import {
+  useRunAutomationNow,
+  useToggleAutomation,
+} from "@/lib/hooks/use-automations";
+import type { Automation } from "@/lib/types";
+
+/**
+ * One automation.
+ *
+ * Everything about WHAT it does — its name, its schedule, its prompt — is
+ * read-only here: automations are written by talking to the agent, and a form
+ * that let a person half-edit one would be a second authoring surface with none
+ * of the agent's context. The two controls are the two decisions a human makes
+ * from the outside: whether it runs at all, and whether it runs right now.
+ */
+export function AutomationCard({ automation }: { automation: Automation }) {
+  const toggle = useToggleAutomation();
+  const runNow = useRunAutomationNow();
+  const [showRuns, setShowRuns] = React.useState(false);
+  const switchId = `automation-${automation.id}-enabled`;
+
+  const setEnabled = (enabled: boolean) => {
+    toggle.mutate(
+      { automationId: automation.id, enabled },
+      {
+        onSuccess: () =>
+          toast.success(
+            enabled ? `${automation.name} is on` : `${automation.name} is paused`,
+          ),
+        onError: (error) =>
+          toast.error("Could not change that automation", {
+            description: friendlyError(
+              error instanceof Error ? error.message : error,
+            ),
+          }),
+      },
+    );
+  };
+
+  const run = () => {
+    runNow.mutate(automation.id, {
+      onSuccess: () => {
+        // The 202 means queued, not done — runs are serialized one at a time,
+        // so saying "ran" here would be a claim the server never made.
+        setShowRuns(true);
+        toast.success(`Queued ${automation.name}`, {
+          description: "One automation runs at a time. Watch it under Runs.",
+        });
+      },
+      onError: (error) =>
+        toast.error("Could not queue that run", {
+          description: friendlyError(
+            error instanceof Error ? error.message : error,
+          ),
+        }),
+    });
+  };
+
+  return (
+    <section className="rounded-[var(--radius-md)] border border-border-subtle bg-surface-1 p-3">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate text-[13px] leading-[18px] font-medium text-fg">
+            {automation.name}
+          </h3>
+          <p className="mt-0.5 flex flex-wrap items-baseline gap-1.5 text-[12px] leading-[18px] text-fg-secondary">
+            {describeCron(automation.cron)}
+            {/* The expression itself, always, beside the sentence: it is what
+                the scheduler evaluates, in the server's timezone. */}
+            <code className="font-mono text-[11px] text-fg-tertiary">
+              {automation.cron}
+            </code>
+          </p>
+        </div>
+
+        <label
+          htmlFor={switchId}
+          className="flex shrink-0 items-center gap-2 text-[12px] leading-4 text-fg-secondary"
+        >
+          {automation.enabled ? "On" : "Paused"}
+          <Switch
+            id={switchId}
+            checked={automation.enabled}
+            disabled={toggle.isPending}
+            onCheckedChange={setEnabled}
+          />
+        </label>
+      </div>
+
+      <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-0.5 text-[12px] leading-[18px]">
+        <div className="flex gap-1.5">
+          <dt className="text-fg-tertiary">Next</dt>
+          <dd className="text-fg-secondary">
+            {automation.enabled && automation.nextRunAt ? (
+              <time
+                dateTime={isoAttr(automation.nextRunAt)}
+                title={isoTitle(automation.nextRunAt)}
+              >
+                {formatReaderDate(automation.nextRunAt)}
+              </time>
+            ) : (
+              // A paused automation has a stored next_run_at that will not
+              // fire. Printing it would be a schedule that is not kept.
+              "Not scheduled"
+            )}
+          </dd>
+        </div>
+        <div className="flex gap-1.5">
+          <dt className="text-fg-tertiary">Last</dt>
+          <dd className="text-fg-secondary">
+            {automation.lastRunAt ? (
+              <time
+                dateTime={isoAttr(automation.lastRunAt)}
+                title={isoTitle(automation.lastRunAt)}
+              >
+                {formatReaderDate(automation.lastRunAt)}
+              </time>
+            ) : (
+              "Never"
+            )}
+          </dd>
+        </div>
+      </dl>
+
+      <details className="mt-2">
+        <summary className="cursor-pointer text-[12px] text-fg-tertiary hover:text-fg-secondary">
+          Instructions
+        </summary>
+        <p className="mt-1 text-[13px] leading-[18px] whitespace-pre-wrap text-fg-secondary">
+          {automation.prompt}
+        </p>
+      </details>
+
+      <div className="mt-2.5 flex items-center gap-1.5">
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          disabled={runNow.isPending}
+          onClick={run}
+        >
+          {runNow.isPending ? <Spinner /> : <Play className="size-3.5" strokeWidth={1.5} />}
+          {runNow.isPending ? "Queueing…" : "Run now"}
+        </Button>
+
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          aria-expanded={showRuns}
+          onClick={() => setShowRuns((open) => !open)}
+        >
+          {showRuns ? (
+            <ChevronDown className="size-3.5" strokeWidth={1.5} />
+          ) : (
+            <ChevronRight className="size-3.5" strokeWidth={1.5} />
+          )}
+          Runs
+        </Button>
+      </div>
+
+      {/* Mounted only while open: each run row carries up to 4 KiB of decrypted
+          log, and that is mail-derived text nobody asked to see. */}
+      {showRuns && <RunHistory automationId={automation.id} />}
+    </section>
+  );
+}
