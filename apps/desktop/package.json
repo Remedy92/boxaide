@@ -1,6 +1,6 @@
 {
   "name": "sley-desktop",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "private": true,
   "description": "Desktop shell for Sley — runs the Sley server in-process and opens the UI in a window",
   "author": "Sley contributors",
