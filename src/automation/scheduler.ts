@@ -6,7 +6,7 @@
  * - Exactly ONE run executes at a time (spec invariant 4), and a run waits
  *   behind an interactive chat agent. Two gates enforce that: the in-process
  *   FIFO here, and underneath it AutomationStore.claimRun, which locks on the
- *   'running' row so a second process (a stdio `mailmux mcp` with its own
+ *   'running' row so a second process (a stdio `sley mcp` with its own
  *   scheduler over the same file) cannot start an overlapping run.
  * - Runs use AgentLauncher's one-shot path (runOnce): fixed preamble +
  *   automation prompt, pre-approved read/draft/CRM/outreach-queue tools,
@@ -130,7 +130,7 @@ export class AutomationScheduler {
     if (!automation || !automation.enabled) return "skipped";
 
     // Second gate under the FIFO: the FIFO only knows about this process, the
-    // claim also excludes a run started by a `mailmux mcp` stdio process on
+    // claim also excludes a run started by a `sley mcp` stdio process on
     // the same database (spec invariant 4).
     const run = this.store.claimRun(id);
     if (!run) return "deferred";

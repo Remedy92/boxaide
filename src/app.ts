@@ -93,7 +93,7 @@ export function createRuntime(
   });
   // The agent platform (CRM, automations, outreach) shares the Store's SQLite
   // handle. Constructed here so every entry point has the tools; its timers
-  // start only in startServer — a stdio `mailmux mcp` process must never run
+  // start only in startServer — a stdio `sley mcp` process must never run
   // a second scheduler against the same database.
   const platform = createPlatform({
     db: store.db,

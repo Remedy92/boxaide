@@ -470,7 +470,7 @@ describe("outreach", () => {
     );
     const queue = OUTREACH_TOOLS.find((t) => t.name === "outbox_queue_draft");
     expect(queue?.description).toContain(
-      "the ONLY way an automation or agent gets outreach toward delivery; a human reviews it in the mailmux Outreach view before anything is sent",
+      "the ONLY way an automation or agent gets outreach toward delivery; a human reviews it in the Sley Outreach view before anything is sent",
     );
   });
 

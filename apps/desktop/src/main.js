@@ -215,7 +215,7 @@ function applyBadge(pending) {
   app.setBadgeCount(pending);
   if (!rose || !Notification.isSupported()) return;
   const notification = new Notification({
-    title: "mailmux",
+    title: "Sley",
     body:
       pending === 1
         ? "1 draft awaits your approval"

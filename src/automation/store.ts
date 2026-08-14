@@ -79,7 +79,7 @@ export const RUN_STALE_MS = RUN_TIMEOUT_MS + 5 * 60 * 1000;
 
 /** Appended to a run log when the sweep finalizes a row nobody finished. */
 export const STALE_RUN_NOTE =
-  "[mailmux] marked killed: the process running this automation exited without finishing the run.";
+  "[sley] marked killed: the process running this automation exited without finishing the run.";
 
 /**
  * A cron field count of 5 is the contract (spec DDL), and it is enforced here
@@ -318,7 +318,7 @@ export class AutomationStore {
    * Takes the cross-process run lock and opens the run row, or returns null.
    *
    * The in-process FIFO only serializes runs inside one process, but a stdio
-   * `mailmux mcp` process has its own scheduler over the same SQLite file
+   * `sley mcp` process has its own scheduler over the same SQLite file
    * (automation_run_now), so two processes could overlap runs and break spec
    * invariant 4. The 'running' row is therefore the lock: sweep dead rows,
    * count live ones and insert, all in ONE transaction. Callers that get null

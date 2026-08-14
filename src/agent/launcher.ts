@@ -116,7 +116,7 @@ const CHAT_TOOL_NAMES = new Set([
  * refused writes a draft instead of retrying the wall.
  */
 export const AUTOMATION_RUN_PREAMBLE =
-  "You are a scheduled mailmux automation. Do the task below using the mailmux MCP tools, then exit. You cannot talk to the user: do not call chat tools; write nothing to the user. Never send email: queue outreach with outbox_queue_draft or save with draft_create and a human will review.";
+  "You are a scheduled Sley automation. Do the task below using the Sley MCP tools, then exit. You cannot talk to the user: do not call chat tools; write nothing to the user. Never send email: queue outreach with outbox_queue_draft or save with draft_create and a human will review.";
 
 /** Automation tools a run may call: reads only. It must not edit the schedule. */
 const RUN_AUTOMATION_READ_TOOLS = ["automations_list", "automation_runs_list"];

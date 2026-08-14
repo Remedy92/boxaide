@@ -212,7 +212,7 @@ describe("AutomationStore", () => {
   });
 
   it("refuses a claim while another process holds a fresh run", () => {
-    // Two stores, one file = `mailmux serve` and a stdio `mailmux mcp`, each
+    // Two stores, one file = `sley serve` and a stdio `sley mcp`, each
     // with its own in-process FIFO. Only the DB lock sees both.
     const [serve, mcp] = newSharedStores();
     const a = serve.create({ name: "a", cron: "0 8 * * *", prompt: "p" });

@@ -32,7 +32,7 @@ export const AUTOMATION_TOOLS: ToolDef[] = [
         agentId: {
           type: "string",
           description:
-            "Agent CLI id from the mailmux Agents list. Omit to use the first installed one.",
+            "Agent CLI id from the Sley Agents list. Omit to use the first installed one.",
         },
       },
       required: ["name", "cron", "prompt"],

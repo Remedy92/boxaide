@@ -659,7 +659,7 @@
         },
         "agentId": {
           "type": "string",
-          "description": "Agent CLI id from the mailmux Agents list. Omit to use the first installed one."
+          "description": "Agent CLI id from the Sley Agents list. Omit to use the first installed one."
         }
       },
       "required": [
@@ -893,7 +893,7 @@
   },
   {
     "name": "outbox_queue_draft",
-    "description": "Queue one email for human review. This is the ONLY way an automation or agent gets outreach toward delivery; a human reviews it in the mailmux Outreach view before anything is sent. Nothing here sends mail, and there is no tool that approves or sends a queued row — do not look for one. An opt-out footer is appended automatically.",
+    "description": "Queue one email for human review. This is the ONLY way an automation or agent gets outreach toward delivery; a human reviews it in the Sley Outreach view before anything is sent. Nothing here sends mail, and there is no tool that approves or sends a queued row — do not look for one. An opt-out footer is appended automatically.",
     "inputSchema": {
       "type": "object",
       "properties": {

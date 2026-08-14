@@ -264,12 +264,12 @@ Three modules ship with the inbox. They are free, MIT, and run only on your mach
 | Module | What it is | Where you see it |
 |---|---|---|
 | **CRM** | Contacts, organisations, notes, an interaction timeline and a deal pipeline, all derived from mail you already have. | **People** and **Pipeline** views |
-| **Automations** | Named prompts on a cron. Each run is a one-shot headless agent with the mailmux tools and no user to talk to. | **Automations** view |
+| **Automations** | Named prompts on a cron. Each run is a one-shot headless agent with the Sley tools and no user to talk to. | **Automations** view |
 | **Outreach** | Campaigns of timed steps that produce drafts. Every draft waits for you. | **Outreach** view |
 
 ### CRM: derived, not entered
 
-You do not type your contacts in. `crm_sync` walks INBOX and the Sent folder of each account and records who you actually mail with: contact per address, one interaction row per message, organisation per non-free email domain. It runs every 10 minutes while `mailmux serve` is up, and on demand from the tool or `POST /api/crm/sync`.
+You do not type your contacts in. `crm_sync` walks INBOX and the Sent folder of each account and records who you actually mail with: contact per address, one interaction row per message, organisation per non-free email domain. It runs every 10 minutes while `sley serve` is up, and on demand from the tool or `POST /api/crm/sync`.
 
 Free-provider domains (gmail.com, outlook.com, proton.me, …) never create an organisation. Automated senders (`no-reply@`, `postmaster@`, bounce addresses) are skipped. You can still add or correct anything by hand, or ask the agent to.
 
@@ -299,11 +299,11 @@ Claude Desktop keeps each scheduled task as a folder under `~/.claude/scheduled-
 
 Ask the agent to do the move:
 
-> Read ~/.claude/scheduled-tasks/*/SKILL.md and recreate each one as a mailmux automation.
+> Read ~/.claude/scheduled-tasks/*/SKILL.md and recreate each one as a Sley automation.
 
 It reads the folder itself with its own file tools and calls `automation_create` per task: `name` from the front matter, `prompt` from the body. A `SKILL.md` does not carry a cron, so the agent asks you for the schedule of each one, or proposes one from the description. Nothing is imported silently, and nothing is deleted on the Claude Desktop side.
 
-Why this is a conversation and not an importer: the two systems do not have the same permissions. A Claude Desktop task can talk to you and reach everything on your machine. A mailmux automation cannot talk to anyone and works through the mailmux tools. A task that assumed it could ask a question needs rewriting before it makes sense on a cron here, and the agent that reads it is the thing best placed to rewrite it.
+Why this is a conversation and not an importer: the two systems do not have the same permissions. A Claude Desktop task can talk to you and reach everything on your machine. A Sley automation cannot talk to anyone and works through the Sley tools. A task that assumed it could ask a question needs rewriting before it makes sense on a cron here, and the agent that reads it is the thing best placed to rewrite it.
 
 ### No auto-send
 
@@ -322,7 +322,7 @@ The MCP surface has no approve, reject or send tool at all. This is not a permis
 
 The rail badges the pending count, and the desktop app raises a notification and a dock badge when it rises. You are told about waiting drafts; you are never told after the fact about sent ones.
 
-Sending is throttled server-side even after approval: at least 60 seconds between engine sends with jitter, and at most `MAILMUX_SEND_DAILY_CAP` (default 50) per account per UTC day. Over the cap, an approved row simply goes out the next day.
+Sending is throttled server-side even after approval: at least 60 seconds between engine sends with jitter, and at most `SLEY_SEND_DAILY_CAP` (default 50) per account per UTC day. Over the cap, an approved row simply goes out the next day.
 
 ### Suppression is a server rule, not a checkbox
 
@@ -341,7 +341,7 @@ Every outreach step, including the first, ends with a plain-text opt-out line te
 
 ### Everything stays on your machine
 
-Same store, same master key, same file as the rest of mailmux: `~/.mailmux/mailmux.db`.
+Same store, same master key, same file as the rest of Sley: `~/.sley/sley.db`.
 
 | Data | At rest |
 |---|---|
@@ -349,7 +349,7 @@ Same store, same master key, same file as the rest of mailmux: `~/.mailmux/mailm
 | Contact email and name, organisation name and domain, tags, deal titles, suppression addresses | plaintext — they are CRM identity, needed for UNIQUE and for search |
 | Automation prompts | plaintext — you wrote them, they are not mail content |
 
-Nothing leaves the process. There is no sync, no telemetry and no hosted component. Back up `~/.mailmux` and you have backed up all of it.
+Nothing leaves the process. There is no sync, no telemetry and no hosted component. Back up `~/.sley` and you have backed up all of it.
 
 ## Install options
 

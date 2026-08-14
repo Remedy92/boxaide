@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-13 · **Status:** accepted · **Author:** Fable (with Lucas)
 
-mailmux grows from agentic inbox into a local agent work platform. Three modules
+Sley grows from agentic inbox into a local agent work platform. Three modules
 ship together: a CRM derived from mail, scheduled agent automations, and an
 outreach engine with human approval. All free, MIT, fully local. No sync.
 
@@ -26,7 +26,7 @@ outreach engine with human approval. All free, MIT, fully local. No sync.
 4. **One automation agent at a time.** Automation runs are serialized in a
    queue. A run that is still going when the next fires makes the next wait.
 5. **Send throttling is server-side.** Approved outreach sends respect a
-   per-account daily cap (`MAILMUX_SEND_DAILY_CAP`, default 50) and a minimum
+   per-account daily cap (`SLEY_SEND_DAILY_CAP`, default 50) and a minimum
    gap of 60s with jitter between engine-driven sends.
 6. **Module isolation.** Each module lives in its own directory and touches
    shared files only through the seams already wired (see File map). Do not
@@ -179,7 +179,7 @@ Scheduler (`AutomationScheduler`):
   hard timeout then SIGKILL and status 'killed'. `runOnce` must not disturb
   the interactive chat agent: when a chat agent is running, queue behind it.
 - Run preamble (verbatim, prepended to every automation prompt):
-  "You are a scheduled mailmux automation. Do the task below using the mailmux
+  "You are a scheduled Sley automation. Do the task below using the Sley
   MCP tools, then exit. You cannot talk to the user: do not call chat tools;
   write nothing to the user. Never send email: queue outreach with
   outbox_queue_draft or save with draft_create and a human will review."
@@ -260,7 +260,7 @@ Engine (`OutreachEngine`):
     Step 0 included. No tracking links, ever.
 - Approval → send: `POST /api/outreach/outbox/:id/approve` marks 'approved'
   and the engine sends approved rows in order, spacing sends ≥60s apart with
-  ±20s jitter, max `MAILMUX_SEND_DAILY_CAP` (default 50) engine sends per
+  ±20s jitter, max `SLEY_SEND_DAILY_CAP` (default 50) engine sends per
   account per UTC day (count outbox rows sent_at that day). Cap reached →
   row stays 'approved' and goes out the next day. Send uses
   `MailService.sendMessage` (guard applies); failure → status 'failed',
@@ -310,7 +310,7 @@ Outreach (`src/outreach/tools.ts`):
 - `campaign_add_contacts` { campaignId, contactIds } — refuses suppressed.
 - `outbox_queue_draft` { account, to, subject, body, contactId?, campaignId? }
   — description: "the ONLY way an automation or agent gets outreach toward
-  delivery; a human reviews it in the mailmux Outreach view before anything
+  delivery; a human reviews it in the Sley Outreach view before anything
   is sent."
 - `outbox_list` { status?, limit=50 } — decrypted subjects/bodies.
 - `suppression_add` { email, reason='agent' }
