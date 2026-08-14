@@ -39,7 +39,7 @@ const CSP_DIRECTIVES = [
 ].join("; ");
 
 /**
- * Headers applied to every response the Sley server sends.
+ * Headers applied to every response the Boxaide server sends.
  *
  * These are cheap and unconditional. They are not a substitute for the origin
  * allowlist or the bearer token; they close the classes of problem those two
@@ -54,7 +54,7 @@ export function applySecurityHeaders(c: Context): void {
   c.header("X-Content-Type-Options", "nosniff");
   // A server URL can carry a port and a path worth not leaking outward.
   c.header("Referrer-Policy", "no-referrer");
-  // Sley asks for none of these; deny them so an injected script cannot.
+  // Boxaide asks for none of these; deny them so an injected script cannot.
   c.header(
     "Permissions-Policy",
     "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()",

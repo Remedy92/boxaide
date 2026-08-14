@@ -1,5 +1,5 @@
 /**
- * The Sley mark, defined once.
+ * The Boxaide mark, defined once.
  *
  * Braces with one line of mail inside them, engraved into a machined plate:
  * code on the outside, a message in the middle. Every surface that carries the

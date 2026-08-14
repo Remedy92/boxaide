@@ -988,7 +988,7 @@ export type LocalAgent = {
   label: string;
   /** The CLI exists on the server machine's PATH. */
   available: boolean;
-  /** This Sley build knows how to launch it. */
+  /** This Boxaide build knows how to launch it. */
   supported: boolean;
   /** Models the server lets you pick from. Empty means no picker. */
   models: LocalAgentModel[];

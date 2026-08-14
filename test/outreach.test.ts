@@ -516,7 +516,7 @@ describe("outreach", () => {
     const quoted = [
       "Sounds good!",
       "",
-      "On Thu, Aug 14, Sley Newsletter wrote:",
+      "On Thu, Aug 14, Boxaide Newsletter wrote:",
       "> You can opt out of future mailings at any time.",
     ].join("\n");
     expect(optOutIntent(quoted, "body")).toBe(false);
@@ -772,7 +772,7 @@ describe("outreach", () => {
     );
     const queue = OUTREACH_TOOLS.find((t) => t.name === "outbox_queue_draft");
     expect(queue?.description).toContain(
-      "the ONLY way an automation or agent gets outreach toward delivery; a human reviews it in the Sley Outreach view before anything is sent",
+      "the ONLY way an automation or agent gets outreach toward delivery; a human reviews it in the Boxaide Outreach view before anything is sent",
     );
   });
 

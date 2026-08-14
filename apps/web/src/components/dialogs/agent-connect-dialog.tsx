@@ -40,12 +40,12 @@ import { cn } from "@/lib/utils";
  * its own terminal where the user cannot see it, and treating an empty
  * chat_await_message as a reason to stop.
  */
-const KICKOFF = `You are my Sley inbox agent. Use the Sley MCP tools.
+const KICKOFF = `You are my Boxaide inbox agent. Use the Boxaide MCP tools.
 
 Loop: call chat_await_message, do the work, post the answer with chat_say, then
 call chat_await_message again. Keep going until I tell you to stop.
 
-Everything I read appears in the Sley window, so every answer must go through
+Everything I read appears in the Boxaide window, so every answer must go through
 chat_say — do not answer here. A chat_await_message that returns no message is
 normal; call it again. Use chat_activity for anything slow. Draft rather than
 send unless I ask you to send.`;
@@ -85,7 +85,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
           <DialogHeader>
             <DialogTitle className="title-15">Connect your agent</DialogTitle>
             <DialogDescription>
-              Point any MCP client at Sley. It can then read, draft and send
+              Point any MCP client at Boxaide. It can then read, draft and send
               from all your mailboxes — and hold a conversation with you in the
               Agent view. Drafting is the default; sending needs the send tool.
             </DialogDescription>
@@ -200,7 +200,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
           </div>
 
           {/* Without this step the Agent view stays silent, and the reason is
-              invisible: MCP is client-driven, so Sley cannot make an agent
+              invisible: MCP is client-driven, so Boxaide cannot make an agent
               start listening. Something has to tell it to enter the loop, and
               that something is the person, once, in their own client. */}
           <div className="space-y-2">

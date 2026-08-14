@@ -305,7 +305,7 @@
   },
   {
     "name": "chat_await_message",
-    "description": "Wait for the user's next message in the Sley window, and return it. This is a LOOP, and you must keep running it until the user tells you to stop: call chat_await_message → do the work → chat_say the answer → call chat_await_message again. Never end your turn after answering once; go straight back to chat_await_message. A call that returns { \"message\": null, \"timedOut\": true } means nobody typed anything yet — that is normal and is NOT an error and NOT a reason to stop; call this tool again immediately. Anything the user typed before you started waiting is queued and comes back on the first call. Each message goes to exactly one agent, so do not run two agents against the same Sley.",
+    "description": "Wait for the user's next message in the Boxaide window, and return it. This is a LOOP, and you must keep running it until the user tells you to stop: call chat_await_message → do the work → chat_say the answer → call chat_await_message again. Never end your turn after answering once; go straight back to chat_await_message. A call that returns { \"message\": null, \"timedOut\": true } means nobody typed anything yet — that is normal and is NOT an error and NOT a reason to stop; call this tool again immediately. Anything the user typed before you started waiting is queued and comes back on the first call. Each message goes to exactly one agent, so do not run two agents against the same Boxaide.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -320,7 +320,7 @@
   },
   {
     "name": "chat_say",
-    "description": "Post a message to the user in the Sley window. This is how the user reads your answer — text you write in your own terminal or chat client is NOT visible to them, so every answer to a chat_await_message has to go through here. Write it as a reply to a person: plain sentences, no tool-call transcripts, no JSON. This is a LOOP, and you must keep running it until the user tells you to stop: call chat_await_message → do the work → chat_say the answer → call chat_await_message again. Never end your turn after answering once; go straight back to chat_await_message.",
+    "description": "Post a message to the user in the Boxaide window. This is how the user reads your answer — text you write in your own terminal or chat client is NOT visible to them, so every answer to a chat_await_message has to go through here. Write it as a reply to a person: plain sentences, no tool-call transcripts, no JSON. This is a LOOP, and you must keep running it until the user tells you to stop: call chat_await_message → do the work → chat_say the answer → call chat_await_message again. Never end your turn after answering once; go straight back to chat_await_message.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -659,7 +659,7 @@
         },
         "agentId": {
           "type": "string",
-          "description": "Agent CLI id from the Sley Agents list. Omit to use the first installed one."
+          "description": "Agent CLI id from the Boxaide Agents list. Omit to use the first installed one."
         }
       },
       "required": [
@@ -893,7 +893,7 @@
   },
   {
     "name": "outbox_queue_draft",
-    "description": "Queue one email for human review. This is the ONLY way an automation or agent gets outreach toward delivery; a human reviews it in the Sley Outreach view before anything is sent. Nothing here sends mail, and there is no tool that approves or sends a queued row — do not look for one. An opt-out footer is appended automatically.",
+    "description": "Queue one email for human review. This is the ONLY way an automation or agent gets outreach toward delivery; a human reviews it in the Boxaide Outreach view before anything is sent. Nothing here sends mail, and there is no tool that approves or sends a queued row — do not look for one. An opt-out footer is appended automatically.",
     "inputSchema": {
       "type": "object",
       "properties": {

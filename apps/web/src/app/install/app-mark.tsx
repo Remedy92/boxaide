@@ -47,7 +47,7 @@ export function AppMark({ size = 88 }: { size?: number }) {
       height={size}
       viewBox="0 0 1024 1024"
       role="img"
-      aria-label="The Sley app icon"
+      aria-label="The Boxaide app icon"
       className="shrink-0"
     >
       <defs>

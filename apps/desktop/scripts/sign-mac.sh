@@ -3,7 +3,7 @@
 #
 # A Developer ID signature alone is not enough. macOS refuses to open a
 # downloaded app that Apple has not notarised: "Apple could not verify
-# Sley is free of malware." Notarisation is a separate upload to Apple,
+# Boxaide is free of malware." Notarisation is a separate upload to Apple,
 # and the returned ticket must be stapled into the app AND the dmg.
 #
 # Why not electron-builder's own signing: it passes the certificate NAME to
@@ -17,15 +17,15 @@
 # Usage:
 #   APPLE_KEYCHAIN_PROFILE=mailmux-notary npm run dist:mac   # sign + notarise
 #   npm run dist:mac                                          # sign only
-#   SLEY_SIGN_ID=<sha1> npm run dist:mac                      # other cert
+#   BOXAIDE_SIGN_ID=<sha1> npm run dist:mac                      # other cert
 #
 # Without APPLE_KEYCHAIN_PROFILE this script signs and skips notarisation.
 # That build is for local testing only. scripts/ship.sh refuses to publish it.
 set -eu
 cd "$(dirname "$0")/.."
 
-ID="${SLEY_SIGN_ID:-${MAILMUX_SIGN_ID:-403ADC00F0A6E8A510184F01AA2D670FA1988B54}}"
-APP=release/mac-arm64/Sley.app
+ID="${BOXAIDE_SIGN_ID:-${MAILMUX_SIGN_ID:-403ADC00F0A6E8A510184F01AA2D670FA1988B54}}"
+APP=release/mac-arm64/Boxaide.app
 ENT=build/entitlements.mac.plist
 
 # Inside-out: leaf binaries, frameworks, helpers, then the app itself.
@@ -65,23 +65,23 @@ PROFILE="${APPLE_KEYCHAIN_PROFILE:-}"
 # network round trip to Apple on first launch; a stapled app never does.
 if [ -n "$PROFILE" ]; then
   echo "notarising the app with profile $PROFILE"
-  rm -f release/sley-app.zip
-  ditto -c -k --keepParent "$APP" release/sley-app.zip
-  xcrun notarytool submit release/sley-app.zip \
+  rm -f release/boxaide-app.zip
+  ditto -c -k --keepParent "$APP" release/boxaide-app.zip
+  xcrun notarytool submit release/boxaide-app.zip \
     --keychain-profile "$PROFILE" --wait
   xcrun stapler staple "$APP"
-  rm -f release/sley-app.zip
+  rm -f release/boxaide-app.zip
 else
   echo "APPLE_KEYCHAIN_PROFILE is not set — skipping notarisation"
 fi
 
 # electron-builder wrote the dmg from the unsigned app. Rebuild the image
 # from this signed copy, or the download still contains an unsigned .app.
-# The path is the .app itself — passing the parent folder nests Sley.app
-# inside another Sley.app.
-npx electron-builder --mac dmg --prepackaged release/mac-arm64/Sley.app -c.mac.identity=null
+# The path is the .app itself — passing the parent folder nests Boxaide.app
+# inside another Boxaide.app.
+npx electron-builder --mac dmg --prepackaged release/mac-arm64/Boxaide.app -c.mac.identity=null
 
-for dmg in release/sley-*.dmg; do
+for dmg in release/boxaide-*.dmg; do
   [ -e "$dmg" ] || continue
   codesign --force --timestamp --sign "$ID" "$dmg"
   codesign --verify "$dmg"

@@ -1,7 +1,7 @@
 /**
  * Snapshots the MCP tool list into the Claude Desktop connector.
  *
- * The connector (apps/mcpb) answers `tools/list` itself while the Sley
+ * The connector (apps/mcpb) answers `tools/list` itself while the Boxaide
  * server is not running, so Claude Desktop can attach — and show the real
  * tools — before the app is ever opened. That answer must be the server's own
  * list, not a hand-maintained copy, so this script derives it from the

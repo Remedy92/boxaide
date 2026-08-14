@@ -39,12 +39,21 @@ export type Settings = {
 };
 
 /**
- * Pre-rename keys. The Next build used to write `mailmux.*`, and the bundled
- * web/ UI stored the token under `mailmux_token`. Reads fall back to these
- * once so an upgrade does not drop a saved token or preference. Writes go
- * only to `sley.*`.
+ * Pre-rename keys. Reads fall back Sley then Mailmux so an upgrade does not
+ * drop a saved token or preference. Writes go only to `boxaide.*`.
  */
 export const LEGACY_TOKEN_KEY = "mailmux_token";
+
+const SLEY_SETTINGS_KEYS = {
+  baseUrl: "sley.baseUrl",
+  token: "sley.token",
+  density: "sley.density",
+  railCollapsed: "sley.railCollapsed",
+  recentCommands: "sley.recentCommands",
+  onboarded: "sley.onboarded",
+  agentModel: "sley.agentModel",
+  theme: "sley.theme",
+} as const;
 
 const LEGACY_SETTINGS_KEYS = {
   baseUrl: "mailmux.baseUrl",
@@ -58,15 +67,15 @@ const LEGACY_SETTINGS_KEYS = {
 } as const;
 
 export const SETTINGS_KEYS = {
-  baseUrl: "sley.baseUrl",
-  token: "sley.token",
-  density: "sley.density",
-  railCollapsed: "sley.railCollapsed",
-  recentCommands: "sley.recentCommands",
-  onboarded: "sley.onboarded",
-  agentModel: "sley.agentModel",
+  baseUrl: "boxaide.baseUrl",
+  token: "boxaide.token",
+  density: "boxaide.density",
+  railCollapsed: "boxaide.railCollapsed",
+  recentCommands: "boxaide.recentCommands",
+  onboarded: "boxaide.onboarded",
+  agentModel: "boxaide.agentModel",
   /** Owned by next-themes, listed here so the key namespace is documented. */
-  theme: "sley.theme",
+  theme: "boxaide.theme",
 } as const;
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -80,7 +89,7 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 /** Fired on the window after any write, so same-tab listeners can react. */
-export const SETTINGS_EVENT = "sley:settings";
+export const SETTINGS_EVENT = "boxaide:settings";
 
 function storage(): Storage | null {
   if (typeof window === "undefined") return null;
@@ -96,20 +105,27 @@ function readString(key: string): string | null {
   return storage()?.getItem(key) ?? null;
 }
 
-/** Prefer the current `sley.*` key, then the pre-rename `mailmux.*` key. */
+/** Prefer `boxaide.*`, then `sley.*`, then `mailmux.*`. */
 function readPref(key: keyof typeof SETTINGS_KEYS): string | null {
-  return readString(SETTINGS_KEYS[key]) ?? readString(LEGACY_SETTINGS_KEYS[key]);
+  return (
+    readString(SETTINGS_KEYS[key]) ??
+    readString(SLEY_SETTINGS_KEYS[key]) ??
+    readString(LEGACY_SETTINGS_KEYS[key])
+  );
 }
 
 /**
- * Copy `mailmux.theme` onto `sley.theme` once. next-themes only reads its
- * `storageKey`, so a fallback that lives only in this module would never run.
+ * Copy `sley.theme` or `mailmux.theme` onto `boxaide.theme` once. next-themes
+ * only reads its `storageKey`, so a fallback that lives only in this module
+ * would never run.
  */
 export function adoptLegacyTheme(): void {
   const store = storage();
   if (!store) return;
   if (store.getItem(SETTINGS_KEYS.theme) !== null) return;
-  const prev = store.getItem(LEGACY_SETTINGS_KEYS.theme);
+  const prev =
+    store.getItem(SLEY_SETTINGS_KEYS.theme) ??
+    store.getItem(LEGACY_SETTINGS_KEYS.theme);
   if (prev !== null) {
     try {
       store.setItem(SETTINGS_KEYS.theme, prev);
@@ -256,6 +272,7 @@ export function subscribeToSettings(onChange: () => void): () => void {
   const onStorage = (event: StorageEvent) => {
     if (
       event.key === null ||
+      event.key.startsWith("boxaide.") ||
       event.key.startsWith("sley.") ||
       event.key.startsWith("mailmux.")
     ) {

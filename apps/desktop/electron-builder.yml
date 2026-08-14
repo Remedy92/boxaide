@@ -1,5 +1,5 @@
-appId: app.sley.desktop
-productName: Sley
+appId: app.boxaide.desktop
+productName: Boxaide
 copyright: MIT licensed
 
 directories:
@@ -73,7 +73,7 @@ publish: null
 # /releases/latest/download/<name> and never be edited again. The names are
 # repeated in apps/web/src/app/install/page.tsx — change one, change the other.
 mac:
-  artifactName: sley-mac.dmg
+  artifactName: boxaide-mac.dmg
   target: dmg
   category: public.app-category.productivity
   # Signs with the Developer ID Application identity from the login keychain
@@ -96,7 +96,7 @@ mac:
   notarize: false
 
 win:
-  artifactName: sley-windows-setup.exe
+  artifactName: boxaide-windows-setup.exe
   target: nsis
   icon: build/icon.ico
 
@@ -106,7 +106,7 @@ nsis:
   allowToChangeInstallationDirectory: true
 
 linux:
-  artifactName: sley-linux.AppImage
+  artifactName: boxaide-linux.AppImage
   target: AppImage
   category: Network
   icon: build/icon.png

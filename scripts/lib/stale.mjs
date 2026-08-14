@@ -87,7 +87,7 @@ export async function treeHash(dir) {
 }
 
 export function lockStampPath(dir) {
-  return join(dir, "node_modules", ".sley-lock");
+  return join(dir, "node_modules", ".boxaide-lock");
 }
 
 export async function lockHash(dir) {
@@ -126,7 +126,7 @@ export async function electronBinaryReady(desktopRoot) {
 }
 
 export function webStampPath(root) {
-  return join(root, "apps", "web", ".sley-export");
+  return join(root, "apps", "web", ".boxaide-export");
 }
 
 export async function webSourceHash(root) {

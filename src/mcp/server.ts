@@ -253,7 +253,7 @@ export const TOOLS = [
  * The chat channel.
  *
  * These are only listed when the server was built with a channel, which is
- * every real entry point — `serve` and `sley mcp` both have one. A caller
+ * every real entry point — `serve` and `boxaide mcp` both have one. A caller
  * that constructs the MCP server without one gets the mail tools and nothing
  * that would advertise a conversation it cannot hold.
  *
@@ -273,7 +273,7 @@ const CHAT_LOOP = [
 export const CHAT_TOOLS = [
   {
     name: "chat_await_message",
-    description: `Wait for the user's next message in the Sley window, and return it. ${CHAT_LOOP} A call that returns { "message": null, "timedOut": true } means nobody typed anything yet — that is normal and is NOT an error and NOT a reason to stop; call this tool again immediately. Anything the user typed before you started waiting is queued and comes back on the first call. Each message goes to exactly one agent, so do not run two agents against the same Sley.`,
+    description: `Wait for the user's next message in the Boxaide window, and return it. ${CHAT_LOOP} A call that returns { "message": null, "timedOut": true } means nobody typed anything yet — that is normal and is NOT an error and NOT a reason to stop; call this tool again immediately. Anything the user typed before you started waiting is queued and comes back on the first call. Each message goes to exactly one agent, so do not run two agents against the same Boxaide.`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -288,7 +288,7 @@ export const CHAT_TOOLS = [
   },
   {
     name: "chat_say",
-    description: `Post a message to the user in the Sley window. This is how the user reads your answer — text you write in your own terminal or chat client is NOT visible to them, so every answer to a chat_await_message has to go through here. Write it as a reply to a person: plain sentences, no tool-call transcripts, no JSON. ${CHAT_LOOP}`,
+    description: `Post a message to the user in the Boxaide window. This is how the user reads your answer — text you write in your own terminal or chat client is NOT visible to them, so every answer to a chat_await_message has to go through here. Write it as a reply to a person: plain sentences, no tool-call transcripts, no JSON. ${CHAT_LOOP}`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -343,7 +343,7 @@ export function createMcpServer(
   platform?: Platform,
 ): Server {
   const server = new Server(
-    { name: "sley", version: "0.1.0" },
+    { name: "boxaide", version: "0.1.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -619,7 +619,7 @@ export async function handleMcpJsonRpc(
         protocolVersion:
           typeof requested === "string" && requested ? requested : PROTOCOL_VERSION,
         capabilities: { tools: {} },
-        serverInfo: { name: "sley", version: "0.1.0" },
+        serverInfo: { name: "boxaide", version: "0.1.0" },
       },
     };
   }

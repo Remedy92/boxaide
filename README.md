@@ -1,4 +1,4 @@
-# Sley
+# Boxaide
 
 **Free, self-hosted multi-mailbox agentic inbox.**  
 Connect any IMAP/SMTP mail. One unified inbox in the browser. One MCP surface for every agent.
@@ -7,12 +7,12 @@ On top of the inbox: a CRM derived from your own mail, scheduled agent automatio
 
 No paid SaaS required for core receive + send. MIT licensed.
 
-Formerly Mailmux. The repo is [Remedy92/sley](https://github.com/Remedy92/sley). A local checkout may still be named `mailmux`.
+Formerly Sley, then Mailmux. The repo is [Remedy92/boxaide](https://github.com/Remedy92/boxaide).
 
 ## Quick start
 
 ```bash
-cd Projects/sley   # or your clone path
+cd Projects/boxaide   # or your clone path
 npm install
 ./scripts/start.sh --fixture
 # equivalent: npm run dev -- --fixture
@@ -40,9 +40,9 @@ npm start
 
 ## Using the hosted interface
 
-Sley has one web interface: the Next.js app in `apps/web`, built as a static export. You can serve it from your own process or host it elsewhere. Either way it talks to the Sley server on **your** machine, and it never sends your mail or your token anywhere else.
+Boxaide has one web interface: the Next.js app in `apps/web`, built as a static export. You can serve it from your own process or host it elsewhere. Either way it talks to the Boxaide server on **your** machine, and it never sends your mail or your token anywhere else.
 
-The public site is **https://sley.vercel.app**.
+The public site is **https://boxaide.vercel.app**.
 
 ### Local (recommended — works in every browser)
 
@@ -84,22 +84,22 @@ No environment variable is required. One optional, non-secret variable exists:
 **2. Allow the origin.** On **your** machine, not on the host:
 
 ```bash
-SLEY_ALLOWED_ORIGINS=https://sley.vercel.app sley serve
+BOXAIDE_ALLOWED_ORIGINS=https://boxaide.vercel.app boxaide serve
 ```
 
-See the rules and the cost of doing this under [Browser origins](#browser-origins-sley_allowed_origins) below.
+See the rules and the cost of doing this under [Browser origins](#browser-origins-boxaide_allowed_origins) below.
 
-**3. Copy the token.** `sley serve` prints it on first run; it is also in `bearer.token` inside your data directory (`~/.sley` by default, or `~/.mailmux` if that folder exists and `~/.sley` does not).
+**3. Copy the token.** `boxaide serve` prints it on first run; it is also in `bearer.token` inside your data directory (`~/.boxaide` by default, or `~/.mailmux` if that folder exists and `~/.boxaide` does not).
 
-**4. Point the page at your server.** Open the deployed page at **`/app`**, click **Set up Sley**, and enter the Server URL and the token. Both are stored in your browser's localStorage (`sley.*`) and are sent only to the server URL you entered. A first run still reads leftover `mailmux.*` and `mailmux_token` keys once.
+**4. Point the page at your server.** Open the deployed page at **`/app`**, click **Set up Boxaide**, and enter the Server URL and the token. Both are stored in your browser's localStorage (`boxaide.*`) and are sent only to the server URL you entered. A first run still reads leftover `mailmux.*` and `mailmux_token` keys once.
 
 **5. Allow local network access (Chrome, Edge, Brave).** Since Chromium 142 the browser asks permission before a website may reach `127.0.0.1`. Allow it when prompted; if you dismissed the prompt, re-enable it under Site settings → *Apps on device*.
 
 ### Safari, and the mixed-content limit
 
-A page served over `https` cannot reach an `http` address. For `127.0.0.1` and `localhost` Chromium and Firefox make an exception; **WebKit does not**, and there is no workaround ([WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934), still open). This is also why `SLEY_ALLOWED_ORIGINS` drops `http://` entries: the configuration that would avoid the block is the one that makes the allowlist spoofable.
+A page served over `https` cannot reach an `http` address. For `127.0.0.1` and `localhost` Chromium and Firefox make an exception; **WebKit does not**, and there is no workaround ([WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934), still open). This is also why `BOXAIDE_ALLOWED_ORIGINS` drops `http://` entries: the configuration that would avoid the block is the one that makes the allowlist spoofable.
 
-If your server is not on loopback, put it behind `https` or reach it over a tunnel. Otherwise use the local build — run `sley serve` and open `http://127.0.0.1:8787` directly. It is the same interface.
+If your server is not on loopback, put it behind `https` or reach it over a tunnel. Otherwise use the local build — run `boxaide serve` and open `http://127.0.0.1:8787` directly. It is the same interface.
 
 ### What the host can see
 
@@ -107,12 +107,12 @@ Nothing. The deployed page has no server-side code: no API routes, no server act
 
 ## Desktop app
 
-A window instead of a terminal, for people who do not want either. `apps/desktop` is an Electron shell: it starts the same server inside its own process, binds `127.0.0.1`, and uses the same `~/.sley` data directory, master key and bearer token. An account connected in the desktop app is the same account your agents reach over MCP.
+A window instead of a terminal, for people who do not want either. `apps/desktop` is an Electron shell: it starts the same server inside its own process, binds `127.0.0.1`, and uses the same `~/.boxaide` data directory, master key and bearer token. An account connected in the desktop app is the same account your agents reach over MCP.
 
 On macOS the app also lives in the menu bar. Click the mark for a popover —
 recent mail, whether an agent is listening, one button into the app; the
 popover is the `/tray/` route of the same web export. Right-click for a menu:
-open Sley, install the Claude connector (opens the bundled `.mcpb` in
+open Boxaide, install the Claude connector (opens the bundled `.mcpb` in
 Claude Desktop), **Start at login** (packaged app only — it registers a macOS
 login item), quit. The menu bar icon stays as long as the app runs, including
 with the window closed.
@@ -127,7 +127,7 @@ That compiles the server, installs Electron deps only when the lockfile changed,
 npm run desktop:dist          # same prepare, then signed mac dmg in apps/desktop/release/
 ```
 
-On mac, signing uses a Developer ID certificate pinned by hash in `apps/desktop/scripts/sign-mac.sh` (electron-builder's by-name signing is ambiguous when the keychain holds two same-named certificates). Notarization is a separate, credential-holding step; the commands are at the top of that script. The port follows `SLEY_PORT` (default 8787); if something already holds it — `sley serve` in a terminal, or a second copy of the app — the window does not open and the app says so.
+On mac, signing uses a Developer ID certificate pinned by hash in `apps/desktop/scripts/sign-mac.sh` (electron-builder's by-name signing is ambiguous when the keychain holds two same-named certificates). Notarization is a separate, credential-holding step; the commands are at the top of that script. The port follows `BOXAIDE_PORT` (default 8787); if something already holds it — `boxaide serve` in a terminal, or a second copy of the app — the window does not open and the app says so.
 
 The install button serves GitHub `releases/latest`. CI does not upload a dmg. After a merge to master, from the **main checkout** (not a worktree):
 
@@ -149,19 +149,19 @@ xcrun notarytool store-credentials mailmux-notary --apple-id <apple-id> --team-i
 
 ### Claude Desktop — one click
 
-With Sley running, open **Connect agent** in the UI and press **Download for
-Claude Desktop**, or fetch `http://127.0.0.1:8787/sley.mcpb` directly.
+With Boxaide running, open **Connect agent** in the UI and press **Download for
+Claude Desktop**, or fetch `http://127.0.0.1:8787/boxaide.mcpb` directly.
 Double-click the file; Claude Desktop installs it. Nothing to configure: the
 connector is a tiny stdio→HTTP proxy (`apps/mcpb`) that finds your local server
-and reads the token from `~/.sley/bearer.token` itself. It is built into
-`web-next/sley.mcpb` by `npm run build` (`npm run mcpb:build` on its own).
+and reads the token from `~/.boxaide/bearer.token` itself. It is built into
+`web-next/boxaide.mcpb` by `npm run build` (`npm run mcpb:build` on its own).
 
 ### HTTP MCP (Cursor / remote-capable clients)
 
 ```json
 {
   "mcpServers": {
-    "sley": {
+    "boxaide": {
       "url": "http://127.0.0.1:8787/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_TOKEN"
@@ -171,7 +171,7 @@ and reads the token from `~/.sley/bearer.token` itself. It is built into
 }
 ```
 
-Token lives in `~/.sley/bearer.token` (or `SLEY_TOKEN`).
+Token lives in `~/.boxaide/bearer.token` (or `BOXAIDE_TOKEN`).
 
 ### stdio MCP (Claude Code / manual Claude Desktop)
 
@@ -183,18 +183,18 @@ npm run mcp
 ```json
 {
   "mcpServers": {
-    "sley": {
+    "boxaide": {
       "command": "npx",
-      "args": ["tsx", "/absolute/path/to/sley/src/cli.ts", "mcp"],
+      "args": ["tsx", "/absolute/path/to/boxaide/src/cli.ts", "mcp"],
       "env": {
-        "SLEY_DATA_DIR": "/Users/you/.sley"
+        "BOXAIDE_DATA_DIR": "/Users/you/.boxaide"
       }
     }
   }
 }
 ```
 
-Agents that speak TOML use `[mcp_servers.sley]`. Tool calls show up as `mcp__sley__*`.
+Agents that speak TOML use `[mcp_servers.boxaide]`. Tool calls show up as `mcp__boxaide__*`.
 
 ### Tools
 
@@ -205,7 +205,7 @@ Agents that speak TOML use `[mcp_servers.sley]`. Tool calls show up as `mcp__sle
 | `messages_search` | Free-text search |
 | `message_get` | Full body |
 | `message_send` | Send (confirm in your agent) |
-| `chat_await_message` | Wait for the user's next message in the Sley window |
+| `chat_await_message` | Wait for the user's next message in the Boxaide window |
 | `chat_say` | Answer them there |
 | `chat_activity` | Post a one-line "here is what I am doing" |
 | `chat_history` | Re-read the conversation |
@@ -222,31 +222,31 @@ There is **no tool that approves, rejects or sends an outbox row**. That is a hu
 
 Accounts are connected once in the web UI (or API). Agents reuse the same store — **no per-agent OAuth**.
 
-## Talking to your agent inside Sley
+## Talking to your agent inside Boxaide
 
-The Agent view is the app's first screen, and Sley runs no model behind it.
+The Agent view is the app's first screen, and Boxaide runs no model behind it.
 The agent is whichever MCP client you already use — Claude Code, Codex, Cursor,
 Claude Desktop — and the four `chat_*` tools above are how it holds the
-conversation in the Sley window instead of in its own terminal. There is no
+conversation in the Boxaide window instead of in its own terminal. There is no
 per-client integration: a long-polling tool call is the one capability every MCP
 client has.
 
 Connect the client as above, then say this to it once, in its own window:
 
 ```
-You are my Sley inbox agent. Use the Sley MCP tools.
+You are my Boxaide inbox agent. Use the Boxaide MCP tools.
 
 Loop: call chat_await_message, do the work, post the answer with chat_say, then
 call chat_await_message again. Keep going until I tell you to stop.
 
-Everything I read appears in the Sley window, so every answer must go through
+Everything I read appears in the Boxaide window, so every answer must go through
 chat_say — do not answer here. A chat_await_message that returns no message is
 normal; call it again. Use chat_activity for anything slow. Draft rather than
 send unless I ask you to send.
 ```
 
 The kickoff is not optional and cannot be automated away: MCP is client-driven,
-so nothing on the Sley side can make an agent start listening. Anything you
+so nothing on the Boxaide side can make an agent start listening. Anything you
 type before one does is queued and delivered when it arrives.
 
 Notes on what the UI claims. "Listening" means an agent is parked in an open
@@ -254,7 +254,7 @@ Notes on what the UI claims. "Listening" means an agent is parked in an open
 never says "connected", because a stateless `POST /mcp` cannot tell a configured
 client from one that was never started. Each message goes to exactly one agent,
 so do not point two at the same server. The conversation is stored in
-`~/.sley/sley.db`, encrypted with the same master key as the account
+`~/.boxaide/boxaide.db`, encrypted with the same master key as the account
 passwords, because an agent summarising an inbox puts mail content in those rows.
 
 ## Agent work platform — CRM, automations, outreach
@@ -264,12 +264,12 @@ Three modules ship with the inbox. They are free, MIT, and run only on your mach
 | Module | What it is | Where you see it |
 |---|---|---|
 | **CRM** | Contacts, organisations, notes, an interaction timeline and a deal pipeline, all derived from mail you already have. | **People** and **Pipeline** views |
-| **Automations** | Named prompts on a cron. Each run is a one-shot headless agent with the Sley tools and no user to talk to. | **Automations** view |
+| **Automations** | Named prompts on a cron. Each run is a one-shot headless agent with the Boxaide tools and no user to talk to. | **Automations** view |
 | **Outreach** | Campaigns of timed steps that produce drafts. Every draft waits for you. | **Outreach** view |
 
 ### CRM: derived, not entered
 
-You do not type your contacts in. `crm_sync` walks INBOX and the Sent folder of each account and records who you actually mail with: contact per address, one interaction row per message, organisation per non-free email domain. It runs every 10 minutes while `sley serve` is up, and on demand from the tool or `POST /api/crm/sync`.
+You do not type your contacts in. `crm_sync` walks INBOX and the Sent folder of each account and records who you actually mail with: contact per address, one interaction row per message, organisation per non-free email domain. It runs every 10 minutes while `boxaide serve` is up, and on demand from the tool or `POST /api/crm/sync`.
 
 Free-provider domains (gmail.com, outlook.com, proton.me, …) never create an organisation. Automated senders (`no-reply@`, `postmaster@`, bounce addresses) are skipped. You can still add or correct anything by hand, or ask the agent to.
 
@@ -299,11 +299,11 @@ Claude Desktop keeps each scheduled task as a folder under `~/.claude/scheduled-
 
 Ask the agent to do the move:
 
-> Read ~/.claude/scheduled-tasks/*/SKILL.md and recreate each one as a Sley automation.
+> Read ~/.claude/scheduled-tasks/*/SKILL.md and recreate each one as a Boxaide automation.
 
 It reads the folder itself with its own file tools and calls `automation_create` per task: `name` from the front matter, `prompt` from the body. A `SKILL.md` does not carry a cron, so the agent asks you for the schedule of each one, or proposes one from the description. Nothing is imported silently, and nothing is deleted on the Claude Desktop side.
 
-Why this is a conversation and not an importer: the two systems do not have the same permissions. A Claude Desktop task can talk to you and reach everything on your machine. A Sley automation cannot talk to anyone and works through the Sley tools. A task that assumed it could ask a question needs rewriting before it makes sense on a cron here, and the agent that reads it is the thing best placed to rewrite it.
+Why this is a conversation and not an importer: the two systems do not have the same permissions. A Claude Desktop task can talk to you and reach everything on your machine. A Boxaide automation cannot talk to anyone and works through the Boxaide tools. A task that assumed it could ask a question needs rewriting before it makes sense on a cron here, and the agent that reads it is the thing best placed to rewrite it.
 
 ### No auto-send
 
@@ -322,7 +322,7 @@ The MCP surface has no approve, reject or send tool at all. This is not a permis
 
 The rail badges the pending count, and the desktop app raises a notification and a dock badge when it rises. You are told about waiting drafts; you are never told after the fact about sent ones.
 
-Sending is throttled server-side even after approval: at least 60 seconds between engine sends with jitter, and at most `SLEY_SEND_DAILY_CAP` (default 50) per account per UTC day. Over the cap, an approved row simply goes out the next day.
+Sending is throttled server-side even after approval: at least 60 seconds between engine sends with jitter, and at most `BOXAIDE_SEND_DAILY_CAP` (default 50) per account per UTC day. Over the cap, an approved row simply goes out the next day.
 
 ### Suppression is a server rule, not a checkbox
 
@@ -341,7 +341,7 @@ Every outreach step, including the first, ends with a plain-text opt-out line te
 
 ### Everything stays on your machine
 
-Same store, same master key, same file as the rest of Sley: `~/.sley/sley.db`.
+Same store, same master key, same file as the rest of Boxaide: `~/.boxaide/boxaide.db`.
 
 | Data | At rest |
 |---|---|
@@ -349,7 +349,7 @@ Same store, same master key, same file as the rest of Sley: `~/.sley/sley.db`.
 | Contact email and name, organisation name and domain, tags, deal titles, suppression addresses | plaintext — they are CRM identity, needed for UNIQUE and for search |
 | Automation prompts | plaintext — you wrote them, they are not mail content |
 
-Nothing leaves the process. There is no sync, no telemetry and no hosted component. Back up `~/.sley` and you have backed up all of it.
+Nothing leaves the process. There is no sync, no telemetry and no hosted component. Back up `~/.boxaide` and you have backed up all of it.
 
 ## Install options
 
@@ -362,28 +362,28 @@ Nothing leaves the process. There is no sync, no telemetry and no hosted compone
 
 ### Env
 
-Each `SLEY_*` name is preferred. The matching `MAILMUX_*` name is still read when the Sley name is unset.
+Each `BOXAIDE_*` name is preferred. The matching `MAILMUX_*` name is still read when the Boxaide name is unset.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `SLEY_DATA_DIR` | `~/.sley` | SQLite + keys. Uses `~/.mailmux` if that exists and `~/.sley` does not. |
-| `SLEY_HOST` | `127.0.0.1` | Bind address — see below |
-| `SLEY_PORT` | `8787` | Port |
-| `SLEY_TOKEN` | auto file | API/MCP bearer |
-| `SLEY_MASTER_KEY` | auto file | AES key for passwords — see below |
-| `SLEY_FIXTURE` | off | Demo provider |
-| `SLEY_ALLOWED_ORIGINS` | empty | Extra browser origins allowed to call the API — see below |
-| `SLEY_SEND_DAILY_CAP` | `50` | Approved outreach sends per account per UTC day |
+| `BOXAIDE_DATA_DIR` | `~/.boxaide` | SQLite + keys. Uses `~/.mailmux` if that exists and `~/.boxaide` does not. |
+| `BOXAIDE_HOST` | `127.0.0.1` | Bind address — see below |
+| `BOXAIDE_PORT` | `8787` | Port |
+| `BOXAIDE_TOKEN` | auto file | API/MCP bearer |
+| `BOXAIDE_MASTER_KEY` | auto file | AES key for passwords — see below |
+| `BOXAIDE_FIXTURE` | off | Demo provider |
+| `BOXAIDE_ALLOWED_ORIGINS` | empty | Extra browser origins allowed to call the API — see below |
+| `BOXAIDE_SEND_DAILY_CAP` | `50` | Approved outreach sends per account per UTC day |
 
-### Bind address (`SLEY_HOST`)
+### Bind address (`BOXAIDE_HOST`)
 
 The default binds to loopback, so only your own machine can reach the server. Change it and the server answers on the network, where the bearer token is the only thing between a stranger and your mail.
 
-One behaviour changes on a non-loopback bind: `/api/local-bootstrap`, which hands out the bearer token in plaintext, answers `404` and hands out nothing. Its `Host` and `Origin` checks are browser guards, and a remote client picks both headers itself. Paste the token in by hand instead; it is in `~/.sley/bearer.token`.
+One behaviour changes on a non-loopback bind: `/api/local-bootstrap`, which hands out the bearer token in plaintext, answers `404` and hands out nothing. Its `Host` and `Origin` checks are browser guards, and a remote client picks both headers itself. Paste the token in by hand instead; it is in `~/.boxaide/bearer.token`.
 
-### Master key (`SLEY_MASTER_KEY`)
+### Master key (`BOXAIDE_MASTER_KEY`)
 
-This key encrypts your stored mail passwords. Leave it unset and Sley generates a random one in `~/.sley/master.key`.
+This key encrypts your stored mail passwords. Leave it unset and Boxaide generates a random one in `~/.boxaide/master.key`.
 
 Set it to **64 hex characters** — a full random 32-byte key:
 
@@ -391,20 +391,20 @@ Set it to **64 hex characters** — a full random 32-byte key:
 openssl rand -hex 32
 ```
 
-Any other value is treated as a passphrase and stretched with scrypt (N=2¹⁷, r=8 — 128 MB per attempt, about 0.2s once at startup). The salt is random per install and stored in `~/.sley/master.salt`, so no precomputed table applies and the same passphrase on two machines produces two different keys. A passphrase still holds far less entropy than a random key, so prefer the hex form.
+Any other value is treated as a passphrase and stretched with scrypt (N=2¹⁷, r=8 — 128 MB per attempt, about 0.2s once at startup). The salt is random per install and stored in `~/.boxaide/master.salt`, so no precomputed table applies and the same passphrase on two machines produces two different keys. A passphrase still holds far less entropy than a random key, so prefer the hex form.
 
 **Back up `master.salt` with your data directory.** Lose it and a passphrase no longer derives the key that encrypted your stored mail passwords.
 
-**Upgrading:** passphrases used to be hashed once with SHA-256. The scrypt change means a passphrase set before this version derives a different key, and stored mail passwords no longer decrypt. Re-enter each account's password once, or keep the old key by setting `SLEY_MASTER_KEY` to the hex of `sha256(<your passphrase>)`.
+**Upgrading:** passphrases used to be hashed once with SHA-256. The scrypt change means a passphrase set before this version derives a different key, and stored mail passwords no longer decrypt. Re-enter each account's password once, or keep the old key by setting `BOXAIDE_MASTER_KEY` to the hex of `sha256(<your passphrase>)`.
 
-### Browser origins (`SLEY_ALLOWED_ORIGINS`)
+### Browser origins (`BOXAIDE_ALLOWED_ORIGINS`)
 
-By default Sley accepts browser requests **only from your own machine**. A page on any other origin gets `403 {"error":"forbidden origin"}`. Leave the variable unset and nothing changes.
+By default Boxaide accepts browser requests **only from your own machine**. A page on any other origin gets `403 {"error":"forbidden origin"}`. Leave the variable unset and nothing changes.
 
 Set it when you want a web interface hosted somewhere else — a deployment of `apps/web`, for example — to talk to your local server. The page still runs entirely in your browser and still fetches mail directly from your machine; the variable only tells your server which page origins it will answer. See [Using the hosted interface](#using-the-hosted-interface) for the full walkthrough.
 
 ```bash
-SLEY_ALLOWED_ORIGINS=https://sley.vercel.app sley serve
+BOXAIDE_ALLOWED_ORIGINS=https://boxaide.vercel.app boxaide serve
 ```
 
 Rules:
@@ -412,7 +412,7 @@ Rules:
 - Comma-separated, exact origins. `https://a.example.com,https://b.example.com`.
 - Only `https://` entries are kept. A plaintext origin is trivially spoofed on a hostile network, so `http://` entries are dropped.
 - Path, query and case are stripped: `https://A.App/x` becomes `https://a.app`. A port must match exactly — `https://a.app` does not allow `https://a.app:8443`.
-- **`*` is ignored on purpose.** Sley holds your mail credentials; an any-origin allowlist would let any page you visit probe your server.
+- **`*` is ignored on purpose.** Boxaide holds your mail credentials; an any-origin allowlist would let any page you visit probe your server.
 - Loopback (`127.0.0.1`, `localhost`, `::1`) always passes, so the self-hosted UI needs no configuration.
 - Requests with no `Origin` header (curl, MCP clients) are unaffected.
 
@@ -420,7 +420,7 @@ Rules:
 
 - Anyone who can serve a page at that exact hostname can reach your server **if they also have your bearer token**. On shared hosting platforms that includes preview deployments and anyone with deploy access. Prefer a custom domain you control over a platform-assigned hostname.
 - It is the only remaining barrier against a DNS-rebinding page reaching your loopback service, so the list should stay as short as you can make it.
-- The token is still required on every request. `Access-Control-Allow-Credentials` is never sent — Sley authenticates by header, never by cookie — so no page can ride ambient credentials.
+- The token is still required on every request. `Access-Control-Allow-Credentials` is never sent — Boxaide authenticates by header, never by cookie — so no page can ride ambient credentials.
 - `/api/local-bootstrap`, which hands out the bearer token in plaintext, is **not** widened by this variable. It stays loopback-only. A remote page must have its token pasted in by a human.
 
 ## Architecture
@@ -432,7 +432,7 @@ One Node process:
 - `/` — web UI (the `apps/web` export, served from `web-next/`)  
 - `/api/*` — REST (same mail core)  
 - `/mcp` — JSON-RPC MCP  
-- `sley mcp` — stdio MCP  
+- `boxaide mcp` — stdio MCP  
 
 IMAP via **ImapFlow**, SMTP via **Nodemailer**, secrets **AES-256-GCM**, state **SQLite**.
 
@@ -447,8 +447,8 @@ Tests call **shipped** `MailService`, crypto, HTTP app, and MCP handlers with an
 ## Security notes
 
 - Default bind is localhost.
-- Browser requests are loopback-only unless `SLEY_ALLOWED_ORIGINS` names another origin. Default is closed.
-- Passwords encrypted at rest; master key in `~/.sley/master.key` (mode 0600). A passphrase in `SLEY_MASTER_KEY` is stretched with scrypt against `~/.sley/master.salt`.
+- Browser requests are loopback-only unless `BOXAIDE_ALLOWED_ORIGINS` names another origin. Default is closed.
+- Passwords encrypted at rest; master key in `~/.boxaide/master.key` (mode 0600). A passphrase in `BOXAIDE_MASTER_KEY` is stretched with scrypt against `~/.boxaide/master.salt`.
 - Prefer app passwords over primary account passwords.
 - Keep `message_send` behind agent confirmation.
 - Outreach cannot be sent by an agent. Approval is REST-only and human; no MCP tool approves, rejects or sends an outbox row.

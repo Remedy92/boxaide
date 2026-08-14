@@ -1,10 +1,10 @@
 /**
  * The agent conversation channel.
  *
- * Sley does not run a model and does not spawn an agent. The agent is
+ * Boxaide does not run a model and does not spawn an agent. The agent is
  * whatever MCP client the user already has — Claude Code, Codex, Cursor,
  * Claude Desktop, anything that speaks MCP — and this is the surface that lets
- * that agent hold a conversation inside the Sley window instead of in its
+ * that agent hold a conversation inside the Boxaide window instead of in its
  * own terminal.
  *
  * The whole protocol is three tools and one rule:
@@ -20,11 +20,11 @@
  * them.
  *
  * A message is delivered to exactly ONE waiting agent. Two agents pointed at
- * the same Sley would otherwise both answer every message.
+ * the same Boxaide would otherwise both answer every message.
  *
  * ## Why this polls its own database
  *
- * `sley mcp` (stdio) is a SEPARATE PROCESS from `sley serve`. Both open
+ * `boxaide mcp` (stdio) is a SEPARATE PROCESS from `boxaide serve`. Both open
  * the same SQLite file, so the two see each other's turns on disk and nothing
  * else: an in-memory listener set cannot cross a process boundary. Waking
  * purely on in-process `post()` would leave a stdio agent parked until its poll
@@ -74,7 +74,7 @@ const WORK_MAX_MS = 5 * 60_000;
 /**
  * What an agent is doing right now, when it is doing anything.
  *
- * This is the one thing about an agent's own work that Sley can prove. A
+ * This is the one thing about an agent's own work that Boxaide can prove. A
  * message is handed to exactly one agent, and that hand-off is a write this
  * process performs; the answer that ends it is another. Between the two, the
  * agent has the message and has not answered — no model is being watched and
@@ -103,7 +103,7 @@ export type Presence = {
    */
   lastAgent: string | null;
   /**
-   * Registry id of the CLI Sley spawned (sidebar Start). The header uses
+   * Registry id of the CLI Boxaide spawned (sidebar Start). The header uses
    * this to show a name before the process has called chat_await_message.
    */
   launchedAgent: string | null;
@@ -403,7 +403,7 @@ export class AgentChannel {
   }
 
   /**
-   * The CLI Sley spawned. Wins the header and new turn stamps until the
+   * The CLI Boxaide spawned. Wins the header and new turn stamps until the
    * process exits. The previous MCP name is kept and returns on Stop.
    */
   setLaunchedAgent(id: string | null): void {

@@ -63,9 +63,16 @@ export class Store {
   }
 
   static open(dataDir: string, masterKey: Buffer): Store {
-    const next = join(dataDir, "sley.db");
-    const prev = join(dataDir, "mailmux.db");
-    const dbPath = existsSync(next) || !existsSync(prev) ? next : prev;
+    const boxaide = join(dataDir, "boxaide.db");
+    const sley = join(dataDir, "sley.db");
+    const mailmux = join(dataDir, "mailmux.db");
+    const dbPath = existsSync(boxaide)
+      ? boxaide
+      : existsSync(sley)
+        ? sley
+        : existsSync(mailmux)
+          ? mailmux
+          : boxaide;
     return new Store(masterKey, dbPath);
   }
 

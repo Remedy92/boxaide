@@ -381,7 +381,7 @@ function Shell() {
       {/* The reader's subject is the only <h1> in the mail view and it exists
           only while a message is open, so without this the first-run page would
           start its heading outline at <h2>. */}
-      <h1 className="sr-only">Sley</h1>
+      <h1 className="sr-only">Boxaide</h1>
 
       {!app.narrow && (
         <nav

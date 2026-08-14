@@ -82,7 +82,7 @@ async function ensureElectron(desktop) {
 export async function prepare(root) {
   await ensureNpm(root, "repo");
   await compileServer(root);
-  const mcpb = join(root, "web-next", "sley.mcpb");
+  const mcpb = join(root, "web-next", "boxaide.mcpb");
   if (await webExportStale(root)) {
     await buildWeb(root);
   }

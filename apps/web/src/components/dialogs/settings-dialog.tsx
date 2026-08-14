@@ -125,7 +125,7 @@ function SettingsBody({
       await getMeta(ctx);
       setResult({
         tone: "success",
-        message: `Connected — Sley ${api.version}`,
+        message: `Connected — Boxaide ${api.version}`,
         note: health.fixture
           ? "Fixture mode — the mail you see is demo data."
           : undefined,
@@ -207,7 +207,7 @@ function SettingsBody({
               </p>
             ) : (
               <p className="text-[12px] leading-4 text-fg-tertiary">
-                The address your Sley server listens on. It never leaves this
+                The address your Boxaide server listens on. It never leaves this
                 browser.
               </p>
             )}
@@ -246,7 +246,7 @@ function SettingsBody({
               </button>
             </div>
             <p className="text-[12px] leading-4 text-fg-tertiary">
-              Run <code className="font-mono">sley serve</code> and copy the
+              Run <code className="font-mono">boxaide serve</code> and copy the
               token it prints. It&rsquo;s also in{" "}
               <code className="font-mono">bearer.token</code> inside your data
               directory.
@@ -260,7 +260,7 @@ function SettingsBody({
 
           {dirty && (
             <p className="text-[12px] leading-4 text-warning">
-              Saving clears everything Sley has cached from the current
+              Saving clears everything Boxaide has cached from the current
               server.
             </p>
           )}
@@ -546,7 +546,7 @@ function describeFailure(error: unknown, host: string): TestResult {
       return {
         tone: "danger",
         message: "Server reached, but it refused this origin.",
-        note: "Set SLEY_ALLOWED_ORIGINS on the machine running Sley, then restart it.",
+        note: "Set BOXAIDE_ALLOWED_ORIGINS on the machine running Boxaide, then restart it.",
         raw,
       };
     }

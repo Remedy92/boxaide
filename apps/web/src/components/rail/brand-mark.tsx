@@ -28,7 +28,7 @@ export function BrandMark({
       {!collapsed && (
         <>
           <span className="text-[13px] font-semibold tracking-[var(--tracking-tight)] text-fg">
-            Sley
+            Boxaide
           </span>
           {fixture && (
             <Tooltip>

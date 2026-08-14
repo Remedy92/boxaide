@@ -290,9 +290,9 @@ function Unanswered({
 }
 
 /**
- * The running mark: the Sley glyph writing itself, in the accent.
+ * The running mark: the Boxaide glyph writing itself, in the accent.
  *
- * A spinner says "software is busy". This says "Sley is holding your
+ * A spinner says "software is busy". This says "Boxaide is holding your
  * message": the same braces-around-a-line the brand mark draws statically,
  * tracing in stroke by stroke, mail line landing last, then starting over.
  * Path data mirrors BrandGlyph in atoms.tsx — generated from

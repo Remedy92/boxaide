@@ -1,11 +1,11 @@
-# Architecture decision — Sley
+# Architecture decision — Boxaide
 
 **Date:** 2026-08-09  
 **Status:** accepted
 
 ## Decision
 
-Ship **Sley** as a single **Node 22+ / TypeScript** process:
+Ship **Boxaide** as a single **Node 22+ / TypeScript** process:
 
 | Layer | Choice |
 |-------|--------|
@@ -14,7 +14,7 @@ Ship **Sley** as a single **Node 22+ / TypeScript** process:
 | Receive | IMAP via **ImapFlow** |
 | Send | SMTP via **Nodemailer** |
 | State | SQLite (`better-sqlite3`) |
-| Secrets | AES-256-GCM, master key file / `SLEY_MASTER_KEY` (64-hex verbatim, anything else stretched with scrypt; `MAILMUX_MASTER_KEY` if unset) |
+| Secrets | AES-256-GCM, master key file / `BOXAIDE_MASTER_KEY` (64-hex verbatim, anything else stretched with scrypt; `MAILMUX_MASTER_KEY` if unset) |
 | Web | One front end: a Next.js App Router build in `apps/web`, static and fully client-side (see below) |
 | Tests | Vitest + in-process **FixtureProvider** (no live mail required) |
 
@@ -37,7 +37,7 @@ Ship **Sley** as a single **Node 22+ / TypeScript** process:
 
 **Date:** 2026-08-09 · **Status:** accepted
 
-`apps/web` is a Next.js App Router build. It talks to the Sley server from the browser, over HTTP, with a bearer token. The backend holds no UI state.
+`apps/web` is a Next.js App Router build. It talks to the Boxaide server from the browser, over HTTP, with a bearer token. The backend holds no UI state.
 
 | Decision | Reason |
 |---|---|
@@ -59,15 +59,15 @@ npm start
 
 `resolveWebRoot()` (`src/app.ts`) serves `web-next/`. There is no second UI to fall back to: with no export present, `/` returns a 500 telling you to run `npm run build`. Served that way the page is same-origin with the API, so no allowlist entry, no preflight and no Local Network Access prompt applies — which is why it is the recommended path for Safari users (WebKit blocks an `https` page from reaching `127.0.0.1`, [bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934)).
 
-Deploying it to a static host (Vercel and equivalents): set the project's **Root Directory** to `apps/web`. Nothing in the repo can express that — it is a dashboard setting, and without it the platform builds the CLI package at the root instead. Then set `SLEY_ALLOWED_ORIGINS` on **your** machine to the deployed origin.
+Deploying it to a static host (Vercel and equivalents): set the project's **Root Directory** to `apps/web`. Nothing in the repo can express that — it is a dashboard setting, and without it the platform builds the CLI package at the root instead. Then set `BOXAIDE_ALLOWED_ORIGINS` on **your** machine to the deployed origin.
 
-## Cross-origin access (`SLEY_ALLOWED_ORIGINS`)
+## Cross-origin access (`BOXAIDE_ALLOWED_ORIGINS`)
 
 **Date:** 2026-08-09 · **Status:** accepted
 
-A browser page served from anywhere other than the Sley process itself cannot reach `/api/*` by default. The `Origin` header must be absent (curl, MCP clients) or loopback; anything else is `403 forbidden origin`, and no `Access-Control-*` header is emitted at all.
+A browser page served from anywhere other than the Boxaide process itself cannot reach `/api/*` by default. The `Origin` header must be absent (curl, MCP clients) or loopback; anything else is `403 forbidden origin`, and no `Access-Control-*` header is emitted at all.
 
-`SLEY_ALLOWED_ORIGINS` adds exact origins to that gate so a separately hosted browser UI can call the local server directly. The decisions behind it:
+`BOXAIDE_ALLOWED_ORIGINS` adds exact origins to that gate so a separately hosted browser UI can call the local server directly. The decisions behind it:
 
 | Decision | Reason |
 |---|---|
@@ -77,7 +77,7 @@ A browser page served from anywhere other than the Sley process itself cannot re
 | **`https:` only for non-loopback entries** | A plaintext allowlisted origin is trivially spoofed on a hostile network. |
 | **Echo the *parsed* origin, never `*` and never the raw header** | A per-origin allowlist is meaningless without an exact echo, and it is a prerequisite for the `Vary` contract. The value comes from `new URL(origin).origin`, because the WHATWG parser reads a backslash as a slash: `https://good.example\.evil.com` passes the allowlist as `https://good.example`, and echoing the raw string back would hand the response to the attacker's origin. |
 | **`Vary: Origin` on every response, including 401 and 403** | Without it a proxy, service worker or tunnel can serve one origin's answer to another. |
-| **`Access-Control-Allow-Credentials` never sent** | Sley authenticates by header, never by cookie. Ambient credentials must stay impossible. |
+| **`Access-Control-Allow-Credentials` never sent** | Boxaide authenticates by header, never by cookie. Ambient credentials must stay impossible. |
 | **`Access-Control-Allow-Headers: authorization, content-type`** | Exactly what the client sends. Echoing the request's header list back would make the allowlist meaningless. |
 | **Preflight answered before the auth gate** | An `OPTIONS` preflight carries no `Authorization` by spec, so gating it on the token makes CORS impossible. The origin allowlist is the control that applies; a preflight runs no handler and returns an empty 204. |
 | **`/api/local-bootstrap` deliberately not widened** | It is unauthenticated and returns the bearer token in plaintext. It exists only while the server's own bind address is loopback — `Host` and `Origin` are browser guards, and a remote client on a `0.0.0.0` bind chooses both headers itself, so `isLoopbackBindAddress(config.host)` is checked first and the route answers `404` otherwise. Beyond that it keeps the strict loopback-only `isAllowedOrigin` plus the `Host` check, and answers `Cache-Control: no-store` + `Vary: Origin` so neither the browser nor a local proxy retains the token. A remote UI must have its token pasted in by a human. |
@@ -90,7 +90,7 @@ Implementation: `parseAllowedOrigins` / `isApiOriginAllowed` / `applyCors` / `co
 
 - Web: connect accounts, unified inbox, read, compose/send
 - MCP tools: `accounts_list`, `messages_list`, `messages_search`, `message_get`, `message_send`
-- CLI: `sley serve` | `sley mcp`
+- CLI: `boxaide serve` | `boxaide mcp`
 
 ## Rejected for v0
 
@@ -122,7 +122,7 @@ The static deployment gets the same set from `apps/web/vercel.json`. Its `connec
 
 Full spec: [docs/specs/agent-platform.md](specs/agent-platform.md). It owns the schema, the tool names, the REST paths and the derivation rules. This section records the decisions and does not repeat them.
 
-Sley grows from an agentic inbox into a local agent work platform. Three modules ship together, all free, MIT and fully local, with no sync.
+Boxaide grows from an agentic inbox into a local agent work platform. Three modules ship together, all free, MIT and fully local, with no sync.
 
 | Module | Directory | Owns |
 |---|---|---|
@@ -144,12 +144,12 @@ Each module is a store, a service or engine, a `<MODULE>_TOOLS` + dispatcher pai
 | **CRM is derived from mail, not entered** | A CRM you have to fill in is a CRM that goes stale. `CrmService.syncFromMail` reads INBOX and Sent, so the contact list is a fact about your mail rather than a claim about it. Manual and agent-authored records are still allowed and are marked with `source`. |
 | **Free email providers never create an organisation** | A gmail.com "organisation" with 400 unrelated contacts is worse than no organisation. The list is explicit, in the spec. |
 | **One automation run at a time, in an in-process FIFO** | Runs are full agents with tool access to one SQLite file and one set of mailboxes. Concurrency here buys throughput nobody asked for and costs interleaved writes and duplicate outreach. |
-| **A run is a one-shot headless CLI agent, not a model call from inside Sley** | Sley runs no model. That is true of the Agent view and stays true here: an automation reuses `AgentLauncher` and the same MCP wiring, so there is still no API key and no inference in this process. |
+| **A run is a one-shot headless CLI agent, not a model call from inside Boxaide** | Boxaide runs no model. That is true of the Agent view and stays true here: an automation reuses `AgentLauncher` and the same MCP wiring, so there is still no API key and no inference in this process. |
 | **A run cannot talk to the user and cannot `message_send`** | There is no one at the window at 03:00. The fixed preamble says so, and the pre-approved tool set omits the chat tools and `message_send` so the statement is backed by the wiring. |
 | **15-minute hard timeout, then SIGKILL and status `killed`** | An agent that hangs holds the queue. A killed run with a log is more useful than a stuck one. |
 | **Automations have no create form in the web UI** | An automation is a prompt. Prompts are written by conversation and revision, and the agent that writes one is the agent that will run it. The empty state says exactly that and points at the Agent view. The UI owns everything after creation: enable, disable, next/last run, run now, log history. |
-| **Claude Desktop scheduled tasks are imported by the agent, not by an importer** | `~/.claude/scheduled-tasks/*/SKILL.md` carries a name, a description and a body — everything `automation_create` needs except a cron. The agent reads the files with its own file tools and calls `automation_create` per task, asking for the schedule. Writing an importer would mean shipping a parser for another product's format and pretending the two execution contexts match. They do not: a Claude Desktop task may ask the user a question and touch the whole machine, a Sley automation may do neither. That rewrite is judgement, so it belongs to the agent and the user, in a conversation. |
-| **Send throttling server-side: ≥60s gap with jitter, `SLEY_SEND_DAILY_CAP` per account per UTC day** | Approval is per-message; deliverability is per-account. A human approving forty drafts in one sitting should not produce forty sends in one minute. Over the cap a row stays `approved` and goes the next day. |
+| **Claude Desktop scheduled tasks are imported by the agent, not by an importer** | `~/.claude/scheduled-tasks/*/SKILL.md` carries a name, a description and a body — everything `automation_create` needs except a cron. The agent reads the files with its own file tools and calls `automation_create` per task, asking for the schedule. Writing an importer would mean shipping a parser for another product's format and pretending the two execution contexts match. They do not: a Claude Desktop task may ask the user a question and touch the whole machine, a Boxaide automation may do neither. That rewrite is judgement, so it belongs to the agent and the user, in a conversation. |
+| **Send throttling server-side: ≥60s gap with jitter, `BOXAIDE_SEND_DAILY_CAP` per account per UTC day** | Approval is per-message; deliverability is per-account. A human approving forty drafts in one sitting should not produce forty sends in one minute. Over the cap a row stays `approved` and goes the next day. |
 | **Opt-out footer on every step including the first; no tracking pixels, no click redirects** | The privacy posture is the product. Tracking is out of scope, not deferred. |
 | **Failed sends do not retry in v1** | A retry loop against SMTP without human eyes is how one bad address becomes a reputation problem. Status `failed` with the error recorded, and a human decides. |
 | **Modules keep their own DDL and share the `Store` SQLite handle** | Same file, same WAL, same transaction semantics as the mail tables. `CREATE TABLE IF NOT EXISTS` in each store constructor means there is no migration step and no ordering requirement between modules. |

@@ -15,12 +15,12 @@ import { useApp } from "@/lib/hooks/use-app-state";
 /**
  * The agent conversation — the app's first screen.
  *
- * Sley runs no model. Everything on this pane came from, or is going to, an
+ * Boxaide runs no model. Everything on this pane came from, or is going to, an
  * MCP client the user runs themselves; the server's only job is to hold the
  * conversation and hand messages over.
  *
  * So there is no token stream and no typing caret — an answer arrives whole.
- * What IS live is the run: Sley hands a message to exactly one agent and
+ * What IS live is the run: Boxaide hands a message to exactly one agent and
  * knows that agent has not answered yet, and it sees every mail tool that agent
  * calls in the meantime. That is what the working indicator and the step list
  * are made of. Nothing here is inferred from silence.
@@ -276,7 +276,7 @@ function EmptyState({
       <h3 className="title-15 text-fg">Talk to your agent about your mail</h3>
       <p className="mt-1.5 max-w-[52ch] text-[13px] leading-[20px] text-fg-secondary">
         Your own agent — Claude Code, Codex, Cursor, anything that speaks MCP —
-        reads and answers here. Sley runs no model of its own and sends your
+        reads and answers here. Boxaide runs no model of its own and sends your
         mail nowhere.
       </p>
 

@@ -217,7 +217,7 @@ export function isApiOriginAllowed(
 /**
  * Stamp CORS headers on an outgoing response. Vary is set unconditionally —
  * including on denials — so no cache can serve one origin's answer to another.
- * Allow-Credentials is deliberately never sent: Sley authenticates by
+ * Allow-Credentials is deliberately never sent: Boxaide authenticates by
  * header, never by cookie, so ambient credentials must not be possible.
  *
  * Never echoes "*": an allowlist that answers every origin is not an
@@ -369,7 +369,7 @@ export function createApi(
   });
 
   app.get("/api/health", (c) =>
-    c.json({ ok: true, service: "sley", version: "0.1.0" }),
+    c.json({ ok: true, service: "boxaide", version: "0.1.0" }),
   );
 
   app.get("/api/meta", (c) =>

@@ -61,7 +61,7 @@ export function buildAgentTargets(input: AgentConfigInput): AgentTarget[] {
   const token = input.token || TOKEN_PLACEHOLDER;
   const remote = {
     mcpServers: {
-      sley: {
+      boxaide: {
         url,
         headers: { Authorization: `Bearer ${token}` },
       },
@@ -74,18 +74,18 @@ export function buildAgentTargets(input: AgentConfigInput): AgentTarget[] {
       label: "Claude Code",
       where: "Run this once in any terminal.",
       kind: "shell",
-      snippet: `claude mcp add --transport http sley ${shellQuote(url)} --header ${shellQuote(
+      snippet: `claude mcp add --transport http boxaide ${shellQuote(url)} --header ${shellQuote(
         `Authorization: Bearer ${token}`,
       )}`,
       carriesToken: true,
-      note: "Adds Sley for the current project. Add --scope user to make it available everywhere.",
+      note: "Adds Boxaide for the current project. Add --scope user to make it available everywhere.",
     },
     {
       id: "grok",
       label: "Grok",
       where: "Run this once in any terminal.",
       kind: "shell",
-      snippet: `grok mcp add --transport http sley ${shellQuote(url)} --header ${shellQuote(
+      snippet: `grok mcp add --transport http boxaide ${shellQuote(url)} --header ${shellQuote(
         `Authorization: Bearer ${token}`,
       )}`,
       carriesToken: true,
@@ -99,16 +99,16 @@ export function buildAgentTargets(input: AgentConfigInput): AgentTarget[] {
       // The manual fallback, for a Claude Desktop that cannot open .mcpb
       // files. It carries no token: the connector reads bearer.token itself.
       snippet: JSON.stringify(
-        { mcpServers: { sley: { command: "sley", args: ["mcp"] } } },
+        { mcpServers: { boxaide: { command: "boxaide", args: ["mcp"] } } },
         null,
         2,
       ),
       carriesToken: false,
-      note: "The connector finds your local server and its token on its own — Sley just has to be running. The manual snippet goes into claude_desktop_config.json (Settings → Developer → Edit config) and needs the sley CLI on your PATH instead.",
+      note: "The connector finds your local server and its token on its own — Boxaide just has to be running. The manual snippet goes into claude_desktop_config.json (Settings → Developer → Edit config) and needs the boxaide CLI on your PATH instead.",
       download: {
-        // Served by the user's own Sley server, built from apps/mcpb.
-        href: `${normalizeBaseUrl(input.baseUrl)}/sley.mcpb`,
-        filename: "sley.mcpb",
+        // Served by the user's own Boxaide server, built from apps/mcpb.
+        href: `${normalizeBaseUrl(input.baseUrl)}/boxaide.mcpb`,
+        filename: "boxaide.mcpb",
         action: "Download for Claude Desktop",
       },
     },
@@ -120,7 +120,7 @@ export function buildAgentTargets(input: AgentConfigInput): AgentTarget[] {
       kind: "json",
       snippet: JSON.stringify(remote, null, 2),
       carriesToken: true,
-      note: "Cursor connects over HTTP, so sley serve has to be running.",
+      note: "Cursor connects over HTTP, so boxaide serve has to be running.",
     },
   ];
 }
@@ -133,7 +133,7 @@ export function genericMcpSnippet(input: AgentConfigInput): string {
   return JSON.stringify(
     {
       mcpServers: {
-        sley: {
+        boxaide: {
           url: mcpEndpoint(input.baseUrl),
           headers: {
             Authorization: `Bearer ${input.token || TOKEN_PLACEHOLDER}`,

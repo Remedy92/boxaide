@@ -13,7 +13,7 @@ import type { CampaignStatus, OutboxStatus, StepInput } from "./store.js";
  * whole bargain of this module, so it is stated where the agent reads it.
  */
 const QUEUE_DRAFT_DESC =
-  "Queue one email for human review. This is the ONLY way an automation or agent gets outreach toward delivery; a human reviews it in the Sley Outreach view before anything is sent. Nothing here sends mail, and there is no tool that approves or sends a queued row — do not look for one. An opt-out footer is appended automatically.";
+  "Queue one email for human review. This is the ONLY way an automation or agent gets outreach toward delivery; a human reviews it in the Boxaide Outreach view before anything is sent. Nothing here sends mail, and there is no tool that approves or sends a queued row — do not look for one. An opt-out footer is appended automatically.";
 
 export const OUTREACH_TOOLS: ToolDef[] = [
   {
@@ -253,7 +253,7 @@ export async function dispatchOutreachTool(
       });
       return {
         queued: row,
-        note: "pending human approval in the Sley Outreach view",
+        note: "pending human approval in the Boxaide Outreach view",
       };
     }
 

@@ -62,14 +62,14 @@ export type ListStateHandlers = {
 /** §7.1 — first run on a fresh browser. No request is made. */
 export function NoBaseUrlState({ onSetUp }: { onSetUp: () => void }) {
   return (
-    <Block icon={Server} headline="Point Sley at your server">
+    <Block icon={Server} headline="Point Boxaide at your server">
       <p>
-        Run <code className="font-mono text-[12px]">sley serve</code> on your
+        Run <code className="font-mono text-[12px]">boxaide serve</code> on your
         machine, then tell this page where to find it.
       </p>
       <div className="mt-4">
         <Button type="button" onClick={onSetUp}>
-          Set up Sley
+          Set up Boxaide
         </Button>
       </div>
     </Block>
@@ -105,7 +105,7 @@ export function UnreachableState({
       }
     >
       <p>
-        Check that <code className="font-mono text-[12px]">sley serve</code>{" "}
+        Check that <code className="font-mono text-[12px]">boxaide serve</code>{" "}
         is running, and that the URL and port match what it printed.
       </p>
       <TechnicalDetails raw={raw} />
@@ -133,7 +133,7 @@ export function UnauthorizedState({
       }
     >
       <p>
-        Copy the token <code className="font-mono text-[12px]">sley serve</code>{" "}
+        Copy the token <code className="font-mono text-[12px]">boxaide serve</code>{" "}
         printed, or read it from{" "}
         <code className="font-mono text-[12px]">bearer.token</code> in your data
         directory.
@@ -160,7 +160,7 @@ export function NoTokenState({ onEnterToken }: { onEnterToken: () => void }) {
       }
     >
       <p>
-        Copy the token <code className="font-mono text-[12px]">sley serve</code>{" "}
+        Copy the token <code className="font-mono text-[12px]">boxaide serve</code>{" "}
         printed, or read it from{" "}
         <code className="font-mono text-[12px]">bearer.token</code> in your data
         directory.
@@ -171,9 +171,9 @@ export function NoTokenState({ onEnterToken }: { onEnterToken: () => void }) {
 
 /** §7.4 — CORS: the server has not allowlisted this origin. */
 export function CorsBlockedState() {
-  const line = "SLEY_ALLOWED_ORIGINS=https://your-deployment.vercel.app";
+  const line = "BOXAIDE_ALLOWED_ORIGINS=https://your-deployment.vercel.app";
   const origin = typeof window === "undefined" ? "" : window.location.origin;
-  const real = `SLEY_ALLOWED_ORIGINS=${origin || "https://your-deployment.vercel.app"}`;
+  const real = `BOXAIDE_ALLOWED_ORIGINS=${origin || "https://your-deployment.vercel.app"}`;
   return (
     <Block
       icon={ShieldAlert}
@@ -194,14 +194,14 @@ export function CorsBlockedState() {
       }
     >
       <p>
-        Sley only accepts browser requests from your own machine unless you
-        allow this address. On the machine running Sley, set:
+        Boxaide only accepts browser requests from your own machine unless you
+        allow this address. On the machine running Boxaide, set:
       </p>
       <pre className="mt-2 overflow-x-auto rounded-[var(--radius-md)] bg-surface-0 p-2 text-left font-mono text-[12px] text-fg-secondary">
         {real || line}
       </pre>
       <p className="mt-2">
-        then restart <code className="font-mono text-[12px]">sley serve</code>.
+        then restart <code className="font-mono text-[12px]">boxaide serve</code>.
       </p>
     </Block>
   );
@@ -253,7 +253,7 @@ export function MixedContentState({ baseUrl }: { baseUrl: string }) {
         }
       >
         <p>
-          This is a WebKit limitation with no workaround. Open Sley directly
+          This is a WebKit limitation with no workaround. Open Boxaide directly
           at <code className="font-mono text-[12px]">{baseUrl}</code> instead —
           it serves the same interface from your own machine.
         </p>

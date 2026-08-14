@@ -3,7 +3,7 @@
  *
  * One factory so every entry point (serve, stdio mcp, tests) constructs the
  * same object graph. Timers are explicit: `start()` runs the schedulers and
- * is called ONLY by the serve process — a stdio `sley mcp` process shares
+ * is called ONLY by the serve process — a stdio `boxaide mcp` process shares
  * the SQLite file and must never run a second scheduler against it.
  *
  * Spec: docs/specs/agent-platform.md. Module code lives in src/crm,

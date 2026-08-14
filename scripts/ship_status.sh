@@ -19,7 +19,7 @@ cd "$ROOT"
 
 say() {
   if [ "$HOOK" -eq 1 ]; then
-    printf 'sley: %s\n' "$*"
+    printf 'boxaide: %s\n' "$*"
   else
     printf '%s\n' "$*"
   fi

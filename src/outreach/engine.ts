@@ -4,14 +4,14 @@
  *
  * Invariants enforced here, not by agent goodwill:
  * - Only rows a human approved are ever sent.
- * - Engine sends respect SLEY_SEND_DAILY_CAP per account per UTC day and
+ * - Engine sends respect BOXAIDE_SEND_DAILY_CAP per account per UTC day and
  *   are spaced >= 60s with +-20s jitter.
  * - Every queued body carries the plain-text opt-out footer. No tracking.
  */
 import type { OutreachStore, ContactState } from "./store.js";
 import type { CrmStore } from "../crm/store.js";
 import type { MailService } from "../mail/service.js";
-import { envFirst } from "../config.js";
+import { envNamed } from "../config.js";
 import { inboundSince, readContact, type CrmContact } from "./crm-read.js";
 import { optOutIntent } from "./opt-out.js";
 
@@ -298,6 +298,6 @@ export class OutreachEngine {
 }
 
 function readDailyCapFromEnv(): number {
-  const raw = Number(envFirst("SLEY_SEND_DAILY_CAP", "MAILMUX_SEND_DAILY_CAP"));
+  const raw = Number(envNamed("SEND_DAILY_CAP"));
   return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_DAILY_CAP;
 }

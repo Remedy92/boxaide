@@ -11,7 +11,7 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ===========================================================================
-   Sley — near-monochrome, one accent.
+   Boxaide — near-monochrome, one accent.
 
    The palette is deliberately achromatic: five neutral surfaces per theme, four
    ink levels, and a single indigo that appears only on focus rings, the active
@@ -303,7 +303,7 @@
 
    The generated primitives in src/components/ui reference shadcn's semantic
    colour names (bg-background, border-input, ring-ring, …). Map them onto the
-   Sley tokens above so no primitive renders against an undefined utility.
+   Boxaide tokens above so no primitive renders against an undefined utility.
    The button / input / badge variants are still remapped by hand where those
    components are styled; this block only keeps the defaults coherent.
 
@@ -452,7 +452,7 @@
   animation: mailmux-shimmer 2200ms linear infinite;
 }
 
-/* An answer arrives whole — Sley is handed finished text, not tokens. It
+/* An answer arrives whole — Boxaide is handed finished text, not tokens. It
    fades up once on arrival, which is a statement about when it landed, not a
    pretend stream. */
 @keyframes mailmux-answer-in {

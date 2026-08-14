@@ -171,7 +171,7 @@ export function PeopleList({
           </Button>
         }
       >
-        No contacts yet. Sley builds them from who you actually write to.
+        No contacts yet. Boxaide builds them from who you actually write to.
       </Empty>
     );
   } else {

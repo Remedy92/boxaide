@@ -1,9 +1,9 @@
 {
-  "name": "sley-desktop",
+  "name": "boxaide-desktop",
   "version": "0.2.8",
   "private": true,
-  "description": "Desktop shell for Sley — runs the Sley server in-process and opens the UI in a window",
-  "author": "Sley contributors",
+  "description": "Desktop shell for Boxaide — runs the Boxaide server in-process and opens the UI in a window",
+  "author": "Boxaide contributors",
   "license": "MIT",
   "type": "module",
   "main": "src/main.js",

@@ -20,7 +20,7 @@ const sans = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Sley",
+  title: "Boxaide",
   description: "Your mailboxes, on your machine.",
   icons: { icon: "/favicon.svg" },
 };

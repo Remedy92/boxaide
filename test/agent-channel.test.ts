@@ -100,8 +100,8 @@ describe("AgentChannel", () => {
   });
 
   it("picks up a turn written by another process against the same database", () => {
-    // Two AgentChannel instances over one Store is the shape `sley serve`
-    // and `sley mcp` are in: separate objects, one SQLite file.
+    // Two AgentChannel instances over one Store is the shape `boxaide serve`
+    // and `boxaide mcp` are in: separate objects, one SQLite file.
     const store = open();
     stores.push(store);
     const serve = new AgentChannel(store);

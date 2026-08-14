@@ -112,8 +112,8 @@ export class FixtureProvider implements MailProvider {
     if (!this.boxes.has(accountId)) {
       this.seedAccount(accountId, email, [
         {
-          subject: "Welcome to Sley",
-          from: "sley@local",
+          subject: "Welcome to Boxaide",
+          from: "boxaide@local",
           bodyText: "Your fixture inbox is ready.",
           seen: false,
         },

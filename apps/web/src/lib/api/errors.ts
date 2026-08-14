@@ -1,5 +1,5 @@
 /**
- * Every failure the browser can hit when talking to a Sley server, and the
+ * Every failure the browser can hit when talking to a Boxaide server, and the
  * one place raw server / driver text is translated into something a person can
  * act on. Nothing here fetches.
  */
@@ -118,7 +118,7 @@ export function classifyNetworkFailure(
 
 const MESSAGE_FOR_KIND: Record<FailureKind, string> = {
   "no-base-url": "No server URL set.",
-  unreachable: "Could not reach your Sley server.",
+  unreachable: "Could not reach your Boxaide server.",
   cors: "Your server refused this page's origin.",
   "lna-denied": "Your browser blocked the request to your own machine.",
   "mixed-content": "Your browser blocked this connection.",
@@ -181,7 +181,7 @@ const ERROR_HINTS: Array<[RegExp, string]> = [
      a plain Error, and errors[] strings go straight through the banner. */
   [
     /forbidden origin/i,
-    "Your Sley server refused this page's origin. Set SLEY_ALLOWED_ORIGINS on the machine running Sley.",
+    "Your Boxaide server refused this page's origin. Set BOXAIDE_ALLOWED_ORIGINS on the machine running Boxaide.",
   ],
   [/unauthorized/i, "Your server rejected this token."],
   [

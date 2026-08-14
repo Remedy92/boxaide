@@ -1,22 +1,22 @@
 #!/usr/bin/env node
 /**
- * The Sley connector for Claude Desktop — a stdio→HTTP proxy.
+ * The Boxaide connector for Claude Desktop — a stdio→HTTP proxy.
  *
  * Claude Desktop speaks MCP over stdio to this process; this process forwards
- * every JSON-RPC message to the Sley server's stateless `POST /mcp` and
+ * every JSON-RPC message to the Boxaide server's stateless `POST /mcp` and
  * writes the answer back. It is a proxy and nothing more: no tool logic, no
  * database, no dependencies beyond Node itself.
  *
- * Why a proxy instead of bundling the real server: Sley keeps mail state in
- * SQLite behind one process (the app or `sley serve`). A second in-process
+ * Why a proxy instead of bundling the real server: Boxaide keeps mail state in
+ * SQLite behind one process (the app or `boxaide serve`). A second in-process
  * copy here would race it over the same database file — and better-sqlite3 is
  * a native module that Claude Desktop's own Node runtime cannot be assumed to
  * load. Forwarding to the one running server sidesteps both, and it means an
- * agent and the Sley window always see the same live state.
+ * agent and the Boxaide window always see the same live state.
  *
  * Zero configuration is the point. The token comes from, in order:
- *   1. SLEY_TOKEN (the extension's optional "Access token" setting; MAILMUX_TOKEN if unset),
- *   2. <data dir>/bearer.token — the file the Sley server itself writes,
+ *   1. BOXAIDE_TOKEN (the extension's optional "Access token" setting; MAILMUX_TOKEN if unset),
+ *   2. <data dir>/bearer.token — the file the Boxaide server itself writes,
  *      because this proxy runs on the same machine as that server.
  * On a 401 the file is re-read once and the call retried, so a token that was
  * created or rotated after Claude Desktop spawned this process still works.
@@ -30,33 +30,35 @@ import process from "node:process";
 const here = dirname(fileURLToPath(import.meta.url));
 
 const INSTALL_HINT =
-  "Sley is not running. Open the Sley app (or run `sley serve`), then try again. Get it at https://github.com/Remedy92/sley";
+  "Boxaide is not running. Open the Boxaide app (or run `boxaide serve`), then try again. Get it at https://github.com/Remedy92/boxaide";
 
-function envFirst(sleyKey, mailmuxKey) {
-  const next = process.env[sleyKey];
-  if (next) return next;
-  const prev = process.env[mailmuxKey];
-  if (prev) return prev;
+function envFirst(...keys) {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value) return value;
+  }
   return undefined;
 }
 
 function defaultDataDir() {
-  const fromEnv = envFirst("SLEY_DATA_DIR", "MAILMUX_DATA_DIR");
+  const fromEnv = envFirst("BOXAIDE_DATA_DIR", "SLEY_DATA_DIR", "MAILMUX_DATA_DIR");
   if (fromEnv) return expandHome(fromEnv);
-  const next = join(homedir(), ".sley");
-  const prev = join(homedir(), ".mailmux");
-  if (existsSync(next)) return next;
-  if (existsSync(prev)) return prev;
-  return next;
+  const boxaide = join(homedir(), ".boxaide");
+  const sley = join(homedir(), ".sley");
+  const mailmux = join(homedir(), ".mailmux");
+  if (existsSync(boxaide)) return boxaide;
+  if (existsSync(sley)) return sley;
+  if (existsSync(mailmux)) return mailmux;
+  return boxaide;
 }
 
 const baseUrl = normalizeBaseUrl(
-  envFirst("SLEY_URL", "MAILMUX_URL") || "http://127.0.0.1:8787",
+  envFirst("BOXAIDE_URL", "SLEY_URL", "MAILMUX_URL") || "http://127.0.0.1:8787",
 );
 const dataDir = defaultDataDir();
 
 /** The extension setting, when the user filled it in. Never re-read. */
-const configuredToken = (envFirst("SLEY_TOKEN", "MAILMUX_TOKEN") || "").trim() || null;
+const configuredToken = (envFirst("BOXAIDE_TOKEN", "SLEY_TOKEN", "MAILMUX_TOKEN") || "").trim() || null;
 /** Last token read from bearer.token; refreshed on 401. */
 let fileToken = readTokenFile();
 /**
@@ -134,20 +136,20 @@ async function forward(message) {
       ? rpcError(
           message.id,
           -32001,
-          `Sley rejected every token this connector knows. It reads ${join(dataDir, "bearer.token")} and the extension's "Access token" setting. Clear that setting (the file is found on its own), or paste the current value from the file into it.`,
+          `Boxaide rejected every token this connector knows. It reads ${join(dataDir, "bearer.token")} and the extension's "Access token" setting. Clear that setting (the file is found on its own), or paste the current value from the file into it.`,
         )
       : null;
   }
   if (!response.ok) {
     return isRequest
-      ? rpcError(message.id, -32001, `Sley answered ${response.status}. ${INSTALL_HINT}`)
+      ? rpcError(message.id, -32001, `Boxaide answered ${response.status}. ${INSTALL_HINT}`)
       : null;
   }
 
   try {
     return await response.json();
   } catch {
-    return isRequest ? rpcError(message.id, -32700, "Sley sent an unparseable response") : null;
+    return isRequest ? rpcError(message.id, -32700, "Boxaide sent an unparseable response") : null;
   }
 }
 
@@ -156,14 +158,14 @@ function rpcError(id, code, text) {
 }
 
 /**
- * What the connector says when the Sley server is not running.
+ * What the connector says when the Boxaide server is not running.
  *
  * The handshake must not fail: Claude Desktop attaches its extensions at its
  * own startup, and "Could not attach" over an app that is merely closed reads
  * as a broken install. So `initialize`, `ping` and `tools/list` are answered
  * here — the tool list from a build-time snapshot of the server's own list
  * (tools.json, written by scripts/export-mcpb-tools.mjs) — and only an actual
- * tool CALL tells the user to open Sley.
+ * tool CALL tells the user to open Boxaide.
  */
 function offlineAnswer(message) {
   const id = message.id ?? null;
@@ -177,7 +179,7 @@ function offlineAnswer(message) {
         protocolVersion:
           typeof requested === "string" && requested ? requested : "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "sley", version: "0.1.0" },
+        serverInfo: { name: "boxaide", version: "0.1.0" },
       },
     };
   }
@@ -259,5 +261,5 @@ function handleLine(line) {
 }
 
 process.stderr.write(
-  `sley connector: forwarding stdio MCP to ${baseUrl}/mcp (token ${activeToken ? "found" : "not found yet"})\n`,
+  `boxaide connector: forwarding stdio MCP to ${baseUrl}/mcp (token ${activeToken ? "found" : "not found yet"})\n`,
 );

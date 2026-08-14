@@ -93,7 +93,7 @@ export function createRuntime(
   });
   // The agent platform (CRM, automations, outreach) shares the Store's SQLite
   // handle. Constructed here so every entry point has the tools; its timers
-  // start only in startServer — a stdio `sley mcp` process must never run
+  // start only in startServer — a stdio `boxaide mcp` process must never run
   // a second scheduler against the same database.
   const platform = createPlatform({
     db: store.db,
@@ -116,7 +116,7 @@ export function createRuntime(
   app.get("/health", (c) => {
     const denied = corsGate(c, config.allowedOrigins);
     if (denied) return denied;
-    return c.json({ ok: true, service: "sley", fixture: config.fixtureMode });
+    return c.json({ ok: true, service: "boxaide", fixture: config.fixtureMode });
   });
 
   // Localhost-only bootstrap so the web UI can pick up the token without copy-paste
@@ -227,17 +227,17 @@ export function createRuntime(
         command: "npx",
         args: ["tsx", "src/cli.ts", "mcp"],
         env: {
-          SLEY_DATA_DIR: config.dataDir,
-          SLEY_TOKEN: config.bearerToken,
+          BOXAIDE_DATA_DIR: config.dataDir,
+          BOXAIDE_TOKEN: config.bearerToken,
         },
       },
       claudeDesktop: {
         mcpServers: {
-          sley: {
+          boxaide: {
             command: "npx",
             args: ["tsx", join(process.cwd(), "src/cli.ts"), "mcp"],
             env: {
-              SLEY_DATA_DIR: config.dataDir,
+              BOXAIDE_DATA_DIR: config.dataDir,
             },
           },
         },
@@ -251,7 +251,7 @@ export function createRuntime(
     const index = join(webRoot, "index.html");
     if (!existsSync(index)) {
       return c.text(
-        "Sley UI missing. Build it with: npm run build",
+        "Boxaide UI missing. Build it with: npm run build",
         500,
       );
     }

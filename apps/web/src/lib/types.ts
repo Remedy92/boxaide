@@ -1,5 +1,5 @@
 /**
- * Exact mirrors of the Sley backend JSON.
+ * Exact mirrors of the Boxaide backend JSON.
  *
  * Every type here is field-for-field from src/provider/types.ts and the
  * responses in src/api/routes.ts. Optionality is load-bearing: `messageId`,
@@ -120,10 +120,10 @@ export type ConnectionTestResult = { ok: boolean; error?: string };
 export type MetaResponse = { tokenHint: string; mcpPath: string; auth: string };
 
 /** GET /health — unauthenticated */
-export type HealthResponse = { ok: true; service: "sley"; fixture: boolean };
+export type HealthResponse = { ok: true; service: "boxaide"; fixture: boolean };
 
 /** GET /api/health — authenticated */
-export type ApiHealthResponse = { ok: true; service: "sley"; version: string };
+export type ApiHealthResponse = { ok: true; service: "boxaide"; version: string };
 
 export type AccountCredentials = {
   imapHost: string;
@@ -166,7 +166,7 @@ export type AgentTurn = {
 };
 
 /**
- * Who is listening, and who Sley spawned.
+ * Who is listening, and who Boxaide spawned.
  *
  * `waiting` is the only field that is proof of a parked chat_await_message.
  * `listening` also accepts an agent that called within the last few seconds,
@@ -179,7 +179,7 @@ export type AgentPresence = {
   listening: boolean;
   lastSeenAt: string | null;
   lastAgent: string | null;
-  /** Registry id of the CLI Sley spawned. Null when nothing is launched. */
+  /** Registry id of the CLI Boxaide spawned. Null when nothing is launched. */
   launchedAgent: string | null;
   /**
    * A message an agent took and has not answered yet — see AgentChannel.Work.
@@ -189,7 +189,7 @@ export type AgentPresence = {
   working: AgentWork | null;
 };
 
-/** The one thing Sley can prove about an agent's own work. */
+/** The one thing Boxaide can prove about an agent's own work. */
 export type AgentWork = {
   /** The `seq` of the user turn being answered. */
   seq: number;

@@ -1,6 +1,4 @@
 import { join } from "node:path";
-import { envFirst } from "./config.js";
-
 /**
  * How the bearer token is reported at startup.
  *
@@ -14,9 +12,9 @@ import { envFirst } from "./config.js";
  */
 export function tokenLine(token: string, dataDir: string): string {
   if (process.stdout.isTTY) return `bearer token: ${token}`;
-  if (envFirst("SLEY_TOKEN", "MAILMUX_TOKEN")) {
-    const via = process.env.SLEY_TOKEN ? "SLEY_TOKEN" : "MAILMUX_TOKEN";
-    return `bearer token: set via ${via} (not printed)`;
-  }
+  const via = ["BOXAIDE_TOKEN", "SLEY_TOKEN", "MAILMUX_TOKEN"].find(
+    (key) => process.env[key],
+  );
+  if (via) return `bearer token: set via ${via} (not printed)`;
   return `bearer token: ${join(dataDir, "bearer.token")} (not printed)`;
 }

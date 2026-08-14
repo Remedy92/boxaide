@@ -79,7 +79,7 @@ export function SetupWizard() {
         <header className="mailmux-rise flex items-center gap-2">
           <BrandGlyph className="text-fg" />
           <span className="text-[13px] font-semibold tracking-[var(--tracking-tight)] text-fg">
-            Sley
+            Boxaide
           </span>
           <span className="ml-auto flex items-center gap-1.5">
             {([1, 2, 3] as const).map((index) => (
@@ -146,7 +146,7 @@ function ServerStep({
   const [probe, setProbe] = React.useState<Probe>({ status: "idle" });
   const [auth, setAuth] = React.useState<Auth>({ status: "idle" });
   /* The address box is off by default. It is the answer to a question almost
-     nobody has — Sley runs on one computer, at one address, and the probe
+     nobody has — Boxaide runs on one computer, at one address, and the probe
      below already knows it. It appears when someone says it is wrong. */
   const [showAddress, setShowAddress] = React.useState(false);
   /* "detecting" is the first render: one quiet line while the page finds and
@@ -155,7 +155,7 @@ function ServerStep({
      and those are the only audiences the address and token fields have. */
   const [phase, setPhase] = React.useState<"detecting" | "manual">("detecting");
 
-  /* The address this page was served from. When Sley serves its own build,
+  /* The address this page was served from. When Boxaide serves its own build,
      that address IS the server — no typing, no CORS, no local-network prompt.
      A static deployment on some other host gets `null` and types it in. */
   const pageOrigin = React.useMemo(() => {
@@ -192,7 +192,7 @@ function ServerStep({
 
   /* Auto-detect on arrival, in the order that is true rather than convenient:
      the stored address first, and only if nothing answers there, the address
-     this page is served from. Served by Sley itself, the first probe already
+     this page is served from. Served by Boxaide itself, the first probe already
      succeeds and step one passes before the heading has been read. Deployed to
      a static host, the page origin is not a mail server and adopting it would
      be a confident wrong answer. */
@@ -252,7 +252,7 @@ function ServerStep({
    * The whole of step one, when it can be done without a human: find a live
    * server, then sign in with a token that is already ours to have. It runs on
    * mount and again behind the "Look again" button, which is the only control
-   * this screen needs while Sley is simply not started yet.
+   * this screen needs while Boxaide is simply not started yet.
    *
    * `alive` reports whether it found the seam a human has to close, so the
    * caller can leave the spinner up on success rather than flashing the form.
@@ -308,7 +308,7 @@ function ServerStep({
   /**
    * "Look again": probe the address in hand — the detected one, or one typed
    * into the box below. A server that is this page's own origin still hands
-   * over its token without being asked, so someone who starts Sley and
+   * over its token without being asked, so someone who starts Boxaide and
    * presses this never sees the token field at all.
    */
   const look = async () => {
@@ -327,7 +327,7 @@ function ServerStep({
       setAuth({
         status: "fail",
         message:
-          "Paste the connection code first — Sley shows it where you started it.",
+          "Paste the connection code first — Boxaide shows it where you started it.",
         raw: "",
       });
       return;
@@ -367,7 +367,7 @@ function ServerStep({
     );
   }
 
-  /* Two screens, not one form. Either Sley is running and the only thing
+  /* Two screens, not one form. Either Boxaide is running and the only thing
      missing is the line it printed, or it is not running and no field on this
      page can fix that. Showing both boxes in both cases is what made this look
      like configuration. */
@@ -384,14 +384,14 @@ function ServerStep({
         id="wizard-step-1"
         className="text-[15px] leading-5 font-semibold tracking-[var(--tracking-tight)] text-fg"
       >
-        {found ? "Let this page in" : "Sley isn’t open yet"}
+        {found ? "Let this page in" : "Boxaide isn’t open yet"}
       </h1>
       <p className="mt-1.5 text-[13px] leading-[18px] text-fg-secondary">
         {found
-          ? "Sley is open on this computer. It shows a code when it starts, and this page needs that code before it can show your mail."
+          ? "Boxaide is open on this computer. It shows a code when it starts, and this page needs that code before it can show your mail."
           : installed
-            ? "Sley is an app on this computer, and it is not running. Open it, then press Try again."
-            : "Sley is an app you open on your own computer. Your mail stays there. Get it below, open it, and this page finds it by itself."}
+            ? "Boxaide is an app on this computer, and it is not running. Open it, then press Try again."
+            : "Boxaide is an app you open on your own computer. Your mail stays there. Get it below, open it, and this page finds it by itself."}
       </p>
 
       <div className="mt-6 space-y-4">
@@ -406,7 +406,7 @@ function ServerStep({
             <Field
               id="wizard-token"
               label="Connection code"
-              helper="Sley shows this code where you started it, on the line that begins “bearer token:”. Copy the whole line."
+              helper="Boxaide shows this code where you started it, on the line that begins “bearer token:”. Copy the whole line."
             >
               <div className="relative">
                 <Input
@@ -456,7 +456,7 @@ function ServerStep({
           {auth.status === "ok" && (
             <p className="flex items-center gap-1.5 text-[12px] text-success">
               <StatusDot tone="success" />
-              Connected — Sley {auth.version}
+              Connected — Boxaide {auth.version}
             </p>
           )}
           {auth.status === "fail" && (
@@ -470,18 +470,18 @@ function ServerStep({
           )}
         </div>
 
-        {/* The address of the machine Sley runs on. Hidden until someone
+        {/* The address of the machine Boxaide runs on. Hidden until someone
             says the found one is wrong, because for everyone else it is the
             answer to a question they never asked. */}
         {showAddress ? (
           <div className="space-y-3">
             <Field
               id="wizard-base-url"
-              label="Where Sley is running"
+              label="Where Boxaide is running"
               helper={
                 sameOrigin
                   ? "This is the address you are reading this page on."
-                  : "The address Sley printed when it started."
+                  : "The address Boxaide printed when it started."
               }
             >
               <Input
@@ -505,7 +505,7 @@ function ServerStep({
             {!found && (
               <p className="text-[12px] leading-4 text-fg-tertiary">
                 Running it from a terminal? Start it there with{" "}
-                <code className="font-mono text-fg-secondary">sley serve</code>
+                <code className="font-mono text-fg-secondary">boxaide serve</code>
                 , then press Try again.
               </p>
             )}
@@ -537,7 +537,7 @@ function ServerStep({
           <Button asChild variant="secondary">
             <a href="/install">
               <Download className="size-4" strokeWidth={1.5} />
-              Get Sley
+              Get Boxaide
             </a>
           </Button>
         )}
@@ -692,7 +692,7 @@ function MailboxStep({
         Add your first mailbox
       </h1>
       <p className="mt-1.5 text-[13px] leading-[18px] text-fg-secondary">
-        Your password is encrypted and stays in Sley&rsquo;s data folder on
+        Your password is encrypted and stays in Boxaide&rsquo;s data folder on
         this computer.
       </p>
 
@@ -1049,7 +1049,7 @@ function describe(error: unknown, host: string): string {
       return "Your browser blocked the request to your own computer. Allow it when Chrome asks, then press Check again.";
     }
     if (error.kind === "mixed-content") {
-      return "Your browser blocks this page from reaching a plain http address. Open Sley at its own address instead.";
+      return "Your browser blocks this page from reaching a plain http address. Open Boxaide at its own address instead.";
     }
   }
   return `Nothing answered at ${host}.`;

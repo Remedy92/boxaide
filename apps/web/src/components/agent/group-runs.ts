@@ -8,7 +8,7 @@ import type { AgentTurn } from "../../lib/types";
  * the conversation actually has: a user turn, any number of activity lines the
  * agent posted while it worked, then the answer.
  *
- * What is NOT here is a token stream. Sley runs no model; an answer arrives
+ * What is NOT here is a token stream. Boxaide runs no model; an answer arrives
  * as one finished `chat_say`. The live part of a run is real all the same — the
  * activity lines and the mail tools being called are events this server
  * handled, so "working" is a fact about a claimed message, not a guess about a

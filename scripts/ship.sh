@@ -47,7 +47,7 @@ command -v npm >/dev/null || die "npm is not on PATH"
 command -v xcrun >/dev/null || die "xcrun is not on PATH"
 
 # A signed but un-notarised dmg installs nowhere. macOS says "Apple could not
-# verify Sley is free of malware" and offers no Open button. Refuse to
+# verify Boxaide is free of malware" and offers no Open button. Refuse to
 # publish one. Mint the profile once with (profile name is historical):
 #   xcrun notarytool store-credentials mailmux-notary \
 #     --apple-id <apple-id> --team-id 22DPQ7YCAS
@@ -86,7 +86,7 @@ if [ -z "$VER" ]; then
   VER="$(node scripts/lib/bump-version.mjs --print)"
 fi
 
-DMG="apps/desktop/release/sley-mac.dmg"
+DMG="apps/desktop/release/boxaide-mac.dmg"
 NOTES="$(git log --format='- %s' "${TAG}..HEAD")"
 
 printf 'ship %s\n' "$VER"
@@ -137,18 +137,18 @@ git add package.json package-lock.json \
   apps/web/package.json apps/web/package-lock.json \
   apps/mcpb/manifest.json
 git commit -m "Cut $VER" -m "The download is now this commit."
-git tag -a "v$VER" -m "sley $VER"
+git tag -a "v$VER" -m "boxaide $VER"
 
 git push origin master
 git push origin "v$VER"
 
 BODY="$(printf '%s\n\n%s\n' "## What is new" "$NOTES")"
 gh release create "v$VER" \
-  --title "Sley $VER" \
+  --title "Boxaide $VER" \
   --notes "$BODY" \
   --latest \
   "$DMG"
 
-printf 'shipped https://github.com/Remedy92/sley/releases/latest/download/sley-mac.dmg\n'
+printf 'shipped https://github.com/Remedy92/boxaide/releases/latest/download/boxaide-mac.dmg\n'
 printf 'commit  %s\n' "$(git rev-parse --short HEAD)"
 ./scripts/ship_status.sh

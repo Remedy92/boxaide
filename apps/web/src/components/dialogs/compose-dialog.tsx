@@ -297,7 +297,7 @@ function ComposeForm({
           <DialogHeader>
             <DialogTitle className="title-15">{title}</DialogTitle>
             <DialogDescription>
-              Plain text only. Sley sends through your own SMTP server and
+              Plain text only. Boxaide sends through your own SMTP server and
               forces the From address to the mailbox you pick.
             </DialogDescription>
           </DialogHeader>

@@ -8,7 +8,7 @@ import type { AgentPresence as Presence } from "@/lib/types";
  * Who the conversation header names.
  *
  * Two facts, never a guess that someone is "connected":
- *   - launchedAgent: Sley spawned this CLI (sidebar Start).
+ *   - launchedAgent: Boxaide spawned this CLI (sidebar Start).
  *   - listening / lastAgent: an MCP client is parked in chat_await_message,
  *     or called it within the presence window. lastAgent is that client's
  *     initialize name.
@@ -29,14 +29,14 @@ export function AgentPresenceBadge({
       ? {
           label: "Unreachable",
           className: "text-danger",
-          detail: "Sley is not answering. Reconnecting.",
+          detail: "Boxaide is not answering. Reconnecting.",
         }
       : connection === "unsupported"
         ? {
             label: "No channel",
             className: "text-warning",
             detail:
-              "This Sley server was built without the chat channel. Update it to talk to an agent here.",
+              "This Boxaide server was built without the chat channel. Update it to talk to an agent here.",
           }
         : name
           ? {
