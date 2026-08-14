@@ -1,6 +1,6 @@
 {
   "name": "sley",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Free self-host multi-mailbox agentic inbox with web UI + MCP for any agent",
   "type": "module",
   "license": "MIT",

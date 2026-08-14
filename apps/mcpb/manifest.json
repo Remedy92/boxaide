@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "sley",
   "display_name": "Sley",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Your mailboxes as MCP tools — read, search, draft and send from Sley.",
   "long_description": "Connects Claude to the Sley app running on this machine. Claude can then read and search mail across every connected mailbox, write drafts, and — only when you ask — send. It also gets the chat tools that let it hold a conversation inside the Sley window.\n\nNothing to configure: the connector finds your local Sley server and its access token on its own. Install the Sley app first, from https://github.com/Remedy92/sley.",
   "author": { "name": "Sley contributors" },
