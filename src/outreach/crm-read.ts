@@ -23,9 +23,6 @@ export type InboundInteraction = {
   optOut: number | null;
 };
 
-/** A contact whose inbound mail carries an opt-out flag. */
-export type FlaggedOptOut = { contactId: string; email: string };
-
 /**
  * The CRM module owns the DDL, so in a process where its store has not run
  * (or a harness that wires outreach alone) the tables are simply absent. A
@@ -105,22 +102,3 @@ export function inboundSince(
     .all(contactId, sinceIso) as InboundInteraction[];
 }
 
-/**
- * Every contact with at least one inbound message the CRM sync flagged as an
- * opt-out, with the address to suppress. Not time-boxed and not tied to a
- * campaign window: the point of the sweep is to catch the "stop" that arrives
- * after the contact was parked in 'replied', 'done', or a pending approval.
- * Callers narrow the result to contacts outreach actually touched.
- */
-export function flaggedOptOuts(db: Database.Database): FlaggedOptOut[] {
-  if (!hasTable(db, "interactions") || !hasTable(db, "contacts")) return [];
-  if (!hasColumn(db, "interactions", "opt_out")) return [];
-  return db
-    .prepare(
-      `SELECT DISTINCT i.contact_id AS contactId, c.email AS email
-         FROM interactions i
-         JOIN contacts c ON c.id = i.contact_id
-        WHERE i.direction = 'in' AND i.opt_out = 1`,
-    )
-    .all() as FlaggedOptOut[];
-}

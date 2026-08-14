@@ -183,10 +183,13 @@ export function registerOutreachRoutes(app: Hono, platform: Platform): void {
   });
 
   app.delete("/api/outreach/suppression/:email", (c) => {
-    const removed = store.removeSuppression(
-      decodeURIComponent(c.req.param("email")),
-    );
+    const email = decodeURIComponent(c.req.param("email"));
+    const removed = store.removeSuppression(email);
     if (!removed) return c.json({ error: "not found" }, 404);
+    // The human has answered the stored "stop": withdraw the interaction
+    // flags too, or the windowed reply check re-suppresses from the same old
+    // rows on the next pass. A new "stop" flags anew and suppresses again.
+    platform.crmStore.clearOptOutFlags(email);
     return c.json({ deleted: true });
   });
 

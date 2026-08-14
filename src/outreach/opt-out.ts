@@ -54,20 +54,51 @@ const SUBJECT_WHOLE_RE = new RegExp(
 );
 
 /**
+ * Where the sender's own words end: the first quoted-thread marker or the
+ * standard signature delimiter. A full body carries the entire quoted thread
+ * below the reply, and a quoted newsletter's "to unsubscribe, click here" is
+ * not this sender asking us to stop. The cut is line-anchored, so it only
+ * works on real bodies — a whitespace-collapsed snippet passes through whole,
+ * which is fine: the snippet is the degraded fallback, not the authority.
+ */
+const QUOTE_MARKERS: RegExp[] = [
+  /^\s*>/m,
+  /^On .{0,200}wrote:\s*$/m,
+  /^-{2,}\s*Original Message\s*-{2,}/im,
+  /^From:\s.+$/m,
+  /^-- $/m,
+];
+
+function replyPortion(text: string): string {
+  let end = text.length;
+  for (const marker of QUOTE_MARKERS) {
+    const m = marker.exec(text);
+    if (m && m.index < end) end = m.index;
+  }
+  return text.slice(0, end);
+}
+
+/**
  * Does this text ask us to stop?
  *
  * `kind` picks the bare-keyword rule: "body" matches the keyword at the
  * start of the text, "subject" only when the whole subject is the keyword.
- * The explicit phrases match anywhere in either. Never call this on a
- * string that concatenates fields — a phrase fabricated across a field
- * boundary must not suppress anyone.
+ * The explicit phrases match anywhere in the sender's own words — for a
+ * body, that is the reply portion above quoted thread and signature, because
+ * a quoted newsletter footer says "unsubscribe" without the sender meaning
+ * it. Residual false positive: a corporate footer pasted flush under a
+ * one-line reply with no signature delimiter still matches; accepted, since
+ * the alternative is missing real opt-outs. Never call this on a string that
+ * concatenates fields — a phrase fabricated across a field boundary must not
+ * suppress anyone.
  */
 export function optOutIntent(
   text: string,
   kind: "subject" | "body",
 ): boolean {
   if (!text) return false;
-  if (PHRASE_RE.test(text)) return true;
+  const phraseScope = kind === "body" ? replyPortion(text) : text;
+  if (PHRASE_RE.test(phraseScope)) return true;
   const bare = text.replace(REPLY_PREFIX_RE, "");
   return kind === "body" ? BODY_START_RE.test(bare) : SUBJECT_WHOLE_RE.test(bare);
 }

@@ -12,12 +12,7 @@ import type { OutreachStore, ContactState } from "./store.js";
 import type { CrmStore } from "../crm/store.js";
 import type { MailService } from "../mail/service.js";
 import { envFirst } from "../config.js";
-import {
-  flaggedOptOuts,
-  inboundSince,
-  readContact,
-  type CrmContact,
-} from "./crm-read.js";
+import { inboundSince, readContact, type CrmContact } from "./crm-read.js";
 import { optOutIntent } from "./opt-out.js";
 
 const DEFAULT_DAILY_CAP = 50;
@@ -108,9 +103,9 @@ export class OutreachEngine {
     this.inFlight = (async () => {
       do {
         this.rerun = false;
-        // Sweep first: a contact who said stop must be suppressed before the
-        // same pass decides whether to queue their next step.
-        this.sweepOptOuts();
+        // No opt-out sweep here: suppression is written at flag time by the
+        // CRM sync's sink (src/platform.ts). A sweep over stored flags would
+        // resurrect suppressions a human removed.
         this.advanceSequences();
         await this.sendApproved();
       } while (this.rerun);
@@ -205,43 +200,23 @@ export class OutreachEngine {
     for (const row of inbound) {
       // The flag is the authority: CRM sync saw the whole body, this class
       // only ever sees a subject and a truncated snippet. The field checks
-      // are the fallback for rows written before the column existed, and each
-      // field is tested on its own — a joined string fabricates phrases
-      // across the seam between subject and snippet.
+      // run ONLY when the column itself is absent (optOut null, a process
+      // reading a pre-migration database) — a stored 0 is a judgement, by
+      // the sync or by the human who cleared the flag on un-suppressing,
+      // and second-guessing it from the snippet would resurrect removals.
+      // Each field is tested on its own — a joined string fabricates
+      // phrases across the seam between subject and snippet.
       const optedOut =
         row.optOut === 1 ||
-        optOutIntent(this.decryptField(row.subjectEnc), "subject") ||
-        optOutIntent(this.decryptField(row.snippetEnc), "body");
+        (row.optOut === null &&
+          (optOutIntent(this.decryptField(row.subjectEnc), "subject") ||
+            optOutIntent(this.decryptField(row.snippetEnc), "body")));
       if (optedOut) {
         this.store.addSuppression(contact.email, "reply-stop");
         return "opted_out";
       }
     }
     return "replied";
-  }
-
-  /**
-   * Suppress everyone who asked to stop, whatever state their campaign rows
-   * are in.
-   *
-   * advanceSequences only looks at active contacts that are due, so a "stop"
-   * that lands after the contact was parked in 'replied' or 'done', or while
-   * an approved row waits for a human, would never be seen there. This pass
-   * reads the opt-out flag the CRM sync writes on inbound mail instead, and
-   * is bounded to contacts outreach actually touched — an unrelated thread
-   * cannot suppress a stranger.
-   */
-  sweepOptOuts(): number {
-    let swept = 0;
-    for (const flagged of flaggedOptOuts(this.crm.db)) {
-      if (!flagged.email) continue;
-      if (this.store.isSuppressed(flagged.email)) continue;
-      if (!this.store.hasOutreachHistory(flagged.contactId)) continue;
-      this.store.addSuppression(flagged.email, "reply-stop");
-      this.store.optOutContact(flagged.contactId);
-      swept += 1;
-    }
-    return swept;
   }
 
   /** Decrypt one optional field; an absent or unreadable one reads as empty. */

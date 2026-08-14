@@ -193,6 +193,29 @@ export class OutreachStore {
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status, created_at);
       CREATE INDEX IF NOT EXISTS idx_outbox_sent ON outbox(account_id, sent_at);
     `);
+
+    // Rows written before canonicalEmail existed hold trim+lowercase keys;
+    // lookups now canonicalize (punycode the domain), so a pre-existing
+    // unicode-domain suppression would silently stop matching — the exact
+    // failure this table exists to prevent. Rewrite once, at open: move each
+    // non-canonical row onto its canonical key, keeping whichever row is
+    // already there (a standing request never un-suppresses).
+    const stale = this.db
+      .prepare(`SELECT email, reason, at FROM suppression`)
+      .all() as SuppressionRow[];
+    const rewrite = this.db.transaction(() => {
+      for (const row of stale) {
+        const canonical = canonicalEmail(row.email);
+        if (canonical === row.email) continue;
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO suppression (email, reason, at) VALUES (?, ?, ?)`,
+          )
+          .run(canonical, row.reason, row.at);
+        this.db.prepare(`DELETE FROM suppression WHERE email = ?`).run(row.email);
+      }
+    });
+    rewrite();
   }
 
   private enc(text: string): string {

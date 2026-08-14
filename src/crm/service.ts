@@ -51,8 +51,12 @@ const NO_REPLY = /^(no-?reply|notifications?|mailer-daemon|postmaster|bounce)/i;
 /** A folder whose name or special-use marks it as the account's Sent mail. */
 const SENT_FOLDER = /sent/i;
 
+/** Called once per freshly flagged inbound opt-out, with the address in hand. */
+export type OptOutSink = (contactId: string, email: string) => void;
+
 export class CrmService {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private optOutSink: OptOutSink | null = null;
   /** A sync in flight. Two overlapping walks would duplicate no rows (the
    *  interactions UNIQUE holds) but would double the IMAP traffic for nothing. */
   private running: Promise<{ contacts: number; interactions: number }> | null =
@@ -62,6 +66,15 @@ export class CrmService {
     private store: CrmStore,
     private mail: MailService,
   ) {}
+
+  /**
+   * Installed by the platform (src/platform.ts), which scopes it to contacts
+   * outreach actually touched before suppressing. CRM stays ignorant of the
+   * suppression table itself.
+   */
+  setOptOutSink(sink: OptOutSink): void {
+    this.optOutSink = sink;
+  }
 
   async syncFromMail(): Promise<{ contacts: number; interactions: number }> {
     if (this.running) return this.running;
@@ -109,7 +122,7 @@ export class CrmService {
               ]
             : addressesOf(message.from);
 
-          const contactIds: string[] = [];
+          const parties: Array<{ id: string; email: string }> = [];
           for (const party of counterparties) {
             if (ownAddresses.has(party.email)) continue;
             if (NO_REPLY.test(localPartOf(party.email))) continue;
@@ -122,24 +135,28 @@ export class CrmService {
               source: "mail",
             });
             if (!known) contacts += 1;
-            contactIds.push(contact.id);
+            parties.push({ id: contact.id, email: party.email });
           }
 
           // Opt-out is decided once per message, and only for inbound mail this
           // sync has not seen before: the walk re-reads the same 200 summaries
           // every ten minutes, and one body fetch per already-recorded message
           // would multiply the IMAP traffic by 200 for an answer already stored.
-          const fresh = contactIds.filter(
-            (id) => !this.store.hasInteraction(account.id, message.id, id),
+          const fresh = new Set(
+            parties
+              .filter(
+                (p) => !this.store.hasInteraction(account.id, message.id, p.id),
+              )
+              .map((p) => p.id),
           );
           const optOut =
-            !outbound && fresh.length > 0
+            !outbound && fresh.size > 0
               ? await this.detectOptOut(account.id, message)
               : false;
 
-          for (const contactId of contactIds) {
+          for (const party of parties) {
             const added = this.store.addInteraction({
-              contactId,
+              contactId: party.id,
               accountId: account.id,
               messageId: message.id,
               direction: outbound ? "out" : "in",
@@ -149,6 +166,16 @@ export class CrmService {
               optOut,
             });
             if (added) interactions += 1;
+            // Suppression is written HERE, at flag time, with the address in
+            // hand — not by a later sweep. A sweep that re-reads old flags
+            // resurrects suppressions a human deliberately removed, and a
+            // contact deleted between flag and sweep would take the address
+            // with it while the approved outbox row lived on. Fresh rows only:
+            // each message gets exactly one shot at suppressing, so a human
+            // removal stands until the contact says stop again.
+            if (optOut && fresh.has(party.id)) {
+              this.optOutSink?.(party.id, party.email);
+            }
           }
         }
       }

@@ -72,6 +72,18 @@ export function createPlatform(opts: {
     }
   });
 
+  // Opt-outs suppress at flag time: the CRM sync sees the "stop" with the
+  // address in hand, and this hook writes the suppression the same moment —
+  // no sweep to resurrect a removal a human made, no window for a contact
+  // deletion to lose the address while an approved outbox row lives on.
+  // Scoped to contacts outreach touched: a stranger's unrelated mail must
+  // not suppress anyone.
+  crmService.setOptOutSink((contactId, email) => {
+    if (!outreachStore.hasOutreachHistory(contactId)) return;
+    outreachStore.addSuppression(email, "reply-stop");
+    outreachStore.optOutContact(contactId);
+  });
+
   return {
     crmStore,
     crmService,

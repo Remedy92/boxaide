@@ -253,16 +253,20 @@ Engine (`OutreachEngine`):
     - CRM sync runs `optOutIntent` over the full inbound body and records the
       verdict on the interaction row (`interactions.opt_out`). That flag is
       the authority; the engine reads it.
-    - The engine's own check is the fallback for rows written before the
-      flag existed. It runs per field — subject with the subject rule,
-      snippet with the body rule — never over a joined string, which would
-      fabricate a phrase across the seam between the two fields.
+    - The engine's own check runs ONLY when the column itself is absent
+      (a process reading a pre-migration database). A stored 0 is a
+      judgement — by the sync or by a human who un-suppressed — and is
+      never second-guessed from the snippet. It runs per field — subject
+      with the subject rule, snippet with the body rule — never over a
+      joined string, which would fabricate a phrase across the seam.
     - The rules differ by field. Explicit phrases (unsubscribe, opt out,
-      stop emailing/mailing/contacting) count anywhere in either. The bare
-      keyword counts at the start of a body, and only as the whole subject
-      after reply prefixes are stripped: "Re: stop" opts out, "Stop by our
-      booth at SaaStr" does not, and "stop" mid-prose ("we should stop by")
-      stays a normal reply.
+      stop emailing/mailing/contacting) count in the sender's own words:
+      for a body, the reply portion above quoted thread and the signature
+      delimiter — a quoted newsletter's "unsubscribe" footer is not this
+      sender opting out. The bare keyword counts at the start of a body,
+      and only as the whole subject after reply prefixes are stripped:
+      "Re: stop" opts out, "Stop by our booth at SaaStr" does not, and
+      "stop" mid-prose ("we should stop by") stays a normal reply.
     - A match → suppress (reason 'reply-stop') + state 'opted_out'.
   - Suppressed email → state 'suppressed', no queue.
   - Otherwise queue the next step into `outbox` (substitute {{name}} — first
@@ -272,15 +276,20 @@ Engine (`OutreachEngine`):
   - Every queued step appends the opt-out footer to the body (plain text):
     "\n\n--\nIf you'd rather not hear from me, just reply with \"stop\"."
     Step 0 included. No tracking links, ever.
-- Opt-out sweep, at the start of every tick pass: every contact with an
-  inbound interaction flagged `opt_out = 1` who is not yet suppressed gets a
-  suppression entry ('reply-stop') and all their `campaign_contacts` rows move
-  to 'opted_out' (rows already 'opted_out' or 'suppressed' are left as they
-  are). Scope: only contacts outreach touched — a `campaign_contacts` row or
-  an `outbox` row exists for them. This catches the "stop" that arrives after
-  the contact was parked in 'replied' or 'done', or while an approved row
-  waits for a human, without letting an unrelated inbound mail suppress
-  someone this product never mailed.
+- Suppression is written at flag time, not by a sweep. The CRM sync fires a
+  platform-installed sink (`CrmService.setOptOutSink`, wired in
+  `src/platform.ts`) once per freshly flagged inbound message, with the
+  address in hand; the sink suppresses ('reply-stop') and moves every
+  `campaign_contacts` row for that contact to 'opted_out' (rows already
+  'opted_out' or 'suppressed' stay). Scope: only contacts outreach touched —
+  a `campaign_contacts` row or an `outbox` row exists. Fresh rows only, so a
+  message suppresses exactly once: removing a suppression through
+  `DELETE /api/outreach/suppression/:email` also withdraws the stored flags
+  (`CrmStore.clearOptOutFlags`), and nothing re-reads old flags — a human
+  removal stands until the contact says stop again. This design (no sweep)
+  exists because a sweep over stored flags resurrects removed suppressions,
+  and a contact deleted between flag and sweep takes the address with it
+  while an approved outbox row lives on.
 - Suppression keys are canonical: trimmed, lowercased, and punycoded domain
   (`canonicalEmail`), on write and on lookup. Nodemailer punycodes IDN domains
   before delivery, so "user@münchen.de" and "user@xn--mnchen-3ya.de" must be

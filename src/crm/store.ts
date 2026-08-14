@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { decryptSecret, encryptSecret } from "../crypto/secrets.js";
+import { canonicalEmail } from "../outreach/opt-out.js";
 
 export type Organization = {
   id: string;
@@ -592,6 +593,33 @@ export class CrmStore {
         )
         .get(accountId, messageId, contactId) !== undefined
     );
+  }
+
+  /**
+   * Withdraw the stored opt-out flags for one mailbox. Called when a human
+   * removes the suppression: the flag is derived data standing in for "they
+   * asked us to stop", and the human has just ruled that request answered.
+   * Without this, the windowed reply check would re-suppress from the same
+   * old rows. A NEW "stop" writes a new flagged row and suppresses again.
+   * Matching is canonical, so the unicode and punycode spellings both clear.
+   */
+  clearOptOutFlags(email: string): number {
+    const canonical = canonicalEmail(email);
+    const contacts = this.db
+      .prepare(`SELECT id, email FROM contacts`)
+      .all() as Array<{ id: string; email: string }>;
+    const ids = contacts
+      .filter((c) => canonicalEmail(c.email) === canonical)
+      .map((c) => c.id);
+    let cleared = 0;
+    for (const id of ids) {
+      cleared += this.db
+        .prepare(
+          `UPDATE interactions SET opt_out = 0 WHERE contact_id = ? AND opt_out = 1`,
+        )
+        .run(id).changes;
+    }
+    return cleared;
   }
 
   listInteractions(contactId: string, limit = 50): Interaction[] {
