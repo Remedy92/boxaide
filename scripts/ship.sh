@@ -51,8 +51,10 @@ command -v xcrun >/dev/null || die "xcrun is not on PATH"
 # publish one. Mint the profile once with (profile name is historical):
 #   xcrun notarytool store-credentials mailmux-notary \
 #     --apple-id <apple-id> --team-id 22DPQ7YCAS
-[ -n "${APPLE_KEYCHAIN_PROFILE:-}" ] || \
-  die "APPLE_KEYCHAIN_PROFILE is not set — the dmg would ship un-notarised"
+# Profile name is historical (created as mailmux-notary). Apple will not
+# rename a stored notary item; minting boxaide-notary needs the Apple ID
+# password in an interactive `notarytool store-credentials`.
+: "${APPLE_KEYCHAIN_PROFILE:=mailmux-notary}"
 xcrun notarytool history --keychain-profile "$APPLE_KEYCHAIN_PROFILE" \
   >/dev/null 2>&1 || die "notary profile $APPLE_KEYCHAIN_PROFILE does not work"
 
