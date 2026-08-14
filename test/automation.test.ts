@@ -654,7 +654,11 @@ describe("AgentLauncher.runOnce", () => {
   });
 
   it("SIGKILLs a run that outlives its timeout", async () => {
-    const { specs, bin } = runSpecs("#!/bin/sh\nsleep 60\n");
+    // Builtins only: the launcher rebuilds the child PATH from the test's
+    // fake dir plus well-known CLI dirs, none of which is /usr/bin — an
+    // external `sleep` exits 127 on CI runners before the timeout fires,
+    // and the run reads 'error' instead of 'killed'.
+    const { specs, bin } = runSpecs("#!/bin/sh\nwhile :; do :; done\n");
     const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
     cleanups.push(() => launcher.close());
 
@@ -665,7 +669,8 @@ describe("AgentLauncher.runOnce", () => {
   });
 
   it("refuses a run while the chat agent holds the slot, and the reverse", async () => {
-    const { specs, bin } = runSpecs("#!/bin/sh\nsleep 60\n");
+    // Builtins only — same reason as the timeout test above.
+    const { specs, bin } = runSpecs("#!/bin/sh\nwhile :; do :; done\n");
     const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
     cleanups.push(() => launcher.close());
 
