@@ -572,3 +572,56 @@ describe("Store.open database name", () => {
     expect(existsSync(join(dir, "sley.db"))).toBe(false);
   });
 });
+
+describe("MailService send guard recipients", () => {
+  async function connected() {
+    const { store, provider, mail } = makeService();
+    await mail.connectAccount({
+      alias: "personal",
+      email: "you@personal.test",
+      creds: baseCreds,
+    });
+    provider.clear();
+    const seen: string[][] = [];
+    mail.setSendGuard((recipients) => {
+      seen.push(recipients);
+    });
+    return { store, provider, mail, seen };
+  }
+
+  it("hands the guard punycoded keys for a unicode IDN domain", async () => {
+    const { store, mail, seen } = await connected();
+    await mail.sendMessage("personal", {
+      to: "User@München.de",
+      subject: "s",
+      text: "t",
+    });
+    expect(seen).toEqual([["user@xn--mnchen-3ya.de"]]);
+    store.close();
+  });
+
+  // Fails closed with no guard installed too: the provider must never be
+  // handed a recipient shape it was not typed for.
+  it.each([
+    ["to", { to: { address: "a@x.test" } }],
+    ["cc", { to: "a@x.test", cc: { address: "b@x.test" } }],
+    ["bcc", { to: "a@x.test", bcc: ["c@x.test"] }],
+  ])("throws on a non-string %s before any send", async (_label, fields) => {
+    const { store, provider, mail } = makeService();
+    await mail.connectAccount({
+      alias: "personal",
+      email: "you@personal.test",
+      creds: baseCreds,
+    });
+    provider.clear();
+    await expect(
+      mail.sendMessage("personal", {
+        subject: "s",
+        text: "t",
+        ...(fields as { to: string }),
+      }),
+    ).rejects.toThrow("invalid recipients: to/cc/bcc must be strings");
+    expect(provider.getSent()).toHaveLength(0);
+    store.close();
+  });
+});

@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
+import addressparser from "nodemailer/lib/addressparser/index.js";
 import type { Store } from "../db/store.js";
+import { canonicalEmail } from "../outreach/opt-out.js";
 import type {
   AccountCredentials,
   DraftInput,
@@ -174,13 +176,31 @@ export class MailService {
     input: SendMessageInput,
     opts: { overrideSuppression?: boolean } = {},
   ): Promise<SendResult> {
+    // Fail closed before any parsing, guard installed or not. A non-string
+    // recipient (an unvalidated REST body can post {name, address}) parses to
+    // address "" and would leave the guard with nothing to check while
+    // nodemailer still delivered it. Rejecting here also keeps the provider
+    // from ever seeing a shape it was not typed for.
+    if (
+      typeof input.to !== "string" ||
+      (input.cc !== undefined && typeof input.cc !== "string") ||
+      (input.bcc !== undefined && typeof input.bcc !== "string")
+    ) {
+      throw new Error("invalid recipients: to/cc/bcc must be strings");
+    }
     if (this.sendGuard) {
+      // Nodemailer's own parser, so the guard sees exactly the addresses
+      // nodemailer would deliver to. A hand-rolled comma split missed
+      // semicolon-separated lists and RFC 2822 group syntax
+      // ("team: a@x.com, b@y.com;") — forms nodemailer delivers happily,
+      // which made them suppression bypasses. flatten unwraps groups.
+      // canonicalEmail (not trim+lowercase) because nodemailer punycodes IDN
+      // domains: the unicode and punycode spellings are one mailbox and must
+      // hit one suppression key.
       const recipients = [input.to, input.cc, input.bcc]
         .filter((v): v is string => Boolean(v))
-        .flatMap((v) => v.split(","))
-        .map((v) => v.trim().toLowerCase())
-        // "Name <a@b>" and bare "a@b" both reduce to the address.
-        .map((v) => /<([^>]+)>/.exec(v)?.[1]?.toLowerCase() ?? v)
+        .flatMap((v) => addressparser(v, { flatten: true }))
+        .map((entry) => canonicalEmail(entry.address))
         .filter((v) => v.includes("@"));
       this.sendGuard(recipients, opts.overrideSuppression === true);
     }

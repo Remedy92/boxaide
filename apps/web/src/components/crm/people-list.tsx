@@ -171,7 +171,7 @@ export function PeopleList({
           </Button>
         }
       >
-        No contacts yet. mailmux builds them from who you actually write to.
+        No contacts yet. Sley builds them from who you actually write to.
       </Empty>
     );
   } else {

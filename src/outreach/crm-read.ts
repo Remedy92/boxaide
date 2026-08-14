@@ -19,6 +19,8 @@ export type InboundInteraction = {
   at: string;
   subjectEnc: string | null;
   snippetEnc: string | null;
+  /** 1 when CRM sync read the full body and saw an opt-out. Null pre-migration. */
+  optOut: number | null;
 };
 
 /**
@@ -62,6 +64,23 @@ export function readContacts(
     .all(...contactIds) as CrmContact[];
 }
 
+/**
+ * `interactions.opt_out` arrives with the CRM sync migration. Outreach must
+ * read the table before and after that lands, so the column is probed rather
+ * than assumed — a missing column selects NULL and the engine falls back to
+ * its own subject/snippet detection.
+ */
+function hasColumn(
+  db: Database.Database,
+  table: string,
+  column: string,
+): boolean {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+    name: string;
+  }>;
+  return cols.some((c) => c.name === column);
+}
+
 /** Inbound interactions strictly after `sinceIso`, newest first. */
 export function inboundSince(
   db: Database.Database,
@@ -69,12 +88,17 @@ export function inboundSince(
   sinceIso: string,
 ): InboundInteraction[] {
   if (!hasTable(db, "interactions")) return [];
+  const optOut = hasColumn(db, "interactions", "opt_out")
+    ? "opt_out"
+    : "NULL";
   return db
     .prepare(
-      `SELECT at, subject_enc AS subjectEnc, snippet_enc AS snippetEnc
+      `SELECT at, subject_enc AS subjectEnc, snippet_enc AS snippetEnc,
+              ${optOut} AS optOut
          FROM interactions
         WHERE contact_id = ? AND direction = 'in' AND at > ?
         ORDER BY at DESC`,
     )
     .all(contactId, sinceIso) as InboundInteraction[];
 }
+

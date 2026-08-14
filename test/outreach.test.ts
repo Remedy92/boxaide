@@ -9,6 +9,7 @@ import { createPlatform, type Platform } from "../src/platform.js";
 import type { AgentLauncher } from "../src/agent/launcher.js";
 import { OutreachEngine, renderTemplate } from "../src/outreach/engine.js";
 import { OPT_OUT_FOOTER } from "../src/outreach/store.js";
+import { OPT_OUT_KEYWORD, optOutIntent } from "../src/outreach/opt-out.js";
 import { dispatchOutreachTool, OUTREACH_TOOLS } from "../src/outreach/tools.js";
 import { registerOutreachRoutes } from "../src/outreach/routes.js";
 import { Hono } from "hono";
@@ -43,6 +44,9 @@ function createCrmFixtureTables(db: Database.Database): void {
       id TEXT PRIMARY KEY, contact_id TEXT NOT NULL, account_id TEXT NOT NULL,
       message_id TEXT NOT NULL, direction TEXT NOT NULL, at TEXT NOT NULL,
       subject_enc TEXT, snippet_enc TEXT,
+      -- Written by CRM sync from the full body (src/crm/store.ts owns the
+      -- production migration); outreach only reads it.
+      opt_out INTEGER NOT NULL DEFAULT 0,
       UNIQUE (account_id, message_id, contact_id)
     );
   `);
@@ -88,13 +92,15 @@ describe("outreach", () => {
     at: Date,
     subject: string,
     snippet: string,
+    optOut = 0,
   ): void {
     const enc = (t: string) => encryptSecret(masterKey, t);
     store.db
       .prepare(
         `INSERT INTO interactions
-           (id, contact_id, account_id, message_id, direction, at, subject_enc, snippet_enc)
-         VALUES (?, ?, ?, ?, 'in', ?, ?, ?)`,
+           (id, contact_id, account_id, message_id, direction, at, subject_enc,
+            snippet_enc, opt_out)
+         VALUES (?, ?, ?, ?, 'in', ?, ?, ?, ?)`,
       )
       .run(
         randomUUID(),
@@ -104,6 +110,7 @@ describe("outreach", () => {
         at.toISOString(),
         enc(subject),
         enc(snippet),
+        optOut,
       );
   }
 
@@ -225,11 +232,14 @@ describe("outreach", () => {
     platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
     engine.advanceSequences();
 
+    // opt_out = 1: the row as CRM sync writes it after reading the full body.
+    // A stored 0 is a judgement the engine must not second-guess.
     addInboundInteraction(
       contactId,
       new Date(clock.getTime() + 1 * DAY),
       "Re: Hi Alan",
       "Please stop emailing me.",
+      1,
     );
     clock = new Date(clock.getTime() + 4 * DAY);
 
@@ -244,6 +254,298 @@ describe("outreach", () => {
         reason: "reply-stop",
       }),
     ]);
+  });
+
+  it("suppresses on the bare 'stop' reply the footer invites", () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("ada@analytical.example", "Ada Lovelace");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    // A real mail client reply: "stop" first, quoted original underneath —
+    // the snippet carries both. This is the exact reply OPT_OUT_FOOTER asks
+    // for, and it must suppress, not read as engagement.
+    addInboundInteraction(
+      contactId,
+      new Date(clock.getTime() + 1 * DAY),
+      "Re: Hi Ada",
+      "Stop.\n\nOn Thu, Aug 14 you wrote: Hi Ada, saw your work…",
+      1,
+    );
+    clock = new Date(clock.getTime() + 4 * DAY);
+
+    engine.advanceSequences();
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("opted_out");
+    expect(platform.outreachStore.isSuppressed("ada@analytical.example")).toBe(
+      true,
+    );
+  });
+
+  it("keeps 'stop' mid-sentence as a normal reply, not an opt-out", () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("kay@mercury.example", "Kay McNulty");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    addInboundInteraction(
+      contactId,
+      new Date(clock.getTime() + 1 * DAY),
+      "Re: Hi Kay",
+      "Sounds interesting — we should stop by your office next week.",
+    );
+    clock = new Date(clock.getTime() + 4 * DAY);
+
+    engine.advanceSequences();
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("replied");
+    expect(platform.outreachStore.isSuppressed("kay@mercury.example")).toBe(
+      false,
+    );
+  });
+
+  it("keeps a subject that merely starts with 'Stop' as a normal reply", () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("booth@saastr.example", "Booth Owner");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    // Subjects use the whole-match rule: only a subject that IS the keyword
+    // opts out. Otherwise every conference invite suppresses its sender.
+    addInboundInteraction(
+      contactId,
+      new Date(clock.getTime() + 1 * DAY),
+      "Stop by our booth at SaaStr",
+      "We are in hall 3 all week.",
+    );
+    clock = new Date(clock.getTime() + 4 * DAY);
+
+    engine.advanceSequences();
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("replied");
+    expect(platform.outreachStore.isSuppressed("booth@saastr.example")).toBe(
+      false,
+    );
+  });
+
+  it("does not fabricate an opt-out across the subject/snippet seam", () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("seam@example.com", "Seam");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    // Joined, these two fields read "Should we stop emailing lists entirely?"
+    // — a phrase that exists in neither field. Each field is matched alone.
+    addInboundInteraction(
+      contactId,
+      new Date(clock.getTime() + 1 * DAY),
+      "Re: Should we stop",
+      "emailing lists entirely?",
+    );
+    clock = new Date(clock.getTime() + 4 * DAY);
+
+    engine.advanceSequences();
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("replied");
+    expect(platform.outreachStore.isSuppressed("seam@example.com")).toBe(false);
+  });
+
+  /* ---- suppression at flag time (the platform sink) --------------------- */
+
+  it("suppresses a 'stop' that arrives after the contact was parked 'replied'", async () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("late@example.com", "Late Stopper");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    // A plain answer parks them in 'replied' — outside the window
+    // advanceSequences ever looks at again.
+    addInboundInteraction(
+      contactId,
+      new Date(clock.getTime() + 1 * DAY),
+      "Re: Hi Late",
+      "Thanks, let me think about it.",
+    );
+    clock = new Date(clock.getTime() + 4 * DAY);
+    engine.advanceSequences();
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("replied");
+
+    // Weeks later they write "stop". The CRM sync flags the row and the
+    // platform sink suppresses AT THAT MOMENT — no engine pass needed, no
+    // campaign window consulted.
+    provider.seedAccount(accountId, "me@test.com", [
+      {
+        subject: "Re: Hi Late",
+        from: "Late Stopper <late@example.com>",
+        bodyText: "stop",
+      },
+    ]);
+    await platform.crmService.syncFromMail();
+
+    expect(platform.outreachStore.isSuppressed("late@example.com")).toBe(true);
+    expect(
+      platform.outreachStore.listSuppression()[0].reason,
+    ).toBe("reply-stop");
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("opted_out");
+  });
+
+  it("leaves a flagged contact outreach never touched alone", async () => {
+    // The flag alone is not a licence to suppress: the sink only reaches
+    // people this product mailed or queued mail for.
+    provider.seedAccount(accountId, "me@test.com", [
+      {
+        subject: "Please remove me",
+        from: "Stranger <stranger@example.com>",
+        bodyText: "unsubscribe",
+      },
+    ]);
+    await platform.crmService.syncFromMail();
+
+    expect(platform.outreachStore.isSuppressed("stranger@example.com")).toBe(
+      false,
+    );
+  });
+
+  it("keeps a human's un-suppression: the same old 'stop' never re-suppresses", async () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("mind@changed.example", "Mind Changer");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    provider.seedAccount(accountId, "me@test.com", [
+      {
+        subject: "Re: Hi Mind",
+        from: "Mind Changer <mind@changed.example>",
+        bodyText: "stop",
+      },
+    ]);
+    await platform.crmService.syncFromMail();
+    expect(platform.outreachStore.isSuppressed("mind@changed.example")).toBe(
+      true,
+    );
+
+    // The human removes the suppression through the route — the only removal
+    // surface — which also withdraws the stored flags.
+    const app = new Hono();
+    registerOutreachRoutes(app, platform);
+    const res = await app.request(
+      `/api/outreach/suppression/${encodeURIComponent("mind@changed.example")}`,
+      { method: "DELETE" },
+    );
+    expect(res.status).toBe(200);
+    expect(platform.outreachStore.isSuppressed("mind@changed.example")).toBe(
+      false,
+    );
+
+    // Neither a re-sync (same message, no fresh row) nor an engine pass may
+    // resurrect the removal from the same old rows.
+    await platform.crmService.syncFromMail();
+    await engine.tick();
+    expect(platform.outreachStore.isSuppressed("mind@changed.example")).toBe(
+      false,
+    );
+
+    // A NEW "stop" is a new request and suppresses again. seedAccount
+    // replaces the whole box with uids restarting at 1, so the original
+    // message is re-seeded first to keep its uid — the new mail must get a
+    // fresh uid or the sync sees an already-recorded row.
+    provider.seedAccount(accountId, "me@test.com", [
+      {
+        subject: "Re: Hi Mind",
+        from: "Mind Changer <mind@changed.example>",
+        bodyText: "stop",
+      },
+      {
+        subject: "Re: Hi Mind again",
+        from: "Mind Changer <mind@changed.example>",
+        bodyText: "stop",
+      },
+    ]);
+    await platform.crmService.syncFromMail();
+    expect(platform.outreachStore.isSuppressed("mind@changed.example")).toBe(
+      true,
+    );
+  });
+
+  it("fails an approved row whose address was suppressed after approval", async () => {
+    const row = platform.outreachStore.queueOutbox({
+      accountId,
+      to: "changed@example.com",
+      subject: "s",
+      body: "b",
+    });
+    platform.outreachStore.decide(row.id, "approved");
+    // The stop lands between the human's click and the send pass.
+    platform.outreachStore.addSuppression("changed@example.com", "reply-stop");
+
+    expect(await engine.sendApproved()).toBe(0);
+    const after = platform.outreachStore.getOutbox(row.id);
+    expect(after?.status).toBe("failed");
+    expect(after?.error).toContain("recipient suppressed");
+    expect(provider.getSent()).toHaveLength(0);
+  });
+
+  /* ---- the opt-out contract --------------------------------------------- */
+
+  it("keeps the footer and the detector in step", () => {
+    // The footer invites exactly one reply. If someone rewords either side,
+    // this fails instead of quietly ignoring people who did as they were told.
+    expect(optOutIntent(OPT_OUT_KEYWORD, "body")).toBe(true);
+    expect(OPT_OUT_FOOTER).toContain(`"${OPT_OUT_KEYWORD}"`);
+  });
+
+  it("ignores 'unsubscribe' that lives in quoted thread or signature, not the reply", () => {
+    // A prospect saying yes, over a quoted newsletter and a corporate footer.
+    const body = [
+      "Sure, Tuesday at 10 works.",
+      "",
+      "-- ",
+      "Jane Doe | Acme",
+      "To unsubscribe from Acme updates, click here.",
+    ].join("\n");
+    expect(optOutIntent(body, "body")).toBe(false);
+
+    const quoted = [
+      "Sounds good!",
+      "",
+      "On Thu, Aug 14, Sley Newsletter wrote:",
+      "> You can opt out of future mailings at any time.",
+    ].join("\n");
+    expect(optOutIntent(quoted, "body")).toBe(false);
+
+    // The sender's own words still count.
+    expect(optOutIntent("Please unsubscribe me.\n\n-- \nJane", "body")).toBe(
+      true,
+    );
+  });
+
+  it("treats an IDN address and its punycoded form as one suppression key", async () => {
+    platform.outreachStore.addSuppression("User@München.de", "reply-stop");
+    // Suppressed in unicode, sent in punycode — nodemailer's form.
+    expect(platform.outreachStore.isSuppressed("user@xn--mnchen-3ya.de")).toBe(
+      true,
+    );
+
+    const row = platform.outreachStore.queueOutbox({
+      accountId,
+      to: "user@xn--mnchen-3ya.de",
+      subject: "s",
+      body: "b",
+    });
+    platform.outreachStore.decide(row.id, "approved");
+    expect(await engine.sendApproved()).toBe(0);
+    expect(platform.outreachStore.getOutbox(row.id)?.error).toContain(
+      "recipient suppressed",
+    );
+    expect(provider.getSent()).toHaveLength(0);
   });
 
   it("refuses to queue for an address already on the suppression list", () => {
@@ -609,5 +911,27 @@ describe("outreach", () => {
         org: null,
       }),
     ).toBe("Hi ada at  <ada@acme.example>");
+  });
+
+  it("rewrites pre-canonical suppression rows onto canonical keys at open", () => {
+    // A row the pre-canonicalEmail code would have written: trim+lowercase
+    // only, unicode domain. Inserted with raw SQL to bypass today's write path.
+    store.db
+      .prepare(`INSERT INTO suppression (email, reason, at) VALUES (?, ?, ?)`)
+      .run("user@münchen.de", "manual", "2026-08-01T00:00:00.000Z");
+
+    // Re-running the migration is what a process restart does.
+    const reopened = new (platform.outreachStore.constructor as new (
+      db: typeof store.db,
+      masterKey: Buffer,
+    ) => typeof platform.outreachStore)(store.db, masterKey);
+
+    // Both spellings of the mailbox hit the one rewritten row.
+    expect(reopened.isSuppressed("user@münchen.de")).toBe(true);
+    expect(reopened.isSuppressed("user@xn--mnchen-3ya.de")).toBe(true);
+    const rows = store.db
+      .prepare(`SELECT email FROM suppression WHERE email LIKE '%mnchen%' OR email LIKE '%münchen%'`)
+      .all() as Array<{ email: string }>;
+    expect(rows).toEqual([{ email: "user@xn--mnchen-3ya.de" }]);
   });
 });

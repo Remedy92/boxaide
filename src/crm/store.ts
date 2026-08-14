@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { decryptSecret, encryptSecret } from "../crypto/secrets.js";
+import { canonicalEmail } from "../outreach/opt-out.js";
 
 export type Organization = {
   id: string;
@@ -45,6 +46,11 @@ export type Interaction = {
   at: string;
   subject: string | null;
   snippet: string | null;
+  /**
+   * Inbound mail that asks us to stop, decided once at insert time by the sync
+   * over the full body. Reading it back costs no decryption and no re-fetch.
+   */
+  optOut: boolean;
 };
 
 export type PipelineStage = {
@@ -112,6 +118,7 @@ type InteractionRow = {
   at: string;
   subjectEnc: string | null;
   snippetEnc: string | null;
+  optOut: number;
 };
 
 const CONTACT_COLUMNS = `
@@ -165,6 +172,7 @@ export class CrmStore {
         at TEXT NOT NULL,
         subject_enc TEXT,
         snippet_enc TEXT,
+        opt_out INTEGER NOT NULL DEFAULT 0,
         UNIQUE (account_id, message_id, contact_id)
       );
       CREATE TABLE IF NOT EXISTS pipeline_stages (
@@ -189,6 +197,19 @@ export class CrmStore {
       CREATE INDEX IF NOT EXISTS idx_deals_stage
         ON deals (stage_id, position);
     `);
+
+    // Only reached by databases created before opt_out existed. Fresh ones get
+    // the column from the CREATE above, so this is a no-op for them. Existing
+    // rows default to 0: the sync decides opt-out for new inbound mail only,
+    // and re-reading years of bodies to backfill is not worth the IMAP traffic.
+    const interactionCols = this.db
+      .prepare(`PRAGMA table_info(interactions)`)
+      .all() as Array<{ name: string }>;
+    if (!interactionCols.some((c) => c.name === "opt_out")) {
+      this.db.exec(
+        `ALTER TABLE interactions ADD COLUMN opt_out INTEGER NOT NULL DEFAULT 0`,
+      );
+    }
 
     // Seed only into an empty table. A user who renamed or deleted a stage must
     // not have it grow back on the next start.
@@ -519,12 +540,14 @@ export class CrmStore {
     at: string;
     subject?: string | null;
     snippet?: string | null;
+    optOut?: boolean;
   }): boolean {
+    const optOut = input.optOut ? 1 : 0;
     const res = this.db
       .prepare(
         `INSERT OR IGNORE INTO interactions
-           (id, contact_id, account_id, message_id, direction, at, subject_enc, snippet_enc)
-         VALUES (@id, @contactId, @accountId, @messageId, @direction, @at, @subjectEnc, @snippetEnc)`,
+           (id, contact_id, account_id, message_id, direction, at, subject_enc, snippet_enc, opt_out)
+         VALUES (@id, @contactId, @accountId, @messageId, @direction, @at, @subjectEnc, @snippetEnc, @optOut)`,
       )
       .run({
         id: randomUUID(),
@@ -535,8 +558,68 @@ export class CrmStore {
         at: input.at,
         subjectEnc: this.encNullable(input.subject),
         snippetEnc: this.encNullable(input.snippet),
+        optOut,
       });
+    // A row that already existed keeps its text but takes the flag when the
+    // caller now knows better — a first pass that only saw a truncated snippet
+    // must be repairable. Never the other way round: an opt-out already
+    // recorded is a standing request, not something a later read can clear.
+    if (res.changes === 0 && optOut === 1) {
+      this.db
+        .prepare(
+          `UPDATE interactions SET opt_out = 1
+           WHERE account_id = ? AND message_id = ? AND contact_id = ? AND opt_out = 0`,
+        )
+        .run(input.accountId, input.messageId, input.contactId);
+    }
     return res.changes > 0;
+  }
+
+  /**
+   * Is this message already recorded against this contact? The sync asks before
+   * it fetches a full body: re-reading every message in the folder every ten
+   * minutes to re-decide opt-out would be 200 IMAP fetches per sync for nothing.
+   */
+  hasInteraction(
+    accountId: string,
+    messageId: string,
+    contactId: string,
+  ): boolean {
+    return (
+      this.db
+        .prepare(
+          `SELECT 1 as hit FROM interactions
+           WHERE account_id = ? AND message_id = ? AND contact_id = ?`,
+        )
+        .get(accountId, messageId, contactId) !== undefined
+    );
+  }
+
+  /**
+   * Withdraw the stored opt-out flags for one mailbox. Called when a human
+   * removes the suppression: the flag is derived data standing in for "they
+   * asked us to stop", and the human has just ruled that request answered.
+   * Without this, the windowed reply check would re-suppress from the same
+   * old rows. A NEW "stop" writes a new flagged row and suppresses again.
+   * Matching is canonical, so the unicode and punycode spellings both clear.
+   */
+  clearOptOutFlags(email: string): number {
+    const canonical = canonicalEmail(email);
+    const contacts = this.db
+      .prepare(`SELECT id, email FROM contacts`)
+      .all() as Array<{ id: string; email: string }>;
+    const ids = contacts
+      .filter((c) => canonicalEmail(c.email) === canonical)
+      .map((c) => c.id);
+    let cleared = 0;
+    for (const id of ids) {
+      cleared += this.db
+        .prepare(
+          `UPDATE interactions SET opt_out = 0 WHERE contact_id = ? AND opt_out = 1`,
+        )
+        .run(id).changes;
+    }
+    return cleared;
   }
 
   listInteractions(contactId: string, limit = 50): Interaction[] {
@@ -544,7 +627,8 @@ export class CrmStore {
       .prepare(
         `SELECT id, contact_id as contactId, account_id as accountId,
                 message_id as messageId, direction, at,
-                subject_enc as subjectEnc, snippet_enc as snippetEnc
+                subject_enc as subjectEnc, snippet_enc as snippetEnc,
+                opt_out as optOut
          FROM interactions WHERE contact_id = ? ORDER BY at DESC LIMIT ?`,
       )
       .all(contactId, clampLimit(limit)) as InteractionRow[];
@@ -565,7 +649,8 @@ export class CrmStore {
       .prepare(
         `SELECT id, contact_id as contactId, account_id as accountId,
                 message_id as messageId, direction, at,
-                subject_enc as subjectEnc, snippet_enc as snippetEnc
+                subject_enc as subjectEnc, snippet_enc as snippetEnc,
+                opt_out as optOut
          FROM interactions
          WHERE contact_id = ? AND at > ? AND (? IS NULL OR direction = ?)
          ORDER BY at DESC`,
@@ -788,6 +873,7 @@ export class CrmStore {
       at: row.at,
       subject: row.subjectEnc ? decryptSecret(this.masterKey, row.subjectEnc) : null,
       snippet: row.snippetEnc ? decryptSecret(this.masterKey, row.snippetEnc) : null,
+      optOut: row.optOut === 1,
     };
   }
 }
