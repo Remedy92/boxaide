@@ -246,6 +246,55 @@ describe("outreach", () => {
     ]);
   });
 
+  it("suppresses on the bare 'stop' reply the footer invites", () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("ada@analytical.example", "Ada Lovelace");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    // A real mail client reply: "stop" first, quoted original underneath —
+    // the snippet carries both. This is the exact reply OPT_OUT_FOOTER asks
+    // for, and it must suppress, not read as engagement.
+    addInboundInteraction(
+      contactId,
+      new Date(clock.getTime() + 1 * DAY),
+      "Re: Hi Ada",
+      "Stop.\n\nOn Thu, Aug 14 you wrote: Hi Ada, saw your work…",
+    );
+    clock = new Date(clock.getTime() + 4 * DAY);
+
+    engine.advanceSequences();
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("opted_out");
+    expect(platform.outreachStore.isSuppressed("ada@analytical.example")).toBe(
+      true,
+    );
+  });
+
+  it("keeps 'stop' mid-sentence as a normal reply, not an opt-out", () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("kay@mercury.example", "Kay McNulty");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    addInboundInteraction(
+      contactId,
+      new Date(clock.getTime() + 1 * DAY),
+      "Re: Hi Kay",
+      "Sounds interesting — we should stop by your office next week.",
+    );
+    clock = new Date(clock.getTime() + 4 * DAY);
+
+    engine.advanceSequences();
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("replied");
+    expect(platform.outreachStore.isSuppressed("kay@mercury.example")).toBe(
+      false,
+    );
+  });
+
   it("refuses to queue for an address already on the suppression list", () => {
     const campaign = makeCampaign();
     const contactId = addContact("no@thanks.example", "Nope");

@@ -18,6 +18,18 @@ import { inboundSince, readContact, type CrmContact } from "./crm-read.js";
 const OPT_OUT_RE =
   /\b(unsubscribe|opt.?out|stop (emailing|mailing|contacting))\b/i;
 
+/**
+ * The footer says: reply with "stop". This matcher honors exactly that reply.
+ * Start-anchored on the subject or the snippet alone — a reply that OPENS
+ * with "stop" ("stop", "Stop.", "please stop", "stop\n\nOn Thu … wrote:")
+ * is an opt-out, while "stop" buried in running prose ("we should stop by
+ * your office") is not. The residual false positive — a reply that begins
+ * "Stop by anytime" — is accepted: suppressing an interested prospect costs
+ * one relationship thread; mailing someone who said stop costs trust and
+ * compliance.
+ */
+const OPT_OUT_START_RE = /^\s*(please\s+)?stop\b/i;
+
 const DEFAULT_DAILY_CAP = 50;
 
 /**
@@ -198,11 +210,16 @@ export class OutreachEngine {
     const inbound = inboundSince(this.crm.db, contactId, sinceIso);
     if (inbound.length === 0) return null;
     for (const row of inbound) {
-      const text = [row.subjectEnc, row.snippetEnc]
+      const fields = [row.subjectEnc, row.snippetEnc]
         .filter((v): v is string => Boolean(v))
-        .map((v) => this.safeDecrypt(v))
-        .join(" ");
-      if (OPT_OUT_RE.test(text)) {
+        .map((v) => this.safeDecrypt(v));
+      // Phrase match anywhere; bare "stop" only at the start of a field —
+      // never against the joined string, where the snippet's first word sits
+      // mid-text behind the subject.
+      const optedOut =
+        OPT_OUT_RE.test(fields.join(" ")) ||
+        fields.some((f) => OPT_OUT_START_RE.test(f));
+      if (optedOut) {
         this.store.addSuppression(contact.email, "reply-stop");
         return "opted_out";
       }

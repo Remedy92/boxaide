@@ -248,8 +248,12 @@ Engine (`OutreachEngine`):
     `last_sent_at` → state 'replied', stop. Requires CrmStore read access
     (constructor dep).
   - Opt-out check: inbound interaction subject/snippet matching
-    /\b(unsubscribe|opt.?out|stop (emailing|mailing|contacting))\b/i →
-    suppress (reason 'reply-stop') + state 'opted_out'.
+    /\b(unsubscribe|opt.?out|stop (emailing|mailing|contacting))\b/i
+    anywhere, OR /^\s*(please\s+)?stop\b/i at the start of the subject or
+    snippet field alone — the footer tells people to reply "stop", so the
+    exact reply it invites must count → suppress (reason 'reply-stop') +
+    state 'opted_out'. "stop" mid-prose ("we should stop by") stays a
+    normal reply.
   - Suppressed email → state 'suppressed', no queue.
   - Otherwise queue the next step into `outbox` (substitute {{name}} — first
     word of contact name or the email local part — {{email}}, {{org}}) with
