@@ -9,6 +9,7 @@ import { createPlatform, type Platform } from "../src/platform.js";
 import type { AgentLauncher } from "../src/agent/launcher.js";
 import { OutreachEngine, renderTemplate } from "../src/outreach/engine.js";
 import { OPT_OUT_FOOTER } from "../src/outreach/store.js";
+import { OPT_OUT_KEYWORD, optOutIntent } from "../src/outreach/opt-out.js";
 import { dispatchOutreachTool, OUTREACH_TOOLS } from "../src/outreach/tools.js";
 import { registerOutreachRoutes } from "../src/outreach/routes.js";
 import { Hono } from "hono";
@@ -43,6 +44,9 @@ function createCrmFixtureTables(db: Database.Database): void {
       id TEXT PRIMARY KEY, contact_id TEXT NOT NULL, account_id TEXT NOT NULL,
       message_id TEXT NOT NULL, direction TEXT NOT NULL, at TEXT NOT NULL,
       subject_enc TEXT, snippet_enc TEXT,
+      -- Written by CRM sync from the full body (src/crm/store.ts owns the
+      -- production migration); outreach only reads it.
+      opt_out INTEGER NOT NULL DEFAULT 0,
       UNIQUE (account_id, message_id, contact_id)
     );
   `);
@@ -88,13 +92,15 @@ describe("outreach", () => {
     at: Date,
     subject: string,
     snippet: string,
+    optOut = 0,
   ): void {
     const enc = (t: string) => encryptSecret(masterKey, t);
     store.db
       .prepare(
         `INSERT INTO interactions
-           (id, contact_id, account_id, message_id, direction, at, subject_enc, snippet_enc)
-         VALUES (?, ?, ?, ?, 'in', ?, ?, ?)`,
+           (id, contact_id, account_id, message_id, direction, at, subject_enc,
+            snippet_enc, opt_out)
+         VALUES (?, ?, ?, ?, 'in', ?, ?, ?, ?)`,
       )
       .run(
         randomUUID(),
@@ -104,6 +110,7 @@ describe("outreach", () => {
         at.toISOString(),
         enc(subject),
         enc(snippet),
+        optOut,
       );
   }
 
@@ -293,6 +300,157 @@ describe("outreach", () => {
     expect(platform.outreachStore.isSuppressed("kay@mercury.example")).toBe(
       false,
     );
+  });
+
+  it("keeps a subject that merely starts with 'Stop' as a normal reply", () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("booth@saastr.example", "Booth Owner");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    // Subjects use the whole-match rule: only a subject that IS the keyword
+    // opts out. Otherwise every conference invite suppresses its sender.
+    addInboundInteraction(
+      contactId,
+      new Date(clock.getTime() + 1 * DAY),
+      "Stop by our booth at SaaStr",
+      "We are in hall 3 all week.",
+    );
+    clock = new Date(clock.getTime() + 4 * DAY);
+
+    engine.advanceSequences();
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("replied");
+    expect(platform.outreachStore.isSuppressed("booth@saastr.example")).toBe(
+      false,
+    );
+  });
+
+  it("does not fabricate an opt-out across the subject/snippet seam", () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("seam@example.com", "Seam");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    // Joined, these two fields read "Should we stop emailing lists entirely?"
+    // — a phrase that exists in neither field. Each field is matched alone.
+    addInboundInteraction(
+      contactId,
+      new Date(clock.getTime() + 1 * DAY),
+      "Re: Should we stop",
+      "emailing lists entirely?",
+    );
+    clock = new Date(clock.getTime() + 4 * DAY);
+
+    engine.advanceSequences();
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("replied");
+    expect(platform.outreachStore.isSuppressed("seam@example.com")).toBe(false);
+  });
+
+  /* ---- the opt-out sweep ------------------------------------------------ */
+
+  it("suppresses a 'stop' that arrives after the contact was parked 'replied'", async () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("late@example.com", "Late Stopper");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    // A plain answer parks them in 'replied' — outside the window
+    // advanceSequences ever looks at again.
+    addInboundInteraction(
+      contactId,
+      new Date(clock.getTime() + 1 * DAY),
+      "Re: Hi Late",
+      "Thanks, let me think about it.",
+    );
+    clock = new Date(clock.getTime() + 4 * DAY);
+    engine.advanceSequences();
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("replied");
+
+    // Weeks later they write "stop". CRM sync flags the row; the sweep must
+    // still act on it.
+    addInboundInteraction(
+      contactId,
+      new Date(clock.getTime() + 20 * DAY),
+      "Re: Hi Late",
+      "stop",
+      1,
+    );
+    clock = new Date(clock.getTime() + 21 * DAY);
+
+    await engine.tick();
+    expect(platform.outreachStore.isSuppressed("late@example.com")).toBe(true);
+    expect(
+      platform.outreachStore.listSuppression()[0].reason,
+    ).toBe("reply-stop");
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("opted_out");
+  });
+
+  it("leaves a flagged contact outreach never touched alone", () => {
+    // The flag alone is not a licence to suppress: the sweep only reaches
+    // people this product mailed or queued mail for.
+    const stranger = addContact("stranger@example.com", "Stranger");
+    addInboundInteraction(stranger, clock, "unsubscribe", "unsubscribe", 1);
+
+    expect(engine.sweepOptOuts()).toBe(0);
+    expect(platform.outreachStore.isSuppressed("stranger@example.com")).toBe(
+      false,
+    );
+  });
+
+  it("fails an approved row whose address was suppressed after approval", async () => {
+    const row = platform.outreachStore.queueOutbox({
+      accountId,
+      to: "changed@example.com",
+      subject: "s",
+      body: "b",
+    });
+    platform.outreachStore.decide(row.id, "approved");
+    // The stop lands between the human's click and the send pass.
+    platform.outreachStore.addSuppression("changed@example.com", "reply-stop");
+
+    expect(await engine.sendApproved()).toBe(0);
+    const after = platform.outreachStore.getOutbox(row.id);
+    expect(after?.status).toBe("failed");
+    expect(after?.error).toContain("recipient suppressed");
+    expect(provider.getSent()).toHaveLength(0);
+  });
+
+  /* ---- the opt-out contract --------------------------------------------- */
+
+  it("keeps the footer and the detector in step", () => {
+    // The footer invites exactly one reply. If someone rewords either side,
+    // this fails instead of quietly ignoring people who did as they were told.
+    expect(optOutIntent(OPT_OUT_KEYWORD, "body")).toBe(true);
+    expect(OPT_OUT_FOOTER).toContain(`"${OPT_OUT_KEYWORD}"`);
+  });
+
+  it("treats an IDN address and its punycoded form as one suppression key", async () => {
+    platform.outreachStore.addSuppression("User@München.de", "reply-stop");
+    // Suppressed in unicode, sent in punycode — nodemailer's form.
+    expect(platform.outreachStore.isSuppressed("user@xn--mnchen-3ya.de")).toBe(
+      true,
+    );
+
+    const row = platform.outreachStore.queueOutbox({
+      accountId,
+      to: "user@xn--mnchen-3ya.de",
+      subject: "s",
+      body: "b",
+    });
+    platform.outreachStore.decide(row.id, "approved");
+    expect(await engine.sendApproved()).toBe(0);
+    expect(platform.outreachStore.getOutbox(row.id)?.error).toContain(
+      "recipient suppressed",
+    );
+    expect(provider.getSent()).toHaveLength(0);
   });
 
   it("refuses to queue for an address already on the suppression list", () => {

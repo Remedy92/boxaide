@@ -8,6 +8,7 @@
 import type { CrmStore } from "./store.js";
 import type { MailService } from "../mail/service.js";
 import type { MailMessageSummary } from "../provider/types.js";
+import { optOutIntent } from "../outreach/opt-out.js";
 
 /** Messages read per folder per sync. Spec: 200. */
 const PER_FOLDER_LIMIT = 200;
@@ -108,6 +109,7 @@ export class CrmService {
               ]
             : addressesOf(message.from);
 
+          const contactIds: string[] = [];
           for (const party of counterparties) {
             if (ownAddresses.has(party.email)) continue;
             if (NO_REPLY.test(localPartOf(party.email))) continue;
@@ -120,15 +122,31 @@ export class CrmService {
               source: "mail",
             });
             if (!known) contacts += 1;
+            contactIds.push(contact.id);
+          }
 
+          // Opt-out is decided once per message, and only for inbound mail this
+          // sync has not seen before: the walk re-reads the same 200 summaries
+          // every ten minutes, and one body fetch per already-recorded message
+          // would multiply the IMAP traffic by 200 for an answer already stored.
+          const fresh = contactIds.filter(
+            (id) => !this.store.hasInteraction(account.id, message.id, id),
+          );
+          const optOut =
+            !outbound && fresh.length > 0
+              ? await this.detectOptOut(account.id, message)
+              : false;
+
+          for (const contactId of contactIds) {
             const added = this.store.addInteraction({
-              contactId: contact.id,
+              contactId,
               accountId: account.id,
               messageId: message.id,
               direction: outbound ? "out" : "in",
               at: message.date,
               subject: message.subject,
               snippet: message.snippet,
+              optOut,
             });
             if (added) interactions += 1;
           }
@@ -136,6 +154,42 @@ export class CrmService {
       }
     }
     return { contacts, interactions };
+  }
+
+  /**
+   * Does this inbound message ask us to stop?
+   *
+   * The full body is the only honest input: the list snippet is 140 characters
+   * of whatever the client put first, which for an HTML-only reply is often
+   * leaked CSS and for a long reply cuts the phrase off. Subject and body are
+   * tested separately — a phrase must never be fabricated across the boundary.
+   * A fetch that fails or yields no text falls back to the summary rather than
+   * breaking the sync: a missed opt-out is caught by the next message, an
+   * exception here would cost the whole account its derivation.
+   */
+  private async detectOptOut(
+    accountId: string,
+    message: MailMessageSummary,
+  ): Promise<boolean> {
+    try {
+      const full = await this.mail.getMessage(
+        accountId,
+        message.id,
+        message.folder,
+      );
+      if (full && full.bodyText.trim()) {
+        return (
+          optOutIntent(full.subject ?? message.subject, "subject") ||
+          optOutIntent(full.bodyText, "body")
+        );
+      }
+    } catch {
+      // Fall through to the summary.
+    }
+    return (
+      optOutIntent(message.subject, "subject") ||
+      optOutIntent(message.snippet, "body")
+    );
   }
 
   /**

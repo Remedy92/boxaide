@@ -40,3 +40,7 @@ apps/desktop/server/
 
 # Local agent fixtures (launch.json, worktrees)
 .claude/
+
+# Local build stamp and personal agent workflows
+apps/web/.sley-export
+.grok/

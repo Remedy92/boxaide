@@ -6,6 +6,13 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { decryptSecret, encryptSecret } from "../crypto/secrets.js";
+import { OPT_OUT_FOOTER, canonicalEmail } from "./opt-out.js";
+
+/**
+ * Re-exported, not redefined: src/outreach/opt-out.ts owns the keyword and the
+ * footer built from it. Existing importers of this module keep working.
+ */
+export { OPT_OUT_FOOTER } from "./opt-out.js";
 
 export type CampaignStatus = "draft" | "active" | "paused" | "done";
 export type OutboxStatus =
@@ -73,14 +80,6 @@ const CAMPAIGN_STATUSES: ReadonlySet<string> = new Set([
   "paused",
   "done",
 ]);
-
-/**
- * Appended to every queued body, step 0 included (spec: OutreachEngine).
- * Plain text, no link — a tracking or one-click URL would leak that the mail
- * was opened, which this product does not do.
- */
-export const OPT_OUT_FOOTER =
-  '\n\n--\nIf you\'d rather not hear from me, just reply with "stop".';
 
 /** Idempotent: a body that already carries the footer is left alone. */
 export function withOptOutFooter(body: string): string {
@@ -215,19 +214,23 @@ export class OutreachStore {
 
   /* ---- suppression ---------------------------------------------------- */
 
-  /** Send-guard check; email compared lowercase. */
+  /**
+   * Send-guard check. The lookup key is canonicalEmail — the same form
+   * addSuppression writes — so an IDN address suppressed in its unicode form
+   * still blocks the punycoded address nodemailer actually delivers to.
+   */
   isSuppressed(email: string): boolean {
     if (!this.suppressedStmt) {
       this.suppressedStmt = this.db.prepare(
         `SELECT 1 FROM suppression WHERE email = ?`,
       );
     }
-    return this.suppressedStmt.get(email.trim().toLowerCase()) !== undefined;
+    return this.suppressedStmt.get(canonicalEmail(email)) !== undefined;
   }
 
   addSuppression(email: string, reason = "manual"): SuppressionRow {
     const row: SuppressionRow = {
-      email: email.trim().toLowerCase(),
+      email: canonicalEmail(email),
       reason,
       at: new Date().toISOString(),
     };
@@ -250,7 +253,7 @@ export class OutreachStore {
   removeSuppression(email: string): boolean {
     const res = this.db
       .prepare(`DELETE FROM suppression WHERE email = ?`)
-      .run(email.trim().toLowerCase());
+      .run(canonicalEmail(email));
     return res.changes > 0;
   }
 
@@ -486,6 +489,40 @@ export class OutreachStore {
           WHERE campaign_id = ? AND contact_id = ?`,
       )
       .run(state, campaignId, contactId);
+  }
+
+  /**
+   * Did outreach ever touch this contact? The opt-out sweep suppresses on the
+   * strength of one inbound message, so it must only reach people this product
+   * mailed or was about to mail — a campaign_contacts row or an outbox row.
+   * Someone who writes "stop" into an unrelated thread is not suppressed.
+   */
+  hasOutreachHistory(contactId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS hit WHERE EXISTS (
+             SELECT 1 FROM campaign_contacts WHERE contact_id = ?
+           ) OR EXISTS (
+             SELECT 1 FROM outbox WHERE contact_id = ?
+           )`,
+      )
+      .get(contactId, contactId) as { hit: number } | undefined;
+    return row !== undefined;
+  }
+
+  /**
+   * End every live campaign membership for a contact who asked to stop.
+   * Rows already 'opted_out' or 'suppressed' are left alone; 'active',
+   * 'replied' and 'done' all move, because the request outranks whatever the
+   * sequence thought its state was.
+   */
+  optOutContact(contactId: string): number {
+    return this.db
+      .prepare(
+        `UPDATE campaign_contacts SET state = 'opted_out'
+          WHERE contact_id = ? AND state NOT IN ('opted_out', 'suppressed')`,
+      )
+      .run(contactId).changes;
   }
 
   advanceContact(

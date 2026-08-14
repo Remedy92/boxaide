@@ -19,7 +19,12 @@ export type InboundInteraction = {
   at: string;
   subjectEnc: string | null;
   snippetEnc: string | null;
+  /** 1 when CRM sync read the full body and saw an opt-out. Null pre-migration. */
+  optOut: number | null;
 };
+
+/** A contact whose inbound mail carries an opt-out flag. */
+export type FlaggedOptOut = { contactId: string; email: string };
 
 /**
  * The CRM module owns the DDL, so in a process where its store has not run
@@ -62,6 +67,23 @@ export function readContacts(
     .all(...contactIds) as CrmContact[];
 }
 
+/**
+ * `interactions.opt_out` arrives with the CRM sync migration. Outreach must
+ * read the table before and after that lands, so the column is probed rather
+ * than assumed — a missing column selects NULL and the engine falls back to
+ * its own subject/snippet detection.
+ */
+function hasColumn(
+  db: Database.Database,
+  table: string,
+  column: string,
+): boolean {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+    name: string;
+  }>;
+  return cols.some((c) => c.name === column);
+}
+
 /** Inbound interactions strictly after `sinceIso`, newest first. */
 export function inboundSince(
   db: Database.Database,
@@ -69,12 +91,36 @@ export function inboundSince(
   sinceIso: string,
 ): InboundInteraction[] {
   if (!hasTable(db, "interactions")) return [];
+  const optOut = hasColumn(db, "interactions", "opt_out")
+    ? "opt_out"
+    : "NULL";
   return db
     .prepare(
-      `SELECT at, subject_enc AS subjectEnc, snippet_enc AS snippetEnc
+      `SELECT at, subject_enc AS subjectEnc, snippet_enc AS snippetEnc,
+              ${optOut} AS optOut
          FROM interactions
         WHERE contact_id = ? AND direction = 'in' AND at > ?
         ORDER BY at DESC`,
     )
     .all(contactId, sinceIso) as InboundInteraction[];
+}
+
+/**
+ * Every contact with at least one inbound message the CRM sync flagged as an
+ * opt-out, with the address to suppress. Not time-boxed and not tied to a
+ * campaign window: the point of the sweep is to catch the "stop" that arrives
+ * after the contact was parked in 'replied', 'done', or a pending approval.
+ * Callers narrow the result to contacts outreach actually touched.
+ */
+export function flaggedOptOuts(db: Database.Database): FlaggedOptOut[] {
+  if (!hasTable(db, "interactions") || !hasTable(db, "contacts")) return [];
+  if (!hasColumn(db, "interactions", "opt_out")) return [];
+  return db
+    .prepare(
+      `SELECT DISTINCT i.contact_id AS contactId, c.email AS email
+         FROM interactions i
+         JOIN contacts c ON c.id = i.contact_id
+        WHERE i.direction = 'in' AND i.opt_out = 1`,
+    )
+    .all() as FlaggedOptOut[];
 }

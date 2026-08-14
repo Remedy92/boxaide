@@ -160,6 +160,100 @@ describe("CrmService.syncFromMail derivation", () => {
   });
 });
 
+describe("CrmService opt-out detection", () => {
+  /** Long enough that the opt-out sentence lands well past any snippet. */
+  const LONG_REPLY = `${"Thanks for the detailed note, I read all of it. ".repeat(
+    5,
+  )}Please unsubscribe me from this list.`;
+
+  /** The phrase must not be reachable from the snippet the list view carries. */
+  function optOutMail(from: string, folder = "INBOX") {
+    return {
+      subject: "Re: renewal",
+      folder,
+      from,
+      to: "you@work.test",
+      snippet: LONG_REPLY.slice(0, 140),
+      bodyText: LONG_REPLY,
+    };
+  }
+
+  it("flags a new inbound message whose opt-out phrase is past the snippet", async () => {
+    const h = await harness();
+    // Guard the fixture itself: a snippet that already carried the phrase
+    // would make this test pass without the body fetch existing.
+    expect(optOutMail("x@y.test").snippet).not.toMatch(/unsubscribe/i);
+    h.provider.seedAccount(h.account.id, "you@work.test", [
+      optOutMail("Kim <kim@acme.test>"),
+      {
+        subject: "Intro",
+        folder: "Sent",
+        from: "you@work.test",
+        to: "Bob <bob@globex.test>",
+        // Same wording outbound: our own mail must never suppress anyone.
+        bodyText: LONG_REPLY,
+        snippet: LONG_REPLY.slice(0, 140),
+      },
+    ]);
+    await h.crmService.syncFromMail();
+
+    const kim = h.crmStore.getContactByEmail("kim@acme.test")!;
+    expect(h.crmStore.listInteractions(kim.id)[0].optOut).toBe(true);
+
+    const bob = h.crmStore.getContactByEmail("bob@globex.test")!;
+    const outbound = h.crmStore.listInteractions(bob.id)[0];
+    expect(outbound.direction).toBe("out");
+    expect(outbound.optOut).toBe(false);
+
+    h.store.close();
+  });
+
+  it("falls back to the snippet when the body fetch fails", async () => {
+    const h = await harness();
+    h.provider.seedAccount(h.account.id, "you@work.test", [
+      {
+        subject: "Re: renewal",
+        from: "Kim <kim@acme.test>",
+        to: "you@work.test",
+        snippet: "stop",
+        bodyText: LONG_REPLY,
+      },
+    ]);
+    // A provider whose full-message read throws: the sync must still finish and
+    // still decide from what the summary carries.
+    h.provider.getMessage = async () => {
+      throw new Error("imap fetch failed");
+    };
+
+    const res = await h.crmService.syncFromMail();
+    expect(res.interactions).toBe(1);
+    const kim = h.crmStore.getContactByEmail("kim@acme.test")!;
+    expect(h.crmStore.listInteractions(kim.id)[0].optOut).toBe(true);
+
+    h.store.close();
+  });
+
+  it("does not re-fetch bodies for interactions it already recorded", async () => {
+    const h = await harness();
+    seedMail(h.provider, h.account.id);
+    await h.crmService.syncFromMail();
+
+    let fetches = 0;
+    const original = h.provider.getMessage.bind(h.provider);
+    h.provider.getMessage = async (...args: Parameters<typeof original>) => {
+      fetches += 1;
+      return original(...args);
+    };
+    expect(await h.crmService.syncFromMail()).toEqual({
+      contacts: 0,
+      interactions: 0,
+    });
+    expect(fetches).toBe(0);
+
+    h.store.close();
+  });
+});
+
 describe("CRM encryption at rest", () => {
   it("stores subjects, snippets and notes as ciphertext", async () => {
     const h = await harness();

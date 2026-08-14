@@ -12,23 +12,13 @@ import type { OutreachStore, ContactState } from "./store.js";
 import type { CrmStore } from "../crm/store.js";
 import type { MailService } from "../mail/service.js";
 import { envFirst } from "../config.js";
-import { inboundSince, readContact, type CrmContact } from "./crm-read.js";
-
-/** Inbound text that ends the sequence AND suppresses the address. */
-const OPT_OUT_RE =
-  /\b(unsubscribe|opt.?out|stop (emailing|mailing|contacting))\b/i;
-
-/**
- * The footer says: reply with "stop". This matcher honors exactly that reply.
- * Start-anchored on the subject or the snippet alone — a reply that OPENS
- * with "stop" ("stop", "Stop.", "please stop", "stop\n\nOn Thu … wrote:")
- * is an opt-out, while "stop" buried in running prose ("we should stop by
- * your office") is not. The residual false positive — a reply that begins
- * "Stop by anytime" — is accepted: suppressing an interested prospect costs
- * one relationship thread; mailing someone who said stop costs trust and
- * compliance.
- */
-const OPT_OUT_START_RE = /^\s*(please\s+)?stop\b/i;
+import {
+  flaggedOptOuts,
+  inboundSince,
+  readContact,
+  type CrmContact,
+} from "./crm-read.js";
+import { optOutIntent } from "./opt-out.js";
 
 const DEFAULT_DAILY_CAP = 50;
 
@@ -118,6 +108,9 @@ export class OutreachEngine {
     this.inFlight = (async () => {
       do {
         this.rerun = false;
+        // Sweep first: a contact who said stop must be suppressed before the
+        // same pass decides whether to queue their next step.
+        this.sweepOptOuts();
         this.advanceSequences();
         await this.sendApproved();
       } while (this.rerun);
@@ -210,21 +203,50 @@ export class OutreachEngine {
     const inbound = inboundSince(this.crm.db, contactId, sinceIso);
     if (inbound.length === 0) return null;
     for (const row of inbound) {
-      const fields = [row.subjectEnc, row.snippetEnc]
-        .filter((v): v is string => Boolean(v))
-        .map((v) => this.safeDecrypt(v));
-      // Phrase match anywhere; bare "stop" only at the start of a field —
-      // never against the joined string, where the snippet's first word sits
-      // mid-text behind the subject.
+      // The flag is the authority: CRM sync saw the whole body, this class
+      // only ever sees a subject and a truncated snippet. The field checks
+      // are the fallback for rows written before the column existed, and each
+      // field is tested on its own — a joined string fabricates phrases
+      // across the seam between subject and snippet.
       const optedOut =
-        OPT_OUT_RE.test(fields.join(" ")) ||
-        fields.some((f) => OPT_OUT_START_RE.test(f));
+        row.optOut === 1 ||
+        optOutIntent(this.decryptField(row.subjectEnc), "subject") ||
+        optOutIntent(this.decryptField(row.snippetEnc), "body");
       if (optedOut) {
         this.store.addSuppression(contact.email, "reply-stop");
         return "opted_out";
       }
     }
     return "replied";
+  }
+
+  /**
+   * Suppress everyone who asked to stop, whatever state their campaign rows
+   * are in.
+   *
+   * advanceSequences only looks at active contacts that are due, so a "stop"
+   * that lands after the contact was parked in 'replied' or 'done', or while
+   * an approved row waits for a human, would never be seen there. This pass
+   * reads the opt-out flag the CRM sync writes on inbound mail instead, and
+   * is bounded to contacts outreach actually touched — an unrelated thread
+   * cannot suppress a stranger.
+   */
+  sweepOptOuts(): number {
+    let swept = 0;
+    for (const flagged of flaggedOptOuts(this.crm.db)) {
+      if (!flagged.email) continue;
+      if (this.store.isSuppressed(flagged.email)) continue;
+      if (!this.store.hasOutreachHistory(flagged.contactId)) continue;
+      this.store.addSuppression(flagged.email, "reply-stop");
+      this.store.optOutContact(flagged.contactId);
+      swept += 1;
+    }
+    return swept;
+  }
+
+  /** Decrypt one optional field; an absent or unreadable one reads as empty. */
+  private decryptField(payload: string | null): string {
+    return payload ? this.safeDecrypt(payload) : "";
   }
 
   /** A row we cannot decrypt must not abort the tick for every other contact. */
@@ -257,6 +279,15 @@ export class OutreachEngine {
         sentToday.set(row.accountId, count);
       }
       if (count >= cap) continue;
+
+      // Approval is not a licence to send later: the recipient may have said
+      // stop between the human's click and this pass. Fail the row so it
+      // leaves the queue with a reason a human can read, rather than being
+      // skipped on every tick forever.
+      if (this.store.isSuppressed(row.to)) {
+        this.store.markFailed(row.id, `recipient suppressed: ${row.to}`);
+        continue;
+      }
 
       await this.waitForGap();
       try {

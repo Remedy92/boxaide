@@ -757,6 +757,116 @@ describe("suppression override on POST /api/messages/send", () => {
     expect(res.status).toBe(400);
     expect((await res.json()).error).toMatch(/recipient suppressed/);
   });
+
+  // The guard canonicalizes with canonicalEmail, so the unicode spelling of an
+  // IDN domain resolves to the punycode key nodemailer would deliver to. The
+  // suppression uses the punycode form directly, so this holds whether or not
+  // the store canonicalizes on its own side.
+  it("blocks a unicode IDN address suppressed in its punycode form", async () => {
+    runtime.platform.outreachStore.addSuppression(
+      "user@xn--mnchen-3ya.de",
+      "manual",
+    );
+    const res = await send({ account: accountId, to: "user@münchen.de" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/recipient suppressed/);
+  });
+});
+
+// A non-string recipient used to sail past the guard: addressparser returns
+// address "" for it, so the guard saw an empty list while nodemailer still
+// delivered. sendMessage now fails closed before parsing.
+describe("non-string recipients on POST /api/messages/send", () => {
+  let runtime: Runtime;
+  let provider: FixtureProvider;
+  let accountId: string;
+
+  async function send(body: Record<string, unknown>): Promise<Response> {
+    return runtime.app.request("/api/messages/send", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ subject: "s", text: "t", ...body }),
+    });
+  }
+
+  beforeEach(async () => {
+    provider = new FixtureProvider();
+    runtime = createRuntime({
+      dataDir: ":memory:",
+      masterKey: randomBytes(32),
+      bearerToken: TOKEN,
+      host: "127.0.0.1",
+      port: 0,
+      fixtureMode: true,
+      allowedOrigins: [],
+      store: new Store(randomBytes(32), ":memory:"),
+      provider,
+    });
+    const res = await runtime.app.request("/api/accounts", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        alias: "personal",
+        email: "you@personal.test",
+        username: "you@personal.test",
+        password: "ok",
+        imapHost: "fixture",
+        smtpHost: "fixture",
+      }),
+    });
+    expect(res.status).toBe(201);
+    accountId = ((await res.json()) as { account: { id: string } }).account.id;
+    provider.clear();
+  });
+
+  afterEach(() => {
+    runtime.store.close();
+  });
+
+  it("rejects an object `to` and delivers nothing", async () => {
+    const res = await send({
+      account: accountId,
+      to: { name: "Blocked", address: "blocked@example.test" },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(
+      /invalid recipients: to\/cc\/bcc must be strings/,
+    );
+    expect(provider.getSent()).toHaveLength(0);
+  });
+
+  it("rejects an object `cc` even with a valid string `to`", async () => {
+    const res = await send({
+      account: accountId,
+      to: "ok@x.test",
+      cc: { name: "Blocked", address: "blocked@example.test" },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(
+      /invalid recipients: to\/cc\/bcc must be strings/,
+    );
+    expect(provider.getSent()).toHaveLength(0);
+  });
+
+  it("rejects an array `bcc`", async () => {
+    const res = await send({
+      account: accountId,
+      to: "ok@x.test",
+      bcc: ["a@x.test"],
+    });
+    expect(res.status).toBe(400);
+    expect(provider.getSent()).toHaveLength(0);
+  });
+
+  it("still sends when to/cc/bcc are strings", async () => {
+    const res = await send({
+      account: accountId,
+      to: "ok@x.test",
+      cc: "cc@x.test",
+    });
+    expect(res.status).toBe(201);
+    expect(provider.getSent()).toHaveLength(1);
+  });
 });
 
 describe("security response headers", () => {

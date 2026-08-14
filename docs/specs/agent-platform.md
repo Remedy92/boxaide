@@ -235,7 +235,7 @@ CREATE TABLE IF NOT EXISTS outbox (
   error TEXT
 );
 CREATE TABLE IF NOT EXISTS suppression (
-  email TEXT PRIMARY KEY,         -- lowercase
+  email TEXT PRIMARY KEY,         -- canonicalEmail: trimmed, lowercase, punycoded domain
   reason TEXT NOT NULL,           -- 'reply-stop' | 'manual' | 'bounce' | 'agent'
   at TEXT NOT NULL
 );
@@ -247,13 +247,23 @@ Engine (`OutreachEngine`):
   - Reply check first: any inbound interaction from that contact after
     `last_sent_at` → state 'replied', stop. Requires CrmStore read access
     (constructor dep).
-  - Opt-out check: inbound interaction subject/snippet matching
-    /\b(unsubscribe|opt.?out|stop (emailing|mailing|contacting))\b/i
-    anywhere, OR /^\s*(please\s+)?stop\b/i at the start of the subject or
-    snippet field alone — the footer tells people to reply "stop", so the
-    exact reply it invites must count → suppress (reason 'reply-stop') +
-    state 'opted_out'. "stop" mid-prose ("we should stop by") stays a
-    normal reply.
+  - Opt-out check: `src/outreach/opt-out.ts` owns the keyword, the footer
+    built from it, the detector (`optOutIntent`) and the canonical address
+    form (`canonicalEmail`). No other module defines its own copy.
+    - CRM sync runs `optOutIntent` over the full inbound body and records the
+      verdict on the interaction row (`interactions.opt_out`). That flag is
+      the authority; the engine reads it.
+    - The engine's own check is the fallback for rows written before the
+      flag existed. It runs per field — subject with the subject rule,
+      snippet with the body rule — never over a joined string, which would
+      fabricate a phrase across the seam between the two fields.
+    - The rules differ by field. Explicit phrases (unsubscribe, opt out,
+      stop emailing/mailing/contacting) count anywhere in either. The bare
+      keyword counts at the start of a body, and only as the whole subject
+      after reply prefixes are stripped: "Re: stop" opts out, "Stop by our
+      booth at SaaStr" does not, and "stop" mid-prose ("we should stop by")
+      stays a normal reply.
+    - A match → suppress (reason 'reply-stop') + state 'opted_out'.
   - Suppressed email → state 'suppressed', no queue.
   - Otherwise queue the next step into `outbox` (substitute {{name}} — first
     word of contact name or the email local part — {{email}}, {{org}}) with
@@ -262,13 +272,29 @@ Engine (`OutreachEngine`):
   - Every queued step appends the opt-out footer to the body (plain text):
     "\n\n--\nIf you'd rather not hear from me, just reply with \"stop\"."
     Step 0 included. No tracking links, ever.
+- Opt-out sweep, at the start of every tick pass: every contact with an
+  inbound interaction flagged `opt_out = 1` who is not yet suppressed gets a
+  suppression entry ('reply-stop') and all their `campaign_contacts` rows move
+  to 'opted_out' (rows already 'opted_out' or 'suppressed' are left as they
+  are). Scope: only contacts outreach touched — a `campaign_contacts` row or
+  an `outbox` row exists for them. This catches the "stop" that arrives after
+  the contact was parked in 'replied' or 'done', or while an approved row
+  waits for a human, without letting an unrelated inbound mail suppress
+  someone this product never mailed.
+- Suppression keys are canonical: trimmed, lowercased, and punycoded domain
+  (`canonicalEmail`), on write and on lookup. Nodemailer punycodes IDN domains
+  before delivery, so "user@münchen.de" and "user@xn--mnchen-3ya.de" must be
+  one key.
 - Approval → send: `POST /api/outreach/outbox/:id/approve` marks 'approved'
   and the engine sends approved rows in order, spacing sends ≥60s apart with
   ±20s jitter, max `SLEY_SEND_DAILY_CAP` (default 50) engine sends per
   account per UTC day (count outbox rows sent_at that day). Cap reached →
   row stays 'approved' and goes out the next day. Send uses
   `MailService.sendMessage` (guard applies); failure → status 'failed',
-  error recorded, no retry in v1.
+  error recorded, no retry in v1. Before each send the engine re-checks the
+  suppression list for that recipient: an approved row whose address was
+  suppressed after approval becomes 'failed' with 'recipient suppressed:
+  <address>', never a row that is silently skipped on every tick.
 - The send guard (wired in app.ts): checks to/cc/bcc against `suppression`,
   throws unless override. REST `POST /api/messages/send` accepts
   `overrideSuppression: true`; MCP `message_send` does not.
