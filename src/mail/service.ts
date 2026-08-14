@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import addressparser from "nodemailer/lib/addressparser/index.js";
 import type { Store } from "../db/store.js";
 import type {
   AccountCredentials,
@@ -175,12 +176,15 @@ export class MailService {
     opts: { overrideSuppression?: boolean } = {},
   ): Promise<SendResult> {
     if (this.sendGuard) {
+      // Nodemailer's own parser, so the guard sees exactly the addresses
+      // nodemailer would deliver to. A hand-rolled comma split missed
+      // semicolon-separated lists and RFC 2822 group syntax
+      // ("team: a@x.com, b@y.com;") — forms nodemailer delivers happily,
+      // which made them suppression bypasses. flatten unwraps groups.
       const recipients = [input.to, input.cc, input.bcc]
         .filter((v): v is string => Boolean(v))
-        .flatMap((v) => v.split(","))
-        .map((v) => v.trim().toLowerCase())
-        // "Name <a@b>" and bare "a@b" both reduce to the address.
-        .map((v) => /<([^>]+)>/.exec(v)?.[1]?.toLowerCase() ?? v)
+        .flatMap((v) => addressparser(v, { flatten: true }))
+        .map((entry) => entry.address.trim().toLowerCase())
         .filter((v) => v.includes("@"));
       this.sendGuard(recipients, opts.overrideSuppression === true);
     }

@@ -734,6 +734,29 @@ describe("suppression override on POST /api/messages/send", () => {
       expect((await res.json()).error).toMatch(/recipient suppressed/);
     },
   );
+
+  // The guard must see every address nodemailer would deliver to. These are
+  // the forms a comma-only split misses; each smuggles BLOCKED past a naive
+  // parser while nodemailer still delivers to it.
+  it.each([
+    ["semicolon-separated list", `ok@x.test; ${BLOCKED}`],
+    ["group syntax", `team: ok@x.test, ${BLOCKED};`],
+    ["display name with comma", `"Doe, Jane" <ok@x.test>, ${BLOCKED}`],
+  ])("blocks a suppressed recipient hidden in a %s", async (_label, to) => {
+    const res = await send({ account: accountId, to });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/recipient suppressed/);
+  });
+
+  it("blocks a suppressed cc even when to is clean", async () => {
+    const res = await send({
+      account: accountId,
+      to: "ok@x.test",
+      cc: `list: ${BLOCKED};`,
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/recipient suppressed/);
+  });
 });
 
 describe("security response headers", () => {
