@@ -59,11 +59,11 @@ export function useSuppression(enabled = true) {
  *
  * It stays a single COUNT: no list, no preview, nothing decrypted.
  */
-export function useOutreachBadge() {
+export function useOutreachBadge(enabled = true) {
   const ctx = useApiCtx();
   return useQuery({
     queryKey: ["outreach-badge", ctx.baseUrl, ctx.token],
-    enabled: ctx.baseUrl.length > 0 && ctx.token.length > 0,
+    enabled: enabled && ctx.baseUrl.length > 0 && ctx.token.length > 0,
     queryFn: ({ signal }) => getOutreachBadge({ ...ctx, signal }),
     staleTime: 15_000,
     refetchInterval: 30_000,
