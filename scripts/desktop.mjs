@@ -99,7 +99,15 @@ export async function prepare(root) {
 export async function packMac(desktop) {
   const builder = join(desktop, "node_modules", ".bin", "electron-builder");
   log("packing macOS app");
-  await run(builder, ["--mac", "dmg", "-c.mac.identity=null"], desktop);
+  // dmg only, and thrown away: sign-mac.sh rebuilds both artifacts from the
+  // signed app. `--publish never` because the publish block in
+  // electron-builder.yml would otherwise upload this unsigned pack whenever a
+  // GH_TOKEN happens to be in the environment.
+  await run(
+    builder,
+    ["--mac", "dmg", "-c.mac.identity=null", "--publish", "never"],
+    desktop,
+  );
   await run("sh", ["scripts/sign-mac.sh"], desktop);
 }
 

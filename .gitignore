@@ -41,6 +41,8 @@ apps/desktop/server/
 # Local agent fixtures (launch.json, worktrees)
 .claude/
 
-# Local build stamp and personal agent workflows
+# Local build stamp and personal agent workflows. The name follows the
+# product; the two older ones are kept so an old checkout stays clean.
+apps/web/.boxaide-export
 apps/web/.sley-export
 .grok/

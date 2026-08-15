@@ -7,8 +7,11 @@
  * in a browser, so the token never has to be shown to the user.
  *
  * There is no preload script and no IPC. The renderer is the same static page
- * the browser gets, and it gets no Electron surface at all.
+ * the browser gets, and it gets no Electron surface at all. That is also why
+ * the updater below is handed to the server rather than to the window: the
+ * sidebar learns about a new version over HTTP, like everything else it shows.
  */
+import electronUpdater from "electron-updater";
 import {
   app,
   BrowserWindow,
@@ -80,6 +83,28 @@ let badgeTimer = null;
  * @type {number | null}
  */
 let lastPending = null;
+/**
+ * Set while `quitAndInstall` is tearing the app down.
+ *
+ * The quit that installs an update must reach Squirrel, and `will-quit` below
+ * ends in `app.exit(0)`, which does not. The install path therefore shuts the
+ * server down itself and leaves nothing for `will-quit` to hold the quit open
+ * for. This flag is what keeps a second Cmd-Q from racing it.
+ */
+let installing = false;
+/**
+ * The version Squirrel has staged and is waiting to swap in, once one is
+ * downloaded. Read by `will-quit`, which applies it instead of exiting.
+ * @type {string | null}
+ */
+let stagedUpdate = null;
+/**
+ * The server's update service, held so the menu bar can ask for a check
+ * without going back through HTTP. The window still reads it over
+ * `/api/update` — that is the only path the renderer has.
+ * @type {{ check: () => Promise<void> } | null}
+ */
+let updateService = null;
 
 if (!app.requestSingleInstanceLock()) {
   // A second launch hands focus to the running one. Two instances would fight
@@ -112,13 +137,30 @@ if (!app.requestSingleInstanceLock()) {
     // Before the early return: the poll must stop even when the server never
     // started, or a tick fires against a half-torn-down process.
     stopBadgePoll();
-    if (!stopServer) return;
-    const stop = stopServer;
-    stopServer = null;
+    // The install path has already closed everything and needs this quit to
+    // reach Squirrel. Holding it open here, and ending in `app.exit`, would
+    // swallow the update instead of applying it.
+    if (installing) return;
+    if (!stopServer && !stagedUpdate) return;
     event.preventDefault();
-    stop()
-      .catch((err) => console.error("shutdown failed", err))
-      .finally(() => app.exit(0));
+    shutdownServer().finally(() => {
+      // A downloaded update the user never restarted into applies here, on the
+      // next quit. electron-updater's own `autoInstallOnAppQuit` hangs off the
+      // `quit` event, which `app.exit` never emits — so the handoff is made by
+      // hand. `quitAndInstall` quits again; `installing` lets that one through.
+      if (stagedUpdate) {
+        installing = true;
+        try {
+          autoUpdater.quitAndInstall(false, false);
+          return;
+        } catch (err) {
+          // A staged file that has gone missing must not cost the user their
+          // quit. Fall through and exit; the next check re-downloads it.
+          console.error("install on quit failed", err);
+        }
+      }
+      app.exit(0);
+    });
   });
 
   app.whenReady().then(start).catch(fatal);
@@ -136,9 +178,22 @@ async function start() {
   // a non-loopback address would put decrypted mail credentials on the LAN.
   // Everything else — port, ~/.boxaide, the bearer token, the master key — is
   // the server's own configuration, untouched.
-  const started = await startServer({ host: "127.0.0.1", webRoot });
+  const started = await startServer({
+    host: "127.0.0.1",
+    webRoot,
+    // Unpackaged there is no bundle to replace and no update feed to read, so
+    // the driver is left off and the server falls back to its manual channel:
+    // it states the newest release and links to it. Wiring the driver anyway
+    // would make every dev run report an updater error it cannot act on.
+    updateDriver: app.isPackaged ? createUpdateDriver() : undefined,
+    // The bundle's version, not a package.json found by walking up from the
+    // compiled server inside the asar. Same number today; this is the one the
+    // OS and Squirrel agree on.
+    appVersion: app.getVersion(),
+  });
   stopServer = started.stop;
   serverUrl = started.url;
+  updateService = started.runtime.update;
   createWindow(started.url);
   // Menu bar presence is macOS-scoped for now: that is where "glance at your
   // mail and your agents without the window" was asked for, and where the
@@ -148,6 +203,135 @@ async function start() {
   // token the page picks up from /api/local-bootstrap — so the main process
   // reads it directly rather than going through the renderer.
   if (!smoke) startBadgePoll(started.url, started.runtime.config.bearerToken);
+}
+
+/**
+ * Close the server once, whoever asked. Never throws.
+ *
+ * Shared by the quit handler and by the update install, which must finish the
+ * shutdown itself and then let the quit run all the way through to Squirrel.
+ */
+async function shutdownServer() {
+  stopBadgePoll();
+  if (!stopServer) return;
+  const stop = stopServer;
+  stopServer = null;
+  await stop().catch((err) => console.error("shutdown failed", err));
+}
+
+/* ---- updates ------------------------------------------------------------- */
+
+const { autoUpdater } = electronUpdater;
+
+/** Told once per version, so a re-check does not re-notify. */
+let notifiedReadyFor = null;
+
+/**
+ * The adapter the server's UpdateService drives.
+ *
+ * electron-updater reads `app-update.yml`, packed from the `publish` block in
+ * electron-builder.yml, and resolves `latest-mac.yml` from the newest GitHub
+ * release. Both files must be on the release for any of this to work —
+ * scripts/ship.sh uploads them beside the dmg.
+ *
+ * Downloading is never automatic. The update is tens of megabytes over
+ * somebody's connection, and it lands as a restart; both are the user's call,
+ * made in the sidebar.
+ */
+function createUpdateDriver() {
+  autoUpdater.autoDownload = false;
+  // A downloaded update that the user never restarts into should still apply
+  // the next time they quit — but electron-updater does that from the `quit`
+  // event, which the shutdown below never emits. Off here, and done by hand in
+  // `will-quit`, which is the only path that gets to run.
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.logger = null;
+
+  /** @type {(event: unknown) => void} */
+  let emit = () => {};
+
+  autoUpdater.on("checking-for-update", () => emit({ kind: "checking" }));
+  autoUpdater.on("update-available", (info) =>
+    emit({
+      kind: "available",
+      version: info.version,
+      notes: notesOf(info.releaseNotes),
+      publishedAt: info.releaseDate ?? null,
+    }),
+  );
+  autoUpdater.on("update-not-available", (info) =>
+    emit({ kind: "not-available", version: info?.version ?? null }),
+  );
+  autoUpdater.on("download-progress", (progress) =>
+    emit({ kind: "progress", percent: progress.percent }),
+  );
+  autoUpdater.on("update-downloaded", (info) => {
+    stagedUpdate = info.version;
+    emit({ kind: "downloaded", version: info.version });
+    announceReady(info.version);
+  });
+  autoUpdater.on("error", (err) =>
+    emit({ kind: "error", message: err?.message ?? String(err) }),
+  );
+
+  return {
+    canInstall: true,
+    subscribe: (sink) => {
+      emit = sink;
+    },
+    check: async () => {
+      await autoUpdater.checkForUpdates();
+    },
+    download: async () => {
+      await autoUpdater.downloadUpdate();
+    },
+    install: () => {
+      if (installing) return;
+      installing = true;
+      // The server owns a SQLite handle and may hold an IMAP connection.
+      // Close both before the process is replaced, then quit for real:
+      // `quitAndInstall` runs the Squirrel handoff that `app.exit` skips.
+      void shutdownServer().finally(() => {
+        autoUpdater.quitAndInstall(false, true);
+      });
+    },
+  };
+}
+
+/**
+ * GitHub release notes arrive as a string, or as a list of per-version blocks
+ * when more than one release is being skipped. Both become one text.
+ */
+function notesOf(raw) {
+  if (typeof raw === "string") return raw;
+  if (!Array.isArray(raw)) return null;
+  return (
+    raw
+      .map((entry) =>
+        entry && typeof entry === "object"
+          ? `## ${entry.version ?? ""}\n${entry.note ?? ""}`.trim()
+          : String(entry),
+      )
+      .join("\n\n")
+      .trim() || null
+  );
+}
+
+/**
+ * One notification, when the update is staged and a restart is all that is
+ * left. Not when it is merely available: that is a sidebar row, not an
+ * interruption.
+ */
+function announceReady(version) {
+  if (notifiedReadyFor === version) return;
+  notifiedReadyFor = version;
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({
+    title: `Boxaide ${version} is ready`,
+    body: "Restart to finish updating.",
+  });
+  notification.on("click", () => openMainWindow());
+  notification.show();
 }
 
 /* ---- approval badge ------------------------------------------------------ */
@@ -276,6 +460,15 @@ function createTray(url) {
         {
           label: "Install Claude connector…",
           click: () => installClaudeConnector(),
+        },
+        {
+          // The check runs against the service directly; the window is where
+          // its answer is shown, so both happen on one click.
+          label: "Check for updates…",
+          click: () => {
+            void updateService?.check().catch(() => {});
+            openMainWindow();
+          },
         },
         { type: "separator" },
         {

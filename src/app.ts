@@ -25,6 +25,7 @@ import { handleMcpJsonRpc } from "./mcp/server.js";
 import { AgentChannel } from "./agent/channel.js";
 import { AgentLauncher } from "./agent/launcher.js";
 import { createPlatform, type Platform } from "./platform.js";
+import { UpdateService, type UpdateDriver } from "./update/service.js";
 import type { MailProvider } from "./provider/types.js";
 
 export {
@@ -53,15 +54,26 @@ export type Runtime = {
   channel: AgentChannel;
   launcher: AgentLauncher;
   platform: Platform;
+  update: UpdateService;
   app: Hono;
 };
 
-export function createRuntime(
-  overrides: Partial<AppConfig> & {
-    provider?: MailProvider;
-    store?: Store;
-  } = {},
-): Runtime {
+/**
+ * Everything an embedder may hand in that is not configuration.
+ *
+ * `updateDriver` is how the Electron shell puts electron-updater behind
+ * `/api/update` without this module importing Electron. Absent, the service
+ * runs on its manual channel: it states the newest release and links to it.
+ */
+export type RuntimeOverrides = Partial<AppConfig> & {
+  provider?: MailProvider;
+  store?: Store;
+  updateDriver?: UpdateDriver;
+  /** The shell's own version, which beats reading package.json when packaged. */
+  appVersion?: string;
+};
+
+export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
   const config = loadConfig(overrides);
   const store =
     overrides.store ??
@@ -100,6 +112,13 @@ export function createRuntime(
     masterKey: config.masterKey,
     mail,
     launcher,
+  });
+
+  // No timers yet — `startServer` starts them. A stdio `boxaide mcp` process
+  // has no UI to show an update in and must not poll GitHub every six hours.
+  const update = new UpdateService({
+    driver: overrides.updateDriver,
+    currentVersion: overrides.appVersion,
   });
 
   const app = new Hono();
@@ -159,6 +178,7 @@ export function createRuntime(
     channel,
     launcher,
     platform,
+    update,
   );
   app.route("/", api);
 
@@ -265,7 +285,7 @@ export function createRuntime(
     }),
   );
 
-  return { config, store, mail, provider, channel, launcher, platform, app };
+  return { config, store, mail, provider, channel, launcher, platform, update, app };
 }
 
 /**
@@ -297,12 +317,15 @@ function resolveWebRoot(configured?: string): string {
  * promise the caller can report, rather than an unhandled `error` event.
  */
 export async function startServer(
-  overrides: Partial<AppConfig> = {},
+  overrides: RuntimeOverrides = {},
 ): Promise<{ runtime: Runtime; url: string; stop: () => Promise<void> }> {
   const runtime = createRuntime(overrides);
   // The serve process is the one place platform timers run (CRM sync,
   // automation scheduler, outreach engine).
   runtime.platform.start();
+  // Same rule for the update check: one process asks, and only the one with a
+  // UI attached to the answer.
+  runtime.update.start();
   const server = await new Promise<ServerType>((resolve, reject) => {
     const s = serve(
       {
@@ -325,6 +348,7 @@ export async function startServer(
       // Platform timers before the launcher: a scheduler tick that fires
       // mid-shutdown would spawn a child the close below never sees.
       runtime.platform.stop();
+      runtime.update.stop();
       // The launched agent first: it holds an open long poll against the
       // channel, and an orphaned child process would outlive the app.
       runtime.launcher.close();

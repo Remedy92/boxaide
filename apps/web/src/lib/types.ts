@@ -393,6 +393,38 @@ export type SuppressionRow = {
 /** GET /api/outreach/badge — a COUNT of pending rows and nothing else. */
 export type OutreachBadge = { pending: number };
 
+/**
+ * GET /api/update — the whole updater state, in one object.
+ *
+ * Every command returns this same shape, so the rail never derives a state of
+ * its own. `channel` decides what the card can offer: "auto" is the desktop
+ * app, which installs; "manual" is a self-hosted server, which can only say
+ * that a newer version exists and link to it.
+ */
+export type UpdateStatus =
+  | "idle"
+  | "checking"
+  | "up-to-date"
+  | "available"
+  | "downloading"
+  | "ready"
+  | "error";
+
+export type UpdateState = {
+  channel: "auto" | "manual";
+  status: UpdateStatus;
+  currentVersion: string;
+  latestVersion: string | null;
+  notes: string | null;
+  releaseUrl: string | null;
+  publishedAt: string | null;
+  /** 0–1 while downloading, null otherwise. */
+  progress: number | null;
+  checkedAt: string | null;
+  error: string | null;
+  canInstall: boolean;
+};
+
 /** Union of every error body shape the server can emit. */
 export type ErrorBody =
   | { error: string }

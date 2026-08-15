@@ -79,7 +79,13 @@ fi
 # from this signed copy, or the download still contains an unsigned .app.
 # The path is the .app itself — passing the parent folder nests Boxaide.app
 # inside another Boxaide.app.
-npx electron-builder --mac dmg --prepackaged release/mac-arm64/Boxaide.app -c.mac.identity=null
+#
+# The zip is built in the same pass, and it matters that it is this pass:
+# Squirrel refuses an update whose signature does not match the running app,
+# so the zip must hold the signed, stapled bundle, not the one electron-builder
+# packed before this script ran. This pass also writes release/latest-mac.yml,
+# the sha512 of that exact zip. Ship all three or none.
+npx electron-builder --mac dmg zip --prepackaged release/mac-arm64/Boxaide.app -c.mac.identity=null --publish never
 
 for dmg in release/boxaide-*.dmg; do
   [ -e "$dmg" ] || continue
@@ -89,6 +95,17 @@ for dmg in release/boxaide-*.dmg; do
   echo "notarising $dmg"
   xcrun notarytool submit "$dmg" --keychain-profile "$PROFILE" --wait
   xcrun stapler staple "$dmg"
+done
+
+# An update the app cannot find is the same as no update. Both files are
+# produced by the pass above; if either is missing the publish must not go
+# ahead with a dmg alone, because the running app would keep reporting the old
+# version forever and nobody would see a failure.
+for required in release/boxaide-mac.zip release/latest-mac.yml; do
+  [ -f "$required" ] || {
+    echo "missing $required — the auto-updater feed was not built" >&2
+    exit 1
+  }
 done
 
 if [ -n "$PROFILE" ]; then

@@ -20,6 +20,7 @@ import { ComposeButton } from "@/components/rail/compose-button";
 import { FolderList } from "@/components/rail/folder-list";
 import { NavItem } from "@/components/rail/nav-item";
 import { RailFooter } from "@/components/rail/rail-footer";
+import { UpdateCard } from "@/components/rail/update-card";
 import { SectionLabel, StatusDot } from "@/components/atoms";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -345,6 +346,11 @@ export function LeftRail({
           onOpenCapabilities={() => app.openDialog("capabilities")}
         />
       </div>
+
+      {/* Outside the scroll area, above the footer: an update is worth seeing
+          without scrolling to it, and it must not push the mailbox list
+          around when it arrives mid-session. */}
+      <UpdateCard collapsed={collapsed} />
 
       <RailFooter
         connection={connection}
