@@ -56,7 +56,10 @@ export function LeftRail({
   const health = useHealth();
   const connection = useConnection();
   const agent = useAgent();
-  const badge = useOutreachBadge();
+  /* The one polled endpoint in this rail. With the CRM off there is no
+     Outreach row to put the number on, so the poll stops rather than running
+     every 30s for a view that does not exist. */
+  const badge = useOutreachBadge(app.crm);
   const messages = useMessages({
     account: app.account,
     folder: app.folder,
@@ -92,11 +95,17 @@ export function LeftRail({
   const inMail = app.view === "mail";
   const pending = badge.data?.pending ?? 0;
 
+  /* Three groups, not one stack of eight rows. Nothing in a flat list said
+     that Inbox and Unread are the same kind of thing and Pipeline is not, and
+     the labels are what make the workspace setting legible: turn the CRM off
+     and a whole named section leaves, rather than three rows going missing
+     from the middle of a list. */
   const viewsAndFolders = (
     <>
       <div className="space-y-px">
         {/* First, and first for a reason: the conversation is the product's
-            front door.
+            front door. It belongs to neither section — an agent reads mail and
+            works the pipeline — so it sits above both, unlabelled.
 
             The trailing mark says one thing and only while it is true: an
             agent has taken a message and has not answered it. That is the fact
@@ -118,6 +127,13 @@ export function LeftRail({
             ) : undefined
           }
         />
+      </div>
+
+      <div className="space-y-px">
+        {/* Not gated on `collapsed`: this block only ever renders at full
+            width — inline in the expanded rail, or inside the popover the
+            collapsed rail opens, which is 224px wide. */}
+        <SectionLabel>Mail</SectionLabel>
         <NavItem
           icon={Inbox}
           label="Inbox"
@@ -146,68 +162,82 @@ export function LeftRail({
           active={app.view === "drafts"}
           onClick={() => app.setView("drafts")}
         />
-        {/* The CRM. People is a list and a detail pane, the same shape as mail;
-            Pipeline is a board and takes the whole width. Neither carries a
-            count: the endpoints return rows, not totals, and counting the page
-            we happened to fetch is a different number. */}
-        <NavItem
-          icon={Users}
-          label="People"
-          active={app.view === "people"}
-          onClick={() => app.setView("people")}
-        />
-        <NavItem
-          icon={Columns3}
-          label="Pipeline"
-          active={app.view === "pipeline"}
-          onClick={() => app.setView("pipeline")}
-        />
+        {/* Under Mail, and it stays in a mail-only install: an automation is a
+            rule that runs over messages, which is exactly what somebody who
+            turned the CRM off still has. */}
         <NavItem
           icon={Timer}
           label="Automations"
           active={app.view === "automations"}
           onClick={() => app.setView("automations")}
         />
-        {/* The one count in this rail, and the one the spec asks for: emails an
-            agent wrote that nobody has decided on. It is a number the server
-            returns — GET /api/outreach/badge, polled every 30s — not a count of
-            the page we happened to fetch, and it is a person's queue, not a
-            notification. Silent when there is nothing to decide. */}
-        <NavItem
-          icon={Send}
-          label="Outreach"
-          active={app.view === "outreach"}
-          onClick={() => app.setView("outreach")}
-          ariaLabel={
-            pending > 0
-              ? `Outreach, ${pending} waiting for approval`
-              : undefined
-          }
-          trailing={
-            pending > 0 ? (
-              <Badge variant="accent" className="tnum px-1.5">
-                {pending}
-              </Badge>
-            ) : undefined
-          }
-        />
+
+        {/* Mail and Drafts only. Folders scope the MESSAGE list; in a
+            conversation, in People and on the Pipeline there is no such list to
+            scope — the section would sit there explaining that it needs a
+            mailbox picked, about a pane that is not on screen. Drafts still
+            shows it, disabled, because Drafts IS a list of mail. */}
+        {(inMail || app.view === "drafts") && (
+          <FolderList
+            accountRef={app.account}
+            activeFolder={app.folder}
+            disabled={app.view === "drafts"}
+            onSelect={(path) => {
+              app.setView("mail");
+              app.setFolder(path);
+            }}
+          />
+        )}
       </div>
 
-      {/* Mail and Drafts only. Folders scope the MESSAGE list; in a
-          conversation, in People and on the Pipeline there is no such list to
-          scope — the section would sit there explaining that it needs a mailbox
-          picked, about a pane that is not on screen. Drafts still shows it,
-          disabled, because Drafts IS a list of mail. */}
-      {(inMail || app.view === "drafts") && (
-        <FolderList
-          accountRef={app.account}
-          activeFolder={app.folder}
-          disabled={app.view === "drafts"}
-          onSelect={(path) => {
-            app.setView("mail");
-            app.setFolder(path);
-          }}
-        />
+      {/* The CRM, and only for somebody who asked for one. Off, these three
+          rows are not rendered — not greyed, not behind a switch — because the
+          setting is a claim about what this app is, not a filter over a list.
+          The server keeps its contacts and deals either way. */}
+      {app.crm && (
+        <div className="space-y-px">
+          <SectionLabel>CRM</SectionLabel>
+          {/* People is a list and a detail pane, the same shape as mail;
+              Pipeline is a board and takes the whole width. Neither carries a
+              count: the endpoints return rows, not totals, and counting the
+              page we happened to fetch is a different number. */}
+          <NavItem
+            icon={Users}
+            label="People"
+            active={app.view === "people"}
+            onClick={() => app.setView("people")}
+          />
+          <NavItem
+            icon={Columns3}
+            label="Pipeline"
+            active={app.view === "pipeline"}
+            onClick={() => app.setView("pipeline")}
+          />
+          {/* The one count in this rail, and the one the spec asks for: emails
+              an agent wrote that nobody has decided on. It is a number the
+              server returns — GET /api/outreach/badge, polled every 30s — not a
+              count of the page we happened to fetch, and it is a person's
+              queue, not a notification. Silent when there is nothing to
+              decide. */}
+          <NavItem
+            icon={Send}
+            label="Outreach"
+            active={app.view === "outreach"}
+            onClick={() => app.setView("outreach")}
+            ariaLabel={
+              pending > 0
+                ? `Outreach, ${pending} waiting for approval`
+                : undefined
+            }
+            trailing={
+              pending > 0 ? (
+                <Badge variant="accent" className="tnum px-1.5">
+                  {pending}
+                </Badge>
+              ) : undefined
+            }
+          />
+        </div>
       )}
     </>
   );

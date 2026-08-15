@@ -88,6 +88,20 @@ export type View =
   | "outreach";
 
 /**
+ * The views the CRM owns. With `settings.crm` off they are not reachable: the
+ * rail omits them, the palette omits them, and setView refuses them — so a
+ * stale caller cannot land the shell on a pane the rail has no row for.
+ *
+ * Automations is NOT here. It runs rules over mail, and a mail-only install is
+ * exactly where a triage rule earns its keep.
+ */
+export const CRM_VIEWS = ["people", "pipeline", "outreach"] as const;
+
+export function isCrmView(view: View): boolean {
+  return (CRM_VIEWS as readonly View[]).includes(view);
+}
+
+/**
  * Which list the Outreach middle column is showing. All three are the same
  * view — they share a pane and a keyboard map — so this is a filter, not a
  * route.
@@ -123,7 +137,13 @@ type AppStateValue = {
 
   /* view */
   view: View;
+  /** A CRM view while the CRM is off is a no-op, not a crash — see CRM_VIEWS. */
   setView: (value: View) => void;
+
+  /* workspace. Not a filter: off means People, Pipeline and Outreach do not
+     exist in this browser. Stored, so it survives a reload. */
+  crm: boolean;
+  setCrm: (value: boolean) => void;
 
   /* People. The filters live here, not in the pane, for the same reason the
      mail filters do: the list header owns the controls and the shell owns the
@@ -520,7 +540,19 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     viewRef.current = view;
   }, [view]);
 
+  /* Read through a ref for the same reason viewRef exists: setView must stay
+     stable, and it is the one caller. */
+  const crmRef = React.useRef(settings.crm);
+  React.useEffect(() => {
+    crmRef.current = settings.crm;
+  }, [settings.crm]);
+
   const setView = React.useCallback((next: View) => {
+    // The last gate before the shell renders a pane. Every surface that offers
+    // a CRM row already hides it, so reaching here means a stale caller — a
+    // held keybinding, another tab's palette — and the answer is to do nothing
+    // rather than to show a view the rail cannot get back to.
+    if (!crmRef.current && isCrmView(next)) return;
     if (viewRef.current === next) return;
     viewRef.current = next;
     clearSelectionRefForView.current();
@@ -556,6 +588,24 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     (value: boolean) => updateSettings({ railCollapsed: value }),
     [updateSettings],
   );
+
+  const setCrm = React.useCallback(
+    (value: boolean) => updateSettings({ crm: value }),
+    [updateSettings],
+  );
+
+  /* Turning the CRM off while standing in one of its views — from Settings, or
+     from another tab through the storage event — would leave the shell on a
+     pane with no row in the rail and no way back to it. Mail, because that is
+     what the person just said they wanted. */
+  const setViewRef = React.useRef(setView);
+  React.useEffect(() => {
+    setViewRef.current = setView;
+  }, [setView]);
+  React.useEffect(() => {
+    if (settings.crm || !isCrmView(view)) return;
+    setViewRef.current("mail");
+  }, [settings.crm, view]);
 
   const toggleRail = React.useCallback(() => {
     // Below 760px the rail column is not rendered at all — the only rail
@@ -722,6 +772,14 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       searching: query.trim().length > 0,
       view,
       setView,
+      /* Gated on mount for the same reason the wizard is: the hydration render
+         reads DEFAULT_SETTINGS, where `crm` is true, so passing settings.crm
+         straight through would paint People, Pipeline and Outreach for one
+         frame in a browser that turned them off. Held false until this
+         browser's own value is readable — the section then appears once,
+         rather than appearing and being taken away. */
+      crm: mounted && settings.crm,
+      setCrm,
       setPeopleRawQuery,
       peopleQuery,
       peopleTag,
@@ -776,6 +834,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       setAccount,
       view,
       setView,
+      mounted,
+      settings.crm,
+      setCrm,
       folder,
       unreadOnly,
       setUnreadOnly,

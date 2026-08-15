@@ -249,23 +249,6 @@ function Palette({
       hint: "g d",
       action: () => app.setView("drafts"),
     },
-    /* No `hint`: People and Pipeline have no `g` chord. The shortcuts sheet is
-       the one list of those, and inventing a binding here would put a key in
-       the palette that does nothing when pressed. */
-    {
-      id: "go-people",
-      group: "Go to",
-      label: "People",
-      icon: <Users />,
-      action: () => app.setView("people"),
-    },
-    {
-      id: "go-pipeline",
-      group: "Go to",
-      label: "Pipeline",
-      icon: <Columns3 />,
-      action: () => app.setView("pipeline"),
-    },
     {
       id: "go-automations",
       group: "Go to",
@@ -273,13 +256,38 @@ function Palette({
       icon: <Timer />,
       action: () => app.setView("automations"),
     },
-    {
-      id: "go-outreach",
-      group: "Go to",
-      label: "Outreach",
-      icon: <Send />,
-      action: () => app.setView("outreach"),
-    },
+    /* The CRM rows, and only where there is a CRM. Listing them disabled would
+       advertise the thing the workspace setting was chosen to remove, and
+       listing them enabled would offer a view setView now refuses.
+
+       No `hint`: People and Pipeline have no `g` chord. The shortcuts sheet is
+       the one list of those, and inventing a binding here would put a key in
+       the palette that does nothing when pressed. */
+    ...(app.crm
+      ? [
+          {
+            id: "go-people",
+            group: "Go to",
+            label: "People",
+            icon: <Users />,
+            action: () => app.setView("people"),
+          },
+          {
+            id: "go-pipeline",
+            group: "Go to",
+            label: "Pipeline",
+            icon: <Columns3 />,
+            action: () => app.setView("pipeline"),
+          },
+          {
+            id: "go-outreach",
+            group: "Go to",
+            label: "Outreach",
+            icon: <Send />,
+            action: () => app.setView("outreach"),
+          },
+        ]
+      : []),
     ...list.map((account, index) => ({
       id: `go-account-${account.id}`,
       group: "Go to",

@@ -36,6 +36,16 @@ export type Settings = {
    * registry, so a stale stored id fails loudly instead of launching wrong.
    */
   agentModel: string;
+  /**
+   * Whether this browser shows the CRM at all: People, Pipeline and Outreach.
+   *
+   * It is a choice about what the app IS, not a filter over what it shows.
+   * Somebody who wanted a mail client gets a mail client — the CRM views are
+   * not rendered, their rows are not in the command palette, and the Outreach
+   * badge stops polling. The data behind them is untouched: the server keeps
+   * its contacts and deals, and turning this back on shows them again.
+   */
+  crm: boolean;
 };
 
 /**
@@ -78,6 +88,13 @@ export const SETTINGS_KEYS = {
   theme: "boxaide.theme",
 } as const;
 
+/**
+ * Shipped after the rename, so it has no `sley.*` or `mailmux.*` ancestor and
+ * is read with readString rather than readPref. Listing it in the legacy maps
+ * would invent two keys that were never written.
+ */
+export const CRM_KEY = "boxaide.crm";
+
 export const DEFAULT_SETTINGS: Settings = {
   baseUrl: DEFAULT_API_BASE,
   token: "",
@@ -86,6 +103,10 @@ export const DEFAULT_SETTINGS: Settings = {
   recentCommands: [],
   onboarded: false,
   agentModel: "",
+  /* On, so an upgrade does not silently take the CRM away from somebody who is
+     already using it. The wizard asks; nobody who skips the wizard loses a
+     view they had yesterday. */
+  crm: true,
 };
 
 /** Fired on the window after any write, so same-tab listeners can react. */
@@ -212,6 +233,9 @@ export function readSettings(): Settings {
       readPref("onboarded") === "1" ||
       (token ?? "").length > 0,
     agentModel: readPref("agentModel") ?? "",
+    /* Absent means never asked, which is the upgrade case and the default: on.
+       Only an explicit "0" turns it off. */
+    crm: readString(CRM_KEY) !== "0",
   };
 }
 
@@ -240,6 +264,9 @@ export function writeSettings(patch: Partial<Settings>): Settings {
   }
   if (patch.agentModel !== undefined) {
     writeString(SETTINGS_KEYS.agentModel, patch.agentModel);
+  }
+  if (patch.crm !== undefined) {
+    writeString(CRM_KEY, patch.crm ? "1" : "0");
   }
   if (patch.recentCommands !== undefined) {
     writeString(

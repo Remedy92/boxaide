@@ -325,6 +325,34 @@ function SettingsBody({
 
         <Separator className="bg-border-subtle" />
 
+        {/* ---- Workspace ---------------------------------------------------
+            Not an appearance preference, which is why it is not in the section
+            below: "Mail" removes People, Pipeline and Outreach from the app,
+            rather than restyling them. Nothing on the server changes, so the
+            contacts and deals are still there if this is turned back on. */}
+        <section className="space-y-3">
+          <h3 className="text-[13px] font-medium text-fg">Workspace</h3>
+
+          <div className="space-y-1">
+            <SegmentGroup
+              label="What Boxaide is"
+              value={app.crm ? "crm" : "mail"}
+              options={[
+                { value: "mail", label: "Mail" },
+                { value: "crm", label: "Mail and CRM" },
+              ]}
+              onSelect={(value) => app.setCrm(value === "crm")}
+            />
+            <p className="text-[12px] leading-4 text-fg-secondary">
+              {app.crm
+                ? "People, Pipeline and Outreach are in the sidebar."
+                : "People, Pipeline and Outreach are hidden. Your contacts and deals are kept."}
+            </p>
+          </div>
+        </section>
+
+        <Separator className="bg-border-subtle" />
+
         {/* ---- Appearance ------------------------------------------------- */}
         <section className="space-y-3">
           <h3 className="text-[13px] font-medium text-fg">Appearance</h3>

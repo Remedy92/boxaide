@@ -51,7 +51,7 @@ import { cn } from "@/lib/utils";
  * anywhere else, a human pastes the token.
  */
 
-type StepId = 1 | 2 | 3;
+type StepId = 1 | 2 | 3 | 4;
 
 type Probe =
   | { status: "idle" }
@@ -82,7 +82,7 @@ export function SetupWizard() {
             Boxaide
           </span>
           <span className="ml-auto flex items-center gap-1.5">
-            {([1, 2, 3] as const).map((index) => (
+            {([1, 2, 3, 4] as const).map((index) => (
               <span
                 key={index}
                 aria-hidden="true"
@@ -92,7 +92,7 @@ export function SetupWizard() {
                 )}
               />
             ))}
-            <span className="sr-only">Step {step} of 3</span>
+            <span className="sr-only">Step {step} of 4</span>
           </span>
         </header>
 
@@ -111,7 +111,18 @@ export function SetupWizard() {
             />
           )}
           {step === 3 && (
+            <WorkspaceStep
+              crm={app.crm}
+              onChoose={(value) => {
+                app.setCrm(value);
+                setStep(4);
+              }}
+              onBack={() => setStep(2)}
+            />
+          )}
+          {step === 4 && (
             <DoneStep
+              crm={app.crm}
               mailboxes={connected.length}
               host={settings.baseUrl ? hostLabel(settings.baseUrl) : ""}
               onFinish={app.finishWizard}
@@ -934,24 +945,154 @@ function MailboxStep({
 }
 
 /* -------------------------------------------------------------------------- */
-/* step 3 — done                                                              */
+/* step 3 — mail, or mail and a CRM                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The one question this wizard asks that is not about connecting something.
+ *
+ * It is asked here, before the app is ever seen, because the honest answer is
+ * different for the two people who install Boxaide: one wants a mail client
+ * and one wants the mail client that also tracks who they are talking to.
+ * Showing both and letting the first person ignore half the sidebar is the
+ * thing this step exists to avoid.
+ *
+ * Choosing is the only way forward — both cards advance — so there is no
+ * default hiding behind a Continue button.
+ */
+function WorkspaceStep({
+  crm,
+  onChoose,
+  onBack,
+}: {
+  crm: boolean;
+  onChoose: (value: boolean) => void;
+  onBack: () => void;
+}) {
+  const options = [
+    {
+      value: false,
+      title: "Mail",
+      body: "An inbox, drafts, folders and your agent. Nothing else in the sidebar.",
+    },
+    {
+      value: true,
+      title: "Mail and CRM",
+      body: "Everything above, plus People, a deal Pipeline, and an Outreach queue you approve.",
+    },
+  ];
+
+  /* The highlighted card, which is NOT the committed answer: arrows move it,
+     and only Enter, Space or a click commits through onChoose. Without this
+     the arrow handler below would advance the wizard on every keypress. */
+  const [choice, setChoice] = React.useState(crm);
+  const optionRefs = React.useRef(new Map<string, HTMLButtonElement>());
+
+  return (
+    <section aria-labelledby="wizard-step-3">
+      <h1
+        id="wizard-step-3"
+        className="text-[15px] leading-5 font-semibold tracking-[var(--tracking-tight)] text-fg"
+      >
+        What do you want Boxaide to be?
+      </h1>
+      <p className="mt-1.5 text-[13px] leading-[18px] text-fg-secondary">
+        You can change this later in Settings, and nothing is thrown away
+        either way.
+      </p>
+
+      {/* A real APG radio group, the same shape as the provider row above: one
+          tab stop, arrows move the highlight and the focus. role="radio"
+          without a roving tabindex and arrow handling makes each card its own
+          tab stop and leaves Arrow keys dead (4.1.2). */}
+      <div
+        role="radiogroup"
+        aria-label="What Boxaide is"
+        className="mt-6 space-y-2"
+        onKeyDown={(event) => {
+          const delta =
+            event.key === "ArrowRight" || event.key === "ArrowDown"
+              ? 1
+              : event.key === "ArrowLeft" || event.key === "ArrowUp"
+                ? -1
+                : 0;
+          if (delta === 0) return;
+          event.preventDefault();
+          const at = options.findIndex((entry) => entry.value === choice);
+          const next =
+            options[
+              (Math.max(at, 0) + delta + options.length) % options.length
+            ];
+          setChoice(next.value);
+          optionRefs.current.get(next.title)?.focus();
+        }}
+      >
+        {options.map((option) => (
+          <button
+            key={option.title}
+            ref={(node) => {
+              if (node) optionRefs.current.set(option.title, node);
+              else optionRefs.current.delete(option.title);
+            }}
+            type="button"
+            role="radio"
+            aria-checked={choice === option.value}
+            tabIndex={choice === option.value ? 0 : -1}
+            onClick={() => onChoose(option.value)}
+            className={cn(
+              "w-full rounded-[var(--radius-md)] border p-3.5 text-left",
+              "transition-colors duration-[var(--dur-fast)]",
+              choice === option.value
+                ? "border-accent bg-accent-subtle"
+                : "border-border-control bg-surface-2 hover:bg-surface-hover",
+            )}
+          >
+            <p
+              className={cn(
+                "text-[13px] leading-[18px] font-medium",
+                choice === option.value ? "text-accent" : "text-fg",
+              )}
+            >
+              {option.title}
+            </p>
+            <p className="mt-1 text-[13px] leading-[18px] text-fg-secondary">
+              {option.body}
+            </p>
+          </button>
+        ))}
+      </div>
+
+      <div className="mt-8 flex items-center gap-2">
+        <Button type="button" variant="ghost" onClick={onBack}>
+          <ArrowLeft className="size-4" strokeWidth={1.5} />
+          Back
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* step 4 — done                                                              */
 /* -------------------------------------------------------------------------- */
 
 function DoneStep({
+  crm,
   mailboxes,
   host,
   onFinish,
   onConnectAgent,
 }: {
+  crm: boolean;
   mailboxes: number;
   host: string;
   onFinish: () => void;
   onConnectAgent: () => void;
 }) {
   return (
-    <section aria-labelledby="wizard-step-3">
+    <section aria-labelledby="wizard-step-4">
       <h1
-        id="wizard-step-3"
+        id="wizard-step-4"
         className="text-[15px] leading-5 font-semibold tracking-[var(--tracking-tight)] text-fg"
       >
         You&rsquo;re set
@@ -962,6 +1103,14 @@ function DoneStep({
           : `${mailboxes} ${mailboxes === 1 ? "mailbox is" : "mailboxes are"} connected${
               host ? ` through ${host}` : ""
             }.`}
+      </p>
+      {/* Says back what was just chosen, in the words of the sidebar it is
+          about to produce. It is the one step whose effect is invisible until
+          the app opens. */}
+      <p className="mt-1.5 text-[13px] leading-[18px] text-fg-secondary">
+        {crm
+          ? "Set up as mail and a CRM. Settings can drop it to mail only."
+          : "Set up as a mail client. Settings can add the CRM back."}
       </p>
 
       <div className="mt-6 rounded-[var(--radius-md)] border border-border-subtle bg-surface-2 p-3.5">
