@@ -288,6 +288,27 @@
 }
 .shell[data-rail="collapsed"] { --rail-w: var(--rail-w-collapsed); }
 
+/* ---------------------------------------------------------------------------
+   macOS desktop chrome. The Electron window drops its title bar and the
+   sidebar carries the traffic lights instead, so the app reads as one surface
+   rather than a web page under a grey bar.
+
+   The strip exists only there: in a browser tab `.titlebar-strip` is
+   display:none and the rail starts at the brand row, unchanged.
+   --------------------------------------------------------------------------- */
+.titlebar-strip { display: none; }
+[data-desktop="mac"] .titlebar-strip {
+  display: block;
+  /* 44px, matching `trafficLightPosition: { x: 16, y: 15 }` in the main
+     process. Change one and change the other. */
+  height: 44px;
+  -webkit-app-region: drag;
+}
+/* The window has no other drag handle, so the strip must stay grabbable when
+   the rail collapses — and the 14px button group is 70px wide, wider than the
+   52px browser rail. */
+[data-desktop="mac"] .shell { --rail-w-collapsed: 76px; }
+
 /* The Agent view has no message list, and the Pipeline is one board across the
    whole width. Two tracks, not a third one collapsed to zero: a 0px column
    still creates a grid line the border-r of the sidebar would sit against

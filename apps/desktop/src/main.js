@@ -648,10 +648,17 @@ function createWindow(url) {
     // behind a platform check so a Windows or Linux dev run is not the stock
     // Electron diamond.
     ...(existsSync(iconPng) ? { icon: iconPng } : {}),
-    // A standard frame: the traffic lights stay in the title bar, where they
-    // cannot land on top of the web UI's own header. The page ships no drag
-    // region and no top inset, so `hiddenInset` would cover its top-left
-    // controls.
+    // macOS: no title bar row. The traffic lights sit inside the sidebar, the
+    // way Claude and ChatGPT do it. The page reserves the strip they land on
+    // and marks it draggable — see `data-desktop` in apps/web. Windows and
+    // Linux keep the standard frame.
+    ...(process.platform === "darwin"
+      ? {
+          titleBarStyle: "hiddenInset",
+          // Centres the 14px button group in the 44px strip the page reserves.
+          trafficLightPosition: { x: 16, y: 15 },
+        }
+      : {}),
     show: false,
     autoHideMenuBar: process.platform !== "darwin",
     webPreferences: {
@@ -703,6 +710,17 @@ function createWindow(url) {
         .catch((err) => console.error("smoke: read title failed", err))
         .finally(() => app.quit());
     });
+  }
+
+  // The one signal the page gets about its host, and the reason it reserves a
+  // strip for the traffic lights. A marker rather than "is this Electron":
+  // any Electron browser pointed at the same URL would answer yes to that, and
+  // only this window actually hides its title bar. Set on macOS alone, because
+  // only macOS gets `hiddenInset` above.
+  if (process.platform === "darwin") {
+    win.webContents.setUserAgent(
+      `${win.webContents.getUserAgent()} BoxaideDesktop/${app.getVersion()}`,
+    );
   }
 
   void win.loadURL(url);

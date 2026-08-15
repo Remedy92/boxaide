@@ -214,6 +214,10 @@ export function LeftRail({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {/* The macOS window's traffic lights land here, and the rest of the strip
+          is the window's drag handle. Zero-height in a browser tab — see
+          `.titlebar-strip` in globals.css. */}
+      <div className="titlebar-strip" aria-hidden />
       <div className={collapsed ? "px-2" : "px-3"}>
         <BrandMark
           fixture={health.data?.fixture ?? false}
