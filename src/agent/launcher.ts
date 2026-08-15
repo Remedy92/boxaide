@@ -33,6 +33,12 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import {
+  lineSplitter,
+  readClaudeEvent,
+  readGrokEvent,
+  type ReadEvent,
+} from "./agent-stream.js";
 import { CRM_TOOL_NAMES } from "../crm/tools.js";
 import { AUTOMATION_TOOL_NAMES } from "../automation/tools.js";
 import { OUTREACH_TOOL_NAMES } from "../outreach/tools.js";
@@ -178,6 +184,15 @@ export type LaunchContext = {
    * not whichever leftover MCP client last called initialize.
    */
   onRunningChange?: (id: string | null) => void;
+  /**
+   * Fired for every line the chat agent writes to stdout: proof the process is
+   * alive, plus the tool it just started when the line names one.
+   *
+   * This is the whole point of reading the stream. An agent doing its own work
+   * — reading files, running commands, thinking — calls no Boxaide tool for
+   * minutes at a time, and without this the pane can only report silence.
+   */
+  onActivity?: (tool: string | null) => void;
 };
 
 /**
@@ -224,6 +239,12 @@ export type AgentSpec = {
     workDir: string,
     parentEnv: NodeJS.ProcessEnv,
   ) => void;
+  /**
+   * Reads one stdout line of this CLI's event stream. Set only for specs whose
+   * `args` ask for that stream; without it the chat agent's stdout is drained
+   * and discarded, which is what every CLI did before.
+   */
+  readEvent?: ReadEvent;
 };
 
 /**
@@ -232,12 +253,21 @@ export type AgentSpec = {
  * read/draft boundary (send stays un-approved, which headless mode denies).
  */
 function claudeArgs(ctx: LaunchContext, model?: string): string[] {
-  return claudeArgsFor(
-    ctx,
-    KICKOFF,
-    chatPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
-    model,
-  );
+  return [
+    ...claudeArgsFor(
+      ctx,
+      KICKOFF,
+      chatPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
+      model,
+    ),
+    // NDJSON of the session's own events, which agent-stream.ts reads for
+    // presence. --verbose is what makes -p emit the per-event lines rather
+    // than only the final result; both flags were verified against the CLI.
+    // Chat only: a scheduled run's log is read by a human, so it stays text.
+    "--output-format",
+    "stream-json",
+    "--verbose",
+  ];
 }
 
 /**
@@ -303,9 +333,15 @@ function grokHomeFor(ctx: LaunchContext): string {
 }
 
 function grokArgs(_ctx: LaunchContext): string[] {
-  return grokArgsFor(KICKOFF, chatPreapprovedToolNames(), {
-    disableWebSearch: true,
-  });
+  return [
+    ...grokArgsFor(KICKOFF, chatPreapprovedToolNames(), {
+      disableWebSearch: true,
+    }),
+    // Same reason as Claude's stream-json, same chat-only rule. Grok's ACP
+    // session updates include one tool_call line per call.
+    "--output-format",
+    "streaming-json",
+  ];
 }
 
 function grokRunArgs(_ctx: LaunchContext, prompt: string): string[] {
@@ -469,6 +505,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     args: claudeArgs,
     runArgs: claudeRunArgs,
     models: CLAUDE_MODELS,
+    readEvent: readClaudeEvent,
   },
   {
     id: "grok",
@@ -478,6 +515,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     runArgs: grokRunArgs,
     childEnv: grokChildEnv,
     prepare: grokPrepare,
+    readEvent: readGrokEvent,
   },
   // Detected and shown, not yet launchable: their CLIs have no verified way
   // to take an MCP server plus a per-tool allowlist on one command line.
@@ -616,8 +654,20 @@ export class AgentLauncher {
     const child = spawn(bin, spec.args(this.ctx, model), {
       cwd: workDir,
       env: this.childEnvFor(spec, workDir),
-      stdio: ["ignore", "ignore", "pipe"],
+      // stdout is piped for the event stream, and MUST be consumed: a pipe
+      // nobody reads fills its buffer and blocks the agent mid-write. The
+      // handler below reads every chunk whether or not anything wants it.
+      stdio: ["ignore", "pipe", "pipe"],
     });
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on(
+      "data",
+      lineSplitter((line) => {
+        // Every line is liveness; only some carry a tool name. A spec with no
+        // reader still reports the line, so its agent stays visibly alive.
+        this.ctx.onActivity?.(spec.readEvent?.(line) ?? null);
+      }),
+    );
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
       this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_TAIL_LIMIT);

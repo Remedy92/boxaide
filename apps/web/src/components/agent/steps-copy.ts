@@ -35,10 +35,17 @@ export function stepsHeadline({
       took === null ? "" : ` · ${took}s`
     }`;
   }
-  if (lastSeenAt === null) return "No word from your agent";
+  /* A live run means one agent took this message and has not answered — a
+     claim this server wrote, not a guess. So silence downgrades the headline;
+     it never contradicts the claim. "No connection" was the old copy and it
+     was wrong twice over: nothing is connected in the first place (MCP is
+     request/response), and the agent is usually mid-task. An agent Boxaide
+     launched rarely gets here at all now, because its own output keeps the
+     seen stamp fresh — see channel.noteAgentActivity. */
+  if (lastSeenAt === null) return "Working — no update yet";
   const seen = Date.parse(lastSeenAt);
   if (now - seen >= SEEN_FRESH_MS) {
-    return `No word from your agent for ${formatClock((now - seen) / 1000)}`;
+    return `Working — no update for ${formatClock((now - seen) / 1000)}`;
   }
   return toolLabel ? `Working — ${toolLabel}` : "Working";
 }

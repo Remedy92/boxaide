@@ -102,6 +102,7 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     bearerToken: config.bearerToken,
     dataDir: config.dataDir,
     onRunningChange: (id) => channel.setLaunchedAgent(id),
+    onActivity: (tool) => channel.noteAgentActivity(tool),
   });
   // The agent platform (CRM, automations, outreach) shares the Store's SQLite
   // handle. Constructed here so every entry point has the tools; its timers
