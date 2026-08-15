@@ -42,7 +42,7 @@ npm start
 
 Boxaide has one web interface: the Next.js app in `apps/web`, built as a static export. You can serve it from your own process or host it elsewhere. Either way it talks to the Boxaide server on **your** machine, and it never sends your mail or your token anywhere else.
 
-The public site is **https://boxaide.vercel.app**.
+The public site is **https://boxaide.tech**.
 
 ### Local (recommended — works in every browser)
 
@@ -84,7 +84,7 @@ No environment variable is required. One optional, non-secret variable exists:
 **2. Allow the origin.** On **your** machine, not on the host:
 
 ```bash
-BOXAIDE_ALLOWED_ORIGINS=https://boxaide.vercel.app boxaide serve
+BOXAIDE_ALLOWED_ORIGINS=https://boxaide.tech boxaide serve
 ```
 
 See the rules and the cost of doing this under [Browser origins](#browser-origins-boxaide_allowed_origins) below.
@@ -404,7 +404,7 @@ By default Boxaide accepts browser requests **only from your own machine**. A pa
 Set it when you want a web interface hosted somewhere else — a deployment of `apps/web`, for example — to talk to your local server. The page still runs entirely in your browser and still fetches mail directly from your machine; the variable only tells your server which page origins it will answer. See [Using the hosted interface](#using-the-hosted-interface) for the full walkthrough.
 
 ```bash
-BOXAIDE_ALLOWED_ORIGINS=https://boxaide.vercel.app boxaide serve
+BOXAIDE_ALLOWED_ORIGINS=https://boxaide.tech boxaide serve
 ```
 
 Rules:

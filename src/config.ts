@@ -23,7 +23,7 @@ export function envNamed(suffix: string): string | undefined {
 /**
  * Origins the browser UI may be served from, beyond loopback.
  * Comma-separated absolute origins in BOXAIDE_ALLOWED_ORIGINS (MAILMUX_* if
- * unset), e.g. https://boxaide.vercel.app,https://mail.example.com
+ * unset), e.g. https://boxaide.tech,https://mail.example.com
  * Defaults to closed: an unset value keeps today's loopback-only behaviour.
  * "*" is deliberately dropped — an any-origin allowlist removes the only
  * defence left against DNS rebinding on a loopback service.
