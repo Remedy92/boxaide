@@ -61,15 +61,34 @@ const POLL_MS = 400;
 const PRESENCE_WINDOW_MS = 40_000;
 
 /**
- * How long a claimed message may stay unanswered before we stop saying an agent
- * is working on it.
+ * How long a claimed message may stay unanswered, WITHOUT PROOF the agent
+ * holding it is alive, before we stop saying an agent is working on it.
  *
  * An agent that took a message and then died leaves no trace: the claim is a
  * database flag, not an open request. Rather than show a spinner forever, the
- * claim expires. Five minutes is far longer than any real answer and short
- * enough that a dead agent does not haunt the pane.
+ * claim expires, and expiring it tells the user the message is gone and must
+ * be sent again.
+ *
+ * The clock runs from the last proof, not from the hand-off. Timing the
+ * hand-off would call a live agent dead for the only reason an answer ever
+ * takes this long — a big question, worked patiently — and the pane would
+ * print "never answered" over an agent that answers two minutes later. Proof
+ * is a Boxaide tool call, or a line on a launched agent's stdout; a dead agent
+ * produces neither, so it still expires five minutes after its last sign of
+ * life.
  */
 const WORK_MAX_MS = 5 * 60_000;
+
+/**
+ * Floor on how often a launched agent's own output may push a presence event.
+ *
+ * That stream is a firehose — Grok narrates its thinking one token per line —
+ * and every line refreshes the same timestamp. Presence only has to stay
+ * inside PRESENCE_WINDOW_MS, so re-announcing it a few times a second buys
+ * nothing and costs an SSE frame each time. A changed tool name is not
+ * throttled: that one is news.
+ */
+const ACTIVITY_EMIT_MS = 5_000;
 
 /**
  * What an agent is doing right now, when it is doing anything.
@@ -87,7 +106,11 @@ export type Work = {
   since: string;
   /** The claiming agent's client name, when it gave one. */
   agent: string | null;
-  /** The last mail tool it called since. Absent until it calls one. */
+  /**
+   * The last tool it started since: a Boxaide tool it called, or, for an agent
+   * Boxaide launched, whatever its own event stream named. Absent until one of
+   * the two reports something.
+   */
   tool: { name: string; at: string } | null;
 };
 
@@ -123,10 +146,17 @@ export class AgentChannel {
   private presenceListeners = new Set<() => void>();
   private waiters: Waiter[] = [];
   private lastSeen: number | null = null;
+  /** When a launched agent's stream last pushed presence. See ACTIVITY_EMIT_MS. */
+  private lastActivityEmit = 0;
   private lastAgent: string | null = null;
   private launchedAgent: string | null = null;
   /** The message an agent has taken and not yet answered. */
-  private work: (Work & { claimedAt: number }) | null = null;
+  private work: (Work & { provenAt: number }) | null = null;
+  /**
+   * Distinct client names that have asked for a message since the launched
+   * agent started. Sized, not read: see `streamSpeaksForWork`.
+   */
+  private askers = new Set<string>();
   /** Highest seq handed to listeners. Advanced only by drain(). */
   private broadcastSeq: number;
   private poll: ReturnType<typeof setInterval> | null = null;
@@ -211,7 +241,7 @@ export class AgentChannel {
   presence(): Presence {
     const now = Date.now();
     const fresh = this.lastSeen !== null && now - this.lastSeen < PRESENCE_WINDOW_MS;
-    if (this.work && now - this.work.claimedAt > WORK_MAX_MS) this.work = null;
+    if (this.work && now - this.work.provenAt > WORK_MAX_MS) this.work = null;
     return {
       waiting: this.waiters.length,
       listening: this.waiters.length > 0 || fresh,
@@ -241,9 +271,43 @@ export class AgentChannel {
   noteToolCall(tool: string): void {
     if (this.work) {
       this.work.tool = { name: tool, at: new Date().toISOString() };
+      // Working the message, not gone. This is the only proof an agent
+      // Boxaide did not launch can offer, and it is enough.
+      this.proveWork();
     }
     // The call itself is proof the agent is alive, work or no work.
     this.touch(null);
+  }
+
+  /**
+   * Records a line from a launched agent's own event stream.
+   *
+   * Same two effects as `noteToolCall` and a stricter claim behind them. An
+   * MCP call proves the agent was alive when it called; a line on the child's
+   * stdout proves the process this server started is alive right now, and
+   * names work that never comes near Boxaide — a file it read, a command it
+   * ran, a sentence it thought. That is the gap this closes: an agent doing
+   * its own work used to look, from here, exactly like an agent that had died.
+   *
+   * Only agents Boxaide launched have a stream to read. A client that
+   * connected over MCP on its own has no child process, so its silence stays
+   * unreadable and the UI says so rather than guessing.
+   */
+  noteAgentActivity(tool: string | null): void {
+    const speaks = this.work !== null && this.streamSpeaksForWork();
+    const renamed = speaks && tool !== null && tool !== this.work?.tool?.name;
+    if (speaks) {
+      if (tool) this.work!.tool = { name: tool, at: new Date().toISOString() };
+      // Reading a file is not answering, but it is not dying either. Whatever
+      // else this line was, the process holding the message just moved.
+      this.proveWork();
+    }
+    // Not touch(): that emits on every call, and this one arrives per line.
+    this.lastSeen = Date.now();
+    if (renamed || this.lastSeen - this.lastActivityEmit >= ACTIVITY_EMIT_MS) {
+      this.lastActivityEmit = this.lastSeen;
+      this.emitPresence();
+    }
   }
 
   /* ---- the long poll ---------------------------------------------------- */
@@ -260,6 +324,10 @@ export class AgentChannel {
     options: { timeoutMs?: number; agent?: string | null } = {},
   ): Promise<Turn | null> {
     const agent = options.agent ?? null;
+    // Asking is what makes a client a candidate for the next hand-off, so this
+    // is the point where a second agent becomes real. An unnamed client counts
+    // as one name: two anonymous clients are still two agents.
+    this.askers.add(agent ?? "");
     this.touch(agent);
     // Back at the loop means done with the last message, answered or abandoned.
     this.work = null;
@@ -339,10 +407,40 @@ export class AgentChannel {
     this.work = {
       seq: turn.seq,
       since: new Date().toISOString(),
-      claimedAt: Date.now(),
+      // The hand-off is itself the first proof: the agent asked, and got one.
+      provenAt: Date.now(),
       agent: agent ?? this.lastAgent,
       tool: null,
     };
+  }
+
+  /**
+   * Restarts the expiry clock: this agent is still on the message.
+   *
+   * Kept separate from `touch` because the two answer different questions.
+   * `touch` says an agent exists; this says the one holding this message has
+   * not abandoned it.
+   */
+  private proveWork(): void {
+    if (this.work) this.work.provenAt = Date.now();
+  }
+
+  /**
+   * Whether a launched agent's stdout may speak for the open claim.
+   *
+   * The stream proves what the child process is doing. It does not prove that
+   * the child is the agent holding the message — HTTP MCP is stateless here,
+   * so a claim cannot be tied back to the client that made it. With one agent
+   * asking, there is nobody else it could be. With two, a launched CLI's file
+   * reads would be drawn as steps under a question Claude Desktop took, and a
+   * silent, dead claimant would be kept alive by the other one's output.
+   *
+   * So the label and the expiry clock are conceded the moment a second name
+   * asks for a message. Liveness is not: that one is about the process, and
+   * the process is provably running either way.
+   */
+  private streamSpeaksForWork(): boolean {
+    return this.launchedAgent !== null && this.askers.size <= 1;
   }
 
   private ensurePoll(): void {
@@ -409,6 +507,10 @@ export class AgentChannel {
   setLaunchedAgent(id: string | null): void {
     if (id === this.launchedAgent) return;
     this.launchedAgent = id;
+    // A fresh process gets a fresh count. Whoever was asking before this one
+    // started may be long gone, and a name from then must not mute the stream
+    // for the rest of the session.
+    this.askers.clear();
     this.emitPresence();
   }
 

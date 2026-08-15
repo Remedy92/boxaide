@@ -218,6 +218,29 @@ describe("AgentLauncher", () => {
     expect(grokArgs.join("\0")).not.toContain("message_send");
   });
 
+  it("asks the chat agent for its event stream, and a run for plain text", () => {
+    // The stream is how the Agent pane knows a launched CLI is still working
+    // while it does its own file and shell work, calling nothing here.
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const claudeArgs = claude.args!(CTX);
+    expect(claudeArgs[claudeArgs.indexOf("--output-format") + 1]).toBe(
+      "stream-json",
+    );
+    expect(claudeArgs).toContain("--verbose");
+    expect(claude.readEvent).toBeTypeOf("function");
+
+    const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
+    const grokArgs = grok.args!(CTX);
+    expect(grokArgs[grokArgs.indexOf("--output-format") + 1]).toBe(
+      "streaming-json",
+    );
+    expect(grok.readEvent).toBeTypeOf("function");
+
+    // A scheduled run has no pane to update, and its log is read by a human.
+    expect(claude.runArgs!(CTX, "do the thing")).not.toContain("--output-format");
+    expect(grok.runArgs!(CTX, "do the thing")).not.toContain("--output-format");
+  });
+
   it("leaves Grok's own web tools at the CLI default on a one-shot run", () => {
     const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
     expect(grok.runArgs!(CTX, "do the thing")).not.toContain(

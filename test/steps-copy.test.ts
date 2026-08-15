@@ -67,7 +67,7 @@ describe("stepsHeadline", () => {
     ).toBe("Working");
   });
 
-  it("names the silence when last-seen is stale", () => {
+  it("keeps the claim and downgrades to no update when last-seen is stale", () => {
     expect(
       stepsHeadline({
         running: true,
@@ -77,7 +77,7 @@ describe("stepsHeadline", () => {
         took: null,
         now,
       }),
-    ).toBe("No word from your agent for 45s");
+    ).toBe("Working — no update for 45s");
   });
 
   it("does not invent a duration when last-seen is missing", () => {
@@ -90,7 +90,7 @@ describe("stepsHeadline", () => {
         took: null,
         now,
       }),
-    ).toBe("No word from your agent");
+    ).toBe("Working — no update yet");
   });
 
   it("folds to the activity count after the answer", () => {

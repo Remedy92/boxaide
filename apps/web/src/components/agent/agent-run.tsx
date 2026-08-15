@@ -12,7 +12,14 @@ import { formatClock, stepsHeadline, workStale } from "./steps-copy";
 
 export { groupRuns, type Run };
 
-/** Plain words for the mail tools, so a step reads as an action, not an API. */
+/**
+ * Plain words for a tool, so a step reads as an action, not an API.
+ *
+ * Two vocabularies land here. Boxaide's own tools arrive from the server; a
+ * launched CLI's private tools arrive from its event stream, under whichever
+ * names that CLI uses, so both spellings of the same act are listed. Anything
+ * unlisted falls back to its bare name — a wrong guess would be worse.
+ */
 const TOOL_WORDS: Record<string, string> = {
   accounts_list: "Checking which mailboxes are connected",
   messages_list: "Reading your inbox",
@@ -25,6 +32,30 @@ const TOOL_WORDS: Record<string, string> = {
   drafts_list: "Reading your drafts",
   draft_delete: "Deleting a draft",
   folders_list: "Listing folders",
+
+  // Claude Code's tools, then Grok's, as their streams name them.
+  Read: "Reading a file",
+  Write: "Writing a file",
+  Edit: "Editing a file",
+  Bash: "Running a command",
+  BashOutput: "Reading command output",
+  Glob: "Looking for files",
+  Grep: "Searching through files",
+  WebSearch: "Searching the web",
+  WebFetch: "Reading a web page",
+  TodoWrite: "Planning its next steps",
+  Task: "Handing part of this to a subagent",
+  read_file: "Reading a file",
+  write: "Writing a file",
+  search_replace: "Editing a file",
+  run_terminal_command: "Running a command",
+  get_command_or_subagent_output: "Reading command output",
+  list_dir: "Looking for files",
+  grep: "Searching through files",
+  web_search: "Searching the web",
+  web_fetch: "Reading a web page",
+  todo_write: "Planning its next steps",
+  spawn_subagent: "Handing part of this to a subagent",
 };
 
 export function toolWords(name: string): string {

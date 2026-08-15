@@ -1,4 +1,4 @@
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
 import { randomBytes } from "node:crypto";
 import { existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -165,6 +165,131 @@ describe("AgentChannel", () => {
 
     channel.noteToolCall("messages_search");
     expect(channel.presence().working?.tool?.name).toBe("messages_search");
+  });
+
+  it("keeps a launched agent present on its own output, with no MCP call", async () => {
+    const { channel } = make();
+    channel.setLaunchedAgent("claude-code");
+    const parked = channel.awaitUserTurn({ timeoutMs: 2_000 });
+    channel.post({ role: "user", text: "migrate my outreach" });
+    await parked;
+
+    // The gap this closes: the agent is reading files and running commands in
+    // its own process, and calls no Boxaide tool while it does.
+    channel.noteAgentActivity("Read");
+    expect(channel.presence().working?.tool?.name).toBe("Read");
+    channel.noteAgentActivity("Bash");
+    expect(channel.presence().working?.tool?.name).toBe("Bash");
+
+    // A line that names no tool still proves the process is alive.
+    channel.noteAgentActivity(null);
+    expect(channel.presence().listening).toBe(true);
+    expect(channel.presence().working?.tool?.name).toBe("Bash");
+  });
+
+  it("does not push a presence event for every line of a firehose", async () => {
+    const { channel } = make();
+    channel.setLaunchedAgent("grok");
+    channel.post({ role: "user", text: "summarise today" });
+    await channel.awaitUserTurn({ timeoutMs: 1_000 });
+
+    let n = 0;
+    const off = channel.subscribePresence(() => {
+      n += 1;
+    });
+
+    // Grok narrates its thinking one token per line. Same tool, no news.
+    channel.noteAgentActivity("read_file");
+    for (let i = 0; i < 500; i += 1) channel.noteAgentActivity(null);
+    expect(n).toBe(1);
+
+    // A different tool is news, and goes out at once.
+    channel.noteAgentActivity("run_terminal_command");
+    expect(n).toBe(2);
+    off();
+  });
+
+  it("expires a claim five minutes after the last proof, not the hand-off", async () => {
+    vi.useFakeTimers();
+    try {
+      const { channel } = make();
+      channel.setLaunchedAgent("claude-code");
+      channel.post({ role: "user", text: "migrate everything into here" });
+      // Already on disk, so this claims without parking and starts no timer.
+      await channel.awaitUserTurn({ timeoutMs: 1_000 });
+      expect(channel.presence().working).not.toBeNull();
+
+      // Eight minutes of its own work — well past WORK_MAX_MS — with one line
+      // of stdout in the middle and not a single Boxaide call.
+      vi.advanceTimersByTime(4 * 60_000);
+      channel.noteAgentActivity("Read");
+      vi.advanceTimersByTime(4 * 60_000);
+      // Timing the hand-off would have printed "never answered" three minutes
+      // ago, over an agent that is about to answer.
+      expect(channel.presence().working).not.toBeNull();
+
+      // Now it stops dead. Five minutes after the last proof, the claim goes.
+      vi.advanceTimersByTime(5 * 60_000 + 1_000);
+      expect(channel.presence().working).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up the claim when a Boxaide tool call is the only proof", async () => {
+    vi.useFakeTimers();
+    try {
+      const { channel } = make();
+      channel.post({ role: "user", text: "find the invoice" });
+      await channel.awaitUserTurn({ timeoutMs: 1_000 });
+
+      // No launched process here, so a mail tool call is all an agent can
+      // offer. It counts: the agent that called it is holding this message.
+      vi.advanceTimersByTime(4 * 60_000);
+      channel.noteToolCall("messages_search");
+      vi.advanceTimersByTime(4 * 60_000);
+      expect(channel.presence().working).not.toBeNull();
+
+      vi.advanceTimersByTime(5 * 60_000 + 1_000);
+      expect(channel.presence().working).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("will not let a launched agent's output speak for another agent's claim", async () => {
+    const { channel } = make();
+    channel.setLaunchedAgent("claude-code");
+
+    // Two clients ask for messages, so Boxaide cannot tell which of them holds
+    // the open one — HTTP MCP gives a claim no session to trace back.
+    channel.post({ role: "user", text: "one" });
+    await channel.awaitUserTurn({ agent: "claude-desktop", timeoutMs: 1_000 });
+    channel.post({ role: "user", text: "two" });
+    await channel.awaitUserTurn({ agent: "claude-code", timeoutMs: 1_000 });
+
+    // The launched CLI is reading files. That may be nothing to do with the
+    // question on screen, so it must not be drawn as a step under it.
+    channel.noteAgentActivity("Read");
+    expect(channel.presence().working?.tool).toBeNull();
+
+    // The process is still provably running, and presence still says so.
+    expect(channel.presence().listening).toBe(true);
+  });
+
+  it("re-trusts the stream once a new launched agent starts alone", async () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "one" });
+    await channel.awaitUserTurn({ agent: "claude-desktop", timeoutMs: 1_000 });
+
+    // Start counts from the new process: the old client may be long gone, and
+    // its name must not mute the stream for the rest of the session.
+    channel.setLaunchedAgent("claude-code");
+    channel.post({ role: "user", text: "two" });
+    await channel.awaitUserTurn({ agent: "claude-code", timeoutMs: 1_000 });
+
+    channel.noteAgentActivity("Bash");
+    expect(channel.presence().working?.tool?.name).toBe("Bash");
   });
 
   it("reports a claimed message as delivered, so the UI never calls it queued", async () => {

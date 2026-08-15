@@ -1,0 +1,116 @@
+import { describe, expect, it } from "vitest";
+import {
+  lineSplitter,
+  readClaudeEvent,
+  readGrokEvent,
+} from "../src/agent/agent-stream.js";
+
+/**
+ * The fixtures below are real lines, trimmed of their bulk: captured by running
+ * `claude --output-format stream-json --verbose` and `grok --output-format
+ * streaming-json` against a prompt that reads a file. Hand-written shapes would
+ * only prove this file agrees with itself.
+ */
+describe("readClaudeEvent", () => {
+  it("names the tool on an assistant tool_use block", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "thinking", thinking: "..." },
+          { type: "tool_use", name: "Read", input: { file_path: "/etc/hosts" } },
+        ],
+      },
+    });
+    expect(readClaudeEvent(line)).toBe("Read");
+  });
+
+  it("strips the MCP prefix so Boxaide's own tools keep one name", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [{ type: "tool_use", name: "mcp__boxaide__messages_list" }],
+      },
+    });
+    expect(readClaudeEvent(line)).toBe("messages_list");
+  });
+
+  it("names nothing for text, results and hook records", () => {
+    for (const event of [
+      { type: "assistant", message: { content: [{ type: "text", text: "hi" }] } },
+      { type: "user", message: { content: [{ type: "tool_result" }] } },
+      { type: "system", subtype: "hook_started", hook_name: "SessionStart" },
+      { type: "result", subtype: "success" },
+    ]) {
+      expect(readClaudeEvent(JSON.stringify(event))).toBeNull();
+    }
+  });
+
+  it("survives a line that is not JSON", () => {
+    expect(readClaudeEvent("Loading...")).toBeNull();
+    expect(readClaudeEvent("{ truncated")).toBeNull();
+  });
+});
+
+describe("readGrokEvent", () => {
+  it("names the tool on a tool_call line", () => {
+    const line = JSON.stringify({
+      type: "tool_call",
+      toolCallId: "call-1",
+      title: "read_file",
+      toolName: "read_file",
+      rawInput: { target_file: "/etc/hosts" },
+    });
+    expect(readGrokEvent(line)).toBe("read_file");
+  });
+
+  it("ignores the updates that follow it", () => {
+    const line = JSON.stringify({
+      type: "tool_call_update",
+      toolCallId: "call-1",
+      status: "completed",
+    });
+    expect(readGrokEvent(line)).toBeNull();
+  });
+
+  it("names nothing for thought and text deltas", () => {
+    expect(readGrokEvent(JSON.stringify({ type: "thought", data: "The" }))).toBeNull();
+    expect(readGrokEvent(JSON.stringify({ type: "text", data: "ok" }))).toBeNull();
+  });
+});
+
+describe("lineSplitter", () => {
+  it("joins a JSON object split across chunks", () => {
+    const seen: string[] = [];
+    const feed = lineSplitter((line) => seen.push(line));
+    feed('{"type":"tool_');
+    expect(seen).toEqual([]);
+    feed('call","toolName":"grep"}\n');
+    expect(seen).toEqual(['{"type":"tool_call","toolName":"grep"}']);
+  });
+
+  it("emits every line in one chunk, and drops blank ones", () => {
+    const seen: string[] = [];
+    lineSplitter((line) => seen.push(line))("a\n\nb\n");
+    expect(seen).toEqual(["a", "b"]);
+  });
+
+  it("holds a partial line back until its newline arrives", () => {
+    const seen: string[] = [];
+    const feed = lineSplitter((line) => seen.push(line));
+    feed("whole\npart");
+    expect(seen).toEqual(["whole"]);
+    feed("ial\n");
+    expect(seen).toEqual(["whole", "partial"]);
+  });
+
+  it("drops an oversized line instead of buffering it forever", () => {
+    const seen: string[] = [];
+    const feed = lineSplitter((line) => seen.push(line));
+    feed("x".repeat(300_000));
+    feed("still the same line\n");
+    expect(seen).toEqual([]);
+    feed("next\n");
+    expect(seen).toEqual(["next"]);
+  });
+});
