@@ -376,6 +376,12 @@ POST `/api/outreach/outbox/:id/reject`, GET/POST `/api/outreach/suppression`,
 DELETE `/api/outreach/suppression/:email`,
 GET `/api/outreach/badge` → `{ pending: n }` (tray + badge poll this).
 
+Updates: GET `/api/update` → the whole `UpdateState`, POST `/api/update/check`,
+POST `/api/update/download`, POST `/api/update/install`. Every one of the four
+answers with the same state object, so the rail never derives a status of its
+own. 409 when the command does not apply — a self-hosted server cannot install,
+and an update that is not downloaded cannot be started.
+
 Follow REST conventions in `src/api/routes.ts`: `errorBody` shape, limits
 clamped to `MAX_LIMIT`, 404 on unknown ids.
 

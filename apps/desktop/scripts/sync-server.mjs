@@ -34,6 +34,18 @@ const sources = [
 ];
 
 /**
+ * Dependencies the shell has and the server does not.
+ *
+ * The check below is an equality check on purpose, so this list is the only
+ * way a desktop-only package gets in — and adding one is a deliberate line in
+ * a diff rather than drift nobody notices.
+ *
+ * electron-updater: the auto-updater. It talks to Squirrel and to the GitHub
+ * release feed, neither of which exists for `boxaide serve`.
+ */
+const DESKTOP_ONLY = new Set(["electron-updater"]);
+
+/**
  * The desktop package restates the server's runtime dependencies instead of
  * depending on the repository root, so Electron gets its own installed tree.
  * That restatement is the one thing here that can silently drift, so it is
@@ -51,6 +63,7 @@ export async function assertServerDepsMatch() {
     else if (mine !== range) problems.push(`"${name}" is "${mine}", root has "${range}"`);
   }
   for (const name of Object.keys(desktop.dependencies ?? {})) {
+    if (DESKTOP_ONLY.has(name)) continue;
     if (!(name in (root.dependencies ?? {}))) {
       problems.push(`"${name}" is not a dependency of the server any more`);
     }

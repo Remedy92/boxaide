@@ -89,6 +89,12 @@ if [ -z "$VER" ]; then
 fi
 
 DMG="apps/desktop/release/boxaide-mac.dmg"
+# The auto-updater's feed. `latest-mac.yml` is what a running Boxaide reads to
+# learn a version exists; the zip is what Squirrel installs from. A release
+# with only the dmg leaves every installed copy on its current version, and
+# says nothing about it.
+ZIP="apps/desktop/release/boxaide-mac.zip"
+FEED="apps/desktop/release/latest-mac.yml"
 NOTES="$(git log --format='- %s' "${TAG}..HEAD")"
 
 printf 'ship %s\n' "$VER"
@@ -122,9 +128,21 @@ if ! ( cd apps/desktop && npm run dist:mac ); then
   restore_versions
   die "dist:mac failed; version files restored"
 fi
-[ -f "$DMG" ] || {
+for artifact in "$DMG" "$ZIP" "$FEED"; do
+  [ -f "$artifact" ] || {
+    restore_versions
+    die "expected $artifact"
+  }
+done
+
+# The feed states the version the updater will offer. If it disagrees with the
+# version being cut, every installed copy either sees nothing or is offered the
+# wrong build — and the mistake is only visible days later, on somebody else's
+# Mac. Check it here, where the fix is free.
+FEED_VER="$(sed -n 's/^version: *//p' "$FEED" | head -1 | tr -d '\r')"
+[ "$FEED_VER" = "$VER" ] || {
   restore_versions
-  die "expected $DMG"
+  die "latest-mac.yml says $FEED_VER, shipping $VER — rebuild the dmg"
 }
 
 # dist:mac notarised and stapled. Prove it before anything reaches GitHub;
@@ -149,7 +167,7 @@ gh release create "v$VER" \
   --title "Boxaide $VER" \
   --notes "$BODY" \
   --latest \
-  "$DMG"
+  "$DMG" "$ZIP" "$FEED"
 
 printf 'shipped https://github.com/Remedy92/boxaide/releases/latest/download/boxaide-mac.dmg\n'
 printf 'commit  %s\n' "$(git rev-parse --short HEAD)"

@@ -9,6 +9,9 @@ import type { Platform } from "../platform.js";
 import { registerCrmRoutes } from "../crm/routes.js";
 import { registerAutomationRoutes } from "../automation/routes.js";
 import { registerOutreachRoutes } from "../outreach/routes.js";
+import { registerUpdateRoutes } from "../update/routes.js";
+import type { UpdateService } from "../update/service.js";
+import { appVersion } from "../version.js";
 import type { AccountCredentials, DraftInput } from "../provider/types.js";
 import { passwordCredentials } from "../provider/types.js";
 
@@ -351,6 +354,7 @@ export function createApi(
   channel?: AgentChannel,
   launcher?: AgentLauncher,
   platform?: Platform,
+  update?: UpdateService,
 ): Hono {
   const app = new Hono();
 
@@ -368,8 +372,11 @@ export function createApi(
     applyCors(c, origin);
   });
 
+  // The version is the running build's, read from package.json. It was the
+  // literal "0.1.0" through every release up to 0.2.9 — which is exactly the
+  // kind of stale answer an update check must not be built on.
   app.get("/api/health", (c) =>
-    c.json({ ok: true, service: "boxaide", version: "0.1.0" }),
+    c.json({ ok: true, service: "boxaide", version: appVersion() }),
   );
 
   app.get("/api/meta", (c) =>
@@ -647,6 +654,10 @@ export function createApi(
     registerAutomationRoutes(app, platform);
     registerOutreachRoutes(app, platform);
   }
+  // Absent in an embedder that builds its own API (tests, `boxaide mcp`), so
+  // the UI's "is there an updater here" question is answered by a 404 rather
+  // than by a state object that describes nothing.
+  if (update) registerUpdateRoutes(app, update);
 
   return app;
 }

@@ -13,7 +13,7 @@
     "dev": "node ../../scripts/desktop.mjs",
     "smoke": "node ../../scripts/desktop.mjs --smoke",
     "predist": "npm run sync",
-    "dist": "electron-builder",
+    "dist": "electron-builder --publish never",
     "postinstall": "electron-builder install-app-deps",
     "dist:mac": "node ../../scripts/desktop.mjs --dist"
   },
@@ -22,6 +22,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "better-sqlite3": "^13.0.3",
     "cron-parser": "^5.9.0",
+    "electron-updater": "^6.6.2",
     "hono": "^4.13.1",
     "imapflow": "^1.6.6",
     "mailparser": "^3.9.15",

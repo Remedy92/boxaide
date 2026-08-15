@@ -64,17 +64,34 @@ compression: maximum
 # Rebuilds better-sqlite3 against Electron's ABI while packaging.
 npmRebuild: true
 
-# Upload is `gh release`, after this script signs. A GH_TOKEN in the
-# environment otherwise makes electron-builder try to publish and crash
-# in updateInfoBuilder after the dmg is already written.
-publish: null
+# Two jobs, neither of them uploading.
+#
+# It writes `app-update.yml` into the bundle, which is the only way
+# electron-updater knows where to look, and it writes `latest-mac.yml` beside
+# the artifacts — the file that names the zip and its sha512. Without this
+# block the app ships with no feed and the updater fails on every check.
+#
+# Upload stays `gh release`, in scripts/ship.sh, after signing. Every
+# electron-builder invocation passes `--publish never`: a GH_TOKEN in the
+# environment otherwise makes it publish on its own, from an unsigned pack.
+publish:
+  provider: github
+  owner: Remedy92
+  repo: boxaide
 
 # Version-free file names, so the download page can link to
 # /releases/latest/download/<name> and never be edited again. The names are
 # repeated in apps/web/src/app/install/page.tsx — change one, change the other.
 mac:
-  artifactName: boxaide-mac.dmg
-  target: dmg
+  # `${ext}` rather than a literal, because two targets share this name now:
+  # boxaide-mac.dmg for a person, boxaide-mac.zip for the updater.
+  artifactName: boxaide-mac.${ext}
+  # The dmg is the download. The zip is what Squirrel installs from — it is
+  # the only mac format electron-updater accepts, and it must be built from
+  # the SIGNED app, so scripts/sign-mac.sh is what produces both.
+  target:
+    - dmg
+    - zip
   category: public.app-category.productivity
   # Signs with the Developer ID Application identity from the login keychain
   # (electron-builder auto-discovers it). Hardened runtime is a notarization

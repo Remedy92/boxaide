@@ -14,3 +14,9 @@ After a land, from the main checkout (`~/Projects/boxaide`), never a worktree:
 ```
 
 `ship.sh` is the only publisher. A hook on `master` only reminds.
+
+A release now carries three files, not one: `boxaide-mac.dmg` for a visitor,
+plus `boxaide-mac.zip` and `latest-mac.yml` for the in-app updater. All three
+come out of `scripts/sign-mac.sh`, after signing, and `ship.sh` refuses to
+publish unless `latest-mac.yml` names the version being cut. A release with
+only the dmg leaves every installed copy on its current version, silently.

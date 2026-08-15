@@ -49,6 +49,7 @@ import type {
   CampaignStatus,
   SendResult,
   SuppressionRow,
+  UpdateState,
 } from "@/lib/types";
 
 /** Everything an endpoint needs: which server, which token, how to cancel. */
@@ -936,6 +937,57 @@ export async function removeSuppression(
 /** One COUNT. Polled every 30s by the rail badge; it must stay this cheap. */
 export function getOutreachBadge(ctx: Ctx): Promise<OutreachBadge> {
   return request<OutreachBadge>("/api/outreach/badge", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* updates                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * All four return the same state object, so a command's reply IS the new
+ * state and the caller never has to re-read to find out what happened.
+ *
+ * A server built before this endpoint answers 404. That is a fact about the
+ * server, not an error to show: `useUpdate` turns it into "no updater here".
+ */
+export function getUpdate(ctx: Ctx): Promise<UpdateState> {
+  return request<UpdateState>("/api/update", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+export function checkForUpdate(ctx: Ctx): Promise<UpdateState> {
+  return request<UpdateState>("/api/update/check", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/** Returns as soon as the download starts; progress arrives through getUpdate. */
+export function downloadUpdate(ctx: Ctx): Promise<UpdateState> {
+  return request<UpdateState>("/api/update/download", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * The app quits and relaunches into the new version. The reply arrives first,
+ * so this resolves — and then the page it was called from goes away with it.
+ */
+export function installUpdate(ctx: Ctx): Promise<UpdateState> {
+  return request<UpdateState>("/api/update/install", {
+    method: "POST",
     baseUrl: ctx.baseUrl,
     token: ctx.token,
     signal: ctx.signal,
