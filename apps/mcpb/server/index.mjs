@@ -96,8 +96,13 @@ function expandHome(p) {
  * Forward one JSON-RPC message. Returns the reply object, or null when there
  * is nothing to write back (notifications — the server answers those 202).
  */
+const inflight = new Map();
+
 async function forward(message) {
   const isRequest = message !== null && typeof message === "object" && "id" in message;
+  const id = isRequest ? message.id : undefined;
+  const controller = new AbortController();
+  if (id !== undefined && id !== null) inflight.set(id, controller);
 
   const send = async (bearer) => {
     const headers = { "content-type": "application/json" };
@@ -106,6 +111,7 @@ async function forward(message) {
       method: "POST",
       headers,
       body: JSON.stringify(message),
+      signal: controller.signal,
     });
   };
 
@@ -127,7 +133,10 @@ async function forward(message) {
       }
     }
   } catch {
+    if (controller.signal.aborted) return null;
     return isRequest ? offlineAnswer(message) : null;
+  } finally {
+    if (id !== undefined && id !== null) inflight.delete(id);
   }
 
   if (response.status === 202) return null;
@@ -228,6 +237,7 @@ process.stdin.on("data", (chunk) => {
 // whatever closed stdin, and an immediate exit would drop them.
 process.stdin.on("end", () => {
   stdinClosed = true;
+  for (const controller of inflight.values()) controller.abort();
   maybeExit();
 });
 
@@ -241,6 +251,16 @@ function handleLine(line) {
     message = JSON.parse(line);
   } catch {
     writeLine(rpcError(null, -32700, "Parse error"));
+    return;
+  }
+  // Closing the HTTP POST is cancellation on this transport. The notification
+  // cannot abort a POST already in flight unless we do it here — the server
+  // is stateless and would just 202 the cancel as a separate request.
+  if (message?.method === "notifications/cancelled") {
+    const requestId = message.params?.requestId;
+    if (requestId !== undefined && requestId !== null) {
+      inflight.get(requestId)?.abort();
+    }
     return;
   }
   // Requests run concurrently on purpose: chat_await_message long-polls for up

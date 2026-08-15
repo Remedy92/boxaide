@@ -3,6 +3,7 @@ import {
   lineSplitter,
   readClaudeEvent,
   readGrokEvent,
+  readOpenCodeEvent,
 } from "../src/agent/agent-stream.js";
 
 /**
@@ -76,6 +77,42 @@ describe("readGrokEvent", () => {
   it("names nothing for thought and text deltas", () => {
     expect(readGrokEvent(JSON.stringify({ type: "thought", data: "The" }))).toBeNull();
     expect(readGrokEvent(JSON.stringify({ type: "text", data: "ok" }))).toBeNull();
+  });
+});
+
+describe("readOpenCodeEvent", () => {
+  it("names the tool on a tool_use line", () => {
+    const line = JSON.stringify({
+      type: "tool_use",
+      part: {
+        type: "tool",
+        tool: "read",
+        callID: "call-1",
+        state: { status: "completed", input: { filePath: "/etc/hosts" } },
+      },
+    });
+    expect(readOpenCodeEvent(line)).toBe("read");
+  });
+
+  it("strips the MCP prefix so Boxaide's own tools keep one name", () => {
+    const line = JSON.stringify({
+      type: "tool_use",
+      part: { type: "tool", tool: "boxaide_chat_await_message" },
+    });
+    expect(readOpenCodeEvent(line)).toBe("chat_await_message");
+  });
+
+  it("names nothing for step and text lines", () => {
+    expect(
+      readOpenCodeEvent(
+        JSON.stringify({ type: "step_start", part: { type: "step-start" } }),
+      ),
+    ).toBeNull();
+    expect(
+      readOpenCodeEvent(
+        JSON.stringify({ type: "text", part: { type: "text", text: "OK" } }),
+      ),
+    ).toBeNull();
   });
 });
 

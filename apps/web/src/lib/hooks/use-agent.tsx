@@ -36,6 +36,7 @@ const IDLE: AgentPresence = {
   lastAgent: null,
   launchedAgent: null,
   working: null,
+  dropped: [],
 };
 
 /**
@@ -44,7 +45,10 @@ const IDLE: AgentPresence = {
  * pane would show a running indicator keyed off a field that is never there.
  */
 function normalise(presence: AgentPresence): AgentPresence {
-  return presence.working ? presence : { ...presence, working: null };
+  return {
+    ...presence,
+    working: presence.working ?? null,
+  };
 }
 
 /** Reconnect backoff. Capped low: this is a server on the same machine. */
@@ -62,14 +66,13 @@ export type AgentConversation = {
   presence: AgentPresence;
   connection: AgentConnection;
   /**
-   * User turns an agent has taken. A hand-off is permanent — the server will
-   * never offer a claimed message to a second agent — so this is what
-   * separates "still queued" from "taken and never answered".
+   * User turns that will not be handed over again. A live lease is `working`,
+   * not this: this is the dead-letter list, plus history rows still marked
+   * delivered with no answer on an older server that cannot re-queue.
    *
-   * Two sources, because neither alone is enough. `turn.delivered` is correct
-   * on history but frozen at false on the live stream frame, which the server
-   * writes before the hand-off; the seqs seen in `presence.working` cover
-   * exactly that gap, for this session.
+   * `turn.delivered` is frozen at false on the live stream frame (written
+   * before the hand-off). `presence.dropped` and `presence.working` cover
+   * that gap for this session.
    */
   claimed: ReadonlySet<number>;
   /** Set when the last send or clear failed. Cleared on the next attempt. */
@@ -92,7 +95,15 @@ function merge(previous: AgentTurn[], incoming: AgentTurn[]): AgentTurn[] {
   const bySeq = new Map(previous.map((turn) => [turn.seq, turn]));
   let changed = false;
   for (const turn of incoming) {
-    if (bySeq.has(turn.seq)) continue;
+    const existing = bySeq.get(turn.seq);
+    if (existing) {
+      if (existing.delivered === turn.delivered && existing.replyTo === turn.replyTo) {
+        continue;
+      }
+      bySeq.set(turn.seq, { ...existing, delivered: turn.delivered, replyTo: turn.replyTo });
+      changed = true;
+      continue;
+    }
     bySeq.set(turn.seq, turn);
     changed = true;
   }
@@ -100,11 +111,16 @@ function merge(previous: AgentTurn[], incoming: AgentTurn[]): AgentTurn[] {
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
 }
 
-/** Which user turns this payload proves were handed to an agent. */
+/** User turns that will not be offered again. */
 function claimedIn(turns: AgentTurn[], presence: AgentPresence): number[] {
-  const seqs = turns.filter((turn) => turn.delivered).map((turn) => turn.seq);
-  if (presence.working) seqs.push(presence.working.seq);
-  return seqs;
+  // New servers name the dead-letter list. Do not also trust `delivered` on
+  // a live turn: that flag is a lease, and a re-queue does not rewrite the
+  // stream frame the client already stored.
+  if (presence.dropped !== undefined) return [...presence.dropped];
+  const workingSeq = presence.working?.seq;
+  return turns
+    .filter((turn) => turn.delivered && turn.seq !== workingSeq)
+    .map((turn) => turn.seq);
 }
 
 const AgentContext = React.createContext<AgentConversation | null>(null);
@@ -146,26 +162,10 @@ function AgentSession({
   );
   const [error, setError] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
-  const [claimed, setClaimed] = React.useState<ReadonlySet<number>>(
-    () => new Set<number>(),
-  );
-
-  /* Every turn the server has ever reported as claimed, from either source.
-     Derived state, so it survives a reconnect and needs no effect: the history
-     refetch re-states the flag and the stream re-states presence. */
-  const noteClaims = React.useCallback(
-    (seqs: Iterable<number>) =>
-      setClaimed((prev) => {
-        let next: Set<number> | null = null;
-        for (const seq of seqs) {
-          if (prev.has(seq)) continue;
-          next ??= new Set(prev);
-          next.add(seq);
-        }
-        return next ?? prev;
-      }),
-    [],
-  );
+  const claimed = React.useMemo(() => {
+    const seqs = new Set<number>(claimedIn(turns, presence));
+    return seqs;
+  }, [turns, presence]);
 
   React.useEffect(() => {
     if (!enabled) return;
@@ -184,7 +184,6 @@ function AgentSession({
           const state = await getAgentState({ ...ctx, signal: abort.signal });
           if (stopped) return;
           setTurns((prev) => merge(prev, state.turns));
-          noteClaims(claimedIn(state.turns, state.presence));
           setPresence(normalise(state.presence));
           setConnection("live");
           attempt = 0;
@@ -193,10 +192,7 @@ function AgentSession({
             { ...ctx, signal: abort.signal },
             {
               turn: (turn) => setTurns((prev) => merge(prev, [turn])),
-              presence: (next) => {
-                noteClaims(claimedIn([], next));
-                setPresence(normalise(next));
-              },
+              presence: (next) => setPresence(normalise(next)),
             },
           );
           if (stopped) return;
@@ -225,7 +221,7 @@ function AgentSession({
       stopped = true;
       abort.abort();
     };
-  }, [ctx, enabled, noteClaims]);
+  }, [ctx, enabled]);
 
   const send = React.useCallback(
     async (text: string) => {
@@ -238,7 +234,6 @@ function AgentSession({
         // The stream will deliver this turn too; merge() makes the duplicate
         // free, and painting it now is what keeps the composer feeling instant.
         setTurns((prev) => merge(prev, [result.turn]));
-        noteClaims(claimedIn([result.turn], result.presence));
         setPresence(normalise(result.presence));
       } catch (err) {
         setError(friendlyError(err instanceof Error ? err.message : String(err)));
@@ -246,7 +241,7 @@ function AgentSession({
         setSending(false);
       }
     },
-    [ctx, noteClaims],
+    [ctx],
   );
 
   const clear = React.useCallback(async () => {
@@ -254,7 +249,6 @@ function AgentSession({
     try {
       await clearAgentConversation(ctx);
       setTurns([]);
-      setClaimed(new Set());
     } catch (err) {
       setError(friendlyError(err instanceof Error ? err.message : String(err)));
     }

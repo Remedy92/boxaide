@@ -30,7 +30,7 @@ function SelectTrigger({
   children,
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Trigger> & {
-  size?: "sm" | "default"
+  size?: "xs" | "sm" | "default"
 }) {
   return (
     <SelectPrimitive.Trigger
@@ -40,20 +40,29 @@ function SelectTrigger({
         // §3: no inline shadow, and the focus ring is the global 2px accent
         // outline — a second box-shadow ring would double-draw it. §6.9's
         // border tokens replace shadcn's `border-input` / `ring-ring` pair.
-        "flex w-fit items-center justify-between gap-2 rounded-[var(--radius-md)] border border-border-control bg-surface-1 px-2 text-[13px] text-fg whitespace-nowrap",
-        "transition-[border-color] duration-[var(--dur-fast)] hover:border-[var(--text-secondary)] focus-visible:border-accent",
+        "flex w-fit items-center justify-between gap-1.5 rounded-[var(--radius-md)] border border-border-control bg-surface-1 px-2 text-fg whitespace-nowrap",
+        "transition-[border-color,background-color,color] duration-[var(--dur-fast)] hover:border-[var(--text-secondary)] focus-visible:border-accent",
         "disabled:cursor-not-allowed disabled:text-fg-disabled aria-disabled:cursor-not-allowed aria-disabled:text-fg-disabled",
         "aria-invalid:border-[var(--danger)] data-[placeholder]:text-fg-tertiary",
-        "data-[size=default]:h-8 data-[size=sm]:h-8",
-        "*:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2",
-        "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 [&_svg:not([class*='text-'])]:text-fg-tertiary",
+        size === "xs"
+          ? "h-6 text-[11px] [&_svg:not([class*='size-'])]:size-3"
+          : size === "sm"
+            ? "h-7 text-[12px] [&_svg:not([class*='size-'])]:size-3.5"
+            : "h-8 text-[13px] [&_svg:not([class*='size-'])]:size-4",
+        "*:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-1.5",
+        "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='text-'])]:text-fg-tertiary",
         className
       )}
       {...props}
     >
       {children}
       <SelectPrimitive.Icon asChild>
-        <ChevronDownIcon className="size-4 opacity-50" />
+        <ChevronDownIcon
+          className={cn(
+            size === "xs" ? "size-3" : size === "sm" ? "size-3.5" : "size-4",
+            "opacity-50 text-fg-tertiary"
+          )}
+        />
       </SelectPrimitive.Icon>
     </SelectPrimitive.Trigger>
   )
@@ -62,8 +71,8 @@ function SelectTrigger({
 function SelectContent({
   className,
   children,
-  position = "item-aligned",
-  align = "center",
+  position = "popper",
+  align = "start",
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Content>) {
   return (
@@ -71,7 +80,7 @@ function SelectContent({
       <SelectPrimitive.Content
         data-slot="select-content"
         className={cn(
-          "relative z-50 max-h-(--radix-select-content-available-height) min-w-[8rem] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-md border bg-surface-2 text-popover-foreground shadow-[var(--shadow-overlay)] data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
+          "relative z-50 max-h-(--radix-select-content-available-height) min-w-[8rem] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-[var(--radius-md)] border border-border-subtle bg-surface-2 text-fg shadow-[var(--shadow-overlay)] data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
           position === "popper" &&
             "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
           className
@@ -103,7 +112,10 @@ function SelectLabel({
   return (
     <SelectPrimitive.Label
       data-slot="select-label"
-      className={cn("px-2 py-1.5 text-xs text-muted-foreground", className)}
+      className={cn(
+        "px-2 py-1 text-[11px] font-medium tracking-[var(--tracking-label)] text-fg-tertiary uppercase",
+        className
+      )}
       {...props}
     />
   )
@@ -118,17 +130,17 @@ function SelectItem({
     <SelectPrimitive.Item
       data-slot="select-item"
       className={cn(
-        "relative flex w-full cursor-default items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none focus:bg-surface-hover focus:text-fg data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 [&_svg:not([class*='text-'])]:text-muted-foreground *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
+        "relative flex w-full cursor-default items-center gap-2 rounded-[var(--radius-sm)] py-1.5 pr-7 pl-2 text-[12px] text-fg outline-hidden select-none focus:bg-surface-hover focus:text-fg data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg-tertiary *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
         className
       )}
       {...props}
     >
       <span
         data-slot="select-item-indicator"
-        className="absolute right-2 flex size-3.5 items-center justify-center"
+        className="absolute right-2 flex size-3.5 items-center justify-center text-fg-secondary"
       >
         <SelectPrimitive.ItemIndicator>
-          <CheckIcon className="size-4" />
+          <CheckIcon className="size-3.5" />
         </SelectPrimitive.ItemIndicator>
       </span>
       <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
@@ -143,7 +155,7 @@ function SelectSeparator({
   return (
     <SelectPrimitive.Separator
       data-slot="select-separator"
-      className={cn("pointer-events-none -mx-1 my-1 h-px bg-border", className)}
+      className={cn("pointer-events-none -mx-1 my-1 h-px bg-border-subtle", className)}
       {...props}
     />
   )

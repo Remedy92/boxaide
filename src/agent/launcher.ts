@@ -21,6 +21,7 @@
  *  - One agent at a time. The channel hands each user message to exactly one
  *    waiter; a second launched agent would race it for every message.
  */
+import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
   copyFileSync,
@@ -37,8 +38,15 @@ import {
   lineSplitter,
   readClaudeEvent,
   readGrokEvent,
+  readOpenCodeEvent,
   type ReadEvent,
 } from "./agent-stream.js";
+import {
+  OpenCodeDriver,
+  serveBaseUrl,
+  type AgentDriver,
+  type DriverChannel,
+} from "./opencode-driver.js";
 import { CRM_TOOL_NAMES } from "../crm/tools.js";
 import { AUTOMATION_TOOL_NAMES } from "../automation/tools.js";
 import { OUTREACH_TOOL_NAMES } from "../outreach/tools.js";
@@ -60,6 +68,9 @@ function wellKnownBinDirs(): string[] {
     join(home, ".bun", "bin"),
     join(home, ".grok", "bin"),
     join(home, ".codex", "bin"),
+    join(home, ".gemini", "antigravity-cli", "bin"),
+    join(home, ".gemini", "bin"),
+    join(home, ".opencode", "bin"),
     join(home, ".cargo", "bin"),
     join(home, ".volta", "bin"),
     join(home, ".asdf", "shims"),
@@ -193,6 +204,13 @@ export type LaunchContext = {
    * minutes at a time, and without this the pane can only report silence.
    */
   onActivity?: (tool: string | null) => void;
+  /**
+   * The conversation channel, for specs that drive their CLI in process
+   * (`AgentSpec.drive`) instead of leaving the loop to a kickoff prompt.
+   * Absent in a process that has no channel to hand messages to; those specs
+   * then launch exactly as before and the MCP tier carries the conversation.
+   */
+  channel?: DriverChannel;
 };
 
 /**
@@ -245,6 +263,22 @@ export type AgentSpec = {
    * and discarded, which is what every CLI did before.
    */
   readEvent?: ReadEvent;
+  /**
+   * Runs the chat loop in this process for a CLI whose `args` start a server
+   * rather than a one-shot session. Called once, straight after spawn; the
+   * launcher stops it when the child exits or is stopped. Null means the
+   * driver declined (no channel), which leaves the child running untouched.
+   */
+  drive?: (
+    ctx: LaunchContext,
+    opts: {
+      child: ChildProcess;
+      workDir: string;
+      model?: string;
+      /** The spec's own childEnv entries, as spawned. Secrets ride here. */
+      env: Record<string, string>;
+    },
+  ) => AgentDriver | null;
 };
 
 /**
@@ -497,6 +531,209 @@ const CLAUDE_MODELS: ModelOption[] = [
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
 ];
 
+const ANTIGRAVITY_MODELS: ModelOption[] = [
+  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+];
+
+/**
+ * Pin a model even when the user picked none. OpenCode's own default
+ * retries forever when that endpoint is down, and the pane then waits
+ * for a chat_await_message that never comes.
+ */
+const OPENCODE_DEFAULT_MODEL = "opencode/big-pickle";
+
+const OPENCODE_MODELS: ModelOption[] = [
+  { id: "opencode/big-pickle", label: "Big Pickle" },
+  { id: "opencode/hy3-free", label: "HY3 Free" },
+  { id: "opencode/laguna-s-2.1-free", label: "Laguna S 2.1 Free" },
+  { id: "opencode/mimo-v2.5-free", label: "MiMo V2.5 Free" },
+  { id: "opencode/nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free" },
+  { id: "opencode/nemotron-3.5-lightning-free", label: "Nemotron 3.5 Lightning Free" },
+  { id: "openai/gpt-5.4", label: "GPT-5.4" },
+  { id: "github-copilot/claude-sonnet-5", label: "Claude Sonnet 5 (Copilot)" },
+];
+
+/**
+ * Antigravity (agy), headless.
+ */
+function antigravityArgs(_ctx: LaunchContext, model?: string): string[] {
+  return [
+    "-p",
+    KICKOFF,
+    "--dangerously-skip-permissions",
+    "--output-format",
+    "stream-json",
+    ...(model ? ["--model", model] : []),
+  ];
+}
+
+function antigravityRunArgs(
+  _ctx: LaunchContext,
+  prompt: string,
+  model?: string,
+): string[] {
+  return [
+    "-p",
+    prompt,
+    "--dangerously-skip-permissions",
+    ...(model ? ["--model", model] : []),
+  ];
+}
+
+function antigravityPrepare(ctx: LaunchContext, workDir: string): void {
+  const agentsDir = join(workDir, ".agents");
+  mkdirSync(agentsDir, { recursive: true });
+  writeFileSync(
+    join(agentsDir, "mcp_config.json"),
+    JSON.stringify(
+      {
+        mcpServers: {
+          boxaide: {
+            serverUrl: ctx.mcpUrl,
+            headers: { Authorization: `Bearer ${ctx.bearerToken}` },
+          },
+        },
+      },
+      null,
+      2,
+    ),
+    { mode: 0o600 },
+  );
+}
+
+/**
+ * OpenCode, headless.
+ *
+ * `run` ignores spawn cwd and walks to a git checkout (observed: it left the
+ * empty workdir and opened this repo). --dir pins it. Global
+ * ~/.config/opencode/opencode.json is merged unless XDG_CONFIG_HOME is
+ * elsewhere, and that file on a real machine starts the user's other MCP
+ * servers. Auth stays in the default data dir so the process still has keys.
+ */
+function agentWorkDir(ctx: LaunchContext): string {
+  return ctx.dataDir === ":memory:"
+    ? join(tmpdir(), "boxaide-agent")
+    : join(ctx.dataDir, "agent-workdir");
+}
+
+function opencodeHomeFor(ctx: LaunchContext): string {
+  const root =
+    ctx.dataDir === ":memory:" ? join(tmpdir(), "boxaide-agent") : ctx.dataDir;
+  return join(root, "agent-homes", "opencode");
+}
+
+/**
+ * Chat launch: the server, not a one-shot `run`.
+ *
+ * `run` answers once and exits, so the loop only exists for as long as the
+ * model keeps choosing to call chat_await_message. The server has no such
+ * opinion — it stays up and the driver holds the loop (see opencode-driver.ts).
+ * The port is 0 and read back off stdout, since a port picked here can be taken
+ * by the time the child binds. Errors are printed because a 500 from this
+ * server carries only a reference id; the trace goes to stderr.
+ */
+function opencodeArgs(_ctx: LaunchContext, _model?: string): string[] {
+  return [
+    "--pure",
+    "serve",
+    "--port",
+    "0",
+    "--hostname",
+    "127.0.0.1",
+    "--print-logs",
+    "--log-level",
+    "ERROR",
+  ];
+}
+
+function opencodeDrive(
+  ctx: LaunchContext,
+  opts: { child: ChildProcess; workDir: string; model?: string; env: Record<string, string> },
+): AgentDriver | null {
+  // Without a channel there is nobody to drive for: the launcher still runs
+  // the server, and the MCP tier is unaffected.
+  if (!ctx.channel) return null;
+  return new OpenCodeDriver({
+    channel: ctx.channel,
+    agent: "opencode",
+    baseUrl: serveBaseUrl(opts.child),
+    directory: agentWorkDir(ctx),
+    password: opts.env.OPENCODE_SERVER_PASSWORD ?? null,
+    model: opts.model ?? OPENCODE_DEFAULT_MODEL,
+  }).start();
+}
+
+function opencodeRunArgs(
+  ctx: LaunchContext,
+  prompt: string,
+  model?: string,
+): string[] {
+  return opencodeArgsFor(ctx, prompt, model, { formatJson: false });
+}
+
+function opencodeArgsFor(
+  ctx: LaunchContext,
+  prompt: string,
+  model: string | undefined,
+  opts: { formatJson: boolean },
+): string[] {
+  return [
+    "--pure",
+    "run",
+    "--auto",
+    "--dir",
+    agentWorkDir(ctx),
+    ...(opts.formatJson ? ["--format", "json"] : []),
+    "--model",
+    model ?? OPENCODE_DEFAULT_MODEL,
+    prompt,
+  ];
+}
+
+function opencodeChildEnv(
+  ctx: LaunchContext,
+  workDir: string,
+): Record<string, string> {
+  return {
+    XDG_CONFIG_HOME: join(opencodeHomeFor(ctx), "config"),
+    OPENCODE_CONFIG: join(workDir, "opencode.json"),
+    // Loopback still means every local account, and this server executes
+    // whatever it is prompted. A fresh secret per launch; the driver gets the
+    // same env map the child was spawned with.
+    OPENCODE_SERVER_PASSWORD: randomUUID(),
+  };
+}
+
+function opencodePrepare(ctx: LaunchContext, workDir: string): void {
+  mkdirSync(join(opencodeHomeFor(ctx), "config"), { recursive: true });
+  writeFileSync(
+    join(workDir, "opencode.json"),
+    JSON.stringify(
+      {
+        $schema: "https://opencode.ai/config.json",
+        model: OPENCODE_DEFAULT_MODEL,
+        mcp: {
+          boxaide: {
+            type: "remote",
+            url: ctx.mcpUrl,
+            enabled: true,
+            oauth: false,
+            timeout: 120_000,
+            headers: {
+              Authorization: `Bearer ${ctx.bearerToken}`,
+            },
+          },
+        },
+      },
+      null,
+      2,
+    ),
+    { mode: 0o600 },
+  );
+}
+
 export const KNOWN_AGENTS: AgentSpec[] = [
   {
     id: "claude-code",
@@ -517,11 +754,30 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     prepare: grokPrepare,
     readEvent: readGrokEvent,
   },
+  {
+    id: "antigravity",
+    label: "Antigravity",
+    bin: "agy",
+    args: antigravityArgs,
+    runArgs: antigravityRunArgs,
+    models: ANTIGRAVITY_MODELS,
+    prepare: antigravityPrepare,
+  },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    bin: "opencode",
+    args: opencodeArgs,
+    runArgs: opencodeRunArgs,
+    models: OPENCODE_MODELS,
+    childEnv: opencodeChildEnv,
+    prepare: opencodePrepare,
+    readEvent: readOpenCodeEvent,
+    drive: opencodeDrive,
+  },
   // Detected and shown, not yet launchable: their CLIs have no verified way
   // to take an MCP server plus a per-tool allowlist on one command line.
   { id: "codex", label: "Codex", bin: "codex" },
-  { id: "gemini", label: "Gemini CLI", bin: "gemini" },
-  { id: "opencode", label: "opencode", bin: "opencode" },
 ];
 
 export type ListedAgent = {
@@ -593,6 +849,8 @@ export class AgentLauncher {
    * that the user never pressed Start on.
    */
   private oneShot: ChildProcess | null = null;
+  /** The in-process loop driving the chat agent, for specs that have one. */
+  private driver: AgentDriver | null = null;
   /** Set while a one-shot is alive; closes over that run's kill/status flag. */
   private killOneShot: (() => void) | null = null;
 
@@ -651,9 +909,12 @@ export class AgentLauncher {
     const workDir = this.prepareWorkDir(spec);
 
     this.stderrTail = "";
+    // Built once and shared with the driver: a spec's childEnv may mint a
+    // per-launch secret, and the driver must see the exact value the child got.
+    const childEnv = spec.childEnv?.(this.ctx, workDir) ?? {};
     const child = spawn(bin, spec.args(this.ctx, model), {
       cwd: workDir,
-      env: this.childEnvFor(spec, workDir),
+      env: this.baseEnvWith(childEnv),
       // stdout is piped for the event stream, and MUST be consumed: a pipe
       // nobody reads fills its buffer and blocks the agent mid-write. The
       // handler below reads every chunk whether or not anything wants it.
@@ -690,7 +951,10 @@ export class AgentLauncher {
 
     this.child = child;
     this.running = started;
+    // Before the driver: the channel has to know a launched agent exists, or
+    // the loop's first awaitUserTurn is stamped against nobody.
     this.ctx.onRunningChange?.(spec.id);
+    this.driver = spec.drive?.(this.ctx, { child, workDir, model, env: childEnv }) ?? null;
     return started;
   }
 
@@ -788,6 +1052,10 @@ export class AgentLauncher {
 
   close(): void {
     const had = this.running !== null;
+    // The loop first: it parks on the channel, and a wait left open would hold
+    // the process past shutdown.
+    this.driver?.stop();
+    this.driver = null;
     this.child?.kill("SIGTERM");
     this.child = null;
     this.running = null;
@@ -799,24 +1067,26 @@ export class AgentLauncher {
    * An empty, dedicated working directory: no repository context, no
    * CLAUDE.md, nothing for the agent to read into the session by accident.
    * Shared by the chat agent and automation runs — they never overlap.
+   * OpenCode is also passed this path as --dir; spawn cwd is not enough.
    */
   private prepareWorkDir(spec: AgentSpec): string {
-    const workDir =
-      this.ctx.dataDir === ":memory:"
-        ? join(tmpdir(), "boxaide-agent")
-        : join(this.ctx.dataDir, "agent-workdir");
+    const workDir = agentWorkDir(this.ctx);
     mkdirSync(workDir, { recursive: true });
     spec.prepare?.(this.ctx, workDir, this.env);
     return workDir;
   }
 
   private childEnvFor(spec: AgentSpec, workDir: string): NodeJS.ProcessEnv {
+    return this.baseEnvWith(spec.childEnv?.(this.ctx, workDir) ?? {});
+  }
+
+  private baseEnvWith(extras: Record<string, string>): NodeJS.ProcessEnv {
     return {
       ...this.env,
       // The widened PATH travels with the agent: launched from the Finder app
       // the inherited PATH lacks even the directory its own binary sits in.
       PATH: this.searchDirs().join(delimiter),
-      ...spec.childEnv?.(this.ctx, workDir),
+      ...extras,
     };
   }
 
@@ -845,6 +1115,9 @@ export class AgentLauncher {
 
   private noteExit(id: string, code: number | null): void {
     if (this.running?.id !== id) return;
+    // The server is gone, so the loop has nothing to prompt.
+    this.driver?.stop();
+    this.driver = null;
     this.lastExit = {
       id,
       code,
@@ -863,8 +1136,11 @@ export class AgentLauncher {
   }
 
   private resolveBin(bin: string): string | null {
+    const rawNames = bin === "agy" ? ["agy", "antigravity"] : [bin];
     const names =
-      process.platform === "win32" ? [`${bin}.exe`, `${bin}.cmd`, bin] : [bin];
+      process.platform === "win32"
+        ? rawNames.flatMap((n) => [`${n}.exe`, `${n}.cmd`, n])
+        : rawNames;
     for (const dir of this.searchDirs()) {
       for (const name of names) {
         const candidate = join(dir, name);
