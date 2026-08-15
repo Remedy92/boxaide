@@ -123,7 +123,7 @@ export function AgentComposer({
 
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
         <div className="flex min-w-0 items-center gap-2">
-          <AgentModelSelect />
+          <AgentModelSelect disabled={disabled || sending} />
           <p
             id="mailmux-agent-hint"
             className="truncate pl-1 text-[11px] leading-4 text-fg-tertiary"

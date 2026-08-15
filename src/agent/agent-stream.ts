@@ -26,7 +26,7 @@
  */
 
 /** How a CLI namespaces the Boxaide MCP server's tools on its own wire. */
-const MCP_PREFIXES = ["mcp__boxaide__", "boxaide__"];
+const MCP_PREFIXES = ["mcp__boxaide__", "boxaide__", "boxaide_"];
 
 /**
  * Boxaide's own tools come back through here under a client-specific prefix.
@@ -87,6 +87,21 @@ export const readGrokEvent: ReadEvent = (line) => {
   if (!event || event.type !== "tool_call") return null;
   return typeof event.toolName === "string" && event.toolName
     ? unprefix(event.toolName)
+    : null;
+};
+
+/**
+ * OpenCode `run --format json`. A tool_use line carries the tool name on
+ * `part.tool`. Captured against 1.18.15; other line types are liveness only.
+ */
+export const readOpenCodeEvent: ReadEvent = (line) => {
+  const event = parse(line) as {
+    type?: string;
+    part?: { tool?: unknown };
+  } | null;
+  if (!event || event.type !== "tool_use") return null;
+  return typeof event.part?.tool === "string" && event.part.tool
+    ? unprefix(event.part.tool)
     : null;
 };
 

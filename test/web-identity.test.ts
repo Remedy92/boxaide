@@ -69,6 +69,9 @@ describe("web identity", () => {
     });
     const desktop = targets.find((entry) => entry.id === "claude-desktop");
     const cursor = targets.find((entry) => entry.id === "cursor");
+    const antigravity = targets.find((entry) => entry.id === "antigravity");
+    const opencode = targets.find((entry) => entry.id === "opencode");
+    const cli = targets.find((entry) => entry.id === "cli");
     expect(desktop?.download).toEqual({
       href: "http://127.0.0.1:8787/boxaide.mcpb",
       filename: "boxaide.mcpb",
@@ -77,6 +80,10 @@ describe("web identity", () => {
     expect(desktop?.snippet).toContain('"boxaide"');
     expect(desktop?.snippet).toContain('"command": "boxaide"');
     expect(cursor?.snippet).toContain('"boxaide"');
+    expect(antigravity?.snippet).toContain('"serverUrl": "http://127.0.0.1:8787/mcp"');
+    expect(antigravity?.snippet).toContain('"Authorization": "Bearer tok"');
+    expect(opencode?.snippet).toContain("opencode mcp add boxaide");
+    expect(cli?.snippet).toBe("boxaide mcp");
     expect(genericMcpSnippet({ baseUrl: "http://127.0.0.1:8787", token: "tok" })).toContain(
       '"boxaide"',
     );

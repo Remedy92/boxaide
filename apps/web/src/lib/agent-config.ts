@@ -15,7 +15,10 @@ export type AgentTargetId =
   | "claude-code"
   | "grok"
   | "claude-desktop"
-  | "cursor";
+  | "cursor"
+  | "antigravity"
+  | "cli"
+  | "opencode";
 
 export type AgentTarget = {
   id: AgentTargetId;
@@ -121,6 +124,48 @@ export function buildAgentTargets(input: AgentConfigInput): AgentTarget[] {
       snippet: JSON.stringify(remote, null, 2),
       carriesToken: true,
       note: "Cursor connects over HTTP, so boxaide serve has to be running.",
+    },
+    {
+      id: "antigravity",
+      label: "Antigravity",
+      where:
+        "Paste into ~/.gemini/config/mcp_config.json for all sessions, or .agents/mcp_config.json inside one project.",
+      kind: "json",
+      snippet: JSON.stringify(
+        {
+          mcpServers: {
+            boxaide: {
+              serverUrl: url,
+              headers: { Authorization: `Bearer ${token}` },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      carriesToken: true,
+      note: "Antigravity connects over HTTP, so boxaide serve has to be running.",
+    },
+    {
+      id: "cli",
+      label: "CLI",
+      where:
+        "Run the local stdio MCP bridge in any terminal or wire it into your CLI agent.",
+      kind: "shell",
+      snippet: "boxaide mcp",
+      carriesToken: false,
+      note: "Runs Boxaide in stdio MCP mode. It locates your local server and bearer token automatically.",
+    },
+    {
+      id: "opencode",
+      label: "OpenCode",
+      where: "Run this once in any terminal, or add to opencode.json.",
+      kind: "shell",
+      snippet: `opencode mcp add boxaide --url ${shellQuote(url)} --header ${shellQuote(
+        `Authorization=Bearer ${token}`,
+      )}`,
+      carriesToken: true,
+      note: "OpenCode connects over HTTP, so boxaide serve has to be running.",
     },
   ];
 }

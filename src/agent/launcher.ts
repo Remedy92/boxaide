@@ -37,6 +37,7 @@ import {
   lineSplitter,
   readClaudeEvent,
   readGrokEvent,
+  readOpenCodeEvent,
   type ReadEvent,
 } from "./agent-stream.js";
 import { CRM_TOOL_NAMES } from "../crm/tools.js";
@@ -60,6 +61,9 @@ function wellKnownBinDirs(): string[] {
     join(home, ".bun", "bin"),
     join(home, ".grok", "bin"),
     join(home, ".codex", "bin"),
+    join(home, ".gemini", "antigravity-cli", "bin"),
+    join(home, ".gemini", "bin"),
+    join(home, ".opencode", "bin"),
     join(home, ".cargo", "bin"),
     join(home, ".volta", "bin"),
     join(home, ".asdf", "shims"),
@@ -497,6 +501,168 @@ const CLAUDE_MODELS: ModelOption[] = [
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
 ];
 
+const ANTIGRAVITY_MODELS: ModelOption[] = [
+  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+];
+
+/**
+ * Pin a model even when the user picked none. OpenCode's own default
+ * retries forever when that endpoint is down, and the pane then waits
+ * for a chat_await_message that never comes.
+ */
+const OPENCODE_DEFAULT_MODEL = "opencode/big-pickle";
+
+const OPENCODE_MODELS: ModelOption[] = [
+  { id: "opencode/big-pickle", label: "Big Pickle" },
+  { id: "opencode/hy3-free", label: "HY3 Free" },
+  { id: "opencode/laguna-s-2.1-free", label: "Laguna S 2.1 Free" },
+  { id: "opencode/mimo-v2.5-free", label: "MiMo V2.5 Free" },
+  { id: "opencode/nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free" },
+  { id: "opencode/nemotron-3.5-lightning-free", label: "Nemotron 3.5 Lightning Free" },
+  { id: "openai/gpt-5.4", label: "GPT-5.4" },
+  { id: "github-copilot/claude-sonnet-5", label: "Claude Sonnet 5 (Copilot)" },
+];
+
+/**
+ * Antigravity (agy), headless.
+ */
+function antigravityArgs(_ctx: LaunchContext, model?: string): string[] {
+  return [
+    "-p",
+    KICKOFF,
+    "--dangerously-skip-permissions",
+    "--output-format",
+    "stream-json",
+    ...(model ? ["--model", model] : []),
+  ];
+}
+
+function antigravityRunArgs(
+  _ctx: LaunchContext,
+  prompt: string,
+  model?: string,
+): string[] {
+  return [
+    "-p",
+    prompt,
+    "--dangerously-skip-permissions",
+    ...(model ? ["--model", model] : []),
+  ];
+}
+
+function antigravityPrepare(ctx: LaunchContext, workDir: string): void {
+  const agentsDir = join(workDir, ".agents");
+  mkdirSync(agentsDir, { recursive: true });
+  writeFileSync(
+    join(agentsDir, "mcp_config.json"),
+    JSON.stringify(
+      {
+        mcpServers: {
+          boxaide: {
+            serverUrl: ctx.mcpUrl,
+            headers: { Authorization: `Bearer ${ctx.bearerToken}` },
+          },
+        },
+      },
+      null,
+      2,
+    ),
+    { mode: 0o600 },
+  );
+}
+
+/**
+ * OpenCode, headless.
+ *
+ * `run` ignores spawn cwd and walks to a git checkout (observed: it left the
+ * empty workdir and opened this repo). --dir pins it. Global
+ * ~/.config/opencode/opencode.json is merged unless XDG_CONFIG_HOME is
+ * elsewhere, and that file on a real machine starts the user's other MCP
+ * servers. Auth stays in the default data dir so the process still has keys.
+ */
+function agentWorkDir(ctx: LaunchContext): string {
+  return ctx.dataDir === ":memory:"
+    ? join(tmpdir(), "boxaide-agent")
+    : join(ctx.dataDir, "agent-workdir");
+}
+
+function opencodeHomeFor(ctx: LaunchContext): string {
+  const root =
+    ctx.dataDir === ":memory:" ? join(tmpdir(), "boxaide-agent") : ctx.dataDir;
+  return join(root, "agent-homes", "opencode");
+}
+
+function opencodeArgs(ctx: LaunchContext, model?: string): string[] {
+  return opencodeArgsFor(ctx, KICKOFF, model, { formatJson: true });
+}
+
+function opencodeRunArgs(
+  ctx: LaunchContext,
+  prompt: string,
+  model?: string,
+): string[] {
+  return opencodeArgsFor(ctx, prompt, model, { formatJson: false });
+}
+
+function opencodeArgsFor(
+  ctx: LaunchContext,
+  prompt: string,
+  model: string | undefined,
+  opts: { formatJson: boolean },
+): string[] {
+  return [
+    "--pure",
+    "run",
+    "--auto",
+    "--dir",
+    agentWorkDir(ctx),
+    ...(opts.formatJson ? ["--format", "json"] : []),
+    "--model",
+    model ?? OPENCODE_DEFAULT_MODEL,
+    prompt,
+  ];
+}
+
+function opencodeChildEnv(
+  ctx: LaunchContext,
+  workDir: string,
+): Record<string, string> {
+  return {
+    XDG_CONFIG_HOME: join(opencodeHomeFor(ctx), "config"),
+    OPENCODE_CONFIG: join(workDir, "opencode.json"),
+  };
+}
+
+function opencodePrepare(ctx: LaunchContext, workDir: string): void {
+  mkdirSync(join(opencodeHomeFor(ctx), "config"), { recursive: true });
+  writeFileSync(
+    join(workDir, "opencode.json"),
+    JSON.stringify(
+      {
+        $schema: "https://opencode.ai/config.json",
+        model: OPENCODE_DEFAULT_MODEL,
+        mcp: {
+          boxaide: {
+            type: "remote",
+            url: ctx.mcpUrl,
+            enabled: true,
+            oauth: false,
+            timeout: 120_000,
+            headers: {
+              Authorization: `Bearer ${ctx.bearerToken}`,
+            },
+          },
+        },
+      },
+      null,
+      2,
+    ),
+    { mode: 0o600 },
+  );
+}
+
 export const KNOWN_AGENTS: AgentSpec[] = [
   {
     id: "claude-code",
@@ -517,11 +683,29 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     prepare: grokPrepare,
     readEvent: readGrokEvent,
   },
+  {
+    id: "antigravity",
+    label: "Antigravity",
+    bin: "agy",
+    args: antigravityArgs,
+    runArgs: antigravityRunArgs,
+    models: ANTIGRAVITY_MODELS,
+    prepare: antigravityPrepare,
+  },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    bin: "opencode",
+    args: opencodeArgs,
+    runArgs: opencodeRunArgs,
+    models: OPENCODE_MODELS,
+    childEnv: opencodeChildEnv,
+    prepare: opencodePrepare,
+    readEvent: readOpenCodeEvent,
+  },
   // Detected and shown, not yet launchable: their CLIs have no verified way
   // to take an MCP server plus a per-tool allowlist on one command line.
   { id: "codex", label: "Codex", bin: "codex" },
-  { id: "gemini", label: "Gemini CLI", bin: "gemini" },
-  { id: "opencode", label: "opencode", bin: "opencode" },
 ];
 
 export type ListedAgent = {
@@ -799,12 +983,10 @@ export class AgentLauncher {
    * An empty, dedicated working directory: no repository context, no
    * CLAUDE.md, nothing for the agent to read into the session by accident.
    * Shared by the chat agent and automation runs — they never overlap.
+   * OpenCode is also passed this path as --dir; spawn cwd is not enough.
    */
   private prepareWorkDir(spec: AgentSpec): string {
-    const workDir =
-      this.ctx.dataDir === ":memory:"
-        ? join(tmpdir(), "boxaide-agent")
-        : join(this.ctx.dataDir, "agent-workdir");
+    const workDir = agentWorkDir(this.ctx);
     mkdirSync(workDir, { recursive: true });
     spec.prepare?.(this.ctx, workDir, this.env);
     return workDir;
@@ -863,8 +1045,11 @@ export class AgentLauncher {
   }
 
   private resolveBin(bin: string): string | null {
+    const rawNames = bin === "agy" ? ["agy", "antigravity"] : [bin];
     const names =
-      process.platform === "win32" ? [`${bin}.exe`, `${bin}.cmd`, bin] : [bin];
+      process.platform === "win32"
+        ? rawNames.flatMap((n) => [`${n}.exe`, `${n}.cmd`, n])
+        : rawNames;
     for (const dir of this.searchDirs()) {
       for (const name of names) {
         const candidate = join(dir, name);

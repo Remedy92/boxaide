@@ -189,6 +189,92 @@ describe("AgentLauncher", () => {
     expect(claude.models?.map((m) => m.id)).toContain("claude-fable-5");
   });
 
+  it("adds --model to Antigravity and OpenCode command lines only when picked", () => {
+    const antigravity = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
+    expect(antigravity.args!(CTX)).not.toContain("--model");
+    const agyWithModel = antigravity.args!(CTX, "gemini-2.5-pro");
+    expect(agyWithModel[agyWithModel.indexOf("--model") + 1]).toBe("gemini-2.5-pro");
+    expect(antigravity.models?.map((m) => m.id)).toEqual([
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      "gemini-2.0-flash",
+    ]);
+
+    const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
+    // A launch with no pick still pins a model: OpenCode's own default
+    // retries forever when that endpoint is down.
+    expect(opencode.args!(CTX)[opencode.args!(CTX).indexOf("--model") + 1]).toBe(
+      "opencode/big-pickle",
+    );
+    const opencodeWithModel = opencode.args!(CTX, "openai/gpt-5.4");
+    expect(opencodeWithModel[opencodeWithModel.indexOf("--model") + 1]).toBe("openai/gpt-5.4");
+    expect(opencode.models?.map((m) => m.id)).toEqual([
+      "opencode/big-pickle",
+      "opencode/hy3-free",
+      "opencode/laguna-s-2.1-free",
+      "opencode/mimo-v2.5-free",
+      "opencode/nemotron-3-ultra-free",
+      "opencode/nemotron-3.5-lightning-free",
+      "openai/gpt-5.4",
+      "github-copilot/claude-sonnet-5",
+    ]);
+  });
+
+  it("writes valid opencode.json config for OpenCode", () => {
+    const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
+    expect(opencode.prepare).toBeTypeOf("function");
+    const ctx = {
+      mcpUrl: "http://127.0.0.1:8787/mcp",
+      bearerToken: "secret-token-xyz",
+      dataDir: tempDir(),
+    };
+    const workDir = join(ctx.dataDir, "agent-workdir");
+    mkdirSync(workDir, { recursive: true });
+    opencode.prepare!(ctx, workDir, {});
+    const content = JSON.parse(readFileSync(join(workDir, "opencode.json"), "utf8"));
+    expect(content).toEqual({
+      $schema: "https://opencode.ai/config.json",
+      model: "opencode/big-pickle",
+      mcp: {
+        boxaide: {
+          type: "remote",
+          url: ctx.mcpUrl,
+          enabled: true,
+          oauth: false,
+          timeout: 120_000,
+          headers: {
+            Authorization: `Bearer ${ctx.bearerToken}`,
+          },
+        },
+      },
+    });
+  });
+
+  it("launches OpenCode pinned to the empty workdir with an isolated config", () => {
+    const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
+    const ctx = {
+      mcpUrl: "http://127.0.0.1:8787/mcp",
+      bearerToken: "secret-token-xyz",
+      dataDir: tempDir(),
+    };
+    const workDir = join(ctx.dataDir, "agent-workdir");
+    const args = opencode.args!(ctx);
+    expect(args[0]).toBe("--pure");
+    expect(args).toContain("run");
+    expect(args[args.indexOf("--dir") + 1]).toBe(workDir);
+    expect(args[args.indexOf("--format") + 1]).toBe("json");
+    expect(args[args.indexOf("--model") + 1]).toBe("opencode/big-pickle");
+    expect(opencode.readEvent).toBeTypeOf("function");
+
+    mkdirSync(workDir, { recursive: true });
+    opencode.prepare!(ctx, workDir, {});
+    const env = opencode.childEnv!(ctx, workDir);
+    expect(env.XDG_CONFIG_HOME).toBe(join(ctx.dataDir, "agent-homes", "opencode", "config"));
+    expect(env.OPENCODE_CONFIG).toBe(join(workDir, "opencode.json"));
+    expect(opencode.runArgs!(ctx, "do the thing")).toContain("--dir");
+    expect(opencode.runArgs!(ctx, "do the thing")).not.toContain("--format");
+  });
+
   it("pre-approves read and draft tools and never message_send", () => {
     const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code");
     const args = claude!.args!(CTX);
@@ -338,6 +424,15 @@ describe("launcher routes", () => {
     const body = await listed.json();
     expect(body.running).toBeNull();
     expect(body.agents.map((a: { id: string }) => a.id)).toContain("claude-code");
+    expect(body.agents.map((a: { id: string }) => a.id)).toContain("antigravity");
+    expect(body.agents.map((a: { id: string }) => a.id)).toContain("opencode");
+    expect(body.agents.map((a: { id: string }) => a.id)).not.toContain("gemini");
+    expect(body.agents.find((a: { id: string }) => a.id === "antigravity")?.supported).toBe(
+      true,
+    );
+    expect(body.agents.find((a: { id: string }) => a.id === "opencode")?.supported).toBe(
+      true,
+    );
     expect(body.agents.find((a: { id: string }) => a.id === "grok")?.supported).toBe(
       true,
     );
