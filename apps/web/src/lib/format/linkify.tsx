@@ -2,8 +2,7 @@ import * as React from "react";
 
 /**
  * Turn plain text into an array of React elements and strings. It never builds
- * an HTML string and there is no dangerouslySetInnerHTML anywhere in this app —
- * React escapes every string child by construction.
+ * an HTML string. React escapes every string child by construction.
  *
  * The allowlist is strict on purpose: `https?://` and `mailto:` only. No bare
  * `www.`, no scheme-less hosts, because guessing a scheme for text a stranger

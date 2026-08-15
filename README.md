@@ -64,14 +64,15 @@ cd apps/web && npm run build && npm run serve # the real static export
 
 The page runs entirely in your browser and fetches mail directly from your machine.
 
-Three routes exist in the export. Locally they are one screen and two spares;
-on a deployment they are the whole difference between a stranger and a user:
+Four routes exist in the export. Locally `/` is the inbox. On a deployment
+the difference is who has a server:
 
 | Route | What it is |
 |---|---|
-| `/` | The inbox. On a deployment `apps/web/vercel.json` redirects it to `/install` — someone who has just found the domain has no server URL or token to type into a setup form yet. |
-| `/install` | The download page. The desktop installer for the visitor's operating system, and the clone-and-run command behind a link. |
-| `/app` | The inbox again, at an address the redirect does not touch. This is the hosted interface; use it wherever this section says "the deployed page". |
+| `/` | The inbox. On a deployment `apps/web/vercel.json` redirects it to `/install`. |
+| `/install` | The download page. A Mac dmg when one exists; Windows and Linux have no installer yet, so those buttons open the release page. Clone-and-run is a line at the bottom. |
+| `/app` | The inbox again, at an address the redirect does not touch. Use this wherever this section says "the deployed page". |
+| `/tray/` | The menu-bar popover the Mac app loads. Not a visitor page. |
 
 **1. Deploy `apps/web`.** On Vercel and equivalents, set the project's **Root Directory** to `apps/web` and leave the build and output commands on auto. That setting is what keeps the CLI's `better-sqlite3` out of the front-end install; it lives in the dashboard and cannot be expressed in a file. Do **not** add a `workspaces` key to the root `package.json`.
 
@@ -89,9 +90,9 @@ BOXAIDE_ALLOWED_ORIGINS=https://boxaide.tech boxaide serve
 
 See the rules and the cost of doing this under [Browser origins](#browser-origins-boxaide_allowed_origins) below.
 
-**3. Copy the token.** `boxaide serve` prints it on first run; it is also in `bearer.token` inside your data directory (`~/.boxaide` by default, or `~/.mailmux` if that folder exists and `~/.boxaide` does not).
+**3. Copy the token.** `boxaide serve` prints it on first run; it is also in `bearer.token` inside your data directory (`~/.boxaide` by default, else `~/.sley`, else `~/.mailmux`, if one of those folders already exists).
 
-**4. Point the page at your server.** Open the deployed page at **`/app`**, click **Set up Boxaide**, and enter the Server URL and the token. Both are stored in your browser's localStorage (`boxaide.*`) and are sent only to the server URL you entered. A first run still reads leftover `mailmux.*` and `mailmux_token` keys once.
+**4. Point the page at your server.** Open the deployed page at **`/app`**, click **Set up Boxaide**, and enter the Server URL and the token. Both are stored in your browser's localStorage (`boxaide.*`) and are sent only to the server URL you entered. A first run still reads leftover `sley.*`, `mailmux.*` and `mailmux_token` keys once.
 
 **5. Allow local network access (Chrome, Edge, Brave).** Since Chromium 142 the browser asks permission before a website may reach `127.0.0.1`. Allow it when prompted; if you dismissed the prompt, re-enable it under Site settings → *Apps on device*.
 
@@ -129,7 +130,7 @@ npm run desktop:dist          # same prepare, then signed mac dmg in apps/deskto
 
 On mac, signing uses a Developer ID certificate pinned by hash in `apps/desktop/scripts/sign-mac.sh` (electron-builder's by-name signing is ambiguous when the keychain holds two same-named certificates). Notarization is a separate, credential-holding step; the commands are at the top of that script. The port follows `BOXAIDE_PORT` (default 8787); if something already holds it — `boxaide serve` in a terminal, or a second copy of the app — the window does not open and the app says so.
 
-The install button serves GitHub `releases/latest`. CI does not upload a dmg. After a merge to master, from the **main checkout** (not a worktree):
+The install button serves GitHub `releases/latest`. CI does not publish a release. After a merge to master, from the **main checkout** (not a worktree):
 
 ```bash
 ./scripts/ship_status.sh   # is origin/master what a visitor downloads?
@@ -139,7 +140,7 @@ The install button serves GitHub `releases/latest`. CI does not upload a dmg. Af
 
 `ship.sh` is the only publisher. A git hook only prints the status; it never packs. Pass `--dry-run` to see the plan.
 
-`ship.sh` needs `APPLE_KEYCHAIN_PROFILE` and refuses to run without it. Apple must notarize every macOS download, or the installer says it cannot verify the app. Mint the profile once. The keychain profile name is historical:
+`ship.sh` defaults `APPLE_KEYCHAIN_PROFILE` to `mailmux-notary` and refuses to publish unless that profile works and the dmg carries a notarization ticket. A release is three files: `boxaide-mac.dmg`, `boxaide-mac.zip`, and `latest-mac.yml`. Mint the profile once. The keychain profile name is historical:
 
 ```bash
 xcrun notarytool store-credentials mailmux-notary --apple-id <apple-id> --team-id 22DPQ7YCAS
@@ -204,7 +205,10 @@ Agents that speak TOML use `[mcp_servers.boxaide]`. Tool calls show up as `mcp__
 | `messages_list` | Inbox list (`account`: alias or `all`) |
 | `messages_search` | Free-text search |
 | `message_get` | Full body |
-| `message_send` | Send (confirm in your agent) |
+| `message_mark_read` | Set or clear the read flag |
+| `folders_list` | Folders on one account |
+| `draft_create` / `draft_update` / `drafts_list` / `draft_delete` | Drafts in the mailbox |
+| `message_send` | Send now (confirm in your agent). Not outreach approval. |
 | `chat_await_message` | Wait for the user's next message in the Boxaide window |
 | `chat_say` | Answer them there |
 | `chat_activity` | Post a one-line "here is what I am doing" |
@@ -224,14 +228,14 @@ Accounts are connected once in the web UI (or API). Agents reuse the same store 
 
 ## Talking to your agent inside Boxaide
 
-The Agent view is the app's first screen, and Boxaide runs no model behind it.
-The agent is whichever MCP client you already use — Claude Code, Codex, Cursor,
-Claude Desktop — and the four `chat_*` tools above are how it holds the
-conversation in the Boxaide window instead of in its own terminal. There is no
-per-client integration: a long-polling tool call is the one capability every MCP
-client has.
+The Agent view is the app's first screen. Boxaide does not host a model. The
+agent is a local CLI you already have — Claude Code, Grok, Codex, Cursor,
+Claude Desktop — talking MCP. The four `chat_*` tools hold the conversation in
+the Boxaide window instead of in that client's terminal.
 
-Connect the client as above, then say this to it once, in its own window:
+**Start** / **Stop** on the rail spawn or kill the installed CLI and feed it
+the kickoff prompt (`src/agent/launcher.ts`). You can still paste the same
+loop into a client you launched yourself:
 
 ```
 You are my Boxaide inbox agent. Use the Boxaide MCP tools.
@@ -245,9 +249,8 @@ normal; call it again. Use chat_activity for anything slow. Draft rather than
 send unless I ask you to send.
 ```
 
-The kickoff is not optional and cannot be automated away: MCP is client-driven,
-so nothing on the Boxaide side can make an agent start listening. Anything you
-type before one does is queued and delivered when it arrives.
+Anything you type before an agent is listening is queued and delivered when
+one arrives.
 
 Notes on what the UI claims. "Listening" means an agent is parked in an open
 `chat_await_message` — a request that is open right now, not an inference. It
@@ -307,17 +310,24 @@ Why this is a conversation and not an importer: the two systems do not have the 
 
 ### No auto-send
 
-**No agent sends outreach. Not a scheduled one, not the one you are chatting to, not by mistake.**
+**No agent sends outreach.** Campaigns and `outbox_queue_draft` land as
+`pending` rows. The Outreach view shows each one — recipient, subject, body —
+with **Approve**, **Edit** or **Reject**. Approval is REST only, from the
+browser, by you. There is no MCP tool that approves, rejects or sends an
+outbox row.
 
-An agent's only route toward delivery is `outbox_queue_draft`, and the outreach engine's timed steps use the same table. Both land as `pending` rows in the outbox. The Outreach view shows each one in full — recipient, subject, body — with **Approve**, **Edit** or **Reject**. Approval is REST only, from the browser, by you.
+That is the outreach path only. An external MCP client can still call
+`message_send` and the mail leaves immediately. Agents Boxaide **launches**
+(rail Start, and every automation run) do not get `message_send`.
 
-The MCP surface has no approve, reject or send tool at all. This is not a permission you can grant; the tool does not exist.
+**Edit** does not rewrite the queued row. It opens the composer with that
+text; the queued copy is rejected after you send.
 
 | Step | Who |
 |---|---|
 | Write the draft | agent |
 | Queue it into the outbox | agent |
-| Read it, edit it, approve or reject it | you, in the browser |
+| Read it, approve or reject it | you, in the browser |
 | Put it on the wire | server, after approval |
 
 The rail badges the pending count, and the desktop app raises a notification and a dock badge when it rises. You are told about waiting drafts; you are never told after the fact about sent ones.
@@ -332,7 +342,7 @@ Sending is throttled server-side even after approval: at least 60 seconds betwee
 |---|---|
 | `reply-stop` | Someone replied "stop", "unsubscribe" or "opt out" to a campaign. Detected on the inbound message; the campaign contact stops immediately. |
 | `manual` | You added it in the Outreach view. |
-| `bounce` | A send failed hard. |
+| `bounce` | You or an agent recorded a hard bounce with `suppression_add`. A failed send does not add this on its own. |
 | `agent` | An agent added it with `suppression_add`. |
 
 Only a human can override, and only through REST: `POST /api/messages/send` accepts `overrideSuppression: true`. The MCP `message_send` tool does not expose the flag, so no agent can override a suppression at all.
@@ -349,7 +359,11 @@ Same store, same master key, same file as the rest of Boxaide: `~/.boxaide/boxai
 | Contact email and name, organisation name and domain, tags, deal titles, suppression addresses | plaintext — they are CRM identity, needed for UNIQUE and for search |
 | Automation prompts | plaintext — you wrote them, they are not mail content |
 
-Nothing leaves the process. There is no sync, no telemetry and no hosted component. Back up `~/.boxaide` and you have backed up all of it.
+Mail, CRM, automations and outreach stay in that directory. There is no
+analytics SDK and no mail sync to a host. The process does poll GitHub for
+updates (`GET /api/update`, and `electron-updater` in the Mac app). The
+marketing UI at `https://boxaide.tech` is a static export and never sees your
+data. Back up `~/.boxaide` and you have backed up the store.
 
 ## Install options
 
@@ -362,11 +376,11 @@ Nothing leaves the process. There is no sync, no telemetry and no hosted compone
 
 ### Env
 
-Each `BOXAIDE_*` name is preferred. The matching `MAILMUX_*` name is still read when the Boxaide name is unset.
+Each `BOXAIDE_*` name is preferred. Then `SLEY_*`, then `MAILMUX_*`.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `BOXAIDE_DATA_DIR` | `~/.boxaide` | SQLite + keys. Uses `~/.mailmux` if that exists and `~/.boxaide` does not. |
+| `BOXAIDE_DATA_DIR` | `~/.boxaide` | SQLite + keys. Else the first existing of `~/.sley`, `~/.mailmux`. |
 | `BOXAIDE_HOST` | `127.0.0.1` | Bind address — see below |
 | `BOXAIDE_PORT` | `8787` | Port |
 | `BOXAIDE_TOKEN` | auto file | API/MCP bearer |

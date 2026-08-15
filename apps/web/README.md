@@ -34,7 +34,7 @@ There is no `next start`: `output: "export"` produces static files, and `next st
 
 Two supported paths, both documented in the root [README](../../README.md#using-the-hosted-interface):
 
-- **Served by the Boxaide process** — `npm run web:build && npm run web:sync` from the repo root copies `out/` to `web-next/`, which `boxaide serve` prefers over the bundled `web/`. Same origin as the API: no CORS, no preflight, no Local Network Access prompt. The only path that works in Safari.
+- **Served by the Boxaide process** — `npm run web:build && npm run web:sync` from the repo root copies `out/` to `web-next/`. That is the only UI `boxaide serve` looks for. Same origin as the API: no CORS, no preflight, no Local Network Access prompt. The only path that works in Safari.
 - **A static host** — set the project's Root Directory to `apps/web`, then set `BOXAIDE_ALLOWED_ORIGINS` to the deployed origin on the machine running Boxaide.
 
 `NEXT_PUBLIC_DEFAULT_API_BASE` is the only environment variable this app reads. It is optional, public, and sets nothing but the pre-filled Server URL default. No secret ever reaches the host — with a static export the platform is structurally incapable of seeing one.
@@ -42,15 +42,17 @@ Two supported paths, both documented in the root [README](../../README.md#using-
 ## Layout
 
 ```
-src/app/          layout.tsx (the only Server Component), page.tsx, globals.css
-src/components/   app-shell, rail/, list/, reader/, dialogs/, ui/ (shadcn primitives)
+src/app/          layout.tsx (the only Server Component), page.tsx, app/,
+                  install/, tray/, globals.css
+src/components/   app-shell, rail/, list/, reader/, dialogs/, onboarding/,
+                  agent/, automations/, crm/, outreach/, drafts/, atoms/, ui/
 src/lib/          types, settings, api/ (the only fetch), format/, hooks/
 ```
 
 ## Rules that are not negotiable
 
-- **Never render `message.bodyHtml`.** It is raw unsanitised sender HTML and there is no sanitiser here. The reader renders `bodyText` only; "View HTML source" shows it escaped inside a `<pre>`. `react/no-danger` is an ESLint error, so `dangerouslySetInnerHTML` cannot land.
+- **Never render `message.bodyHtml`.** It is raw unsanitised sender HTML and there is no sanitiser here. The reader renders `bodyText` only; "View HTML source" shows it escaped inside a `<pre>`. `react/no-danger` is an ESLint error. The only `dangerouslySetInnerHTML` is the desktop UA marker in `layout.tsx`.
 - **Never call `/api/agent-connect`.** Its response embeds the bearer token. The MCP snippet is built client-side from `localStorage`.
-- **`/api/local-bootstrap` is called from one place, under one condition.** The setup wizard calls it only when the page's own origin IS the server address and that origin is loopback — the page is the server's own UI, so first run needs no token copy-paste. Served from anywhere else, a human pastes the token; the server enforces the same boundary.
+- **`/api/local-bootstrap` is loopback-only.** The setup wizard and the tray popover call it when the page origin is the server and that origin is loopback. Served from anywhere else, a human pastes the token; the server enforces the same boundary.
 - **Never fetch outside `src/lib/api/client.ts`.** It is the one place the token becomes an `Authorization` header, and the one place the base URL is resolved.
-- **Only draw what the server can do.** Before adding a control, find its endpoint in `src/api/routes.ts`. There is no archive, delete, move, star, label, snooze, thread, attachment download, unread count or agent-presence signal, because there is no endpoint behind any of them. A greyed-out roadmap control is still a claim.
+- **Only draw what the server can do.** Before adding a control, find its endpoint in `src/api/routes.ts`. There is no archive, delete, move, star, label, snooze, thread or attachment download. Unread and agent presence do exist: `POST /api/messages/:accountId/:messageId/read`, `GET /api/agent/state`, `GET /api/agent/stream`, `GET /api/agents` plus start/stop.

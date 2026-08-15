@@ -46,7 +46,7 @@ Ship **Boxaide** as a single **Node 22+ / TypeScript** process:
 | **Base URL and token in `localStorage` only** | No cookies, no env var carries a secret. `NEXT_PUBLIC_DEFAULT_API_BASE` sets only the pre-filled default (`http://127.0.0.1:8787`) and is public by definition. |
 | **One route, selection in the URL hash** | `output: "export"` bans dynamic routes without `generateStaticParams`, and message ids are unknowable at build time. Selection is mirrored to `#/a/<accountId>/m/<messageId>` with `history.replaceState`. |
 | **Its own `package.json` and lockfile; no root `workspaces` key** | A workspace would hoist `better-sqlite3` into the front-end install and force a native build on every deploy. |
-| **`bodyHtml` is never rendered** | It is raw unsanitised sender HTML and there is no sanitiser in this codebase. The reader renders `bodyText` only; "View HTML source" shows it escaped inside a `<pre>`. `react/no-danger` is an ESLint **error**, so there is no `dangerouslySetInnerHTML` anywhere in the tree. |
+| **`bodyHtml` is never rendered** | It is raw unsanitised sender HTML and there is no sanitiser in this codebase. The reader renders `bodyText` only; "View HTML source" shows it escaped inside a `<pre>`. `react/no-danger` is an ESLint **error**. The only `dangerouslySetInnerHTML` is a fixed desktop UA marker in `layout.tsx`. |
 | **`/api/agent-connect` is never called; `/api/local-bootstrap` only same-origin from loopback** | agent-connect embeds the token, and the MCP snippet is built client-side from `localStorage` instead. local-bootstrap exists precisely so the server's own UI needs no token copy-paste: the wizard calls it only when the page origin equals the server address and is loopback, mirroring the guard the endpoint itself enforces. A remotely hosted UI still requires a human to paste the token. |
 
 Serving it from the Node process:
@@ -89,7 +89,7 @@ Implementation: `parseAllowedOrigins` / `isApiOriginAllowed` / `applyCors` / `co
 ## MVP surface
 
 - Web: connect accounts, unified inbox, read, compose/send
-- MCP tools: `accounts_list`, `messages_list`, `messages_search`, `message_get`, `message_send`
+- MCP tools: mail (`accounts_list`, `messages_list`, `messages_search`, `message_get`, `message_mark_read`, `folders_list`, drafts, `message_send`), chat (`chat_*`), plus CRM, automation and outreach groups
 - CLI: `boxaide serve` | `boxaide mcp`
 
 ## Rejected for v0
