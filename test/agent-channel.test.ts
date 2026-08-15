@@ -209,31 +209,73 @@ describe("AgentChannel", () => {
     off();
   });
 
-  it("expires a claim five minutes after the last proof, not the hand-off", async () => {
+  it("stops holding a claim open on output once two agents are asking", async () => {
+    vi.useFakeTimers();
+    try {
+      const { channel } = make();
+      channel.setLaunchedAgent("claude-code");
+      channel.post({ role: "user", text: "one" });
+      await channel.awaitUserTurn({ agent: "claude-desktop", timeoutMs: 1_000 });
+      channel.post({ role: "user", text: "two" });
+      await channel.awaitUserTurn({ agent: "claude-code", timeoutMs: 1_000 });
+
+      // Two names have asked, so this claim cannot be pinned on the process we
+      // own. Its output no longer holds the claim open, and the ordinary
+      // proof clock takes back over.
+      vi.advanceTimersByTime(4 * 60_000);
+      channel.noteAgentActivity("Read");
+      vi.advanceTimersByTime(60_000 + 1_000);
+      expect(channel.presence().working).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never expires a claim while the process we launched is still running", async () => {
     vi.useFakeTimers();
     try {
       const { channel } = make();
       channel.setLaunchedAgent("claude-code");
       channel.post({ role: "user", text: "migrate everything into here" });
-      // Already on disk, so this claims without parking and starts no timer.
-      await channel.awaitUserTurn({ timeoutMs: 1_000 });
+      await channel.awaitUserTurn({ agent: "claude-code", timeoutMs: 1_000 });
+
+      // One long tool call — a test run, a build, a big read — and stdout says
+      // nothing for the whole of it. Half an hour, not one line, still ours.
+      vi.advanceTimersByTime(30 * 60_000);
       expect(channel.presence().working).not.toBeNull();
 
-      // Eight minutes of its own work — well past WORK_MAX_MS — with one line
-      // of stdout in the middle and not a single Boxaide call.
-      vi.advanceTimersByTime(4 * 60_000);
-      channel.noteAgentActivity("Read");
-      vi.advanceTimersByTime(4 * 60_000);
-      // Timing the hand-off would have printed "never answered" three minutes
-      // ago, over an agent that is about to answer.
-      expect(channel.presence().working).not.toBeNull();
-
-      // Now it stops dead. Five minutes after the last proof, the claim goes.
-      vi.advanceTimersByTime(5 * 60_000 + 1_000);
+      // And the answer still lands on a claim that was never taken away.
+      channel.post({ role: "agent", text: "here is the plan" });
       expect(channel.presence().working).toBeNull();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("ends the claim the moment a launched agent exits unanswered", async () => {
+    const { channel } = make();
+    channel.setLaunchedAgent("claude-code");
+    channel.post({ role: "user", text: "who emailed me?" });
+    await channel.awaitUserTurn({ agent: "claude-code", timeoutMs: 1_000 });
+    expect(channel.presence().working).not.toBeNull();
+
+    // The process died. That is exactly what the expiry was built to catch,
+    // and the exit proves it — no reason to hold a spinner for five minutes.
+    channel.setLaunchedAgent(null);
+    expect(channel.presence().working).toBeNull();
+  });
+
+  it("leaves another agent's claim alone when a launched agent exits", async () => {
+    const { channel } = make();
+    channel.setLaunchedAgent("claude-code");
+    channel.post({ role: "user", text: "one" });
+    await channel.awaitUserTurn({ agent: "claude-desktop", timeoutMs: 1_000 });
+    channel.post({ role: "user", text: "two" });
+    await channel.awaitUserTurn({ agent: "claude-code", timeoutMs: 1_000 });
+
+    // Two agents asked, so the claim cannot be pinned on the one that exited.
+    channel.setLaunchedAgent(null);
+    expect(channel.presence().working).not.toBeNull();
   });
 
   it("gives up the claim when a Boxaide tool call is the only proof", async () => {

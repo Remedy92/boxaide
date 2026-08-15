@@ -76,6 +76,10 @@ const PRESENCE_WINDOW_MS = 40_000;
  * is a Boxaide tool call, or a line on a launched agent's stdout; a dead agent
  * produces neither, so it still expires five minutes after its last sign of
  * life.
+ *
+ * This clock does not run at all for an agent Boxaide launched. There the
+ * running child process is the proof, it never lapses while the process
+ * lives, and its exit ends the claim outright — see `presence`.
  */
 const WORK_MAX_MS = 5 * 60_000;
 
@@ -241,7 +245,16 @@ export class AgentChannel {
   presence(): Presence {
     const now = Date.now();
     const fresh = this.lastSeen !== null && now - this.lastSeen < PRESENCE_WINDOW_MS;
-    if (this.work && now - this.work.provenAt > WORK_MAX_MS) this.work = null;
+    // A process we started is still running and this claim is its own: no
+    // timer may overrule that. Stdout goes quiet for as long as one tool call
+    // takes — a test run, a build, a long read — and a claim that expired
+    // underneath it would tell the user their answer is never coming while
+    // the agent is a minute from giving it. When the child exits, the exit
+    // itself ends the claim, so nothing here has to guess.
+    const held = this.work !== null && this.streamSpeaksForWork();
+    if (this.work && !held && now - this.work.provenAt > WORK_MAX_MS) {
+      this.work = null;
+    }
     return {
       waiting: this.waiters.length,
       listening: this.waiters.length > 0 || fresh,
@@ -296,11 +309,10 @@ export class AgentChannel {
   noteAgentActivity(tool: string | null): void {
     const speaks = this.work !== null && this.streamSpeaksForWork();
     const renamed = speaks && tool !== null && tool !== this.work?.tool?.name;
-    if (speaks) {
-      if (tool) this.work!.tool = { name: tool, at: new Date().toISOString() };
-      // Reading a file is not answering, but it is not dying either. Whatever
-      // else this line was, the process holding the message just moved.
-      this.proveWork();
+    // No proveWork here, deliberately: while the stream speaks for the claim
+    // the process is running, and `presence` does not expire it on any clock.
+    if (speaks && tool) {
+      this.work!.tool = { name: tool, at: new Date().toISOString() };
     }
     // Not touch(): that emits on every call, and this one arrives per line.
     this.lastSeen = Date.now();
@@ -506,11 +518,20 @@ export class AgentChannel {
    */
   setLaunchedAgent(id: string | null): void {
     if (id === this.launchedAgent) return;
+    // Read ownership before the id moves: after this, streamSpeaksForWork is
+    // answering about a different process, or none.
+    const wasOurs = this.streamSpeaksForWork();
+    const stopped = id === null;
     this.launchedAgent = id;
     // A fresh process gets a fresh count. Whoever was asking before this one
     // started may be long gone, and a name from then must not mute the stream
     // for the rest of the session.
     this.askers.clear();
+    // It took a message and exited without answering. That is the case the
+    // expiry was built for, and the exit proves it outright — so say it now
+    // instead of leaving a spinner up for five more minutes. An agent that
+    // answered first cleared this on the way out and there is nothing here.
+    if (stopped && wasOurs && this.work) this.work = null;
     this.emitPresence();
   }
 
