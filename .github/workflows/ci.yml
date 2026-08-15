@@ -89,3 +89,7 @@ jobs:
       - name: Audit web dependencies
         run: npm audit --omit=dev --audit-level=moderate
         working-directory: apps/web
+
+      - name: Audit desktop dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+        working-directory: apps/desktop

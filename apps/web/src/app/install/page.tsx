@@ -63,12 +63,7 @@ const DOWNLOADS: Record<
     // on the packaged binary reports arm64 alone. Saying "macOS 12 or later"
     // on its own would hand an Intel Mac a file it cannot run.
     needs: "macOS 12 or later, Apple silicon",
-    // The second sentence is here because the dmg is signed with a Developer ID
-    // but not notarised, and macOS refuses the first open of anything it cannot
-    // check with Apple. Right-click → Open stopped working for this in Sequoia;
-    // Privacy & Security is the only route now. Delete the sentence the day the
-    // release carries a stapled, notarised dmg — not before.
-    next: "Drag Boxaide into Applications. On first open macOS asks — allow it in System Settings → Privacy & Security.",
+    next: "Drag Boxaide into Applications, then open it.",
   },
   windows: {
     name: "Windows",

@@ -32,9 +32,9 @@ A release is a local, ordered pipeline. Nothing in git or Actions runs it.
 1. Bump `version` in root / `apps/desktop` / `apps/web` `package.json` (and their lockfiles) and `apps/mcpb/manifest.json`. The `6619fc0` "Cut 0.2.1" commit is exactly those seven files.
 2. `npm run build` at the repo root — server, Next export, `web-next/`, `.mcpb`.
 3. `npm run dist:mac` in `apps/desktop` — `sync-server.mjs` copies `dist/` + `web-next/` into `apps/desktop/server/`, electron-builder writes an unsigned dmg (`-c.mac.identity=null`), `scripts/sign-mac.sh` codesigns the app inside-out with cert hash `403ADC00F0A6E8A510184F01AA2D670FA1988B54`, rebuilds the dmg from the signed `.app`, signs the dmg.
-4. Optional notarization (`xcrun notarytool submit` / `stapler staple`). Comments in `sign-mac.sh` and `electron-builder.yml`; `notarize: false` today. The install page still tells the visitor to allow the app in Privacy & Security.
-5. `gh release create vX.Y.Z --latest apps/desktop/release/boxaide-mac.dmg` ([`gh release create`](https://cli.github.com/manual/gh_release_create)). `--latest` is what the download button follows.
-6. `publish: null` in electron-builder on purpose: a `GH_TOKEN` in the environment made electron-builder try to publish and crash after the dmg was written.
+4. Notarization is required to publish. `ship.sh` runs `notarytool` / `stapler` and refuses a dmg with no ticket.
+5. `gh release create vX.Y.Z --latest` uploads `boxaide-mac.dmg`, `boxaide-mac.zip`, and `latest-mac.yml`. The download button follows `--latest`.
+6. Pack scripts pass `--publish never` so a `GH_TOKEN` in the environment does not upload an unsigned pack.
 
 This needs: this Mac, an unlocked login keychain, the Developer ID, Node 22, and `gh` authenticated to Remedy92/boxaide. It is minutes, not seconds (`compression: maximum`).
 
@@ -63,7 +63,7 @@ This is the missing piece. Today the steps live in README comments and muscle me
 | `pre-push` | `git push` | If it packs, every master push hangs until the dmg is signed. If the keychain is locked, push fails. |
 | `post-commit` | every commit | Worse. |
 
-Hooks also do not run on GitHub's squash merge. The merge of #26 happened on GitHub; the local event was `git pull --ff-only`. A `post-merge` in `/Users/lucasvanhoutven/Projects/mailmux` would have fired then — and would have shipped a dmg in the middle of a pull, with no version bump commit yet.
+Hooks also do not run on GitHub's squash merge. The merge of #26 happened on GitHub; the local event was `git pull --ff-only`. A `post-merge` in the main checkout would have fired then — and would have shipped a dmg in the middle of a pull, with no version bump commit yet.
 
 A hook that *runs electron-builder* is the wrong tool.
 
