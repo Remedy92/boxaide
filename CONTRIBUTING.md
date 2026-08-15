@@ -2,7 +2,7 @@
 
 Open a pull request from a fork. Do not ask for write access.
 
-Only the owner merges to `master`. CI must be green. Do not merge your own PR.
+Only the owner merges to `master`. CI must be green. Contributors do not merge.
 
 Do not run `./scripts/ship.sh`. A merge is not a download. The owner publishes GitHub `releases/latest` from the main checkout.
 

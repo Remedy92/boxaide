@@ -253,7 +253,7 @@ export default function InstallPage() {
                   ? "Boxaide runs on your computer. Open this page there to install it."
                   : current && !current.file
                     ? `There is no ${current.name} installer yet. Run it from source below — it takes two commands.`
-                    : `Free and open source · ${current?.needs ?? "macOS, Windows and Linux"}`}
+                    : `Free and open source · ${current?.needs ?? "Mac installer"}`}
             </p>
           </div>
 

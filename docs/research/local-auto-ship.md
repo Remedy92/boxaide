@@ -11,7 +11,7 @@ The install button is a static URL:
 https://github.com/Remedy92/boxaide/releases/latest/download/boxaide-mac.dmg
 ```
 
-Pinned in `apps/web/src/app/install/page.tsx` (`RELEASE_BASE`) and `apps/desktop/electron-builder.yml` (`artifactName: boxaide-mac.dmg`). GitHub keeps `/releases/latest` on the newest published release ([GitHub: linking to releases](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)).
+Pinned in `apps/web/src/app/install/page.tsx` (`RELEASE_BASE`) and `apps/desktop/electron-builder.yml` (`artifactName: boxaide-mac.${ext}`). GitHub keeps `/releases/latest` on the newest published release ([GitHub: linking to releases](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)).
 
 CI (`.github/workflows/ci.yml`) runs on push and PR to `master`. It typechecks, tests, lints, and builds the web export. It does not pack a dmg, sign, or call `gh release`. Ubuntu runners cannot use the Developer ID in this Mac's login keychain.
 
@@ -31,7 +31,7 @@ A release is a local, ordered pipeline. Nothing in git or Actions runs it.
 
 1. Bump `version` in root / `apps/desktop` / `apps/web` `package.json` (and their lockfiles) and `apps/mcpb/manifest.json`. The `6619fc0` "Cut 0.2.1" commit is exactly those seven files.
 2. `npm run build` at the repo root — server, Next export, `web-next/`, `.mcpb`.
-3. `npm run dist:mac` in `apps/desktop` — `sync-server.mjs` copies `dist/` + `web-next/` into `apps/desktop/server/`, electron-builder writes an unsigned dmg (`-c.mac.identity=null`), `scripts/sign-mac.sh` codesigns the app inside-out with cert hash `403ADC00F0A6E8A510184F01AA2D670FA1988B54`, rebuilds the dmg from the signed `.app`, signs the dmg.
+3. `npm run dist:mac` in `apps/desktop` — `sync-server.mjs` copies `dist/` + `web-next/` into `apps/desktop/server/`, electron-builder writes an unsigned pack (`-c.mac.identity=null`), `apps/desktop/scripts/sign-mac.sh` codesigns the app inside-out with cert hash `403ADC00F0A6E8A510184F01AA2D670FA1988B54`, rebuilds the dmg and zip from the signed `.app`.
 4. Notarization is required to publish. `ship.sh` runs `notarytool` / `stapler` and refuses a dmg with no ticket.
 5. `gh release create vX.Y.Z --latest` uploads `boxaide-mac.dmg`, `boxaide-mac.zip`, and `latest-mac.yml`. The download button follows `--latest`.
 6. Pack scripts pass `--publish never` so a `GH_TOKEN` in the environment does not upload an unsigned pack.
@@ -44,10 +44,10 @@ This needs: this Mac, an unlocked login keychain, the Developer ID, Node 22, and
 
 A single command that is the only publisher:
 
-- Refuse unless cwd is the main checkout, branch is `master`, tree is clean, and `origin/master` is an ancestor of HEAD (fresh fetch).
+- Refuse unless cwd is the main checkout, branch is `master`, tree is clean, and `HEAD` equals `origin/master` after a fresh fetch.
 - Refuse if `gh release view --json tagName,targetCommitish` already points at this HEAD.
-- Bump patch (or take `0.2.2` as an argument). Commit `Cut X.Y.Z`.
-- Run steps 2–5 above. Notarize only if the keychain profile exists.
+- Bump patch (or take a version as an argument). Commit `Cut X.Y.Z`.
+- Run steps 2–5 above. The notary profile must work; unsigned packs are not published.
 - Push `master` and the tag. Create the GitHub release with `--latest`.
 - Print the download URL and the SHA it now serves.
 

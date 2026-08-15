@@ -14,13 +14,13 @@ Boxaide runs on your machine and holds live mail credentials. The threat model i
 
 | Asset | Protection |
 |---|---|
-| Mail passwords and OAuth tokens | AES-256-GCM at rest, per-record random nonce, authenticated. The master key lives in your data directory, never in the database. A `BOXAIDE_MASTER_KEY` that is not 64 hex characters is a passphrase, stretched with scrypt (N=2¹⁷, r=8 — 128 MB per attempt) against a random per-install salt in `master.salt`, rather than hashed. `MAILMUX_MASTER_KEY` is still read when `BOXAIDE_MASTER_KEY` is unset. |
+| Mail passwords and OAuth tokens | AES-256-GCM at rest, per-record random nonce, authenticated. The master key lives in your data directory, never in the database. A `BOXAIDE_MASTER_KEY` that is not 64 hex characters is a passphrase, stretched with scrypt (N=2¹⁷, r=8 — 128 MB per attempt) against a random per-install salt in `master.salt`, rather than hashed. `SLEY_MASTER_KEY` then `MAILMUX_MASTER_KEY` are still read when `BOXAIDE_MASTER_KEY` is unset. |
 | The bearer token | Compared in constant time. Accepted only in an `Authorization` header, never a query string. |
 | The API | Bound to `127.0.0.1` by default. Every browser origin is denied except loopback and entries you add to `BOXAIDE_ALLOWED_ORIGINS`. |
-| `/api/local-bootstrap` | Hands out the token, so it answers `404` unless the server's own bind address is loopback. Beyond that it is gated on both the `Origin` and the `Host` header being loopback, sends `Cache-Control: no-store`, and carries no CORS headers. |
-| Message bodies | Sender HTML is never rendered. The reader shows `bodyText` only, as React elements. There is no `dangerouslySetInnerHTML` anywhere in `apps/web` and `react/no-danger` is an ESLint error. |
+| `/api/local-bootstrap` | Hands out the token, so it answers `404` unless the server's own bind address is loopback. `Host` must be loopback. A missing `Origin` is allowed (curl, MCP); a present `Origin` must be loopback. Sends `Cache-Control: no-store`, and carries no CORS headers. |
+| Message bodies | Sender HTML is never rendered. The reader shows `bodyText` only, as React elements. `react/no-danger` is an ESLint error. The one `dangerouslySetInnerHTML` in `apps/web` is a fixed desktop UA marker in `layout.tsx`, not mail. |
 | Links in messages | Only `https://`, `http://` and `mailto:` are linkified, so a `javascript:` URL stays inert text. Every link carries `rel="noopener noreferrer nofollow"`. |
-| Every response | CSP with `frame-ancestors 'none'`, `base-uri 'none'` and `object-src 'none'`, plus `nosniff`, `Referrer-Policy: no-referrer` and a deny-all `Permissions-Policy`. |
+| Every response | CSP with `frame-ancestors 'none'`, `base-uri 'none'` and `object-src 'none'`, plus `nosniff`, `Referrer-Policy: no-referrer` and a `Permissions-Policy` that denies camera, microphone, geolocation, payment, USB and `interest-cohort`. |
 
 ## Known limits
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Is origin/master what a visitor downloads?
 #
-# The install button is GitHub releases/latest. CI does not publish a dmg.
+# The install button is GitHub releases/latest. CI does not publish a release.
 # This script is the only claim that the download has a given commit.
 #
 #   ./scripts/ship_status.sh        exit 0 if shipped, 1 if not, 2 on error
