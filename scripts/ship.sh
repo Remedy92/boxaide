@@ -54,7 +54,13 @@ command -v xcrun >/dev/null || die "xcrun is not on PATH"
 # Profile name is historical (created as mailmux-notary). Apple will not
 # rename a stored notary item; minting boxaide-notary needs the Apple ID
 # password in an interactive `notarytool store-credentials`.
-: "${APPLE_KEYCHAIN_PROFILE:=mailmux-notary}"
+#
+# Exported, not just assigned. sign-mac.sh reads this variable in a child
+# process two levels down (npm run dist:mac -> desktop.mjs -> sign-mac.sh),
+# and a plain `:=` assignment does not cross that boundary. Unexported, the
+# child saw it unset, skipped notarisation, and the stapler gate below failed
+# the build after a full sign-and-pack.
+export APPLE_KEYCHAIN_PROFILE="${APPLE_KEYCHAIN_PROFILE:-mailmux-notary}"
 xcrun notarytool history --keychain-profile "$APPLE_KEYCHAIN_PROFILE" \
   >/dev/null 2>&1 || die "notary profile $APPLE_KEYCHAIN_PROFILE does not work"
 
