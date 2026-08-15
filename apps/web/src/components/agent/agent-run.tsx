@@ -83,7 +83,7 @@ export function AgentRunView({
   /** Parked `chat_await_message` count — the only proof a next hand-off is ready. */
   waiting: number;
   lastSeenAt: string | null;
-  /** True once an agent has taken this question — see useAgent().claimed. */
+  /** True when this question was dead-lettered — see useAgent().claimed. */
   claimed: boolean;
 }) {
   const running = work !== null;
@@ -279,10 +279,9 @@ function Steps({
  * Queued is recoverable and needs nothing from the user: the message sits
  * unclaimed on disk and the next agent to call in gets it.
  *
- * Dropped is not. A hand-off is permanent — `claimNextUserTurn` marks the row
- * delivered inside the claim transaction and no agent is ever offered it again
- * — so an agent that took this one and went away took it with it. Telling
- * somebody to wait for that would be telling them to wait for nothing.
+ * Dropped is not. After a few failed leases the row stays claimed — no agent
+ * is offered it again — so telling somebody to wait would be telling them to
+ * wait for nothing.
  */
 function Unanswered({
   waiting,

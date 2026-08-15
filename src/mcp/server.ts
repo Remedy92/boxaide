@@ -351,12 +351,19 @@ export function createMcpServer(
     tools: toolsFor(channel, platform),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const name = request.params.name;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
 
     try {
-      const result = await dispatch(mail, name, args, channel, platform);
+      const result = await dispatch(
+        mail,
+        name,
+        args,
+        channel,
+        platform,
+        extra?.signal,
+      );
       return {
         content: [
           {
@@ -402,10 +409,11 @@ async function dispatch(
   args: Record<string, unknown>,
   channel?: AgentChannel,
   platform?: Platform,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   if (CHAT_TOOL_NAMES.has(name)) {
     if (!channel) throw new Error(`${name} is not available on this server`);
-    return dispatchChat(channel, name, args);
+    return dispatchChat(channel, name, args, signal);
   }
   if (
     CRM_TOOL_NAMES.has(name) ||
@@ -522,14 +530,33 @@ async function dispatchChat(
   channel: AgentChannel,
   name: string,
   args: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   switch (name) {
     case "chat_await_message": {
+      // A driven conversation already has a loop; a second asker here would
+      // present as the same holder and steal its lease. See AgentChannel.driven.
+      if (channel.driven) {
+        return {
+          message: null,
+          timedOut: true,
+          hint: "Boxaide is handling this conversation for you. Do not call chat tools; just do the work you were asked.",
+        };
+      }
       const seconds = Number(args.timeoutSeconds ?? DEFAULT_WAIT_MS / 1000);
       const turn = await channel.awaitUserTurn({
         timeoutMs: Number.isFinite(seconds) ? seconds * 1000 : DEFAULT_WAIT_MS,
         agent: channel.clientName,
+        signal,
       });
+      if (signal?.aborted) {
+        if (turn) channel.releaseLease(turn.seq, { revertAttempt: true });
+        return {
+          message: null,
+          timedOut: true,
+          hint: "Nobody typed anything yet. This is normal. Call chat_await_message again now.",
+        };
+      }
       if (!turn) {
         return {
           message: null,
@@ -537,12 +564,22 @@ async function dispatchChat(
           hint: "Nobody typed anything yet. This is normal. Call chat_await_message again now.",
         };
       }
+      const redelivered = turn.deliveryCount > 1;
       return {
         message: { seq: turn.seq, at: turn.at, text: turn.text },
-        hint: "Answer with chat_say, then call chat_await_message again.",
+        redelivered,
+        hint: redelivered
+          ? "You were handed this message before and did not chat_say. Answer with chat_say, then call chat_await_message again."
+          : "Answer with chat_say, then call chat_await_message again.",
       };
     }
     case "chat_say": {
+      if (channel.driven) {
+        return {
+          posted: false,
+          hint: "Boxaide posts your reply for you in this conversation. Return your answer as normal output instead.",
+        };
+      }
       const turn = channel.post({
         role: "agent",
         text: String(args.text ?? ""),
@@ -600,6 +637,7 @@ export async function handleMcpJsonRpc(
   },
   channel?: AgentChannel,
   platform?: Platform,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const id = message.id ?? null;
   if (message.method === "initialize") {
@@ -624,6 +662,9 @@ export async function handleMcpJsonRpc(
     };
   }
   if (message.method === "notifications/initialized") {
+    return null;
+  }
+  if (message.method === "notifications/cancelled") {
     return null;
   }
   if (message.method === "ping") {
@@ -662,7 +703,9 @@ export async function handleMcpJsonRpc(
         params.arguments ?? {},
         channel,
         platform,
+        signal,
       );
+      if (signal?.aborted) return null;
       return {
         jsonrpc: "2.0",
         id,

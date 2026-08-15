@@ -101,6 +101,9 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     mcpUrl: `http://${launcherHost}:${config.port}/mcp`,
     bearerToken: config.bearerToken,
     dataDir: config.dataDir,
+    // OpenCode is launched as a server and driven from here, so the launcher
+    // needs the channel itself, not just its callbacks.
+    channel,
     onRunningChange: (id) => channel.setLaunchedAgent(id),
     onActivity: (tool) => channel.noteAgentActivity(tool),
   });
@@ -206,7 +209,14 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     const messages = Array.isArray(body) ? body : [body];
     const results = [];
     for (const msg of messages) {
-      const res = await handleMcpJsonRpc(mail, msg, channel, platform);
+      const res = await handleMcpJsonRpc(
+        mail,
+        msg,
+        channel,
+        platform,
+        c.req.raw.signal,
+      );
+      if (c.req.raw.signal.aborted) return c.body(null);
       if (res != null) results.push(res);
     }
     // A JSON-RPC notification has no id and takes no reply. The streamable-HTTP

@@ -19,8 +19,11 @@
  * elicitation would be a cleaner fit on paper, and almost nothing implements
  * them.
  *
- * A message is delivered to exactly ONE waiting agent. Two agents pointed at
- * the same Boxaide would otherwise both answer every message.
+ * A message is leased to exactly ONE waiting agent. Two agents pointed at
+ * the same Boxaide would otherwise both answer every message. The lease ends
+ * at `chat_say`, or when the holder is gone — abort, expiry, process exit,
+ * or the same agent returning to the loop unanswered. After a few failed
+ * leases the row is dead-lettered and the UI asks the user to send it again.
  *
  * ## Why this polls its own database
  *
@@ -36,9 +39,10 @@
  * drain immediately, so the common case costs nothing in latency and the
  * interval is only there for the cross-process one.
  */
-import type { Store, StoredTurn } from "../db/store.js";
+import { MAX_DELIVERIES, type Store, type StoredTurn } from "../db/store.js";
 
 export type Turn = StoredTurn;
+export { MAX_DELIVERIES };
 
 /** Turns kept on disk. Older ones are dropped as new ones arrive. */
 const HISTORY_LIMIT = 500;
@@ -62,12 +66,13 @@ const PRESENCE_WINDOW_MS = 40_000;
 
 /**
  * How long a claimed message may stay unanswered, WITHOUT PROOF the agent
- * holding it is alive, before we stop saying an agent is working on it.
+ * holding it is alive, before we give the lease back.
  *
  * An agent that took a message and then died leaves no trace: the claim is a
  * database flag, not an open request. Rather than show a spinner forever, the
- * claim expires, and expiring it tells the user the message is gone and must
- * be sent again.
+ * lease expires and the next waiting agent is offered the same message.
+ * After MAX_DELIVERIES failed leases it stays claimed, and the UI tells the
+ * user it will not be handed over again.
  *
  * The clock runs from the last proof, not from the hand-off. Timing the
  * hand-off would call a live agent dead for the only reason an answer ever
@@ -136,6 +141,12 @@ export type Presence = {
   launchedAgent: string | null;
   /** Set while a claimed message is unanswered. Null the rest of the time. */
   working: Work | null;
+  /**
+   * User seqs leased until the delivery cap and never answered. The warning
+   * in the pane is these, not a row that is still queued or still in flight.
+   * Absent on a server built before the field existed — treat as none.
+   */
+  dropped: number[];
 };
 
 type Waiter = {
@@ -143,6 +154,10 @@ type Waiter = {
   timer: ReturnType<typeof setTimeout>;
   /** Client name of the parked agent, for the work record it may claim. */
   agent: string | null;
+  /** Present when the MCP request that parked this waiter can be cancelled. */
+  signal?: AbortSignal;
+  /** Remove the abort listener, if one was attached. */
+  cleanup?: () => void;
 };
 
 export class AgentChannel {
@@ -165,12 +180,23 @@ export class AgentChannel {
   private broadcastSeq: number;
   private poll: ReturnType<typeof setInterval> | null = null;
   private closed = false;
+  /**
+   * True while an in-process driver holds the chat loop. The MCP chat tools
+   * are refused for the duration: a driven CLI that still called
+   * `chat_await_message` would present as the same holder the driver uses,
+   * take the lease out from under it, and answer twice. A prompt telling the
+   * model not to is a sentence; this is the gate.
+   */
+  private drivenFlag = false;
 
   constructor(private store: Store) {
     // Start from the end of history: attaching a listener replays nothing, it
     // only follows. The UI fetches history separately.
     const tail = this.store.listTurns({ limit: 1 });
     this.broadcastSeq = tail.length > 0 ? tail[tail.length - 1].seq : 0;
+    // This process just started. Any lease in the file is held by nobody —
+    // the previous process's in-memory work died with it.
+    this.store.releaseOrphanLeases();
   }
 
   /* ---- writing ---------------------------------------------------------- */
@@ -253,7 +279,7 @@ export class AgentChannel {
     // itself ends the claim, so nothing here has to guess.
     const held = this.work !== null && this.streamSpeaksForWork();
     if (this.work && !held && now - this.work.provenAt > WORK_MAX_MS) {
-      this.work = null;
+      this.releaseWork();
     }
     return {
       waiting: this.waiters.length,
@@ -270,6 +296,14 @@ export class AgentChannel {
             tool: this.work.tool,
           }
         : null,
+      // The final lease looks identical on disk to a dead-lettered one — the
+      // count is already at the cap the moment it is handed over. Only the
+      // in-memory hold tells the two apart, so the message being worked right
+      // now is never in the warning. It joins the list when that lease ends
+      // unanswered, and not a second earlier.
+      dropped: this.store
+        .listDroppedUserSeqs()
+        .filter((seq) => seq !== this.work?.seq),
     };
   }
 
@@ -326,28 +360,41 @@ export class AgentChannel {
 
   /**
    * Resolves with the next unclaimed user message, or null once `timeoutMs`
-   * passes with nothing to hand over.
+   * passes with nothing to hand over, or once `signal` aborts.
    *
    * Null is a normal result, not an error: it exists so the agent's client sees
    * a completed tool call well inside its request timeout and can immediately
    * call again. The tool description tells the agent to do exactly that.
+   *
+   * A second agent parking does not take the open lease. The same agent
+   * returning unanswered does: that is abandon, and the message goes back
+   * on the queue (or to another waiter) rather than sitting delivered forever.
    */
   awaitUserTurn(
-    options: { timeoutMs?: number; agent?: string | null } = {},
+    options: {
+      timeoutMs?: number;
+      agent?: string | null;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<Turn | null> {
     const agent = options.agent ?? null;
+    const signal = options.signal;
     // Asking is what makes a client a candidate for the next hand-off, so this
     // is the point where a second agent becomes real. An unnamed client counts
     // as one name: two anonymous clients are still two agents.
     this.askers.add(agent ?? "");
     this.touch(agent);
-    // Back at the loop means done with the last message, answered or abandoned.
-    this.work = null;
+    if (this.sameHolder(agent)) this.releaseWork();
     if (this.closed) return Promise.resolve(null);
+    if (signal?.aborted) return Promise.resolve(null);
 
     // Anything typed before the agent got here is already on disk.
     const pending = this.store.claimNextUserTurn();
     if (pending) {
+      if (signal?.aborted) {
+        this.releaseLease(pending.seq, { revertAttempt: true });
+        return Promise.resolve(null);
+      }
       this.beginWork(pending, agent);
       this.emitPresence();
       return Promise.resolve(pending);
@@ -360,12 +407,21 @@ export class AgentChannel {
     return new Promise<Turn | null>((resolve) => {
       const waiter: Waiter = {
         agent,
+        signal,
         resolve,
         timer: setTimeout(() => {
           this.drop(waiter);
           resolve(null);
         }, ms),
       };
+      if (signal) {
+        const onAbort = () => {
+          this.drop(waiter);
+          resolve(null);
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        waiter.cleanup = () => signal.removeEventListener("abort", onAbort);
+      }
       this.waiters.push(waiter);
       this.ensurePoll();
       this.emitPresence();
@@ -402,16 +458,75 @@ export class AgentChannel {
   private handOff(): void {
     let handed = false;
     while (this.waiters.length > 0) {
+      this.pruneAbortedWaiters();
+      if (this.waiters.length === 0) break;
       const turn = this.store.claimNextUserTurn();
       if (!turn) break;
       const waiter = this.waiters.shift();
-      if (!waiter) break;
+      if (!waiter) {
+        this.store.unclaimUserTurn(turn.seq, { revertAttempt: true });
+        break;
+      }
       clearTimeout(waiter.timer);
+      waiter.cleanup?.();
+      if (waiter.signal?.aborted) {
+        this.store.unclaimUserTurn(turn.seq, { revertAttempt: true });
+        waiter.resolve(null);
+        continue;
+      }
       this.beginWork(turn, waiter.agent);
       waiter.resolve(turn);
       handed = true;
     }
     if (handed) this.emitPresence();
+  }
+
+  /**
+   * Ends the in-memory hold and writes that to disk. A released row is offered
+   * to the next waiter; a dead-lettered one stays claimed for the UI warning.
+   */
+  releaseLease(seq: number, options: { revertAttempt?: boolean } = {}): void {
+    if (this.work?.seq === seq) this.work = null;
+    const result = this.store.unclaimUserTurn(seq, options);
+    if (result === "released") this.handOff();
+    else this.emitPresence();
+  }
+
+  private releaseWork(options: { revertAttempt?: boolean } = {}): void {
+    if (!this.work) return;
+    this.releaseLease(this.work.seq, options);
+  }
+
+  /**
+   * The same client that holds the lease is asking for a message again.
+   *
+   * Compared on the literal name each caller gave, with no fall back to the
+   * last name seen. Filling an unnamed caller in with `lastAgent` would let
+   * any anonymous client match a named holder, take the lease away mid-answer,
+   * and be handed the same message — the double-answer hole this lease exists
+   * to close. An unnamed caller is the holder only when the holder is unnamed
+   * too, which is the case where they really are the one client asking.
+   */
+  private sameHolder(agent: string | null): boolean {
+    if (!this.work) return false;
+    return (agent ?? "") === (this.work.agent ?? "");
+  }
+
+  private pruneAbortedWaiters(): void {
+    const live: Waiter[] = [];
+    for (const waiter of this.waiters) {
+      if (!waiter.signal?.aborted) {
+        live.push(waiter);
+        continue;
+      }
+      clearTimeout(waiter.timer);
+      waiter.cleanup?.();
+      waiter.resolve(null);
+    }
+    if (live.length === this.waiters.length) return;
+    this.waiters = live;
+    this.maybeStopPoll();
+    this.emitPresence();
   }
 
   /** One agent now holds one message. Ends at its next answer, or by expiry. */
@@ -421,7 +536,10 @@ export class AgentChannel {
       since: new Date().toISOString(),
       // The hand-off is itself the first proof: the agent asked, and got one.
       provenAt: Date.now(),
-      agent: agent ?? this.lastAgent,
+      // The caller's own name, borrowed from nobody. `sameHolder` compares
+      // against this, so stamping an unnamed claimant with `lastAgent` would
+      // hand its lease to whoever that name belongs to.
+      agent,
       tool: null,
     };
   }
@@ -475,6 +593,7 @@ export class AgentChannel {
   private drop(waiter: Waiter): void {
     const index = this.waiters.indexOf(waiter);
     if (index >= 0) this.waiters.splice(index, 1);
+    waiter.cleanup?.();
     this.maybeStopPoll();
     if (index >= 0) this.emitPresence();
   }
@@ -531,8 +650,8 @@ export class AgentChannel {
     // expiry was built for, and the exit proves it outright — so say it now
     // instead of leaving a spinner up for five more minutes. An agent that
     // answered first cleared this on the way out and there is nothing here.
-    if (stopped && wasOurs && this.work) this.work = null;
-    this.emitPresence();
+    if (stopped && wasOurs && this.work) this.releaseWork();
+    else this.emitPresence();
   }
 
   /** Who new agent turns are stamped as: the launched CLI, else last initialize. */
@@ -541,6 +660,14 @@ export class AgentChannel {
   }
 
   /* ---- lifecycle -------------------------------------------------------- */
+
+  setDriven(on: boolean): void {
+    this.drivenFlag = on;
+  }
+
+  get driven(): boolean {
+    return this.drivenFlag;
+  }
 
   clear(): void {
     this.store.clearTurns();
@@ -560,6 +687,7 @@ export class AgentChannel {
     const parked = this.waiters.splice(0);
     for (const waiter of parked) {
       clearTimeout(waiter.timer);
+      waiter.cleanup?.();
       waiter.resolve(null);
     }
     this.listeners.clear();

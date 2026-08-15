@@ -152,10 +152,11 @@ export type AgentTurn = {
   /** MCP client name. Best effort — see AgentChannel.noteClient on the server. */
   agent: string | null;
   /**
-   * User turns: an agent has taken this one and no agent will be given it
-   * again. Absent on a server built before the field existed, and false on the
-   * live stream frame, which is written before the hand-off — the client also
-   * remembers what it saw claimed. See useAgent().claimed.
+   * User turns: an agent is holding this one, already answered it, or held it
+   * until it was dead-lettered. A live hold is a lease, not a permanent take —
+   * a vanished holder gives the row back. Absent on a server built before the
+   * field existed, and false on the live stream frame, which is written before
+   * the hand-off. See useAgent().claimed.
    */
   delivered?: boolean;
   /**
@@ -187,6 +188,11 @@ export type AgentPresence = {
    * field existed, which is why every reader treats absence as "not working".
    */
   working: AgentWork | null;
+  /**
+   * User seqs leased until the delivery cap and never answered. The pane
+   * warning is these. Absent on a server built before the field existed.
+   */
+  dropped?: number[];
 };
 
 /** The one thing Boxaide can prove about an agent's own work. */

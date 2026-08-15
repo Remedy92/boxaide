@@ -274,6 +274,55 @@ describe("mcpb connector proxy", () => {
       "Bearer fresh",
     ]);
   });
+
+  it("aborts the in-flight POST when the client sends notifications/cancelled", async () => {
+    let closed = false;
+    // The cancel must not race the request: proxy startup plus the POST can
+    // outlast any fixed sleep on a loaded machine, so the test waits on the
+    // events themselves.
+    let arrived!: () => void;
+    const arrival = new Promise<void>((resolve) => (arrived = resolve));
+    const hanging = createServer((req, res) => {
+      arrived();
+      req.on("close", () => {
+        closed = true;
+        if (!res.writableEnded) res.end();
+      });
+    });
+    const url = await new Promise<string>((resolve) => {
+      hanging.listen(0, "127.0.0.1", () => {
+        const { port } = hanging.address() as AddressInfo;
+        resolve(`http://127.0.0.1:${port}`);
+      });
+    });
+    cleanups.push(() => hanging.close());
+
+    const proxy = startProxy({
+      BOXAIDE_URL: url,
+      BOXAIDE_DATA_DIR: tempDataDir("t"),
+      BOXAIDE_TOKEN: "",
+    });
+
+    proxy.send({
+      jsonrpc: "2.0",
+      id: 11,
+      method: "tools/call",
+      params: { name: "chat_await_message", arguments: {} },
+    });
+    await arrival;
+    proxy.send({
+      jsonrpc: "2.0",
+      method: "notifications/cancelled",
+      params: { requestId: 11 },
+    });
+    const deadline = Date.now() + 2_000;
+    while (!closed && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(closed).toBe(true);
+    expect(proxy.unread).toBe(0);
+  });
 });
 
 describe("mcpb connector token fallback", () => {

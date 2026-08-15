@@ -4,7 +4,7 @@ import { existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { AgentChannel } from "../src/agent/channel.js";
+import { AgentChannel, MAX_DELIVERIES } from "../src/agent/channel.js";
 import { createRuntime } from "../src/app.js";
 import { encryptSecret } from "../src/crypto/secrets.js";
 import { Store } from "../src/db/store.js";
@@ -59,12 +59,16 @@ describe("AgentChannel", () => {
     expect(turn).toBeNull();
   });
 
-  it("never re-delivers a message that was already claimed", async () => {
+  it("does not hand a held message to a second agent", async () => {
     const { channel } = make();
     channel.post({ role: "user", text: "once" });
 
-    expect((await channel.awaitUserTurn({ timeoutMs: 1_000 }))?.text).toBe("once");
-    expect(await channel.awaitUserTurn({ timeoutMs: 1_000 })).toBeNull();
+    expect((await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" }))?.text).toBe(
+      "once",
+    );
+    // A different agent parking is not abandon. The first still holds it.
+    expect(await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "b" })).toBeNull();
+    expect(channel.history()[0].delivered).toBe(true);
   });
 
   it("keeps history in order and round-trips through encryption at rest", () => {
@@ -263,6 +267,10 @@ describe("AgentChannel", () => {
     // and the exit proves it — no reason to hold a spinner for five minutes.
     channel.setLaunchedAgent(null);
     expect(channel.presence().working).toBeNull();
+    expect(channel.history()[0].delivered).toBe(false);
+    expect((await channel.awaitUserTurn({ timeoutMs: 1_000 }))?.text).toBe(
+      "who emailed me?",
+    );
   });
 
   it("leaves another agent's claim alone when a launched agent exits", async () => {
@@ -294,6 +302,10 @@ describe("AgentChannel", () => {
 
       vi.advanceTimersByTime(5 * 60_000 + 1_000);
       expect(channel.presence().working).toBeNull();
+      expect(channel.history()[0].delivered).toBe(false);
+      expect(
+        (await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "b" }))?.text,
+      ).toBe("find the invoice");
     } finally {
       vi.useRealTimers();
     }
@@ -334,30 +346,116 @@ describe("AgentChannel", () => {
     expect(channel.presence().working?.tool?.name).toBe("Bash");
   });
 
-  it("reports a claimed message as delivered, so the UI never calls it queued", async () => {
+  it("reports a claimed message as delivered while the lease is held", async () => {
     const { channel } = make();
     channel.post({ role: "user", text: "who emailed me?" });
     expect(channel.history()[0].delivered).toBe(false);
 
-    await channel.awaitUserTurn({ timeoutMs: 500 });
+    await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
 
-    // The claim is permanent: this row is never handed to anybody again, so
-    // "waiting for an agent" would be a lie from here on.
     expect(channel.history()[0].delivered).toBe(true);
-    expect(await channel.awaitUserTurn({ timeoutMs: 500 })).toBeNull();
+    expect(channel.presence().dropped).toEqual([]);
   });
 
-  it("drops the work when the agent goes back to the loop unanswered", async () => {
+  it("hands the message back when the same agent returns unanswered", async () => {
     const { channel } = make();
-    const parked = channel.awaitUserTurn({ timeoutMs: 2_000 });
+    channel.post({ role: "user", text: "hello" });
+    const first = await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" });
+    expect(first?.deliveryCount).toBe(1);
+
+    const again = await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" });
+    expect(again?.text).toBe("hello");
+    expect(again?.deliveryCount).toBe(2);
+  });
+
+  it("keeps another agent's lease when a second agent parks", async () => {
+    const { channel } = make();
+    const parked = channel.awaitUserTurn({ timeoutMs: 2_000, agent: "a" });
     channel.post({ role: "user", text: "hello" });
     await parked;
     expect(channel.presence().working).not.toBeNull();
 
-    // Round two of the loop. Whatever happened to message one, it is over.
-    const next = channel.awaitUserTurn({ timeoutMs: 500 });
-    expect(channel.presence().working).toBeNull();
+    const next = channel.awaitUserTurn({ timeoutMs: 500, agent: "b" });
+    expect(channel.presence().working).not.toBeNull();
     await next;
+  });
+
+  it("drops a waiter when the request is aborted", async () => {
+    const { channel } = make();
+    const abort = new AbortController();
+    const parked = channel.awaitUserTurn({ timeoutMs: 60_000, signal: abort.signal });
+    expect(channel.presence().waiting).toBe(1);
+    abort.abort();
+    expect(await parked).toBeNull();
+    expect(channel.presence().waiting).toBe(0);
+  });
+
+  it("dead-letters a message after too many unanswered leases", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      expect(
+        (await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" }))?.text,
+      ).toBe("once");
+    }
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" })).toBeNull();
+    expect(channel.history()[0].delivered).toBe(true);
+    expect(channel.presence().dropped).toEqual([posted.seq]);
+  });
+
+  it("keeps the final lease out of the dropped list while it is live", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    for (let n = 0; n < MAX_DELIVERIES - 1; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    }
+
+    // The last allowed hand-off. On disk this row already looks dead-lettered,
+    // and the agent is answering it right now: the pane must not tell the user
+    // to send it again over a live attempt.
+    const last = await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    expect(last?.deliveryCount).toBe(MAX_DELIVERIES);
+    expect(channel.presence().working?.seq).toBe(posted.seq);
+    expect(channel.presence().dropped).toEqual([]);
+
+    // The lease ended with no answer. Now it really is dropped.
+    channel.releaseLease(posted.seq);
+    expect(channel.presence().working).toBeNull();
+    expect(channel.presence().dropped).toEqual([posted.seq]);
+  });
+
+  it("will not let an unnamed client take a named agent's lease", async () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "hello" });
+    const held = await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    expect(held?.deliveryCount).toBe(1);
+
+    // Neither an anonymous client nor a different name is the holder, so the
+    // lease stays with "a" and nobody else is handed the same message.
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: null })).toBeNull();
+    expect(channel.presence().working?.agent).toBe("a");
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "b" })).toBeNull();
+    expect(channel.presence().working?.agent).toBe("a");
+
+    // The holder itself returning unanswered still gives the message back.
+    const again = await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    expect(again?.text).toBe("hello");
+    expect(again?.deliveryCount).toBe(2);
+  });
+
+  it("lets an unnamed holder re-take its own lease after another was named", async () => {
+    const { channel } = make();
+    // A named client initialized first, so lastAgent is set before anyone asks.
+    channel.noteClient("claude-desktop");
+    channel.post({ role: "user", text: "hello" });
+
+    const held = await channel.awaitUserTurn({ timeoutMs: 500, agent: null });
+    expect(held?.deliveryCount).toBe(1);
+    expect(channel.presence().working?.agent).toBeNull();
+
+    const again = await channel.awaitUserTurn({ timeoutMs: 500, agent: null });
+    expect(again?.text).toBe("hello");
+    expect(again?.deliveryCount).toBe(2);
   });
 
   it("notifies presence subscribers when an agent parks or speaks", async () => {
@@ -521,6 +619,7 @@ describe("AgentChannel", () => {
       expect(listed).toHaveLength(1);
       expect(listed[0].text).toBe("old question");
       expect(listed[0].replyTo).toBeNull();
+      expect(listed[0].deliveryCount).toBe(0);
 
       const added = store.appendTurn({
         at: new Date().toISOString(),
@@ -638,6 +737,62 @@ describe("chat tools over MCP", () => {
     expect(body.timedOut).toBe(true);
     // The hint is the only thing telling the model to call again.
     expect(body.hint).toMatch(/again/i);
+  });
+
+  it("unclaims when the await request is aborted after the hand-off", async () => {
+    const service = mail();
+    const { channel } = make();
+    const abort = new AbortController();
+    const pending = handleMcpJsonRpc(
+      service,
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "chat_await_message", arguments: { timeoutSeconds: 30 } },
+      },
+      channel,
+      undefined,
+      abort.signal,
+    );
+    channel.post({ role: "user", text: "hello" });
+    abort.abort();
+    expect(await pending).toBeNull();
+    expect(channel.history()[0].delivered).toBe(false);
+  });
+
+  it("refuses the chat loop tools while a driver holds the conversation", async () => {
+    const service = mail();
+    const { channel } = make();
+    channel.post({ role: "user", text: "hello" });
+    channel.setDriven(true);
+
+    // No wait, no claim: the driver's own loop must stay the only asker.
+    const awaited = payload(await call(service, channel, "chat_await_message"));
+    expect(awaited.message).toBeNull();
+    expect(awaited.hint).toMatch(/handling this conversation/i);
+    expect(channel.history()[0].delivered).toBe(false);
+
+    const said = payload(await call(service, channel, "chat_say", { text: "mine!" }));
+    expect(said.posted).toBe(false);
+    expect(channel.history()).toHaveLength(1);
+
+    // Driver gone, tools back: the MCP tier is the fallback again.
+    channel.setDriven(false);
+    const after = payload(await call(service, channel, "chat_await_message"));
+    expect(after.message.text).toBe("hello");
+  });
+
+  it("marks a second hand-off of the same message as redelivered", async () => {
+    const service = mail();
+    const { channel } = make();
+    channel.post({ role: "user", text: "hello" });
+    expect(payload(await call(service, channel, "chat_await_message")).redelivered).toBe(
+      false,
+    );
+    const again = payload(await call(service, channel, "chat_await_message"));
+    expect(again.message.text).toBe("hello");
+    expect(again.redelivered).toBe(true);
   });
 
   it("refuses a chat tool on a server built without a channel", async () => {
