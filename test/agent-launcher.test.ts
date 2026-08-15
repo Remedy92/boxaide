@@ -201,12 +201,13 @@ describe("AgentLauncher", () => {
     ]);
 
     const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
-    // A launch with no pick still pins a model: OpenCode's own default
-    // retries forever when that endpoint is down.
-    expect(opencode.args!(CTX)[opencode.args!(CTX).indexOf("--model") + 1]).toBe(
-      "opencode/big-pickle",
-    );
-    const opencodeWithModel = opencode.args!(CTX, "openai/gpt-5.4");
+    // The chat launch is a server now, so the pick reaches the model over the
+    // API per prompt, not on the command line. Automations still pin it in
+    // argv: OpenCode's own default retries forever when that endpoint is down.
+    expect(opencode.args!(CTX)).not.toContain("--model");
+    const opencodeRun = opencode.runArgs!(CTX, "do the thing");
+    expect(opencodeRun[opencodeRun.indexOf("--model") + 1]).toBe("opencode/big-pickle");
+    const opencodeWithModel = opencode.runArgs!(CTX, "do the thing", "openai/gpt-5.4");
     expect(opencodeWithModel[opencodeWithModel.indexOf("--model") + 1]).toBe("openai/gpt-5.4");
     expect(opencode.models?.map((m) => m.id)).toEqual([
       "opencode/big-pickle",
@@ -258,12 +259,14 @@ describe("AgentLauncher", () => {
       dataDir: tempDir(),
     };
     const workDir = join(ctx.dataDir, "agent-workdir");
+    // Chat runs the server; the driver holds the loop and passes --dir's job
+    // as ?directory= per call.
     const args = opencode.args!(ctx);
     expect(args[0]).toBe("--pure");
-    expect(args).toContain("run");
-    expect(args[args.indexOf("--dir") + 1]).toBe(workDir);
-    expect(args[args.indexOf("--format") + 1]).toBe("json");
-    expect(args[args.indexOf("--model") + 1]).toBe("opencode/big-pickle");
+    expect(args).toContain("serve");
+    expect(args[args.indexOf("--port") + 1]).toBe("0");
+    expect(args[args.indexOf("--hostname") + 1]).toBe("127.0.0.1");
+    expect(opencode.drive).toBeTypeOf("function");
     expect(opencode.readEvent).toBeTypeOf("function");
 
     mkdirSync(workDir, { recursive: true });
@@ -271,6 +274,16 @@ describe("AgentLauncher", () => {
     const env = opencode.childEnv!(ctx, workDir);
     expect(env.XDG_CONFIG_HOME).toBe(join(ctx.dataDir, "agent-homes", "opencode", "config"));
     expect(env.OPENCODE_CONFIG).toBe(join(workDir, "opencode.json"));
+    // A fresh server password per launch, readable by the driver.
+    expect(env.OPENCODE_SERVER_PASSWORD).toBeTruthy();
+    expect(opencode.childEnv!(ctx, workDir).OPENCODE_SERVER_PASSWORD).not.toBe(
+      env.OPENCODE_SERVER_PASSWORD,
+    );
+    // The automation path is unchanged: still a one-shot `run`.
+    expect(opencode.runArgs!(ctx, "do the thing")).toContain("run");
+    expect(opencode.runArgs!(ctx, "do the thing")[
+      opencode.runArgs!(ctx, "do the thing").indexOf("--dir") + 1
+    ]).toBe(workDir);
     expect(opencode.runArgs!(ctx, "do the thing")).toContain("--dir");
     expect(opencode.runArgs!(ctx, "do the thing")).not.toContain("--format");
   });
