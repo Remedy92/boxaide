@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   parseId,
+  parseSince,
   uidWindow,
+  withinSince,
   imapErrorText,
   imapAuthOptions,
   smtpAuthOptions,
@@ -226,5 +228,58 @@ describe("auth credential mapping (password | xoauth2)", () => {
       user: "u@x.com",
       accessToken: "ya29.token",
     });
+  });
+});
+
+/**
+ * The precise half of the since filter. IMAP SINCE compares whole days, so
+ * the server hands back everything from that day and these two trim it to the
+ * instant the caller asked for. Getting this wrong reintroduces the bug the
+ * option exists to fix — a triage run asking for "since 17:00" would silently
+ * read the whole day, or drop mail that did arrive inside the window.
+ */
+describe("since filtering", () => {
+  const noon = "2026-08-16T12:00:00.000Z";
+
+  it("rejects input it cannot turn into a time", () => {
+    expect(parseSince(undefined)).toBe(null);
+    expect(parseSince("")).toBe(null);
+    expect(parseSince("last tuesday")).toBe(null);
+    expect(parseSince(noon)?.toISOString()).toBe(noon);
+  });
+
+  it("keeps mail at or after the instant and drops the rest of that day", () => {
+    const since = new Date(noon);
+    const at = (iso: string) => ({ uid: 1, internalDate: iso });
+
+    expect(withinSince(at("2026-08-16T12:00:00.000Z"), since)).toBe(true);
+    expect(withinSince(at("2026-08-16T18:00:00.000Z"), since)).toBe(true);
+    // Same day, before the instant: the part SINCE cannot exclude on its own.
+    expect(withinSince(at("2026-08-16T09:00:00.000Z"), since)).toBe(false);
+  });
+
+  it("prefers receive time over the sender's Date header", () => {
+    const since = new Date(noon);
+    // A sender whose clock is a day slow. It really arrived inside the window.
+    const head = {
+      uid: 1,
+      internalDate: "2026-08-16T13:00:00.000Z",
+      envelope: { date: "2026-08-15T13:00:00.000Z" },
+    };
+    expect(withinSince(head, since)).toBe(true);
+  });
+
+  it("falls back to the header, then keeps the message when neither is usable", () => {
+    const since = new Date(noon);
+    expect(
+      withinSince({ uid: 1, envelope: { date: "2026-08-16T14:00:00.000Z" } }, since),
+    ).toBe(true);
+    expect(
+      withinSince({ uid: 1, envelope: { date: "2026-08-16T02:00:00.000Z" } }, since),
+    ).toBe(false);
+    // Undated or unparseable: keeping it is the safe direction — a missed
+    // reply is worse than one extra message in the triage list.
+    expect(withinSince({ uid: 1 }, since)).toBe(true);
+    expect(withinSince({ uid: 1, internalDate: "not a date" }, since)).toBe(true);
   });
 });

@@ -313,7 +313,7 @@ describe("CRM encryption at rest", () => {
 });
 
 describe("CRM tool dispatch", () => {
-  it("exposes the thirteen tools of the spec", () => {
+  it("exposes the fifteen tools of the spec", () => {
     expect(CRM_TOOLS.map((t) => t.name).sort()).toEqual(
       [
         "crm_contact_delete",
@@ -323,10 +323,12 @@ describe("CRM tool dispatch", () => {
         "crm_deal_delete",
         "crm_deal_move",
         "crm_deal_upsert",
+        "crm_intent_set",
         "crm_interactions_list",
         "crm_note_add",
         "crm_org_upsert",
         "crm_orgs_list",
+        "crm_outreach_state",
         "crm_pipeline_get",
         "crm_sync",
       ].sort(),

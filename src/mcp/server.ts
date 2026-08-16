@@ -62,7 +62,7 @@ export const TOOLS = [
   {
     name: "messages_list",
     description:
-      "List message summaries from one account (alias/id) or all accounts. Unified inbox when account is 'all'. Returns { messages, errors }; a non-empty errors array means some accounts failed and the list is incomplete.",
+      "List message summaries from one account (alias/id) or all accounts. Unified inbox when account is 'all'. Returns { messages, errors }; a non-empty errors array means some accounts failed and the list is incomplete. Without `since` this returns the newest `limit` messages and nothing older, so it CANNOT answer 'everything from the last day' on its own — pass `since` whenever you mean a period of time, and raise `limit` to cover the busiest expected day.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -78,6 +78,11 @@ export const TOOLS = [
           default: "INBOX",
         },
         unreadOnly: { type: "boolean", default: false },
+        since: {
+          type: "string",
+          description:
+            "ISO timestamp. Returns only mail received at or after it. This is the only way to bound a read by time; a period written in prose is ignored.",
+        },
       },
       additionalProperties: false,
     },
@@ -92,6 +97,11 @@ export const TOOLS = [
         query: { type: "string" },
         account: { type: "string", default: "all" },
         limit: { type: "number", default: 25 },
+        since: {
+          type: "string",
+          description:
+            "ISO timestamp. Narrows the search to mail received at or after it.",
+        },
       },
       required: ["query"],
       additionalProperties: false,
@@ -441,6 +451,7 @@ async function dispatch(
           limit: Number(args.limit ?? 25),
           folder: args.folder ? String(args.folder) : undefined,
           unreadOnly: Boolean(args.unreadOnly),
+          since: args.since ? String(args.since) : undefined,
         },
       );
       return errors.length ? { messages, errors } : { messages };
@@ -451,6 +462,7 @@ async function dispatch(
         {
           query: String(args.query ?? ""),
           limit: Number(args.limit ?? 25),
+          since: args.since ? String(args.since) : undefined,
         },
       );
       return errors.length ? { messages, errors } : { messages };
