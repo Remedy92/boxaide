@@ -46,6 +46,8 @@ outreach engine with human approval. All free, MIT, fully local. No sync.
 | Field | Worked out from |
 | --- | --- |
 | `lastOutboundAt` | newest `interactions.direction = 'out'`, or newest `outbox.sent_at` where status `sent` — whichever is later |
+| `firstOutboundAt` | oldest of the same two — the clock a follow-up cadence runs on |
+| `outboundCount` | the LARGER of the two counts, never the sum: once the sync walks Sent, an engine send is also an interaction and no id ties them together |
 | `lastInboundAt` | newest `interactions.direction = 'in'` |
 | `optedOutAt` | earlier of `suppression.at` and the first `interactions.opt_out = 1` |
 | `queuedAt` | oldest unsent `outbox` row, else a `queued` intent |

@@ -54,6 +54,10 @@ export type ContactState = {
   email: string;
   status: ContactStatus;
   lastOutboundAt: string | null;
+  /** When we first wrote to them. The clock a follow-up cadence runs on. */
+  firstOutboundAt: string | null;
+  /** How many times we have written. Replaces a hand-kept follow-up counter. */
+  outboundCount: number;
   lastInboundAt: string | null;
   optedOutAt: string | null;
   /** Set while an unsent outreach row exists, or an explicit `queued` intent. */
@@ -136,19 +140,28 @@ export function contactStates(
 
   const inbound = new Map<string, string>();
   const outbound = new Map<string, string>();
+  const firstOutbound = new Map<string, string>();
+  const outboundCount = new Map<string, number>();
   const optOut = new Map<string, string>();
   if (hasTable(db, "interactions")) {
     const rows = db
       .prepare(
-        `SELECT contact_id, direction, MAX(at) AS at
+        `SELECT contact_id, direction, MAX(at) AS at,
+                MIN(at) AS firstAt, COUNT(*) AS n
            FROM interactions
           WHERE contact_id IN (${marks})
           GROUP BY contact_id, direction`,
       )
-      .all(...ids) as Array<Row & { direction: string }>;
+      .all(...ids) as Array<
+      Row & { direction: string; firstAt: string | null; n: number }
+    >;
     for (const row of rows) {
       if (!row.at) continue;
       (row.direction === "out" ? outbound : inbound).set(row.contact_id, row.at);
+      if (row.direction === "out") {
+        if (row.firstAt) firstOutbound.set(row.contact_id, row.firstAt);
+        outboundCount.set(row.contact_id, row.n);
+      }
     }
     // Earliest, not latest: the moment the request to stop was first seen is
     // the honest answer to "since when", and later mail does not renew it.
@@ -168,19 +181,36 @@ export function contactStates(
     // A send the engine performed is known here before the Sent folder is
     // walked, so a contact counts as contacted the moment the mail leaves —
     // not up to ten minutes later when the mail sync catches up.
-    const sent = byContact(
-      db
-        .prepare(
-          `SELECT contact_id, MAX(sent_at) AS at
-             FROM outbox
-            WHERE status = 'sent' AND sent_at IS NOT NULL
-              AND contact_id IN (${marks})
-            GROUP BY contact_id`,
-        )
-        .all(...ids) as Row[],
-    );
-    for (const [id, at] of sent) {
-      outbound.set(id, later(outbound.get(id) ?? null, at) ?? at);
+    const sentRows = db
+      .prepare(
+        `SELECT contact_id, MAX(sent_at) AS at,
+                MIN(sent_at) AS firstAt, COUNT(*) AS n
+           FROM outbox
+          WHERE status = 'sent' AND sent_at IS NOT NULL
+            AND contact_id IN (${marks})
+          GROUP BY contact_id`,
+      )
+      .all(...ids) as Array<Row & { firstAt: string | null; n: number }>;
+    for (const row of sentRows) {
+      if (!row.at) continue;
+      outbound.set(row.contact_id, later(outbound.get(row.contact_id) ?? null, row.at) ?? row.at);
+      if (row.firstAt) {
+        firstOutbound.set(
+          row.contact_id,
+          earlier(firstOutbound.get(row.contact_id) ?? null, row.firstAt) ?? row.firstAt,
+        );
+      }
+      // The larger of the two, never the sum. Once the mail sync walks the
+      // Sent folder, an engine send is ALSO an outbound interaction, and the
+      // outbox row carries no message id to match them on. Adding them would
+      // double every send the moment the sync caught up, which would end a
+      // follow-up sequence early. The larger count is right in every case
+      // that matters: sends the engine has made but the sync has not seen,
+      // and mail sent by hand that the outbox never knew about.
+      outboundCount.set(
+        row.contact_id,
+        Math.max(outboundCount.get(row.contact_id) ?? 0, row.n),
+      );
     }
 
     queued = byContact(
@@ -270,6 +300,8 @@ export function contactStates(
       email: contact.email,
       status,
       lastOutboundAt,
+      firstOutboundAt: firstOutbound.get(contact.id) ?? null,
+      outboundCount: outboundCount.get(contact.id) ?? 0,
       lastInboundAt,
       optedOutAt,
       queuedAt,

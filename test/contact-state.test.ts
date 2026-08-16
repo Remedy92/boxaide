@@ -190,7 +190,7 @@ describe("contact state derivation", () => {
       contactId: c.id,
       createdAt: new Date().toISOString(),
     });
-    h.outreach.addSuppression(c.email, "manual", daysAgo(1));
+    h.outreach.addSuppression(c.email, "manual");
 
     expect(state(h, c).blockedBy).toBe("opted_out");
   });
@@ -257,5 +257,67 @@ describe("contact state derivation", () => {
     const detail = h.crm.contactDetail({ contactId: c.id });
     expect(detail?.state.status).toBe("contacted");
     expect(detail?.state.contactable).toBe(false);
+  });
+});
+
+describe("follow-up cadence facts", () => {
+  it("counts sends and remembers the first one", () => {
+    const h = harness();
+    const c = contact(h, "sequence@acme.test");
+    mail(h, c.id, "out", daysAgo(21));
+    mail(h, c.id, "out", daysAgo(14));
+
+    const s = state(h, c);
+    expect(s.outboundCount).toBe(2);
+    expect(new Date(s.firstOutboundAt!).getTime()).toBeLessThan(
+      new Date(s.lastOutboundAt!).getTime(),
+    );
+  });
+
+  it("does not double-count a send once the Sent folder is walked", () => {
+    // The outbox row and the interaction are the same message, and no id ties
+    // them together. Summing would push a contact to "two follow-ups sent"
+    // the moment the sync ran, ending the sequence a message early.
+    const h = harness();
+    const c = contact(h, "synced@acme.test");
+    const row = h.outreach.queueOutbox({
+      accountId: ACCOUNT,
+      to: c.email,
+      subject: "Hello",
+      body: "Body",
+      contactId: c.id,
+      createdAt: daysAgo(2),
+    });
+    h.outreach.decide(row.id, "approved");
+    h.outreach.markSent(row.id, daysAgo(2));
+    mail(h, c.id, "out", daysAgo(2)); // the sync catching up
+
+    expect(state(h, c).outboundCount).toBe(1);
+  });
+
+  it("counts a send the sync has not seen yet", () => {
+    const h = harness();
+    const c = contact(h, "justsent@acme.test");
+    const row = h.outreach.queueOutbox({
+      accountId: ACCOUNT,
+      to: c.email,
+      subject: "Hello",
+      body: "Body",
+      contactId: c.id,
+      createdAt: daysAgo(1),
+    });
+    h.outreach.decide(row.id, "approved");
+    h.outreach.markSent(row.id, daysAgo(1));
+
+    const s = state(h, c);
+    expect(s.outboundCount).toBe(1);
+    expect(s.firstOutboundAt).not.toBe(null);
+  });
+
+  it("counts nothing for a contact never written to", () => {
+    const h = harness();
+    const s = state(h, contact(h, "untouched@acme.test"));
+    expect(s.outboundCount).toBe(0);
+    expect(s.firstOutboundAt).toBe(null);
   });
 });
