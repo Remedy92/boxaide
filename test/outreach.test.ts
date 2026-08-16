@@ -47,6 +47,7 @@ function createCrmFixtureTables(db: Database.Database): void {
       -- Written by CRM sync from the full body (src/crm/store.ts owns the
       -- production migration); outreach only reads it.
       opt_out INTEGER NOT NULL DEFAULT 0,
+      opt_out_full INTEGER NOT NULL DEFAULT 0,
       UNIQUE (account_id, message_id, contact_id)
     );
   `);
@@ -473,6 +474,94 @@ describe("outreach", () => {
     expect(platform.outreachStore.isSuppressed("mind@changed.example")).toBe(
       true,
     );
+  });
+
+  it("retries a body fetch that failed, then suppresses from the full body", async () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("late@fetch.example", "Late Fetch");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    const longBody = `${"Thanks for the detailed note, I read all of it. ".repeat(
+      5,
+    )}Please unsubscribe me from this list.`;
+    provider.seedAccount(accountId, "me@test.com", [
+      {
+        subject: "Re: Hi Late",
+        from: "Late Fetch <late@fetch.example>",
+        snippet: longBody.slice(0, 140),
+        bodyText: longBody,
+      },
+    ]);
+    expect(longBody.slice(0, 140)).not.toMatch(/unsubscribe/i);
+
+    const original = provider.getMessage.bind(provider);
+    provider.getMessage = async () => {
+      throw new Error("imap fetch failed");
+    };
+    await platform.crmService.syncFromMail();
+    expect(platform.outreachStore.isSuppressed("late@fetch.example")).toBe(
+      false,
+    );
+
+    provider.getMessage = original;
+    await platform.crmService.syncFromMail();
+    expect(platform.outreachStore.isSuppressed("late@fetch.example")).toBe(
+      true,
+    );
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("opted_out");
+  });
+
+  it("un-suppressing restarts campaign membership the stop had ended", async () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("mind@changed.example", "Mind Changer");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+
+    provider.seedAccount(accountId, "me@test.com", [
+      {
+        subject: "Re: Hi Mind",
+        from: "Mind Changer <mind@changed.example>",
+        bodyText: "stop",
+      },
+    ]);
+    await platform.crmService.syncFromMail();
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("opted_out");
+
+    const app = new Hono();
+    registerOutreachRoutes(app, platform);
+    const res = await app.request(
+      `/api/outreach/suppression/${encodeURIComponent("mind@changed.example")}`,
+      { method: "DELETE" },
+    );
+    expect(res.status).toBe(200);
+
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("active");
+  });
+
+  it("re-adding an opted-out contact restarts them in the campaign", () => {
+    const campaign = makeCampaign();
+    const contactId = addContact("again@acme.example", "Again");
+    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
+    engine.advanceSequences();
+    platform.outreachStore.optOutContact(contactId);
+    expect(
+      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
+    ).toBe("opted_out");
+
+    expect(
+      platform.outreachStore.addCampaignContacts(campaign.id, [contactId]),
+    ).toBe(1);
+    const row = platform.outreachStore.listCampaignContacts(campaign.id)[0];
+    expect(row.state).toBe("active");
+    expect(row.currentStep).toBe(-1);
+    expect(row.lastSentAt).toBeNull();
   });
 
   it("fails an approved row whose address was suppressed after approval", async () => {

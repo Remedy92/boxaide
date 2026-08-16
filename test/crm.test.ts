@@ -233,6 +233,27 @@ describe("CrmService opt-out detection", () => {
     h.store.close();
   });
 
+  it("retries the body fetch when the first pass could not read it", async () => {
+    const h = await harness();
+    h.provider.seedAccount(h.account.id, "you@work.test", [
+      optOutMail("Kim <kim@acme.test>"),
+    ]);
+    const original = h.provider.getMessage.bind(h.provider);
+    h.provider.getMessage = async () => {
+      throw new Error("imap fetch failed");
+    };
+
+    await h.crmService.syncFromMail();
+    const kim = h.crmStore.getContactByEmail("kim@acme.test")!;
+    expect(h.crmStore.listInteractions(kim.id)[0].optOut).toBe(false);
+
+    h.provider.getMessage = original;
+    await h.crmService.syncFromMail();
+    expect(h.crmStore.listInteractions(kim.id)[0].optOut).toBe(true);
+
+    h.store.close();
+  });
+
   it("does not re-fetch bodies for interactions it already recorded", async () => {
     const h = await harness();
     seedMail(h.provider, h.account.id);

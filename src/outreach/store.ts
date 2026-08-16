@@ -456,9 +456,15 @@ export class OutreachStore {
 
   addCampaignContacts(campaignId: string, contactIds: string[]): number {
     const insert = this.db.prepare(
-      `INSERT OR IGNORE INTO campaign_contacts
+      `INSERT INTO campaign_contacts
          (campaign_id, contact_id, state, current_step)
-       VALUES (?, ?, 'active', -1)`,
+       VALUES (?, ?, 'active', -1)
+       ON CONFLICT(campaign_id, contact_id) DO UPDATE SET
+         state = 'active',
+         current_step = -1,
+         last_sent_at = NULL,
+         next_due_at = NULL
+       WHERE campaign_contacts.state IN ('opted_out', 'suppressed')`,
     );
     const write = this.db.transaction(() => {
       let added = 0;
@@ -544,6 +550,23 @@ export class OutreachStore {
       .prepare(
         `UPDATE campaign_contacts SET state = 'opted_out'
           WHERE contact_id = ? AND state NOT IN ('opted_out', 'suppressed')`,
+      )
+      .run(contactId).changes;
+  }
+
+  /**
+   * A human took this address off the suppression list. Rows that stopped
+   * because of that list or a reply-stop restart at step 0 so the sequence
+   * can queue again (still pending approval). replied/done stay put: those
+   * are sequence outcomes, not the suppression the human just answered.
+   */
+  reopenStoppedCampaigns(contactId: string): number {
+    return this.db
+      .prepare(
+        `UPDATE campaign_contacts
+            SET state = 'active', current_step = -1,
+                last_sent_at = NULL, next_due_at = NULL
+          WHERE contact_id = ? AND state IN ('opted_out', 'suppressed')`,
       )
       .run(contactId).changes;
   }

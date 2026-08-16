@@ -47,8 +47,9 @@ export type Interaction = {
   subject: string | null;
   snippet: string | null;
   /**
-   * Inbound mail that asks us to stop, decided once at insert time by the sync
-   * over the full body. Reading it back costs no decryption and no re-fetch.
+   * Inbound mail that asks us to stop. CRM sync writes this from the full
+   * body (retrying until that body is read); a later walk does not re-fetch
+   * a finished judgement.
    */
   optOut: boolean;
 };
@@ -173,6 +174,10 @@ export class CrmStore {
         subject_enc TEXT,
         snippet_enc TEXT,
         opt_out INTEGER NOT NULL DEFAULT 0,
+        -- 1 once sync read a non-empty full body (or a human withdrew the
+        -- flags). 0 means the verdict is snippet-only and the next walk
+        -- should fetch again — a transient IMAP miss must not freeze a 0.
+        opt_out_full INTEGER NOT NULL DEFAULT 0,
         UNIQUE (account_id, message_id, contact_id)
       );
       CREATE TABLE IF NOT EXISTS pipeline_stages (
@@ -208,6 +213,11 @@ export class CrmStore {
     if (!interactionCols.some((c) => c.name === "opt_out")) {
       this.db.exec(
         `ALTER TABLE interactions ADD COLUMN opt_out INTEGER NOT NULL DEFAULT 0`,
+      );
+    }
+    if (!interactionCols.some((c) => c.name === "opt_out_full")) {
+      this.db.exec(
+        `ALTER TABLE interactions ADD COLUMN opt_out_full INTEGER NOT NULL DEFAULT 0`,
       );
     }
 
@@ -541,13 +551,15 @@ export class CrmStore {
     subject?: string | null;
     snippet?: string | null;
     optOut?: boolean;
+    fromBody?: boolean;
   }): boolean {
     const optOut = input.optOut ? 1 : 0;
+    const fromBody = input.fromBody ? 1 : 0;
     const res = this.db
       .prepare(
         `INSERT OR IGNORE INTO interactions
-           (id, contact_id, account_id, message_id, direction, at, subject_enc, snippet_enc, opt_out)
-         VALUES (@id, @contactId, @accountId, @messageId, @direction, @at, @subjectEnc, @snippetEnc, @optOut)`,
+           (id, contact_id, account_id, message_id, direction, at, subject_enc, snippet_enc, opt_out, opt_out_full)
+         VALUES (@id, @contactId, @accountId, @messageId, @direction, @at, @subjectEnc, @snippetEnc, @optOut, @fromBody)`,
       )
       .run({
         id: randomUUID(),
@@ -559,40 +571,67 @@ export class CrmStore {
         subjectEnc: this.encNullable(input.subject),
         snippetEnc: this.encNullable(input.snippet),
         optOut,
+        fromBody,
       });
     // A row that already existed keeps its text but takes the flag when the
     // caller now knows better — a first pass that only saw a truncated snippet
     // must be repairable. Never the other way round: an opt-out already
     // recorded is a standing request, not something a later read can clear.
-    if (res.changes === 0 && optOut === 1) {
+    if (res.changes === 0 && (optOut === 1 || fromBody === 1)) {
       this.db
         .prepare(
-          `UPDATE interactions SET opt_out = 1
-           WHERE account_id = ? AND message_id = ? AND contact_id = ? AND opt_out = 0`,
+          `UPDATE interactions
+              SET opt_out = CASE WHEN @optOut = 1 THEN 1 ELSE opt_out END,
+                  opt_out_full = CASE WHEN @fromBody = 1 THEN 1 ELSE opt_out_full END
+            WHERE account_id = @accountId AND message_id = @messageId
+              AND contact_id = @contactId`,
         )
-        .run(input.accountId, input.messageId, input.contactId);
+        .run({
+          optOut,
+          fromBody,
+          accountId: input.accountId,
+          messageId: input.messageId,
+          contactId: input.contactId,
+        });
     }
     return res.changes > 0;
   }
 
   /**
-   * Is this message already recorded against this contact? The sync asks before
-   * it fetches a full body: re-reading every message in the folder every ten
-   * minutes to re-decide opt-out would be 200 IMAP fetches per sync for nothing.
+   * Should this inbound message still be fetched for opt-out? A stored 0 that
+   * came from a full body is a judgement and is not revisited (IMAP cost, and
+   * so a human who cleared the flags is not second-guessed). A stored 0 from
+   * a failed or empty fetch is not a judgement — the next walk tries again.
    */
-  hasInteraction(
+  needsOptOutDecision(
     accountId: string,
     messageId: string,
     contactId: string,
   ): boolean {
-    return (
-      this.db
-        .prepare(
-          `SELECT 1 as hit FROM interactions
-           WHERE account_id = ? AND message_id = ? AND contact_id = ?`,
-        )
-        .get(accountId, messageId, contactId) !== undefined
-    );
+    const row = this.db
+      .prepare(
+        `SELECT opt_out as optOut, opt_out_full as optOutFull FROM interactions
+         WHERE account_id = ? AND message_id = ? AND contact_id = ?`,
+      )
+      .get(accountId, messageId, contactId) as
+      | { optOut: number; optOutFull: number }
+      | undefined;
+    if (!row) return true;
+    return row.optOut !== 1 && row.optOutFull !== 1;
+  }
+
+  /**
+   * Contact ids whose mailbox matches `email` after canonicalEmail. Used by
+   * un-suppress so CRM flags and campaign membership move together.
+   */
+  contactIdsForEmail(email: string): string[] {
+    const canonical = canonicalEmail(email);
+    const contacts = this.db
+      .prepare(`SELECT id, email FROM contacts`)
+      .all() as Array<{ id: string; email: string }>;
+    return contacts
+      .filter((c) => canonicalEmail(c.email) === canonical)
+      .map((c) => c.id);
   }
 
   /**
@@ -604,18 +643,16 @@ export class CrmStore {
    * Matching is canonical, so the unicode and punycode spellings both clear.
    */
   clearOptOutFlags(email: string): number {
-    const canonical = canonicalEmail(email);
-    const contacts = this.db
-      .prepare(`SELECT id, email FROM contacts`)
-      .all() as Array<{ id: string; email: string }>;
-    const ids = contacts
-      .filter((c) => canonicalEmail(c.email) === canonical)
-      .map((c) => c.id);
+    const ids = this.contactIdsForEmail(email);
     let cleared = 0;
     for (const id of ids) {
+      // Mark the row body-complete so the next sync does not re-fetch the
+      // same mail and resurrect the suppression the human just removed.
       cleared += this.db
         .prepare(
-          `UPDATE interactions SET opt_out = 0 WHERE contact_id = ? AND opt_out = 1`,
+          `UPDATE interactions
+              SET opt_out = 0, opt_out_full = 1
+            WHERE contact_id = ? AND opt_out = 1`,
         )
         .run(id).changes;
     }
