@@ -566,8 +566,8 @@ describe("launcher routes", () => {
     });
     expect(unsupported.status).toBe(400);
 
-    // Model validation happens before anything resolves or spawns, so these
-    // are safe to hit even on a machine with the real CLI installed.
+    // A bad model is rejected before anything spawns, so these are safe to
+    // hit even on a machine with the real CLI installed.
     const badModelType = await runtime.app.request(
       "/api/agents/claude-code/start",
       {
@@ -587,7 +587,12 @@ describe("launcher routes", () => {
       },
     );
     expect(unknownModel.status).toBe(400);
-    expect((await unknownModel.json()).error).toMatch(/does not offer/);
+    // Which of the two rejections lands depends on whether the CLI is on this
+    // machine: validating a model means asking that CLI what it offers, so a
+    // missing binary is reported first. Both refuse, and neither spawns.
+    expect((await unknownModel.json()).error).toMatch(
+      /does not offer|is not installed/,
+    );
 
     const stopped = await runtime.app.request("/api/agents/stop", {
       method: "POST",
