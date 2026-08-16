@@ -319,21 +319,26 @@ export async function dispatchCrmTool(
       // than silently dropping out of the answer — an outreach run that
       // treats "not found" as "not blocked" is exactly the double-send this
       // tool exists to stop.
-      const named: Array<{ id: string; email: string }> = [];
+      const named = new Map<string, { id: string; email: string }>();
       const missing: string[] = [];
       for (const id of ids) {
         const contact = store.getContact(id);
-        if (contact) named.push({ id: contact.id, email: contact.email });
+        if (contact) named.set(contact.id, { id: contact.id, email: contact.email });
         else missing.push(id);
       }
       for (const email of emails) {
         const contact = store.getContactByEmail(email);
-        if (contact) named.push({ id: contact.id, email: contact.email });
+        if (contact) named.set(contact.id, { id: contact.id, email: contact.email });
         else missing.push(email);
       }
 
-      let states = named.length
-        ? contactStates(store.db, named, { cooldownDays })
+      // Whether the caller NAMED anyone, not whether anyone resolved. Falling
+      // back on the selection branch here would answer a question about one
+      // unknown address with a page of unrelated contacts, every one of them
+      // carrying `contactable` — a list the caller would then cold-mail.
+      const askedForNames = ids.length > 0 || emails.length > 0;
+      let states = askedForNames
+        ? contactStates(store.db, [...named.values()], { cooldownDays })
         : store.states(
             { query: str(args.query), tag: str(args.tag), limit },
             { cooldownDays },

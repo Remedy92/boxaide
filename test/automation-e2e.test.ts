@@ -363,13 +363,57 @@ describe("Reply triage automation", () => {
   it("reports a contact it was asked about but could not find", async () => {
     // Silently dropping an unknown id would read as "not blocked" to the
     // caller, which is the double-send failure wearing a different hat.
+    //
+    // The CRM is deliberately NOT empty here. An earlier version of this test
+    // seeded nothing, so it passed while the tool was answering a question
+    // about one unknown address with a page of every contact in the database.
     let answer: any;
     const h = await harness(async (call) => {
       answer = await call("crm_outreach_state", { emails: ["ghost@acme.test"] });
     });
+    for (const email of ["a@acme.test", "b@acme.test", "c@acme.test"]) {
+      h.platform.crmStore.upsertContact({ email });
+    }
     await runAutomation(h, "Reply triage", TRIAGE_PROMPT);
 
     expect(answer.states).toEqual([]);
     expect(answer.missing).toEqual(["ghost@acme.test"]);
+  });
+
+  it("never answers a question about named people with a page of strangers", async () => {
+    // Same hazard with contactableOnly on, which is how outreach calls it:
+    // the fallback would have handed back a list of mailable strangers.
+    let answer: any;
+    const h = await harness(async (call) => {
+      answer = await call("crm_outreach_state", {
+        contactIds: ["no-such-id"],
+        emails: ["ghost@acme.test"],
+        contactableOnly: true,
+      });
+    });
+    for (const email of ["d@acme.test", "e@acme.test"]) {
+      h.platform.crmStore.upsertContact({ email });
+    }
+    await runAutomation(h, "Reply triage", TRIAGE_PROMPT);
+
+    expect(answer.states).toEqual([]);
+    expect(answer.missing).toEqual(["no-such-id", "ghost@acme.test"]);
+  });
+
+  it("asks about one person once, however it was named", async () => {
+    let answer: any;
+    const h = await harness(async (call) => {
+      const { states } = await call("crm_outreach_state", { query: "" });
+      const target = states[0];
+      answer = await call("crm_outreach_state", {
+        contactIds: [target.contactId],
+        emails: [target.email],
+      });
+    });
+    h.platform.crmStore.upsertContact({ email: "twice@acme.test" });
+    await runAutomation(h, "Reply triage", TRIAGE_PROMPT);
+
+    expect(h.runs[0].result.status).toBe("ok");
+    expect(answer.states).toHaveLength(1);
   });
 });

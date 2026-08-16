@@ -154,14 +154,21 @@ describe("contact state derivation", () => {
     expect(s.blockedBy).toBe(null); // outside the cooldown
   });
 
-  it("distinguishes someone who wrote to us first", () => {
+  it("does not cold-pitch someone who wrote to us first", () => {
+    // The mail sync turns every correspondent into a contact, so the outreach
+    // pool would otherwise include people mid-enquiry. Sending them the cold
+    // intro is worse than skipping them.
     const h = harness();
     const c = contact(h, "inbound@acme.test");
     mail(h, c.id, "in", daysAgo(1));
 
     const s = state(h, c);
     expect(s.status).toBe("inbound_only");
-    expect(s.contactable).toBe(true);
+    expect(s.contactable).toBe(false);
+    expect(s.blockedBy).toBe("in_conversation");
+    // Distinguishable from a real reply: we never wrote to them.
+    expect(s.lastOutboundAt).toBe(null);
+    expect(s.outboundCount).toBe(0);
   });
 
   it("blocks on opt-out from either signal, and reports the first sighting", () => {

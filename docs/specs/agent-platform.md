@@ -52,12 +52,18 @@ outreach engine with human approval. All free, MIT, fully local. No sync.
 | `optedOutAt` | earlier of `suppression.at` and the first `interactions.opt_out = 1` |
 | `queuedAt` | oldest unsent `outbox` row, else a `queued` intent |
 | `status` | `opted_out` → `replied` (inbound after our last outbound) → `contacted` → `inbound_only` → `new` |
-| `blockedBy` | `opted_out` → `do_not_contact` → `already_queued` → `in_conversation` → `cooldown` (a send inside `cooldownDays`, default 30) |
+| `blockedBy` | `opted_out` → `do_not_contact` → `already_queued` → `in_conversation` (status `replied` OR `inbound_only`: their message is the last word either way) → `cooldown` (a send inside `cooldownDays`, default 30) |
 
-`contactable` is `blockedBy === null`. Two properties matter and both are
+`contactable` is `blockedBy === null`. Three properties matter and all are
 tested: a send recorded by the engine blocks the next run **before** the Sent
-folder is walked, so a run that dies after sending cannot double-send; and a
-contact with no state at all reads `new`, never "blocked forever".
+folder is walked, so a run that dies after sending cannot double-send; a
+contact with no state at all reads `new`, never "blocked forever"; and a
+question about named contacts never falls back to a page of unrelated ones,
+however many of the names fail to resolve.
+
+Blocking governs what automated outreach may **pick**. It is not a send ban —
+only suppression is, enforced in the send guard (invariant 2) — so a human or
+an agent acting on a specific instruction can still mail a blocked contact.
 
 **Why not tags.** `contact_tags` is an unordered set with no timestamp. It
 cannot answer "which came last", so a prompt saying "the newest tag wins" was

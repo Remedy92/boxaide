@@ -289,7 +289,15 @@ export function contactStates(
         ? "do_not_contact"
         : queuedAt
           ? "already_queued"
-          : status === "replied"
+          : // Both ways their message can be the last word. `replied` is
+            // mid-thread. `inbound_only` is someone who wrote in and was never
+            // mailed by us, which the mail sync turns into a contact like any
+            // other — usually a live enquiry. Cold-pitching either is the
+            // mistake this module exists to prevent, so neither is selectable.
+            // Nothing becomes permanently unmailable: this decides what
+            // automated outreach may PICK, while the send path stays open to a
+            // human, or to an agent acting on a specific instruction.
+            status === "replied" || status === "inbound_only"
             ? "in_conversation"
             : cooldownFrom && lastOutboundAt && lastOutboundAt >= cooldownFrom
               ? "cooldown"
