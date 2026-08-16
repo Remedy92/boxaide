@@ -842,6 +842,13 @@ const MODEL_CACHE_TTL_MS = 10 * 60 * 1000;
 /** A listing that failed is retried on the next poll, not in ten minutes. */
 const MODEL_CACHE_FAILURE_TTL_MS = 30 * 1000;
 
+/**
+ * How long the first, uncached `list()` waits for the CLIs before answering
+ * with an empty picker. Well under the listing timeout, because the same
+ * response carries the running/exited state that the pane polls for.
+ */
+const MODEL_LIST_FIRST_WAIT_MS = 2_000;
+
 /** What a finished one-shot automation run reports back to the scheduler. */
 export type OneShotResult = {
   status: "ok" | "error" | "killed";
@@ -927,10 +934,31 @@ export class AgentLauncher {
           label: spec.label,
           available: bin !== null,
           supported: spec.args !== undefined,
-          models: cached ?? (await this.modelsFor(spec, bin)),
+          models: cached ?? (await this.firstModels(spec, bin)),
         };
       }),
     );
+  }
+
+  /**
+   * The cold-cache wait, capped. Waiting is what makes the picker right on the
+   * first poll, but this response also carries the running/exited state, and a
+   * CLI that hangs must not hold that back for the whole listing timeout. Past
+   * the cap the poll answers with an empty picker and the fetch keeps running;
+   * it lands in the cache and the next poll shows it.
+   */
+  private async firstModels(
+    spec: AgentSpec,
+    bin: string | null,
+  ): Promise<ModelOption[]> {
+    // A listing that throws must not fail the endpoint — it is the same
+    // "could not ask" as a CLI that exits non-zero.
+    const fetched = this.modelsFor(spec, bin).catch(() => null);
+    const capped = new Promise<null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), MODEL_LIST_FIRST_WAIT_MS);
+      timer.unref?.();
+    });
+    return (await Promise.race([fetched, capped])) ?? [];
   }
 
   /**
@@ -961,7 +989,9 @@ export class AgentLauncher {
     // every poll after a failed listing wait out the fetch timeout.
     if (!hit?.answered) return null;
     if (!hit.inFlight && Date.now() >= hit.expiresAt) {
-      void this.modelsFor(spec, bin);
+      // Nobody awaits this one, so it must swallow its own failure: an
+      // unhandled rejection here takes the process down.
+      void this.modelsFor(spec, bin).catch(() => {});
     }
     return hit.models;
   }
@@ -986,29 +1016,39 @@ export class AgentLauncher {
     // during the fetch bumps the counter, and this answer is then dropped
     // instead of landing on top of the cleared cache with a fresh TTL.
     const generation = this.modelGeneration;
+    // What the picker is showing right now. A refresh that fails must not
+    // erase it: the ids in it were good a moment ago, and dropping to the
+    // typed list means an empty picker for every CLI that has no typed list.
+    const lastGood = hit?.answered && hit.models.length > 0 ? hit.models : null;
     const inFlight = fetchModels(
       bin,
       spec.listModels,
       // The spec's own child env, so the listing describes the environment the
       // agent is actually launched in: OpenCode and Grok both run under an
       // isolated config home, and a list read from the user's own config can
-      // name providers that the launch cannot resolve. The workdir may not
-      // exist yet, which is fine — these entries only name paths.
-      this.childEnvFor(spec, agentWorkDir(this.ctx)),
-    ).then((fetched) => {
-      const models = fetched ?? spec.models ?? [];
-      if (generation !== this.modelGeneration) return models;
-      this.modelCache.set(spec.id, {
-        models,
-        answered: true,
-        // A failed listing expires fast, so a CLI that was mid-login or
-        // offline is retried soon instead of showing nothing for ten minutes.
-        expiresAt:
-          Date.now() +
-          (fetched ? MODEL_CACHE_TTL_MS : MODEL_CACHE_FAILURE_TTL_MS),
+      // name providers that the launch cannot resolve. The prepare step runs
+      // first, because that env names config files the CLI is told to read and
+      // on a machine that has never launched this agent they do not exist yet.
+      this.childEnvFor(spec, this.listWorkDir(spec)),
+    )
+      // Never rejects: a listing that throws is the same "could not ask" as a
+      // CLI that exits non-zero. A rejected promise parked in the cache as
+      // `inFlight` would fail every later list() and start() for good.
+      .catch(() => null)
+      .then((fetched) => {
+        const models = fetched ?? lastGood ?? spec.models ?? [];
+        if (generation !== this.modelGeneration) return models;
+        this.modelCache.set(spec.id, {
+          models,
+          answered: true,
+          // A failed listing expires fast, so a CLI that was mid-login or
+          // offline is retried soon instead of showing nothing for ten minutes.
+          expiresAt:
+            Date.now() +
+            (fetched ? MODEL_CACHE_TTL_MS : MODEL_CACHE_FAILURE_TTL_MS),
+        });
+        return models;
       });
-      return models;
-    });
     this.modelCache.set(spec.id, {
       models: hit?.models ?? [],
       // Carried over: a refresh on top of an earlier answer keeps serving that
@@ -1248,6 +1288,20 @@ export class AgentLauncher {
     mkdirSync(workDir, { recursive: true });
     spec.prepare?.(this.ctx, workDir, this.env);
     return workDir;
+  }
+
+  /**
+   * The workdir a listing is described against — prepared, so the config files
+   * its env points at exist. Preparing is idempotent and writes the same
+   * content a launch would, so doing it early costs nothing. A failure here is
+   * not fatal to a listing: the CLI is asked anyway, against the bare path.
+   */
+  private listWorkDir(spec: AgentSpec): string {
+    try {
+      return this.prepareWorkDir(spec);
+    } catch {
+      return agentWorkDir(this.ctx);
+    }
   }
 
   private childEnvFor(spec: AgentSpec, workDir: string): NodeJS.ProcessEnv {
