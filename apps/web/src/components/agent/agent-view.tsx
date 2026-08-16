@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowDown, Menu, Plug, Trash2 } from "lucide-react";
+import { Archive, ArrowDown, Menu, Plug, Trash2 } from "lucide-react";
 import { AgentComposer } from "@/components/agent/agent-composer";
 import { AgentPresenceBadge } from "@/components/agent/agent-presence";
 import { AgentRunView, groupRuns } from "@/components/agent/agent-run";
@@ -143,13 +143,34 @@ export function AgentView({
             <Menu className="size-4" strokeWidth={1.5} />
           </Button>
         )}
-        <h2 className="text-[13px] leading-[18px] font-medium text-fg">Agent</h2>
+        {/* The chat's own name, once there is one. Before that it is still the
+            Agent pane and says so, rather than showing a placeholder title
+            over a conversation that has not started. */}
+        <h2 className="min-w-0 truncate text-[13px] leading-[18px] font-medium text-fg">
+          {agent.chat && !empty ? agent.chat.title : "Agent"}
+        </h2>
 
         <div className="ml-auto flex items-center gap-1.5">
           <AgentPresenceBadge
             presence={agent.presence}
             connection={agent.connection}
           />
+          {agent.chat && !empty && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Archive this chat"
+                  onClick={() => void agent.archiveChat(agent.chat!.id)}
+                >
+                  <Archive className="size-4" strokeWidth={1.5} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Archive this chat</TooltipContent>
+            </Tooltip>
+          )}
           {!empty && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -195,6 +216,15 @@ export function AgentView({
               />
             ) : (
               <div className="space-y-6 pt-4">
+                {/* Said once, at the top, where the missing messages were. The
+                    old behaviour dropped them silently and this conversation
+                    simply began in the middle. */}
+                {agent.chat?.trimmed && (
+                  <p className="rounded-[var(--radius-md)] bg-surface-hover px-3 py-2 text-[12px] leading-4 text-fg-tertiary">
+                    Older messages in this chat were dropped to keep it inside
+                    its limit.
+                  </p>
+                )}
                 {runs.map((run) => (
                   <AgentRunView
                     key={run.seq}

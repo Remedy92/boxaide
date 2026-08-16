@@ -30,10 +30,13 @@ import {
  */
 export function AgentsSection({
   collapsed = false,
+  hideLabel = false,
   onOpenAgentConnect,
   onOpenCapabilities,
 }: {
   collapsed?: boolean;
+  /** Set when the rail wraps this in a folding section that has its own label. */
+  hideLabel?: boolean;
   onOpenAgentConnect: () => void;
   onOpenCapabilities: () => void;
 }) {
@@ -59,7 +62,7 @@ export function AgentsSection({
 
   return (
     <div className="space-y-0.5">
-      <SectionLabel>Agents</SectionLabel>
+      {!hideLabel && <SectionLabel>Agents</SectionLabel>}
       <LocalAgentList />
       <NavItem
         icon={Plug}

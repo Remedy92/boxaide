@@ -2,15 +2,26 @@
 
 import * as React from "react";
 import {
+  archiveAgentChat,
   clearAgentConversation,
+  createAgentChat,
+  deleteAgentChat,
   getAgentState,
+  listAgentChats,
+  renameAgentChat,
+  selectAgentChat,
   sendAgentMessage,
   streamAgent,
 } from "@/lib/api/endpoints";
 import { ApiError } from "@/lib/api/client";
 import { friendlyError } from "@/lib/api/errors";
 import { useApiCtx } from "@/lib/hooks/use-settings";
-import type { AgentPresence, AgentTurn } from "@/lib/types";
+import type {
+  AgentChat,
+  AgentChatStorage,
+  AgentPresence,
+  AgentTurn,
+} from "@/lib/types";
 
 /**
  * The live agent conversation.
@@ -37,6 +48,14 @@ const IDLE: AgentPresence = {
   launchedAgent: null,
   working: null,
   dropped: [],
+};
+
+/** Reads as "nothing stored yet" until the server has answered once. */
+const NO_STORAGE: AgentChatStorage = {
+  bytes: 0,
+  budget: 0,
+  chats: 0,
+  archived: 0,
 };
 
 /**
@@ -80,6 +99,17 @@ export type AgentConversation = {
   sending: boolean;
   send: (text: string) => Promise<void>;
   clear: () => Promise<void>;
+  /** Live chats, newest message first. Archived ones are fetched separately. */
+  chats: AgentChat[];
+  /** The chat on screen. Null until the server has answered once. */
+  chat: AgentChat | null;
+  storage: AgentChatStorage;
+  /** Switching also makes the chat active on the server, so sends follow. */
+  openChat: (id: string) => Promise<void>;
+  newChat: () => Promise<void>;
+  renameChat: (id: string, title: string) => Promise<void>;
+  archiveChat: (id: string) => Promise<void>;
+  removeChat: (id: string) => Promise<void>;
 };
 
 /**
@@ -162,10 +192,42 @@ function AgentSession({
   );
   const [error, setError] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
+  const [chats, setChats] = React.useState<AgentChat[]>([]);
+  const [chat, setChat] = React.useState<AgentChat | null>(null);
+  const [storage, setStorage] = React.useState<AgentChatStorage>(NO_STORAGE);
   const claimed = React.useMemo(() => {
     const seqs = new Set<number>(claimedIn(turns, presence));
     return seqs;
   }, [turns, presence]);
+
+  /* The chat on screen, readable from inside the long-lived stream loop.
+     State cannot be: that effect is keyed on the connection, not on the
+     selection, and re-running it on every switch would drop and rebuild the
+     SSE connection each time somebody clicked a row in the rail. */
+  const shown = React.useRef<string | null>(null);
+
+  /**
+   * Shows a chat and makes it the one the composer writes to.
+   *
+   * The turns are dropped before the fetch, not merged after it: `seq` is
+   * global across chats, so a stale turn from the previous conversation would
+   * sort cleanly into the middle of this one and look like it belonged.
+   */
+  const refresh = React.useCallback(
+    async (id: string | null) => {
+      shown.current = id;
+      setTurns([]);
+      const state = await getAgentState(ctx, undefined, id ?? undefined);
+      // A second click landed while this was in flight. That switch owns the
+      // pane now, and painting this answer would show the wrong conversation.
+      if (shown.current !== id) return;
+      shown.current = state.chat?.id ?? null;
+      setChat(state.chat ?? null);
+      setTurns(state.turns);
+      setPresence(normalise(state.presence));
+    },
+    [ctx],
+  );
 
   React.useEffect(() => {
     if (!enabled) return;
@@ -181,18 +243,69 @@ function AgentSession({
         try {
           // History first, then follow. Both merge on seq, so a turn written
           // between the two lands exactly once and in the right place.
-          const state = await getAgentState({ ...ctx, signal: abort.signal });
+          const state = await getAgentState(
+            { ...ctx, signal: abort.signal },
+            undefined,
+            shown.current ?? undefined,
+          );
           if (stopped) return;
+          shown.current = state.chat?.id ?? null;
+          setChat(state.chat ?? null);
           setTurns((prev) => merge(prev, state.turns));
           setPresence(normalise(state.presence));
           setConnection("live");
           attempt = 0;
+          // Not awaited: the conversation must paint whether or not the rail's
+          // list arrives, and a server without chats answers this with a 404.
+          void listAgentChats({ ...ctx, signal: abort.signal })
+            .then((list) => {
+              if (stopped) return;
+              setChats(list.chats);
+              setStorage(list.storage);
+            })
+            .catch(() => {
+              // Older server, or a list that failed once. The stream sends the
+              // list again on the next change either way.
+            });
 
           await streamAgent(
             { ...ctx, signal: abort.signal },
             {
-              turn: (turn) => setTurns((prev) => merge(prev, [turn])),
+              // A turn written in a chat the user is not looking at belongs to
+              // that chat's history, not to this pane. The rail still learns
+              // about it from the `chats` frame.
+              turn: (turn) => {
+                if (turn.chatId && turn.chatId !== shown.current) return;
+                setTurns((prev) => merge(prev, [turn]));
+              },
               presence: (next) => setPresence(normalise(next)),
+              chats: (list) => {
+                setChats(list.chats);
+                setStorage(list.storage);
+                const current = list.chats.find((row) => row.id === shown.current);
+                if (current) {
+                  setChat(current);
+                  // The server trimmed this chat under a client that had
+                  // streamed every turn. Those rows are gone; keeping them
+                  // painted would put "older messages were dropped" above the
+                  // messages it is talking about.
+                  setTurns((prev) =>
+                    prev.length > current.turns
+                      ? prev.slice(prev.length - current.turns)
+                      : prev,
+                  );
+                  return;
+                }
+                // The chat on screen is no longer a live chat: the budget
+                // archived it, or another window deleted it. Its messages are
+                // already gone on the server, so showing them here would be a
+                // conversation that does not exist. Fall back to the active one.
+                if (shown.current !== null) {
+                  void refresh(null).catch(() => {
+                    // The next frame, or the reconnect, asks again.
+                  });
+                }
+              },
             },
           );
           if (stopped) return;
@@ -201,10 +314,18 @@ function AgentSession({
           await sleep(250);
         } catch (err) {
           if (stopped || abort.signal.aborted) return;
-          // A 404 means this build of the server has no agent channel at all.
-          // Retrying every eight seconds forever would never fix that, and the
-          // UI has a specific thing to say about it.
           if (err instanceof ApiError && err.status === 404) {
+            // The chat this pane was showing is gone — deleted in another
+            // window, or archived by the budget. Fall back to the active one
+            // rather than declaring the whole channel missing.
+            if (shown.current !== null) {
+              shown.current = null;
+              setTurns([]);
+              continue;
+            }
+            // No chat asked for, so this build of the server has no agent
+            // channel at all. Retrying forever would never fix that, and the
+            // UI has a specific thing to say about it.
             setConnection("unsupported");
             return;
           }
@@ -221,7 +342,8 @@ function AgentSession({
       stopped = true;
       abort.abort();
     };
-  }, [ctx, enabled]);
+    // `refresh` is stable on ctx, so this does not reconnect on a chat switch.
+  }, [ctx, enabled, refresh]);
 
   const send = React.useCallback(
     async (text: string) => {
@@ -254,9 +376,105 @@ function AgentSession({
     }
   }, [ctx]);
 
+  const withChats = React.useCallback(
+    async (run: () => Promise<void>) => {
+      setError(null);
+      try {
+        await run();
+        const list = await listAgentChats(ctx);
+        setChats(list.chats);
+        setStorage(list.storage);
+      } catch (err) {
+        setError(friendlyError(err instanceof Error ? err.message : String(err)));
+      }
+    },
+    [ctx],
+  );
+
+  const openChat = React.useCallback(
+    (id: string) =>
+      withChats(async () => {
+        await selectAgentChat(id, ctx);
+        await refresh(id);
+      }),
+    [ctx, refresh, withChats],
+  );
+
+  const newChat = React.useCallback(
+    () =>
+      withChats(async () => {
+        const created = await createAgentChat(ctx);
+        await refresh(created.chat.id);
+      }),
+    [ctx, refresh, withChats],
+  );
+
+  const renameChat = React.useCallback(
+    (id: string, title: string) =>
+      withChats(async () => {
+        await renameAgentChat(id, title, ctx);
+        if (shown.current === id) setChat((prev) => (prev ? { ...prev, title } : prev));
+      }),
+    [ctx, withChats],
+  );
+
+  const archiveChat = React.useCallback(
+    (id: string) =>
+      withChats(async () => {
+        await archiveAgentChat(id, ctx);
+        // Archiving the chat on screen leaves nothing to read. The server has
+        // already moved on to another one; ask it which.
+        if (shown.current === id) await refresh(null);
+      }),
+    [ctx, refresh, withChats],
+  );
+
+  const removeChat = React.useCallback(
+    (id: string) =>
+      withChats(async () => {
+        await deleteAgentChat(id, ctx);
+        if (shown.current === id) await refresh(null);
+      }),
+    [ctx, refresh, withChats],
+  );
+
   const value = React.useMemo<AgentConversation>(
-    () => ({ turns, presence, connection, claimed, error, sending, send, clear }),
-    [turns, presence, connection, claimed, error, sending, send, clear],
+    () => ({
+      turns,
+      presence,
+      connection,
+      claimed,
+      error,
+      sending,
+      send,
+      clear,
+      chats,
+      chat,
+      storage,
+      openChat,
+      newChat,
+      renameChat,
+      archiveChat,
+      removeChat,
+    }),
+    [
+      turns,
+      presence,
+      connection,
+      claimed,
+      error,
+      sending,
+      send,
+      clear,
+      chats,
+      chat,
+      storage,
+      openChat,
+      newChat,
+      renameChat,
+      archiveChat,
+      removeChat,
+    ],
   );
 
   return <AgentContext.Provider value={value}>{children}</AgentContext.Provider>;

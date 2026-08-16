@@ -5,6 +5,7 @@ import { AgentView } from "@/components/agent/agent-view";
 import { AutomationsView } from "@/components/automations/automations-view";
 import { AgentConnectDialog } from "@/components/dialogs/agent-connect-dialog";
 import { CapabilitiesDialog } from "@/components/dialogs/capabilities-dialog";
+import { ChatsDialog } from "@/components/dialogs/chats-dialog";
 import { CommandPalette } from "@/components/dialogs/command-palette";
 import { ComposeDialog } from "@/components/dialogs/compose-dialog";
 import { ConnectMailboxDialog } from "@/components/dialogs/connect-mailbox-dialog";
@@ -525,6 +526,10 @@ function Shell() {
       />
       <CapabilitiesDialog
         open={app.dialog === "capabilities"}
+        onOpenChange={(open) => (open ? undefined : app.closeDialog())}
+      />
+      <ChatsDialog
+        open={app.dialog === "chats"}
         onOpenChange={(open) => (open ? undefined : app.closeDialog())}
       />
       <AgentConnectDialog
