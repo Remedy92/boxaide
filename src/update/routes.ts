@@ -11,9 +11,20 @@ import { UpdateUnavailable, type UpdateService } from "./service.js";
 export function registerUpdateRoutes(app: Hono, update: UpdateService): void {
   app.get("/api/update", (c) => c.json(update.state()));
 
-  /** The "Check now" button. Waits for the answer so the reply is the answer. */
+  /**
+   * The "Check now" button. Waits for the answer so the reply is the answer.
+   *
+   * `?download=0` checks and stops there. The default is to check AND start
+   * the download, because a person who presses a check button wants the
+   * update, not a second button. The reply already says "downloading" when
+   * that happened, so the UI never has to guess.
+   */
   app.post("/api/update/check", async (c) => {
-    await update.check().catch(() => {});
+    if (c.req.query("download") === "0") {
+      await update.check().catch(() => {});
+    } else {
+      await update.checkAndDownload();
+    }
     return c.json(update.state());
   });
 

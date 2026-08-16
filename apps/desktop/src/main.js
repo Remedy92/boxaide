@@ -102,9 +102,15 @@ let stagedUpdate = null;
  * The server's update service, held so the menu bar can ask for a check
  * without going back through HTTP. The window still reads it over
  * `/api/update` — that is the only path the renderer has.
- * @type {{ check: () => Promise<void> } | null}
+ * @type {{
+ *   check: () => Promise<void>,
+ *   checkAndDownload: () => Promise<void>,
+ *   state: () => { status: string, currentVersion: string, latestVersion: string | null, error: string | null },
+ * } | null}
  */
 let updateService = null;
+/** Set while a menu-driven check is running, so a second click is not a second check. */
+let checkingFromMenu = false;
 
 if (!app.requestSingleInstanceLock()) {
   // A second launch hands focus to the running one. Two instances would fight
@@ -194,6 +200,7 @@ async function start() {
   stopServer = started.stop;
   serverUrl = started.url;
   updateService = started.runtime.update;
+  createAppMenu();
   createWindow(started.url);
   // Menu bar presence is macOS-scoped for now: that is where "glance at your
   // mail and your agents without the window" was asked for, and where the
@@ -326,12 +333,7 @@ function announceReady(version) {
   if (notifiedReadyFor === version) return;
   notifiedReadyFor = version;
   if (!Notification.isSupported()) return;
-  const notification = new Notification({
-    title: `Boxaide ${version} is ready`,
-    body: "Restart to finish updating.",
-  });
-  notification.on("click", () => openMainWindow());
-  notification.show();
+  notify(`Boxaide ${version} is ready`, "Restart to finish updating.");
 }
 
 /* ---- approval badge ------------------------------------------------------ */
@@ -411,15 +413,185 @@ function applyBadge(pending) {
   notification.show();
 }
 
-/** Raise the main window, recreating it after a close. */
-function openMainWindow() {
+/**
+ * Raise the main window, recreating it after a close.
+ *
+ * `hash` names a page inside the app — `#/settings/updates`, say. The page
+ * routes on the URL hash, so this is the whole of the main process's ability
+ * to send the window somewhere: there is no preload and no IPC, by design.
+ * @param {string} [hash]
+ */
+function openMainWindow(hash) {
   if (win) {
     if (win.isMinimized()) win.restore();
     win.show();
     win.focus();
+    if (hash) navigateTo(hash);
     return;
   }
-  if (serverUrl) createWindow(serverUrl);
+  if (serverUrl) createWindow(serverUrl, hash);
+}
+
+/**
+ * Move the loaded page to a hash route without reloading it.
+ *
+ * The custom event is not belt-and-braces: assigning the same hash the window
+ * is already on fires no `hashchange`, and "Check for updates…" pressed twice
+ * from the Updates page is exactly that case.
+ * @param {string} hash
+ */
+function navigateTo(hash) {
+  if (!win) return;
+  void win.webContents
+    .executeJavaScript(
+      `window.location.hash = ${JSON.stringify(hash)};` +
+        `window.dispatchEvent(new Event("boxaide:hash"));`,
+    )
+    .catch(() => {
+      // A window mid-load has no document to route yet. It is loading the URL
+      // it was created with, which already carries the hash.
+    });
+}
+
+/**
+ * The menu item, end to end: show the page that reports updates, run the
+ * check, start the download if there is one, and say so when there is not.
+ *
+ * The old version checked and opened the window, which from the outside is a
+ * menu item that does nothing — the sidebar card it was opening the window for
+ * only appears when an update exists, and only after the check lands.
+ */
+async function checkForUpdatesFromMenu() {
+  if (!updateService || checkingFromMenu) return;
+  checkingFromMenu = true;
+  // Before the await: the window comes up on the Updates page, which shows
+  // "Checking for updates…" while this runs. That is the feedback.
+  openMainWindow("#/settings/updates");
+  try {
+    await updateService.checkAndDownload();
+  } finally {
+    checkingFromMenu = false;
+  }
+  const state = updateService.state();
+  // An update that was found is on screen — the page shows the version and a
+  // progress bar. Only the two outcomes with nothing to show get a line.
+  if (state.status === "up-to-date") {
+    notify("Boxaide is up to date", `You are on ${state.currentVersion}.`);
+    return;
+  }
+  if (state.status === "error") {
+    notify(
+      "Could not check for updates",
+      state.error ?? "The release feed did not answer.",
+    );
+  }
+}
+
+/**
+ * @param {string} title
+ * @param {string} body
+ */
+function notify(title, body) {
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({ title, body });
+  notification.on("click", () => openMainWindow("#/settings/updates"));
+  notification.show();
+}
+
+/* ---- application menu ---------------------------------------------------- */
+
+/**
+ * The default Electron menu has no way to reach settings and no way to ask for
+ * an update, so this replaces it. Everything else is a role, which is how the
+ * standard Edit and Window behaviour (copy, paste, minimise, the emoji picker)
+ * survives the replacement.
+ *
+ * Built once at start rather than per open: nothing in it reads state that
+ * changes. The tray menu, which does, is still rebuilt per click.
+ */
+function createAppMenu() {
+  const mac = process.platform === "darwin";
+  /** Shared by the app menu on macOS and the File menu everywhere else. */
+  const appItems = [
+    {
+      label: "Check for Updates…",
+      click: () => void checkForUpdatesFromMenu(),
+    },
+    { type: "separator" },
+    {
+      label: "Settings…",
+      accelerator: "CmdOrCtrl+,",
+      click: () => openMainWindow("#/settings"),
+    },
+    {
+      label: "Install Claude connector…",
+      click: () => installClaudeConnector(),
+    },
+  ];
+
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      ...(mac
+        ? [
+            {
+              label: app.name,
+              submenu: [
+                { role: "about" },
+                { type: "separator" },
+                ...appItems,
+                { type: "separator" },
+                { role: "services" },
+                { type: "separator" },
+                { role: "hide" },
+                { role: "hideOthers" },
+                { role: "unhide" },
+                { type: "separator" },
+                { role: "quit" },
+              ],
+            },
+          ]
+        : [
+            {
+              label: "File",
+              submenu: [...appItems, { type: "separator" }, { role: "quit" }],
+            },
+          ]),
+      { role: "editMenu" },
+      {
+        label: "View",
+        // No accelerators on these two. CmdOrCtrl+0 belongs to the resetZoom
+        // role three lines down, and CmdOrCtrl+, is already on Settings… in
+        // the menu above — a second registration takes the key away from the
+        // item that should have it.
+        submenu: [
+          { label: "Boxaide", click: () => openMainWindow() },
+          { label: "Settings", click: () => openMainWindow("#/settings") },
+          { type: "separator" },
+          { role: "reload" },
+          { role: "resetZoom" },
+          { role: "zoomIn" },
+          { role: "zoomOut" },
+          { type: "separator" },
+          { role: "togglefullscreen" },
+        ],
+      },
+      { role: "windowMenu" },
+      {
+        role: "help",
+        submenu: [
+          {
+            label: "Boxaide on GitHub",
+            click: () => openExternal("https://github.com/Remedy92/boxaide"),
+          },
+          {
+            label: "Releases",
+            click: () =>
+              openExternal("https://github.com/Remedy92/boxaide/releases"),
+          },
+        ],
+      },
+    ]),
+  );
 }
 
 /* ---- menu bar ------------------------------------------------------------ */
@@ -462,13 +634,15 @@ function createTray(url) {
           click: () => installClaudeConnector(),
         },
         {
-          // The check runs against the service directly; the window is where
-          // its answer is shown, so both happen on one click.
-          label: "Check for updates…",
-          click: () => {
-            void updateService?.check().catch(() => {});
-            openMainWindow();
-          },
+          label: "Settings…",
+          click: () => openMainWindow("#/settings"),
+        },
+        {
+          // Opens the Updates page, checks, and downloads what it finds. See
+          // checkForUpdatesFromMenu.
+          label: checkingFromMenu ? "Checking for updates…" : "Check for updates…",
+          enabled: !checkingFromMenu,
+          click: () => void checkForUpdatesFromMenu(),
         },
         { type: "separator" },
         {
@@ -634,8 +808,11 @@ function installClaudeConnector() {
   });
 }
 
-/** @param {string} url */
-function createWindow(url) {
+/**
+ * @param {string} url
+ * @param {string} [hash] A page inside the app, e.g. `#/settings/updates`.
+ */
+function createWindow(url, hash) {
   const origin = new URL(url).origin;
 
   win = new BrowserWindow({
@@ -723,7 +900,7 @@ function createWindow(url) {
     );
   }
 
-  void win.loadURL(url);
+  void win.loadURL(hash ? `${url}${hash}` : url);
 }
 
 /** @param {string} target */

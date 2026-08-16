@@ -31,7 +31,10 @@ const CHECKING_POLL_MS = 2_000;
 export type UpdateHandle = {
   /** Null until the first answer, and for a server that has no updater. */
   state: UpdateState | null;
+  /** Presses the Check button: finds an update and starts downloading it. */
   check: () => void;
+  /** Asks the same question without starting a download. */
+  refresh: () => void;
   download: () => void;
   install: () => void;
   /** True while a command is in flight, so a button can hold its press. */
@@ -93,6 +96,11 @@ export function useUpdate(): UpdateHandle {
     mutationFn: () => checkForUpdate(ctx),
     onSuccess: adopt,
   });
+  // Same endpoint, no download. Used where the check was not a button press.
+  const refresh = useMutation({
+    mutationFn: () => checkForUpdate(ctx, { download: false }),
+    onSuccess: adopt,
+  });
   const download = useMutation({
     mutationFn: () => downloadUpdate(ctx),
     onSuccess: adopt,
@@ -105,13 +113,18 @@ export function useUpdate(): UpdateHandle {
   return {
     state: query.data ?? null,
     check: () => check.mutate(),
+    refresh: () => refresh.mutate(),
     download: () => download.mutate(),
     install: () => install.mutate(),
-    busy: check.isPending || download.isPending || install.isPending,
+    busy:
+      check.isPending ||
+      refresh.isPending ||
+      download.isPending ||
+      install.isPending,
     // Derived, not stored: a mutation clears its own error on the next press,
     // so the line goes away exactly when the user tries again.
     commandError: messageOf(
-      download.error ?? install.error ?? check.error ?? null,
+      download.error ?? install.error ?? check.error ?? refresh.error ?? null,
     ),
   };
 }

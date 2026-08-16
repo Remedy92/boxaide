@@ -146,6 +146,16 @@ describe("UpdateService, manual channel", () => {
     expect(service.state().error).toMatch(/rate-limit/);
   });
 
+  it("checks without throwing when there is nothing it can download", async () => {
+    const service = new UpdateService({
+      currentVersion: "0.2.9",
+      fetchImpl: githubFetch(RELEASE),
+    });
+    await service.checkAndDownload();
+    expect(service.state().status).toBe("available");
+    expect(service.state().canInstall).toBe(false);
+  });
+
   it("refuses to download or install", () => {
     const service = new UpdateService({ currentVersion: "0.2.9" });
     expect(() => service.download()).toThrow(/npm or git/);
@@ -255,6 +265,35 @@ describe("UpdateService, auto channel", () => {
     expect(state.status).toBe("available");
     expect(state.error).toBe("sha512 mismatch");
     expect(state.progress).toBeNull();
+  });
+
+  it("starts the download the check found, for checkAndDownload", async () => {
+    const fake = fakeDriver();
+    const service = new UpdateService({
+      currentVersion: "0.2.9",
+      driver: fake.driver,
+    });
+    // electron-updater answers a check by emitting; the fake does it here.
+    fake.driver.check = async () => {
+      fake.emit({ kind: "available", version: "0.3.0" });
+    };
+    await service.checkAndDownload();
+    expect(fake.downloads).toBe(1);
+    expect(service.state().status).toBe("downloading");
+  });
+
+  it("does not download when checkAndDownload finds nothing", async () => {
+    const fake = fakeDriver();
+    const service = new UpdateService({
+      currentVersion: "0.2.9",
+      driver: fake.driver,
+    });
+    fake.driver.check = async () => {
+      fake.emit({ kind: "not-available", version: "0.2.9" });
+    };
+    await service.checkAndDownload();
+    expect(fake.downloads).toBe(0);
+    expect(service.state().status).toBe("up-to-date");
   });
 
   it("refuses to install before the download lands", () => {
@@ -378,6 +417,38 @@ describe("update routes", () => {
       status: "available",
       latestVersion: "0.3.0",
     });
+  });
+
+  it("checks and downloads from POST /api/update/check", async () => {
+    const fake = fakeDriver();
+    const service = new UpdateService({
+      currentVersion: "0.2.9",
+      driver: fake.driver,
+    });
+    fake.driver.check = async () => {
+      fake.emit({ kind: "available", version: "0.3.0" });
+    };
+    const res = await routed(service).request("/api/update/check", {
+      method: "POST",
+    });
+    expect(await res.json()).toMatchObject({ status: "downloading" });
+    expect(fake.downloads).toBe(1);
+  });
+
+  it("checks without downloading when asked not to", async () => {
+    const fake = fakeDriver();
+    const service = new UpdateService({
+      currentVersion: "0.2.9",
+      driver: fake.driver,
+    });
+    fake.driver.check = async () => {
+      fake.emit({ kind: "available", version: "0.3.0" });
+    };
+    const res = await routed(service).request("/api/update/check?download=0", {
+      method: "POST",
+    });
+    expect(await res.json()).toMatchObject({ status: "available" });
+    expect(fake.downloads).toBe(0);
   });
 
   it("refuses a download on the manual channel with 409", async () => {
