@@ -674,7 +674,7 @@ describe("AgentLauncher.runOnce", () => {
     const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
     cleanups.push(() => launcher.close());
 
-    launcher.start("fake");
+    await launcher.start("fake");
     expect(launcher.busy()).toBe(true);
     await expect(launcher.runOnce({ prompt: "p" })).rejects.toThrowError(LaunchError);
     launcher.stop();
@@ -682,7 +682,7 @@ describe("AgentLauncher.runOnce", () => {
 
     const pending = launcher.runOnce({ prompt: "p", timeoutMs: 5_000 });
     await until(() => launcher.busy());
-    expect(() => launcher.start("fake")).toThrowError(/automation run is in progress/);
+    await expect(launcher.start("fake")).rejects.toThrowError(/automation run is in progress/);
     launcher.killRun();
     expect((await pending).status).toBe("killed");
   });

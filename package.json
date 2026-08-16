@@ -66,5 +66,8 @@
   "allowScripts": {
     "better-sqlite3@13.0.3": true,
     "esbuild@0.28.2": true
+  },
+  "overrides": {
+    "tmp": "0.2.7"
   }
 }

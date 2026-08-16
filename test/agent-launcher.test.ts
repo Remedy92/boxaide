@@ -13,6 +13,7 @@ import {
   LaunchError,
   type AgentSpec,
 } from "../src/agent/launcher.js";
+import { parseTabbedModels } from "../src/agent/model-list.js";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -62,14 +63,14 @@ async function until(check: () => boolean, ms = 3_000): Promise<void> {
 }
 
 describe("AgentLauncher", () => {
-  it("lists availability from PATH and supported from the registry", () => {
+  it("lists availability from PATH and supported from the registry", async () => {
     const bin = fakeBinDir("fake-agent");
     const launcher = new AgentLauncher(
       CTX,
       [...specs(), { id: "ghost", label: "Ghost", bin: "not-installed" }],
       { PATH: bin },
     );
-    expect(launcher.list()).toEqual([
+    expect((await launcher.list())).toEqual([
       { id: "fake", label: "Fake Agent", available: true, supported: true, models: [] },
       { id: "ghost", label: "Ghost", available: false, supported: false, models: [] },
     ]);
@@ -80,7 +81,7 @@ describe("AgentLauncher", () => {
     const launcher = new AgentLauncher(CTX, specs(), { PATH: bin });
     cleanups.push(() => launcher.close());
 
-    const running = launcher.start("fake");
+    const running = await launcher.start("fake");
     expect(running.id).toBe("fake");
     expect(launcher.status().running?.pid).toBe(running.pid);
 
@@ -99,7 +100,7 @@ describe("AgentLauncher", () => {
     );
     cleanups.push(() => launcher.close());
 
-    launcher.start("fake");
+    await launcher.start("fake");
     expect(seen).toEqual(["fake"]);
 
     launcher.stop();
@@ -112,8 +113,8 @@ describe("AgentLauncher", () => {
     const launcher = new AgentLauncher(CTX, specs(), { PATH: bin });
     cleanups.push(() => launcher.close());
 
-    launcher.start("fake");
-    expect(() => launcher.start("fake")).toThrowError(LaunchError);
+    await launcher.start("fake");
+    await expect(launcher.start("fake")).rejects.toThrowError(LaunchError);
   });
 
   it("captures a crash with its stderr tail", async () => {
@@ -124,7 +125,7 @@ describe("AgentLauncher", () => {
     const launcher = new AgentLauncher(CTX, specs(), { PATH: bin });
     cleanups.push(() => launcher.close());
 
-    launcher.start("fake");
+    await launcher.start("fake");
     await until(() => launcher.status().running === null);
 
     const exit = launcher.status().lastExit;
@@ -132,17 +133,17 @@ describe("AgentLauncher", () => {
     expect(exit?.stderrTail).toContain("auth expired");
   });
 
-  it("rejects unknown, unsupported and uninstalled agents with API-shaped errors", () => {
+  it("rejects unknown, unsupported and uninstalled agents with API-shaped errors", async () => {
     const launcher = new AgentLauncher(
       CTX,
       [...specs(), { id: "nolaunch", label: "No Launch", bin: "fake-agent" }],
       { PATH: fakeBinDir("fake-agent") },
     );
-    expect(() => launcher.start("nope")).toThrowError(/unknown agent/);
-    expect(() => launcher.start("nolaunch")).toThrowError(/cannot be launched/);
+    await expect(launcher.start("nope")).rejects.toThrowError(/unknown agent/);
+    await expect(launcher.start("nolaunch")).rejects.toThrowError(/cannot be launched/);
 
     const empty = new AgentLauncher(CTX, specs(), { PATH: tempDir() });
-    expect(() => empty.start("fake")).toThrowError(/not installed/);
+    await expect(empty.start("fake")).rejects.toThrowError(/not installed/);
   });
 
   it("passes only registry model ids to the command line", async () => {
@@ -161,22 +162,237 @@ describe("AgentLauncher", () => {
     );
     cleanups.push(() => launcher.close());
 
-    expect(() => launcher.start("fake", "model-b")).toThrowError(
+    await expect(launcher.start("fake", "model-b")).rejects.toThrowError(
       /does not offer that model/,
     );
 
-    const running = launcher.start("fake", "model-a");
+    const running = await launcher.start("fake", "model-a");
     expect(running.model).toBe("model-a");
     expect(seenArgs).toEqual(["--model", "model-a"]);
-    expect(launcher.list()[0].models).toEqual([{ id: "model-a", label: "Model A" }]);
+    expect((await launcher.list())[0].models).toEqual([{ id: "model-a", label: "Model A" }]);
     launcher.stop();
     await until(() => launcher.status().running === null);
   });
 
-  it("rejects a model on an agent that offers none", () => {
+  it("lists the models its CLI reports, and only those reach the command line", async () => {
+    // The fake CLI answers `models` the way `agy` does, and sleeps otherwise.
+    const bin = fakeBinDir(
+      "fake-agent",
+      `#!/bin/sh
+if [ "$1" = "models" ]; then
+  printf 'fetching...\\n' >&2
+  printf 'live-a\\tLive A\\nlive-b\\tLive B\\n'
+  exit 0
+fi
+sleep 60
+`,
+    );
+    let seenArgs: string[] = [];
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({
+        // A stale typed list that must never be shown once the CLI answers.
+        models: [{ id: "stale", label: "Stale" }],
+        listModels: { args: ["models"], parse: parseTabbedModels },
+        args: (_ctx, model) => {
+          seenArgs = model ? ["--model", model] : [];
+          return seenArgs;
+        },
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    expect((await launcher.list())[0].models).toEqual([
+      { id: "live-a", label: "Live A" },
+      { id: "live-b", label: "Live B" },
+    ]);
+    await expect(launcher.start("fake", "stale")).rejects.toThrowError(
+      /does not offer that model/,
+    );
+
+    const running = await launcher.start("fake", "live-b");
+    expect(running.model).toBe("live-b");
+    expect(seenArgs).toEqual(["--model", "live-b"]);
+    launcher.stop();
+    await until(() => launcher.status().running === null);
+  });
+
+  it("still launches only one agent when two starts race the model check", async () => {
+    // `exec`, and an absolute sleep. The launcher's widened PATH has no
+    // /usr/bin, so a bare `sleep` is not found and the fake agent would exit
+    // at once — this test needs it to stay alive. And without `exec` the
+    // sleep is a grandchild that keeps the stdio pipes open after the shell
+    // is killed, so "close" never fires and stop() never reports the exit.
+    const bin = fakeBinDir(
+      "fake-agent",
+      `#!/bin/sh
+if [ "$1" = "models" ]; then printf 'm1\\tM1\\n'; exit 0; fi
+exec /bin/sleep 60
+`,
+    );
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({ listModels: { args: ["models"], parse: parseTabbedModels } }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    // Validating the model awaits the CLI, and both calls park there before
+    // either has spawned. Without a re-check on the way out, both spawn and
+    // the first child is orphaned by the second overwriting this.child.
+    const settled = await Promise.allSettled([
+      launcher.start("fake", "m1"),
+      launcher.start("fake", "m1"),
+    ]);
+    const started = settled.filter((r) => r.status === "fulfilled");
+    expect(started).toHaveLength(1);
+    expect(launcher.status().running?.pid).toBe(
+      (started[0] as PromiseFulfilledResult<{ pid: number }>).value.pid,
+    );
+    // The loser is refused, not silently ignored.
+    const refused = settled.find((r) => r.status === "rejected");
+    expect((refused as PromiseRejectedResult).reason).toBeInstanceOf(LaunchError);
+
+    // No stop()/until() here on purpose. stop() only sends SIGTERM and waits
+    // for the exit event, which makes any test that awaits it hostage to how
+    // this platform's /bin/sh hands signals to the process it is waiting on.
+    // Teardown has its own test above; the registered close() reaps the child.
+  });
+
+  it("serves a poll from an empty answer while a refresh is in flight", async () => {
+    // Lists nothing the first time, then hangs — a CLI that loses its network.
+    const dir = tempDir();
+    const bin = fakeBinDir(
+      "fake-agent",
+      `#!/bin/sh
+if [ "$1" = "models" ]; then
+  if [ -f ${join(dir, "once")} ]; then exec /bin/sleep 60; fi
+  : > ${join(dir, "once")}
+  exit 1
+fi
+exec /bin/sleep 60
+`,
+    );
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({ listModels: { args: ["models"], parse: parseTabbedModels } }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    expect((await launcher.list())[0].models).toEqual([]);
+    // Age that answer past its TTL, so the next poll serves it and starts a
+    // refresh against the now-hanging CLI. Poking the cache directly is the
+    // only way to reach that state without sleeping out the failure TTL.
+    const cache = (
+      launcher as unknown as {
+        modelCache: Map<string, { expiresAt: number }>;
+      }
+    ).modelCache;
+    cache.get("fake")!.expiresAt = Date.now() - 1;
+    await launcher.list();
+
+    // The poll after that must not wait on the hung refresh. It did before:
+    // an empty answer was indistinguishable from never having asked.
+    const started = Date.now();
+    await launcher.list();
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("asks the CLI once and serves the poll from cache", async () => {
+    const dir = tempDir();
+    const counter = join(dir, "calls");
+    const bin = fakeBinDir(
+      "fake-agent",
+      `#!/bin/sh
+if [ "$1" = "models" ]; then
+  echo x >> ${counter}
+  printf 'live-a\\tLive A\\n'
+  exit 0
+fi
+sleep 60
+`,
+    );
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({ listModels: { args: ["models"], parse: parseTabbedModels } }),
+      { PATH: bin },
+    );
+
+    for (let i = 0; i < 3; i++) {
+      expect((await launcher.list())[0].models).toEqual([
+        { id: "live-a", label: "Live A" },
+      ]);
+    }
+    expect(readFileSync(counter, "utf8").trim().split("\n")).toHaveLength(1);
+
+    // An explicit refresh is the only thing that re-runs it inside the TTL.
+    launcher.refreshModels();
+    await launcher.list();
+    expect(readFileSync(counter, "utf8").trim().split("\n")).toHaveLength(2);
+  });
+
+  it("does not let a fetch that a refresh invalidated land in the cache", async () => {
+    const dir = tempDir();
+    const bin = fakeBinDir(
+      "fake-agent",
+      `#!/bin/sh
+if [ "$1" = "models" ]; then
+  if [ -f ${join(dir, "once")} ]; then printf 'second\\tSecond\\n'; exit 0; fi
+  : > ${join(dir, "once")}
+  printf 'first\\tFirst\\n'
+  exit 0
+fi
+exec /bin/sleep 60
+`,
+    );
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({ listModels: { args: ["models"], parse: parseTabbedModels } }),
+      { PATH: bin },
+    );
+
+    // Refresh while the first fetch is still running. Its answer belongs to
+    // the state that was just discarded, so it must not repopulate the cache
+    // with a full TTL and silently undo the refresh.
+    const inFlight = launcher.list();
+    launcher.refreshModels();
+    await inFlight;
+
+    expect((await launcher.list())[0].models).toEqual([
+      { id: "second", label: "Second" },
+    ]);
+  });
+
+  it("falls back to the typed list when the CLI cannot answer", async () => {
+    const bin = fakeBinDir(
+      "fake-agent",
+      `#!/bin/sh
+if [ "$1" = "models" ]; then
+  echo 'not logged in' >&2
+  exit 1
+fi
+sleep 60
+`,
+    );
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({
+        models: [{ id: "typed", label: "Typed" }],
+        listModels: { args: ["models"], parse: parseTabbedModels },
+      }),
+      { PATH: bin },
+    );
+    expect((await launcher.list())[0].models).toEqual([
+      { id: "typed", label: "Typed" },
+    ]);
+  });
+
+  it("rejects a model on an agent that offers none", async () => {
     const bin = fakeBinDir("fake-agent");
     const launcher = new AgentLauncher(CTX, specs(), { PATH: bin });
-    expect(() => launcher.start("fake", "anything")).toThrowError(
+    await expect(launcher.start("fake", "anything")).rejects.toThrowError(
       /does not offer that model/,
     );
   });
@@ -192,13 +408,11 @@ describe("AgentLauncher", () => {
   it("adds --model to Antigravity and OpenCode command lines only when picked", () => {
     const antigravity = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
     expect(antigravity.args!(CTX)).not.toContain("--model");
-    const agyWithModel = antigravity.args!(CTX, "gemini-2.5-pro");
-    expect(agyWithModel[agyWithModel.indexOf("--model") + 1]).toBe("gemini-2.5-pro");
-    expect(antigravity.models?.map((m) => m.id)).toEqual([
-      "gemini-2.5-pro",
-      "gemini-2.5-flash",
-      "gemini-2.0-flash",
-    ]);
+    const agyWithModel = antigravity.args!(CTX, "gemini-3.1-pro-high");
+    expect(agyWithModel[agyWithModel.indexOf("--model") + 1]).toBe("gemini-3.1-pro-high");
+    // No typed-out list: the ids come from `agy models` at request time.
+    expect(antigravity.models).toBeUndefined();
+    expect(antigravity.listModels?.args).toEqual(["models"]);
 
     const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
     // The chat launch is a server now, so the pick reaches the model over the
@@ -209,16 +423,18 @@ describe("AgentLauncher", () => {
     expect(opencodeRun[opencodeRun.indexOf("--model") + 1]).toBe("opencode/big-pickle");
     const opencodeWithModel = opencode.runArgs!(CTX, "do the thing", "openai/gpt-5.4");
     expect(opencodeWithModel[opencodeWithModel.indexOf("--model") + 1]).toBe("openai/gpt-5.4");
-    expect(opencode.models?.map((m) => m.id)).toEqual([
-      "opencode/big-pickle",
-      "opencode/hy3-free",
-      "opencode/laguna-s-2.1-free",
-      "opencode/mimo-v2.5-free",
-      "opencode/nemotron-3-ultra-free",
-      "opencode/nemotron-3.5-lightning-free",
-      "openai/gpt-5.4",
-      "github-copilot/claude-sonnet-5",
-    ]);
+    // Same: `opencode models` is the list, and --pure matches the launch.
+    expect(opencode.models).toBeUndefined();
+    expect(opencode.listModels?.args).toEqual(["--pure", "models"]);
+  });
+
+  it("reads Grok's models from its CLI and passes the pick on the command line", () => {
+    const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
+    expect(grok.args!(CTX)).not.toContain("--model");
+    const withModel = grok.args!(CTX, "grok-4.6");
+    expect(withModel[withModel.indexOf("--model") + 1]).toBe("grok-4.6");
+    expect(grok.models).toBeUndefined();
+    expect(grok.listModels?.args).toEqual(["models"]);
   });
 
   it("writes valid opencode.json config for OpenCode", () => {
@@ -399,7 +615,7 @@ describe("AgentLauncher", () => {
     );
     cleanups.push(() => launcher.close());
 
-    const running = launcher.start("grok");
+    const running = await launcher.start("grok");
     expect(running.id).toBe("grok");
     const home = join(dataDir, "agent-homes", "grok");
     expect(readFileSync(join(home, "config.toml"), "utf8")).toContain(
@@ -464,8 +680,8 @@ describe("launcher routes", () => {
     });
     expect(unsupported.status).toBe(400);
 
-    // Model validation happens before anything resolves or spawns, so these
-    // are safe to hit even on a machine with the real CLI installed.
+    // A bad model is rejected before anything spawns, so these are safe to
+    // hit even on a machine with the real CLI installed.
     const badModelType = await runtime.app.request(
       "/api/agents/claude-code/start",
       {
@@ -485,7 +701,12 @@ describe("launcher routes", () => {
       },
     );
     expect(unknownModel.status).toBe(400);
-    expect((await unknownModel.json()).error).toMatch(/does not offer/);
+    // Which of the two rejections lands depends on whether the CLI is on this
+    // machine: validating a model means asking that CLI what it offers, so a
+    // missing binary is reported first. Both refuse, and neither spawns.
+    expect((await unknownModel.json()).error).toMatch(
+      /does not offer|is not installed/,
+    );
 
     const stopped = await runtime.app.request("/api/agents/stop", {
       method: "POST",
@@ -500,7 +721,7 @@ describe("launcher routes", () => {
 });
 
 describe("GUI PATH detection", () => {
-  it("finds agents in well-known directories when PATH is launchd-minimal", () => {
+  it("finds agents in well-known directories when PATH is launchd-minimal", async () => {
     const bin = fakeBinDir("fake-agent");
     const launcher = new AgentLauncher(
       CTX,
@@ -508,10 +729,10 @@ describe("GUI PATH detection", () => {
       { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
       [bin], // stands in for ~/.local/bin etc.
     );
-    expect(launcher.list()[0].available).toBe(true);
+    expect((await launcher.list())[0].available).toBe(true);
 
     // And the launched child gets the widened PATH, not launchd's.
-    const running = launcher.start("fake");
+    const running = await launcher.start("fake");
     expect(running.id).toBe("fake");
     launcher.close();
   });
