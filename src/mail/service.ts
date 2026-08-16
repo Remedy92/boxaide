@@ -19,7 +19,6 @@ import type {
   SendMessageInput,
   SendResult,
 } from "../provider/types.js";
-import { skipSnippetsForLimit } from "../provider/types.js";
 
 export type ConnectAccountInput = {
   alias: string;
@@ -75,7 +74,14 @@ export class MailService {
   start(): void {
     this.idleOn = true;
     for (const a of this.store.listAccounts()) {
-      this.watchAccount(this.resolve(a.id));
+      try {
+        this.watchAccount(this.resolve(a.id));
+      } catch (err) {
+        console.warn(
+          `[mail] failed to start watcher for ${a.alias} (${a.email}):`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     }
   }
 
@@ -180,11 +186,11 @@ export class MailService {
     const errors: Array<{ account: string; error: string }> = [];
     await Promise.all(
       accounts.map(async (row) => {
-        const account = this.resolve(row.id);
         try {
+          const account = this.resolve(row.id);
           await this.ensureFresh(account, folder, limit, opts.refresh === true);
         } catch (err) {
-          this.index.setLastError(account.id, folder, errText(err));
+          this.index.setLastError(row.id, folder, errText(err));
           if (accountRef !== "all") throw err;
           errors.push({ account: row.alias, error: errText(err) });
         }
@@ -391,7 +397,6 @@ export class MailService {
       const result = await this.provider.syncMailbox(account, {
         folder,
         limit,
-        skipSnippets: skipSnippetsForLimit(limit),
         fullWindow: opts.fullWindow,
         knownUids: this.index.listUids(account.id, folder),
         cursor: state

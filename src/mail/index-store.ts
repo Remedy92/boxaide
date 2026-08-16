@@ -74,8 +74,9 @@ export class MailIndexStore {
         has_attachments INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (account_id, folder, uid)
       );
-      CREATE INDEX IF NOT EXISTS message_summaries_date
-        ON message_summaries (date DESC);
+      CREATE INDEX IF NOT EXISTS message_summaries_account_folder_date
+        ON message_summaries (account_id, folder, date DESC);
+      DROP INDEX IF EXISTS message_summaries_date;
     `);
   }
 
@@ -172,7 +173,12 @@ export class MailIndexStore {
         opts.limit,
         opts.offset ?? 0,
       ) as SummaryRow[];
-    return rows.map((row) => this.toSummary(row));
+    const summaries: MailMessageSummary[] = [];
+    for (const row of rows) {
+      const summary = this.toSummary(row);
+      if (summary) summaries.push(summary);
+    }
+    return summaries;
   }
 
   listUids(accountId: string, folder: string): number[] {
@@ -215,7 +221,7 @@ export class MailIndexStore {
         }
       }
       for (const msg of result.messages) {
-        this.upsertSummary(msg, { preserveSnippet: result.thin === true });
+        this.upsertSummary(msg);
       }
       this.writeState(accountId, folder, result.cursor, false, null);
     });
@@ -230,11 +236,7 @@ export class MailIndexStore {
       .run(seen ? 1 : 0, accountId, messageId);
   }
 
-  upsertSummary(
-    msg: MailMessageSummary,
-    opts: { preserveSnippet?: boolean } = {},
-  ): void {
-    const preserve = opts.preserveSnippet === true ? 1 : 0;
+  upsertSummary(msg: MailMessageSummary): void {
     this.db
       .prepare(
         `INSERT INTO message_summaries (
@@ -250,10 +252,10 @@ export class MailIndexStore {
            from_enc=excluded.from_enc,
            to_enc=excluded.to_enc,
            subject_enc=excluded.subject_enc,
-           snippet_enc=CASE WHEN @preserve THEN snippet_enc ELSE excluded.snippet_enc END,
+           snippet_enc=excluded.snippet_enc,
            date=excluded.date,
            seen=excluded.seen,
-           has_attachments=CASE WHEN @preserve THEN has_attachments ELSE excluded.has_attachments END`,
+           has_attachments=excluded.has_attachments`,
       )
       .run({
         accountId: msg.accountId,
@@ -270,7 +272,6 @@ export class MailIndexStore {
         date: msg.date,
         seen: msg.seen ? 1 : 0,
         hasAttachments: msg.hasAttachments ? 1 : 0,
-        preserve,
       });
   }
 
@@ -321,22 +322,30 @@ export class MailIndexStore {
       });
   }
 
-  private toSummary(row: SummaryRow): MailMessageSummary {
-    return {
-      id: row.id,
-      accountId: row.accountId,
-      uid: row.uid,
-      messageId: row.messageIdEnc
-        ? decryptSecret(this.masterKey, row.messageIdEnc)
-        : undefined,
-      folder: row.folder,
-      from: decryptSecret(this.masterKey, row.fromEnc),
-      to: decryptSecret(this.masterKey, row.toEnc),
-      subject: decryptSecret(this.masterKey, row.subjectEnc),
-      date: row.date,
-      snippet: decryptSecret(this.masterKey, row.snippetEnc),
-      seen: row.seen === 1,
-      hasAttachments: row.hasAttachments === 1,
-    };
+  private toSummary(row: SummaryRow): MailMessageSummary | null {
+    try {
+      return {
+        id: row.id,
+        accountId: row.accountId,
+        uid: row.uid,
+        messageId: row.messageIdEnc
+          ? decryptSecret(this.masterKey, row.messageIdEnc)
+          : undefined,
+        folder: row.folder,
+        from: decryptSecret(this.masterKey, row.fromEnc),
+        to: decryptSecret(this.masterKey, row.toEnc),
+        subject: decryptSecret(this.masterKey, row.subjectEnc),
+        date: row.date,
+        snippet: decryptSecret(this.masterKey, row.snippetEnc),
+        seen: row.seen === 1,
+        hasAttachments: row.hasAttachments === 1,
+      };
+    } catch (err) {
+      console.warn(
+        `[mail-index] failed to decrypt row ${row.accountId}:${row.folder}:${row.uid}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return null;
+    }
   }
 }

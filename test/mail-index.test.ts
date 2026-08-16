@@ -201,54 +201,61 @@ describe("local mail index", () => {
     expect(after.messages.map((m) => m.subject)).toEqual(["Only survivor"]);
   });
 
-  it("does not let a thin tray sync wipe a real snippet", () => {
-    mail.index.upsertSummary({
-      id: `${accountId}:INBOX:1`,
-      accountId,
-      uid: 1,
-      folder: "INBOX",
-      from: "a@b.c",
-      to: "you@personal.test",
-      subject: "Secret subject",
-      date: new Date().toISOString(),
-      snippet: "hello cache",
-      seen: false,
-      hasAttachments: true,
-    });
-    mail.index.applySync(accountId, "INBOX", {
-      replaced: false,
-      messages: [
-        {
-          id: `${accountId}:INBOX:1`,
-          accountId,
-          uid: 1,
-          folder: "INBOX",
-          from: "a@b.c",
-          to: "you@personal.test",
-          subject: "Secret subject",
-          date: new Date().toISOString(),
-          snippet: "Secret subject",
-          seen: false,
-          hasAttachments: false,
-        },
-      ],
-      vanishedUids: [],
-      flagUpdates: [],
-      cursor: {
-        uidvalidity: 1,
-        highestModseq: "1",
-        uidnext: 2,
-        exists: 1,
+  it("populates snippet and attachments on first-seen mail during tray-sized sync", async () => {
+    provider.seedAccount(accountId, "you@personal.test", [
+      {
+        subject: "Tray item",
+        from: "tray@example.com",
+        bodyText: "tray snippet text",
+        hasAttachments: true,
       },
-      thin: true,
-    });
+    ]);
+    const tray = await mail.listMessages("personal", { limit: 9 });
+    expect(tray.messages).toHaveLength(1);
+    expect(tray.messages[0].snippet).toBe("tray snippet text");
+    expect(tray.messages[0].hasAttachments).toBe(true);
+
+    const app = await mail.listMessages("personal", { limit: 50 });
+    expect(app.messages[0].snippet).toBe("tray snippet text");
+    expect(app.messages[0].hasAttachments).toBe(true);
+  });
+
+  it("drops an undecryptable summary row instead of failing the list", async () => {
+    await mail.listMessages("personal", { limit: 20 });
+    store.db
+      .prepare(
+        `INSERT INTO message_summaries (
+           account_id, folder, uid, id, message_id_enc, from_enc, to_enc,
+           subject_enc, snippet_enc, date, seen, has_attachments
+         ) VALUES (
+           ?, 'INBOX', 999, 'corrupt-row', NULL, 'bad', 'bad', 'bad-data', 'bad', ?, 0, 0
+         )`,
+      )
+      .run(accountId, new Date().toISOString());
+
     const listed = mail.index.listMessages({
       accountIds: [accountId],
       folder: "INBOX",
-      limit: 5,
+      limit: 20,
     });
-    expect(listed[0].snippet).toBe("hello cache");
-    expect(listed[0].hasAttachments).toBe(true);
+    expect(listed.map((m) => m.subject)).toEqual([
+      "Secret subject",
+      "Already read",
+    ]);
+  });
+
+  it("creates composite index on (account_id, folder, date DESC)", () => {
+    const indexes = store.db
+      .prepare(`PRAGMA index_list('message_summaries')`)
+      .all() as Array<{ name: string }>;
+    expect(
+      indexes.some(
+        (idx) => idx.name === "message_summaries_account_folder_date",
+      ),
+    ).toBe(true);
+    expect(
+      indexes.some((idx) => idx.name === "message_summaries_date"),
+    ).toBe(false);
   });
 
   it("indexes a sent copy when the provider returns a uid", async () => {

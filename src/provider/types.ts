@@ -80,13 +80,6 @@ export type MailMessage = MailMessageSummary & {
  */
 export type SinceOpt = { since?: string };
 
-/** Tray-sized lists skip snippet FETCHes. */
-export const TRAY_LIST_LIMIT = 9;
-
-export function skipSnippetsForLimit(limit: number): boolean {
-  return limit <= TRAY_LIST_LIMIT;
-}
-
 export type ListMessagesOpts = SinceOpt & {
   folder?: string;
   limit?: number;
@@ -183,8 +176,6 @@ export type SyncMailboxOpts = {
   folder?: string;
   limit?: number;
   offset?: number;
-  /** Skip bodyStructure + snippet FETCHes (tray-sized lists). */
-  skipSnippets?: boolean;
   cursor?: MailboxCursor | null;
   /** Ignore CHANGEDSINCE and refill the sequence window of `limit`. */
   fullWindow?: boolean;
@@ -199,8 +190,6 @@ export type MailboxSyncResult = {
   vanishedUids: number[];
   flagUpdates: Array<{ uid: number; seen: boolean }>;
   cursor: MailboxCursor;
-  /** Snippet/attachment fields are placeholders; do not overwrite richer rows. */
-  thin?: boolean;
 };
 
 export type MailFolder = {

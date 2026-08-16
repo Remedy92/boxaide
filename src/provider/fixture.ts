@@ -193,7 +193,6 @@ export class FixtureProvider implements MailProvider {
         uidnext: this.nextUid.get(account.id) ?? 1,
         exists: box.length,
       },
-      thin: opts.skipSnippets === true,
     };
   }
 

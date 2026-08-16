@@ -3,7 +3,6 @@ import type { ExpungeEvent, MessageStructureObject } from "imapflow";
 import nodemailer from "nodemailer";
 import type { SendMailOptions } from "nodemailer";
 import { parseRfc822, formatAddress, stripHtml } from "./mime.js";
-import { skipSnippetsForLimit } from "./types.js";
 import type {
   AccountCredentials,
   ConnectionTestResult,
@@ -452,7 +451,7 @@ function envelopeToSummary(
   const snippet =
     snippetOverride ||
     source.source?.toString("utf8").replace(/\s+/g, " ").slice(0, 140) ||
-    subject;
+    "";
   return {
     id: makeId(accountId, folder, source.uid),
     accountId,
@@ -716,19 +715,16 @@ function cursorFromMailbox(mb: {
 async function collectHeads(
   client: ImapFlow,
   range: string | number[],
-  withSnippets: boolean,
   extra: { uid?: boolean; changedSince?: bigint; cap: number },
 ): Promise<FetchedHead[] | null>;
 async function collectHeads(
   client: ImapFlow,
   range: string | number[],
-  withSnippets: boolean,
   extra?: { uid?: boolean; changedSince?: bigint; internalDate?: boolean },
 ): Promise<FetchedHead[]>;
 async function collectHeads(
   client: ImapFlow,
   range: string | number[],
-  withSnippets: boolean,
   extra?: {
     uid?: boolean;
     changedSince?: bigint;
@@ -740,7 +736,7 @@ async function collectHeads(
     uid: true as const,
     envelope: true as const,
     flags: true as const,
-    ...(withSnippets ? { bodyStructure: true as const } : {}),
+    bodyStructure: true as const,
     ...(extra?.internalDate ? { internalDate: true as const } : {}),
   };
   const heads: FetchedHead[] = [];
@@ -762,11 +758,8 @@ async function headsToSummaries(
   accountId: string,
   folder: string,
   heads: FetchedHead[],
-  withSnippets: boolean,
 ): Promise<MailMessageSummary[]> {
-  const snippets = withSnippets
-    ? await attachSnippets(client, heads)
-    : new Map<number, string>();
+  const snippets = await attachSnippets(client, heads);
   return heads
     .map((msg) =>
       envelopeToSummary(accountId, folder, msg, snippets.get(msg.uid)),
@@ -798,7 +791,6 @@ export class ImapSmtpProvider implements MailProvider {
     const folder = opts.folder ?? "INBOX";
     const limit = opts.limit ?? 50;
     const since = parseSince(opts.since);
-    const withSnippets = !skipSnippetsForLimit(limit);
     return withImap(account.id, account.creds, async (client) => {
       const lock = await client.getMailboxLock(folder, { readOnly: true });
       try {
@@ -823,7 +815,7 @@ export class ImapSmtpProvider implements MailProvider {
           if (!window) return [];
           range = `${window.start}:${window.end}`;
         }
-        const heads = await collectHeads(client, range, withSnippets, {
+        const heads = await collectHeads(client, range, {
           uid: Array.isArray(range),
           internalDate: since != null,
         });
@@ -834,7 +826,7 @@ export class ImapSmtpProvider implements MailProvider {
           if (since && !withinSince(msg, since)) return false;
           return true;
         });
-        return headsToSummaries(client, account.id, folder, kept, withSnippets);
+        return headsToSummaries(client, account.id, folder, kept);
       } finally {
         lock.release();
       }
@@ -847,7 +839,6 @@ export class ImapSmtpProvider implements MailProvider {
   ): Promise<MailboxSyncResult> {
     const folder = opts.folder ?? "INBOX";
     const limit = opts.limit ?? 50;
-    const withSnippets = opts.skipSnippets !== true;
     return withImap(account.id, account.creds, async (client) => {
       const lock = await client.getMailboxLock(folder, { readOnly: true });
       try {
@@ -881,14 +872,12 @@ export class ImapSmtpProvider implements MailProvider {
           const heads = await collectHeads(
             client,
             `${window.start}:${window.end}`,
-            withSnippets,
           );
           const messages = await headsToSummaries(
             client,
             account.id,
             folder,
             heads,
-            withSnippets,
           );
           return {
             replaced: true,
@@ -896,7 +885,6 @@ export class ImapSmtpProvider implements MailProvider {
             vanishedUids: [],
             flagUpdates: [],
             cursor,
-            thin: opts.skipSnippets === true,
           };
         };
 
@@ -923,7 +911,6 @@ export class ImapSmtpProvider implements MailProvider {
               heads = await collectHeads(
                 client,
                 `${known?.lowest ?? 1}:*`,
-                withSnippets,
                 {
                   uid: true,
                   changedSince: BigInt(since),
@@ -953,7 +940,6 @@ export class ImapSmtpProvider implements MailProvider {
               account.id,
               folder,
               heads,
-              withSnippets,
             );
             return {
               replaced: false,
@@ -964,7 +950,6 @@ export class ImapSmtpProvider implements MailProvider {
                 seen: m.seen,
               })),
               cursor,
-              thin: opts.skipSnippets === true,
             };
           } catch (err) {
             const text = imapErrorText(err);
@@ -1238,13 +1223,12 @@ export class ImapSmtpProvider implements MailProvider {
       const uid = appended.uid;
       const lock = await client.getMailboxLock(path, { readOnly: true });
       try {
-        const heads = await collectHeads(client, [uid], true, { uid: true });
+        const heads = await collectHeads(client, [uid], { uid: true });
         const messages = await headsToSummaries(
           client,
           account.id,
           path,
           heads,
-          true,
         );
         return { folder: path, summary: messages[0] ?? null };
       } finally {
