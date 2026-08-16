@@ -10,6 +10,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useApp } from "@/lib/hooks/use-app-state";
 import { hasUpdateNews, useUpdate } from "@/lib/hooks/use-update";
 import type { UpdateState } from "@/lib/types";
 
@@ -27,41 +28,36 @@ import type { UpdateState } from "@/lib/types";
  * the server can never disagree about whether an update exists.
  */
 export function UpdateCard({ collapsed = false }: { collapsed?: boolean }) {
+  const app = useApp();
   const update = useUpdate();
   const state = update.state;
   if (!hasUpdateNews(state)) return null;
 
   if (collapsed) {
+    /* One click to the Updates page, not a popover. The collapsed rail is
+       where this used to be an unlabelled arrow-in-a-circle that opened a
+       second surface before it opened anything the user could act on. */
     return (
       <div className="px-2 pt-2">
-        <Popover>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <PopoverTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={headline(state)}
-                  className="relative w-full text-accent hover:text-accent"
-                >
-                  <ArrowUpCircle className="size-4" strokeWidth={1.5} />
-                  {/* Same grammar as the Outreach dot above it: the collapsed
-                      rail has no room for the words, so the dot carries the
-                      fact and the accessible name carries the sentence. */}
-                  <StatusDot
-                    tone="accent"
-                    className="absolute top-1.5 right-1.5"
-                  />
-                </Button>
-              </PopoverTrigger>
-            </TooltipTrigger>
-            <TooltipContent side="right">{headline(state)}</TooltipContent>
-          </Tooltip>
-          <PopoverContent side="right" align="end" className="w-64 p-2">
-            <Body state={state} update={update} />
-          </PopoverContent>
-        </Popover>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label={`${headline(state)}. Open update settings.`}
+              className="relative w-full text-accent hover:text-accent"
+              onClick={() => app.openSettingsSection("updates")}
+            >
+              <ArrowUpCircle className="size-4" strokeWidth={1.5} />
+              {/* Same grammar as the Outreach dot above it: the collapsed
+                  rail has no room for the words, so the dot carries the
+                  fact and the accessible name carries the sentence. */}
+              <StatusDot tone="accent" className="absolute top-1.5 right-1.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="right">{headline(state)}</TooltipContent>
+        </Tooltip>
       </div>
     );
   }
@@ -126,6 +122,13 @@ function Body({
           {update.commandError}
         </p>
       )}
+
+      {/* The card is a summary; the page is where the version, the channel and
+          the last check time are. Its own line: "What is new" is an inline
+          button, and the two would otherwise read as one word. */}
+      <div>
+        <SettingsLink />
+      </div>
     </div>
   );
 }
@@ -227,6 +230,19 @@ function Progress({ value }: { value: number | null }) {
       </div>
       <p className="tnum text-[11px] leading-4 text-fg-tertiary">{percent}%</p>
     </div>
+  );
+}
+
+function SettingsLink() {
+  const app = useApp();
+  return (
+    <button
+      type="button"
+      onClick={() => app.openSettingsSection("updates")}
+      className="text-[11px] leading-4 text-fg-tertiary underline decoration-dotted underline-offset-2 hover:text-fg-secondary"
+    >
+      Update settings
+    </button>
   );
 }
 

@@ -27,6 +27,8 @@ export type KeyboardHandlers = {
   focusSearch: () => void;
   commandPalette: () => void;
   shortcuts: () => void;
+  /** ⌘, — the platform's settings key, and it works from a focused input. */
+  settings: () => void;
   goAgent: () => void;
   goInbox: () => void;
   goUnread: () => void;
@@ -85,6 +87,16 @@ export function useKeyboard(
       if (mod && !event.altKey && event.key.toLowerCase() === "k") {
         event.preventDefault();
         h.commandPalette();
+        return;
+      }
+
+      // ⌘, / Ctrl+, is the settings key on every desktop platform, and it
+      // fires from a focused input — but never over an open overlay. Opening
+      // Settings takes the composer off screen, and an unsent message is not
+      // something a stray keystroke gets to throw away.
+      if (mod && !event.altKey && !suspended && event.key === ",") {
+        event.preventDefault();
+        h.settings();
         return;
       }
 
@@ -192,8 +204,16 @@ export function useKeyboard(
       }
     };
 
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    // Capture, not bubble. Radix dismisses a dialog from a listener on
+    // `document`, which in the bubble phase runs BEFORE this one — and React
+    // flushes that close, effects and all, at the microtask checkpoint between
+    // the two callbacks. This listener would then be re-subscribed with
+    // `suspended` already false and would handle the very same Escape,
+    // dismissing the layer underneath as well. The capture phase reaches
+    // window first, so `suspended` still describes the screen the user pressed
+    // the key on.
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [closeGWindow, suspended]);
 
   React.useEffect(() => {

@@ -3,6 +3,7 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowUpCircle,
   ChevronRight,
   Columns3,
   Copy,
@@ -310,7 +311,16 @@ function Palette({
       group: "Server",
       label: "Open settings",
       icon: <Settings2 />,
+      hint: "⌘ ,",
       action: () => app.openSettings(),
+    },
+    {
+      id: "updates",
+      group: "Server",
+      label: "Check for updates",
+      icon: <ArrowUpCircle />,
+      // The page runs the check as it mounts, so the row does what it says.
+      action: () => app.openSettingsSection("updates"),
     },
     {
       id: "set-base-url",

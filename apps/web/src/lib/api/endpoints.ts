@@ -962,8 +962,20 @@ export function getUpdate(ctx: Ctx): Promise<UpdateState> {
   });
 }
 
-export function checkForUpdate(ctx: Ctx): Promise<UpdateState> {
-  return request<UpdateState>("/api/update/check", {
+/**
+ * `download` defaults to true on the server: a person who presses a check
+ * button wants the update, not a second button. Pass false for a check the
+ * user did not press — opening a page is not asking for a 100 MB transfer.
+ */
+export function checkForUpdate(
+  ctx: Ctx,
+  options: { download?: boolean } = {},
+): Promise<UpdateState> {
+  const path =
+    options.download === false
+      ? "/api/update/check?download=0"
+      : "/api/update/check";
+  return request<UpdateState>(path, {
     method: "POST",
     baseUrl: ctx.baseUrl,
     token: ctx.token,
