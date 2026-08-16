@@ -275,7 +275,9 @@ export class MailService {
     const account = this.resolve(accountRef);
     const result = await this.provider.sendMessage(account, input);
     if (result.copied) this.index.upsertSummary(result.copied);
-    else this.index.markDirty(account.id, "Sent");
+    else if (result.sentFolder) {
+      this.index.markDirty(account.id, result.sentFolder);
+    }
     return result;
   }
 

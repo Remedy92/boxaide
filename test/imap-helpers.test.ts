@@ -8,6 +8,7 @@ import {
   imapAuthOptions,
   smtpAuthOptions,
   mailboxNeedsFullResync,
+  indexedUidRange,
   draftsMailboxPath,
   draftFromImapSource,
 } from "../src/provider/imap-smtp.js";
@@ -100,6 +101,26 @@ describe("mailboxNeedsFullResync", () => {
 
   it("is false when uidvalidity matches", () => {
     expect(mailboxNeedsFullResync({ uidvalidity: 7 }, 7)).toBe(false);
+  });
+});
+
+describe("indexedUidRange (expunge check stays one range)", () => {
+  it("is null with nothing indexed", () => {
+    expect(indexedUidRange([])).toBeNull();
+    expect(indexedUidRange(undefined)).toBeNull();
+  });
+
+  it("spans the lowest and highest uid, unsorted input included", () => {
+    expect(indexedUidRange([40, 7, 19])).toEqual({ lowest: 7, highest: 40 });
+  });
+
+  it("handles a single uid", () => {
+    expect(indexedUidRange([12])).toEqual({ lowest: 12, highest: 12 });
+  });
+
+  it("does not blow the stack on a large index", () => {
+    const uids = Array.from({ length: 200_000 }, (_, i) => i + 1);
+    expect(indexedUidRange(uids)).toEqual({ lowest: 1, highest: 200_000 });
   });
 });
 

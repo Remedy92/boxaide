@@ -31,12 +31,26 @@ const IDLE_MS = 60_000;
 const keepAlive = new Set<string>();
 const watchers = new Map<
   string,
-  { client: ImapFlow; onExists: () => void; onFlags: () => void }
+  {
+    client: ImapFlow;
+    onExists: () => void;
+    onFlags: () => void;
+    onClose: () => void;
+  }
 >();
+/** Reconnect backoff for a dropped watch, so an offline server is not hammered. */
+const WATCH_RETRY_MIN_MS = 5_000;
+const WATCH_RETRY_MAX_MS = 5 * 60_000;
 /** Guards against a hung server holding a request open forever. */
 const CONNECT_TIMEOUT_MS = 15_000;
 const GREETING_TIMEOUT_MS = 10_000;
 const SOCKET_TIMEOUT_MS = 60_000;
+/**
+ * Ceiling on messages one incremental sync will read. A mark-all-read on a
+ * large mailbox reports every message as changed; past this it is cheaper —
+ * and bounded — to refill the window instead.
+ */
+const SYNC_FETCH_CAP = 1000;
 /** Bytes of a body part fetched per message to build a list snippet. */
 const SNIPPET_BYTES = 1024;
 /** Drafts read per listDrafts call. Each one costs a full source fetch. */
@@ -569,6 +583,23 @@ export function uidWindow(
   return { start, end };
 }
 
+/**
+ * Span of the UIDs already indexed. Asking the server about that range keeps
+ * the command one pair of numbers long however many messages are held.
+ */
+export function indexedUidRange(
+  uids: number[] | undefined,
+): { lowest: number; highest: number } | null {
+  if (!uids || uids.length === 0) return null;
+  let lowest = uids[0];
+  let highest = uids[0];
+  for (const uid of uids) {
+    if (uid < lowest) lowest = uid;
+    if (uid > highest) highest = uid;
+  }
+  return { lowest, highest };
+}
+
 /** True when the stored uidvalidity cannot be used for CHANGEDSINCE. */
 export function mailboxNeedsFullResync(
   stored: { uidvalidity: number } | null | undefined,
@@ -681,12 +712,30 @@ function cursorFromMailbox(mb: {
   };
 }
 
+/** With `cap`, returns null when the mailbox has more to give than that. */
+async function collectHeads(
+  client: ImapFlow,
+  range: string | number[],
+  withSnippets: boolean,
+  extra: { uid?: boolean; changedSince?: bigint; cap: number },
+): Promise<FetchedHead[] | null>;
 async function collectHeads(
   client: ImapFlow,
   range: string | number[],
   withSnippets: boolean,
   extra?: { uid?: boolean; changedSince?: bigint; internalDate?: boolean },
-): Promise<FetchedHead[]> {
+): Promise<FetchedHead[]>;
+async function collectHeads(
+  client: ImapFlow,
+  range: string | number[],
+  withSnippets: boolean,
+  extra?: {
+    uid?: boolean;
+    changedSince?: bigint;
+    internalDate?: boolean;
+    cap?: number;
+  },
+): Promise<FetchedHead[] | null> {
   const query = {
     uid: true as const,
     envelope: true as const,
@@ -700,6 +749,9 @@ async function collectHeads(
       ? { uid: extra.uid, changedSince: extra.changedSince }
       : undefined;
   for await (const msg of client.fetch(range, query, opts)) {
+    // Null, not a truncated list: a partial answer would look like the whole
+    // mailbox to the caller and quietly delete the rest of the index.
+    if (extra?.cap != null && heads.length >= extra.cap) return null;
     heads.push(msg);
   }
   return heads;
@@ -863,17 +915,30 @@ export class ImapSmtpProvider implements MailProvider {
               if (evt.uid != null) vanishedUids.push(evt.uid);
             };
             client.on("expunge", onExpunge);
-            let heads: FetchedHead[];
+            let heads: FetchedHead[] | null;
+            const known = indexedUidRange(opts.knownUids);
             try {
-              heads = await collectHeads(client, "1:*", withSnippets, {
-                changedSince: BigInt(since),
-              });
+              // Only the indexed range can change what a list paints, and it
+              // starts at the oldest UID we hold. Anything older is not ours.
+              heads = await collectHeads(
+                client,
+                `${known?.lowest ?? 1}:*`,
+                withSnippets,
+                {
+                  uid: true,
+                  changedSince: BigInt(since),
+                  cap: SYNC_FETCH_CAP,
+                },
+              );
             } finally {
               client.off("expunge", onExpunge);
             }
-            if (opts.knownUids && opts.knownUids.length > 0) {
+            // Too much changed to read one by one. A window refill is bounded
+            // and lands in the same place.
+            if (heads === null) return full();
+            if (known && opts.knownUids) {
               const still = await client.search(
-                { uid: opts.knownUids.join(",") },
+                { uid: `${known.lowest}:${known.highest}` },
                 { uid: true },
               );
               const stillSet = new Set(still || []);
@@ -924,47 +989,85 @@ export class ImapSmtpProvider implements MailProvider {
   ): () => void {
     const key = account.id;
     keepAlive.add(key);
+    let stopped = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    let backoff = WATCH_RETRY_MIN_MS;
     const fire = () => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(onChange, 250);
       timer.unref?.();
     };
-    const attach = (client: ImapFlow) => {
+    const detach = () => {
       const prev = watchers.get(key);
-      if (prev) {
-        prev.client.off("exists", prev.onExists);
-        prev.client.off("expunge", prev.onExists);
-        prev.client.off("flags", prev.onFlags);
-      }
+      if (!prev) return;
+      prev.client.off("exists", prev.onExists);
+      prev.client.off("expunge", prev.onExists);
+      prev.client.off("flags", prev.onFlags);
+      prev.client.off("close", prev.onClose);
+      watchers.delete(key);
+    };
+    const attach = (client: ImapFlow) => {
+      detach();
       const onExists = () => fire();
       const onFlags = () => fire();
+      // The connection is the subscription. When it drops, the listeners go
+      // with it, so reconnect — otherwise this account silently stops
+      // reporting new mail for the life of the process.
+      const onClose = () => {
+        detach();
+        schedule();
+      };
       client.on("exists", onExists);
       client.on("expunge", onExists);
       client.on("flags", onFlags);
-      watchers.set(key, { client, onExists, onFlags });
+      client.on("close", onClose);
+      watchers.set(key, { client, onExists, onFlags, onClose });
     };
 
-    void withImap(key, account.creds, async (client) => {
-      attach(client);
-      const lock = await client.getMailboxLock(folder, { readOnly: true });
-      lock.release();
-    }).catch((err) => {
+    const select = async (reconnect: boolean) => {
+      await withImap(key, account.creds, async (client) => {
+        attach(client);
+        const lock = await client.getMailboxLock(folder, { readOnly: true });
+        lock.release();
+      });
+      backoff = WATCH_RETRY_MIN_MS;
+      // The gap is invisible from here: anything that arrived while the
+      // connection was down produced no event, so ask for a sync outright.
+      if (reconnect) fire();
+    };
+
+    const schedule = () => {
+      if (stopped || retry) return;
+      const wait = backoff;
+      backoff = Math.min(backoff * 2, WATCH_RETRY_MAX_MS);
+      retry = setTimeout(() => {
+        retry = null;
+        if (stopped) return;
+        void select(true).catch((err) => {
+          console.warn(
+            `[imap] watch ${folder} reconnect failed for ${account.email}:`,
+            err instanceof Error ? err.message : String(err),
+          );
+          schedule();
+        });
+      }, wait);
+      retry.unref?.();
+    };
+
+    void select(false).catch((err) => {
       console.warn(
         `[imap] watch ${folder} failed for ${account.email}:`,
         err instanceof Error ? err.message : String(err),
       );
+      schedule();
     });
 
     return () => {
+      stopped = true;
       if (timer) clearTimeout(timer);
-      const prev = watchers.get(key);
-      if (prev) {
-        prev.client.off("exists", prev.onExists);
-        prev.client.off("expunge", prev.onExists);
-        prev.client.off("flags", prev.onFlags);
-        watchers.delete(key);
-      }
+      if (retry) clearTimeout(retry);
+      detach();
       keepAlive.delete(key);
       const entry = pool.get(key);
       if (entry) scheduleIdle(key, entry);
@@ -1095,9 +1198,11 @@ export class ImapSmtpProvider implements MailProvider {
     // Gmail copies SMTP sends into Sent by itself; Fastmail and generic IMAP
     // do not. A failed copy must never fail a delivered message.
     let copied: MailMessageSummary | undefined;
+    let sentFolder: string | undefined;
     await this.appendToSent(account, raw)
-      .then((summary) => {
-        copied = summary ?? undefined;
+      .then((result) => {
+        copied = result.summary ?? undefined;
+        sentFolder = result.folder;
       })
       .catch((err: unknown) => {
       console.warn(
@@ -1110,19 +1215,26 @@ export class ImapSmtpProvider implements MailProvider {
       messageId: info.messageId ?? composed.messageId ?? "",
       accepted: (info.accepted ?? []).map(String),
       copied,
+      sentFolder,
     };
   }
 
+  /**
+   * The folder comes back even when the uid does not: a server that withholds
+   * APPENDUID still tells the caller which mailbox to refresh.
+   */
   private async appendToSent(
     account: ProviderAccount,
     raw: Buffer,
-  ): Promise<MailMessageSummary | null> {
+  ): Promise<{ folder: string; summary: MailMessageSummary | null }> {
     return withImap(account.id, account.creds, async (client) => {
       const boxes = await client.list();
       const path = sentMailboxPath(boxes);
       if (!path) throw new Error("no Sent mailbox found");
       const appended = await client.append(path, raw, ["\\Seen"], new Date());
-      if (!appended || appended.uid == null) return null;
+      if (!appended || appended.uid == null) {
+        return { folder: path, summary: null };
+      }
       const uid = appended.uid;
       const lock = await client.getMailboxLock(path, { readOnly: true });
       try {
@@ -1134,7 +1246,7 @@ export class ImapSmtpProvider implements MailProvider {
           heads,
           true,
         );
-        return messages[0] ?? null;
+        return { folder: path, summary: messages[0] ?? null };
       } finally {
         lock.release();
       }

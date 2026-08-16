@@ -118,6 +118,11 @@ export type SendResult = {
   accepted: string[];
   /** Sent-folder copy, when APPEND (or the fixture) named the new uid. */
   copied?: MailMessageSummary;
+  /**
+   * Where the copy landed. Servers name that mailbox differently — "Sent",
+   * "Sent Items", "[Gmail]/Sent Mail" — so callers must not guess it.
+   */
+  sentFolder?: string;
 };
 
 export type ConnectionTestResult = {

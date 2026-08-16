@@ -271,6 +271,7 @@ export class FixtureProvider implements MailProvider {
       messageId,
       accepted: input.to.split(",").map((s) => s.trim()),
       copied,
+      sentFolder: "Sent",
     };
   }
 

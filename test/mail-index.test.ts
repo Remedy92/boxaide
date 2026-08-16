@@ -265,6 +265,36 @@ describe("local mail index", () => {
     expect(sent.map((m) => m.subject)).toEqual(["Shipped"]);
   });
 
+  it("marks the folder the server named when the sent uid is withheld", async () => {
+    // Gmail and Fastmail do not call it "Sent". Guessing that name marks a
+    // folder nothing reads, and the sent copy never shows up.
+    const send = provider.sendMessage.bind(provider);
+    provider.sendMessage = async (account, input) => {
+      const result = await send(account, input);
+      return {
+        messageId: result.messageId,
+        accepted: result.accepted,
+        sentFolder: "[Gmail]/Sent Mail",
+      };
+    };
+    mail.index.applySync(accountId, "[Gmail]/Sent Mail", {
+      replaced: true,
+      messages: [],
+      vanishedUids: [],
+      flagUpdates: [],
+      cursor: { uidvalidity: 1, highestModseq: "1", uidnext: 1, exists: 0 },
+    });
+
+    await mail.sendMessage("personal", {
+      to: "client@acme.test",
+      subject: "Shipped",
+      text: "hello",
+    });
+    expect(mail.index.getState(accountId, "[Gmail]/Sent Mail")?.dirty).toBe(
+      true,
+    );
+  });
+
   it("rebuilds through listMessages when uidvalidity changes", async () => {
     await mail.listMessages("personal", { limit: 20 });
     provider.setUidValidity(accountId, 99);
