@@ -25,14 +25,15 @@ export function UpdatesPanel() {
   const update = useUpdate();
   const state = update.state;
 
-  /* Opening this page IS asking. The palette row is labelled "Check for
-     updates" and the desktop menu item opens it, so a page that showed a
-     stale answer and waited to be pressed would be the same do-nothing
-     button this replaced. Once per mount, and never over a check that just
+  /* Opening this page asks the question — a page that showed a stale answer
+     and waited to be pressed would be the same do-nothing button this
+     replaced. It does NOT start the download: arriving here to read the
+     version number is not consent to spend somebody's connection. The button
+     below is what downloads. Once per mount, and never over a check that just
      ran or a download in flight. */
-  const checkRef = React.useRef(update.check);
+  const checkRef = React.useRef(update.refresh);
   React.useEffect(() => {
-    checkRef.current = update.check;
+    checkRef.current = update.refresh;
   });
   const asked = React.useRef(false);
   React.useEffect(() => {

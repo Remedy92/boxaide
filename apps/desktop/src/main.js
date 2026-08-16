@@ -559,9 +559,13 @@ function createAppMenu() {
       { role: "editMenu" },
       {
         label: "View",
+        // No accelerators on these two. CmdOrCtrl+0 belongs to the resetZoom
+        // role three lines down, and CmdOrCtrl+, is already on Settings… in
+        // the menu above — a second registration takes the key away from the
+        // item that should have it.
         submenu: [
-          { label: "Boxaide", accelerator: "CmdOrCtrl+0", click: () => openMainWindow() },
-          { label: "Settings", accelerator: "CmdOrCtrl+,", click: () => openMainWindow("#/settings") },
+          { label: "Boxaide", click: () => openMainWindow() },
+          { label: "Settings", click: () => openMainWindow("#/settings") },
           { type: "separator" },
           { role: "reload" },
           { role: "resetZoom" },

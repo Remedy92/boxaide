@@ -724,15 +724,25 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const clearRemovalTarget = React.useCallback(() => setRemovalTarget(null), []);
 
   /**
+   * The selection Settings was opened over, so closing it can put the message
+   * back. Settings and the reading pane share the one hash slot, and taking a
+   * message off screen is not what opening a settings page means.
+   */
+  const hashBeforeSettings = React.useRef<string>("");
+
+  /**
    * Write the settings route. `replaceState`, like a selection at desktop
    * width: Settings is a place the user goes on purpose and leaves with a
    * click, not a step in a trail they arrow back through.
    */
   const goToSettings = React.useCallback((section: SettingsSection) => {
     if (typeof window === "undefined") return;
-    // Whatever entry a pushed message selection left behind is the one being
-    // overwritten here, so the flag that guards history.back() has to go too.
-    pushedSelection.current = false;
+    const current = window.location.hash;
+    // Only on the way in. Moving between sections must not record a settings
+    // route as the thing to go back to.
+    if (!SETTINGS_HASH_PATTERN.test(current)) {
+      hashBeforeSettings.current = current;
+    }
     const next = `#/settings/${section}`;
     window.history.replaceState(null, "", next);
     window.dispatchEvent(new Event(HASH_EVENT));
@@ -772,10 +782,18 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     setSettingsFocus(null);
     setSettingsAutoTest(null);
     if (typeof window === "undefined") return;
+    // Back to the message that was open, if there was one. A bare path
+    // otherwise — and never a stale settings route, which would reopen the
+    // page this is closing.
+    const previous = hashBeforeSettings.current;
+    hashBeforeSettings.current = "";
+    const base = `${window.location.pathname}${window.location.search}`;
     window.history.replaceState(
       null,
       "",
-      `${window.location.pathname}${window.location.search}`,
+      previous && !SETTINGS_HASH_PATTERN.test(previous)
+        ? `${base}${previous}`
+        : base,
     );
     window.dispatchEvent(new Event(HASH_EVENT));
   }, []);

@@ -37,6 +37,18 @@ import { cn } from "@/lib/utils";
 
 type TestResult = { tone: DotTone; message: string; note?: string; raw?: string };
 
+/**
+ * What the user has typed into Connection but not saved yet.
+ *
+ * The panel is unmounted the moment another section is picked, and a
+ * half-pasted token that vanishes because somebody looked at Updates is a
+ * form that ate their work. Module scope rather than context: it is one
+ * transient draft, read by one component, and it must not re-render the app
+ * on every keystroke. Cleared on save, and gone on reload — like any unsaved
+ * form.
+ */
+let pendingConnection: { baseUrl: string; token: string } | null = null;
+
 export function PanelHeader({
   title,
   children,
@@ -112,8 +124,12 @@ export function ConnectionPanel({
   const update = useUpdateSettings();
   const meta = useMeta();
 
-  const [baseUrl, setBaseUrl] = React.useState(() => settings.baseUrl);
-  const [token, setToken] = React.useState(() => settings.token);
+  const [baseUrl, setBaseUrl] = React.useState(
+    () => pendingConnection?.baseUrl ?? settings.baseUrl,
+  );
+  const [token, setToken] = React.useState(
+    () => pendingConnection?.token ?? settings.token,
+  );
   const [reveal, setReveal] = React.useState(false);
   const [urlError, setUrlError] = React.useState<string | null>(null);
   const [testing, setTesting] = React.useState(false);
@@ -136,6 +152,12 @@ export function ConnectionPanel({
   const dirty =
     normalizeBaseUrl(baseUrl) !== settings.baseUrl || token !== settings.token;
 
+  /* Recorded after the render that changed a field, not during it: nothing
+     renders from this, so it is a side effect and belongs in an effect. */
+  React.useEffect(() => {
+    pendingConnection = dirty ? { baseUrl, token } : null;
+  }, [dirty, baseUrl, token]);
+
   const save = () => {
     if (!isValidBaseUrl(baseUrl)) {
       setUrlError("Enter a full URL, like http://127.0.0.1:8787");
@@ -143,6 +165,7 @@ export function ConnectionPanel({
       return;
     }
     update({ baseUrl: normalizeBaseUrl(baseUrl), token });
+    pendingConnection = null;
     toast.success("Settings saved");
   };
 
