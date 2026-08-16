@@ -1,6 +1,6 @@
 {
   "name": "boxaide",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "description": "Free self-host multi-mailbox agentic inbox with web UI + MCP for any agent",
   "type": "module",
   "license": "MIT",
@@ -66,5 +66,8 @@
   "allowScripts": {
     "better-sqlite3@13.0.3": true,
     "esbuild@0.28.2": true
+  },
+  "overrides": {
+    "tmp": "0.2.7"
   }
 }

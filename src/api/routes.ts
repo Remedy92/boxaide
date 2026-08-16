@@ -799,9 +799,12 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
  * launcher; nothing from a request ever becomes part of a command line.
  */
 function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
-  app.get("/api/agents", (c) =>
-    c.json({ agents: launcher.list(), ...launcher.status() }),
-  );
+  // ?refresh=1 drops the cached model lists first, so a user who just updated
+  // a CLI can see its new models without waiting out the cache TTL.
+  app.get("/api/agents", async (c) => {
+    if (c.req.query("refresh") === "1") launcher.refreshModels();
+    return c.json({ agents: await launcher.list(), ...launcher.status() });
+  });
 
   app.post("/api/agents/:id/start", async (c) => {
     // Body is optional: { model?: string }. The launcher validates the id
@@ -819,7 +822,8 @@ function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
       // No body, or not JSON — start on the CLI's default model.
     }
     try {
-      return c.json({ running: launcher.start(c.req.param("id"), model) }, 201);
+      const running = await launcher.start(c.req.param("id"), model);
+      return c.json({ running }, 201);
     } catch (err) {
       if (err instanceof LaunchError) {
         return c.json({ error: err.message }, err.status);

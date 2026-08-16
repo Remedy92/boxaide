@@ -97,8 +97,12 @@ export type UpdateOptions = {
 /** Six hours. An update is not news that goes stale in minutes. */
 export const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-/** The first check waits this long so it never competes with app start. */
-export const FIRST_CHECK_DELAY_MS = 20_000;
+/**
+ * The launch check. Short enough that the answer is on screen while the user
+ * is still looking at a freshly opened window, long enough that it does not
+ * compete with the first mailbox refresh for the same socket.
+ */
+export const FIRST_CHECK_DELAY_MS = 2_000;
 
 /** A release page can hold a very long changelog; the rail shows a summary. */
 const MAX_NOTES = 4_000;
@@ -205,6 +209,30 @@ export class UpdateService {
       this.pending = null;
     });
     return this.pending;
+  }
+
+  /**
+   * Check, and start the download the moment the check finds something.
+   *
+   * This is what a person means by "check for updates": the menu item used to
+   * check, say nothing, and leave the download to a button in the sidebar the
+   * user had to go and find. Every surface a human presses — the menu bar item
+   * and the Check now button in Settings — calls this. The six-hour background
+   * timer still calls `check` alone: an unasked-for 100 MB download is the
+   * user's call, an asked-for one is not.
+   *
+   * Never throws. A manual-channel server has nothing to download, and that is
+   * an answer ("0.3.0 is out, here is the release"), not a failure.
+   */
+  async checkAndDownload(): Promise<void> {
+    await this.check().catch(() => {});
+    if (!this.driver) return;
+    if (this.status !== "available") return;
+    try {
+      this.download();
+    } catch {
+      // Raced with another caller that already started it. Nothing to report.
+    }
   }
 
   /**

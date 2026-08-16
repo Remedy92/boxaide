@@ -54,13 +54,30 @@ export type ComposeSeed = {
 export type DialogName =
   | "connect"
   | "compose"
-  | "settings"
   | "shortcuts"
   | "palette"
   | "capabilities"
   | "agent";
 
 export type SettingsFocus = "baseUrl" | "token" | null;
+
+/**
+ * Settings is a page, not a dialog — one section per row of its own sidebar.
+ *
+ * The order is the order of the sidebar. `connection` comes first among the
+ * technical ones because it is the only section that can leave the app with no
+ * mail in it.
+ */
+export const SETTINGS_SECTIONS = [
+  "general",
+  "connection",
+  "agents",
+  "appearance",
+  "updates",
+  "about",
+] as const;
+
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
 /**
  * Which view owns the workspace.
@@ -85,7 +102,8 @@ export type View =
   | "people"
   | "pipeline"
   | "automations"
-  | "outreach";
+  | "outreach"
+  | "settings";
 
 /**
  * The views the CRM owns. With `settings.crm` off they are not reachable: the
@@ -209,9 +227,15 @@ type AppStateValue = {
   requestRemoveAccount: (account: MailAccountMeta) => void;
   clearRemovalTarget: () => void;
   settingsFocus: SettingsFocus;
-  /** Non-null ⇒ the settings dialog runs its connection test on open. */
+  /** Non-null ⇒ the Connection section runs its test as it mounts. */
   settingsAutoTest: number | null;
+  /** Which settings page is open. Null whenever `view` is not "settings". */
+  settingsSection: SettingsSection | null;
+  /** Opens the Settings page. A focus target implies the Connection section. */
   openSettings: (focus?: SettingsFocus, autoTest?: boolean) => void;
+  openSettingsSection: (section: SettingsSection) => void;
+  /** Leaves Settings for the view the user was in before it. */
+  closeSettings: () => void;
 
   /* first run */
   /** True while the full-screen setup wizard owns the viewport. */
@@ -256,6 +280,17 @@ const PeopleQueryContext = React.createContext<string>("");
 export function usePeopleSearchQuery(): string {
   return React.useContext(PeopleQueryContext);
 }
+
+/**
+ * The Settings page, as a route.
+ *
+ * It is in the hash rather than in state because it has to be reachable from
+ * outside the page: the desktop app's "Check for updates…" points the window
+ * at `#/settings/updates`, and it has no other channel to do it with — there
+ * is no preload script and no IPC. Deep-linking a section also means the
+ * command palette's "Set access token" is one address, not one more flag.
+ */
+const SETTINGS_HASH_PATTERN = /^#\/settings(?:\/([a-z-]+))?$/;
 
 const HASH_PATTERN = /^#\/a\/([^/]+)\/m\/(.+)$/;
 /** Same shape, `d` instead of `m`. One hash, so a draft and a message can
@@ -313,6 +348,17 @@ function draftFromHash(hash: string): DraftSelection | null {
   } catch {
     return null;
   }
+}
+
+/** Null for every hash that is not a settings route, including no hash. */
+function settingsFromHash(hash: string): SettingsSection | null {
+  const match = SETTINGS_HASH_PATTERN.exec(hash);
+  if (!match) return null;
+  const section = match[1] as SettingsSection | undefined;
+  if (!section) return "general";
+  // An unknown section is a typed or stale address, not a crash: the page
+  // opens on its first row.
+  return SETTINGS_SECTIONS.includes(section) ? section : "general";
 }
 
 function hashFor(selection: Selection): string {
@@ -380,6 +426,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   );
   const selected = React.useMemo(() => selectionFromHash(hash), [hash]);
   const selectedDraft = React.useMemo(() => draftFromHash(hash), [hash]);
+  /* Derived, not mirrored into state: the hash IS which settings page is open,
+     so the browser's Back button, the palette and the desktop menu all move
+     the same one thing and no effect has to keep two copies in step. */
+  const settingsSection = React.useMemo(() => settingsFromHash(hash), [hash]);
 
   /* The browser's own Back button pops the pushed entry without going through
      clearSelection, so the flag has to follow the hash, not only our callers.
@@ -547,13 +597,34 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     crmRef.current = settings.crm;
   }, [settings.crm]);
 
+  /** Assigned once openSettingsSection exists, below. setView is its caller. */
+  const openSettingsRef = React.useRef<(section: SettingsSection) => void>(
+    () => {},
+  );
+
+  /* Settings owns the hash while it is open, so leaving it is a hash change
+     even when the view underneath never moved. Read through a ref for the
+     same reason viewRef exists: setView must stay stable. */
+  const settingsRef = React.useRef(settingsSection);
+  React.useEffect(() => {
+    settingsRef.current = settingsSection;
+  }, [settingsSection]);
+
   const setView = React.useCallback((next: View) => {
+    // Settings is a route, not a view state — see openSettings.
+    if (next === "settings") {
+      openSettingsRef.current("general");
+      return;
+    }
     // The last gate before the shell renders a pane. Every surface that offers
     // a CRM row already hides it, so reaching here means a stale caller — a
     // held keybinding, another tab's palette — and the answer is to do nothing
     // rather than to show a view the rail cannot get back to.
     if (!crmRef.current && isCrmView(next)) return;
-    if (viewRef.current === next) return;
+    // Standing in Settings, the row the user pressed may be the view behind
+    // it. That is a navigation — the early return below would swallow it and
+    // leave Settings on screen.
+    if (viewRef.current === next && settingsRef.current === null) return;
     viewRef.current = next;
     clearSelectionRefForView.current();
     // The contact pane is the People view's right column and nothing else's.
@@ -626,10 +697,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const openDialog = React.useCallback((name: DialogName) => {
     setDialog(name);
     if (name === "palette") setPalettePage("root");
-    if (name !== "settings") {
-      setSettingsFocus(null);
-      setSettingsAutoTest(null);
-    }
+    // A pending "focus the token field" belongs to the press that asked for
+    // it. Anything else opening first has taken that press's place.
+    setSettingsFocus(null);
+    setSettingsAutoTest(null);
   }, []);
 
   const openPalette = React.useCallback((page: PalettePage = "root") => {
@@ -652,16 +723,80 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   );
   const clearRemovalTarget = React.useCallback(() => setRemovalTarget(null), []);
 
+  /**
+   * The selection Settings was opened over, so closing it can put the message
+   * back. Settings and the reading pane share the one hash slot, and taking a
+   * message off screen is not what opening a settings page means.
+   */
+  const hashBeforeSettings = React.useRef<string>("");
+
+  /**
+   * Write the settings route. `replaceState`, like a selection at desktop
+   * width: Settings is a place the user goes on purpose and leaves with a
+   * click, not a step in a trail they arrow back through.
+   */
+  const goToSettings = React.useCallback((section: SettingsSection) => {
+    if (typeof window === "undefined") return;
+    const current = window.location.hash;
+    // Only on the way in. Moving between sections must not record a settings
+    // route as the thing to go back to.
+    if (!SETTINGS_HASH_PATTERN.test(current)) {
+      hashBeforeSettings.current = current;
+    }
+    const next = `#/settings/${section}`;
+    window.history.replaceState(null, "", next);
+    window.dispatchEvent(new Event(HASH_EVENT));
+  }, []);
+
+  const openSettingsSection = React.useCallback(
+    (section: SettingsSection) => {
+      setSettingsFocus(null);
+      setSettingsAutoTest(null);
+      // An overlay over the page the user just asked for is nobody's intent —
+      // this is reached from the palette, which is one of them.
+      setDialog(null);
+      goToSettings(section);
+    },
+    [goToSettings],
+  );
+
+  React.useEffect(() => {
+    openSettingsRef.current = openSettingsSection;
+  }, [openSettingsSection]);
+
   const openSettings = React.useCallback(
     (focus: SettingsFocus = null, autoTest = false) => {
       setSettingsFocus(focus);
       // A nonce rather than a boolean: asking twice in a row must run the test
       // twice, and a boolean that is already true would not change.
       setSettingsAutoTest(autoTest ? Date.now() : null);
-      setDialog("settings");
+      setDialog(null);
+      // A focus target and the connection test are both about the server, so
+      // they name the section rather than needing one passed alongside.
+      goToSettings(focus || autoTest ? "connection" : "general");
     },
-    [],
+    [goToSettings],
   );
+
+  const closeSettings = React.useCallback(() => {
+    setSettingsFocus(null);
+    setSettingsAutoTest(null);
+    if (typeof window === "undefined") return;
+    // Back to the message that was open, if there was one. A bare path
+    // otherwise — and never a stale settings route, which would reopen the
+    // page this is closing.
+    const previous = hashBeforeSettings.current;
+    hashBeforeSettings.current = "";
+    const base = `${window.location.pathname}${window.location.search}`;
+    window.history.replaceState(
+      null,
+      "",
+      previous && !SETTINGS_HASH_PATTERN.test(previous)
+        ? `${base}${previous}`
+        : base,
+    );
+    window.dispatchEvent(new Event(HASH_EVENT));
+  }, []);
 
   const openCompose = React.useCallback((seed?: Partial<ComposeSeed>) => {
     setComposeSeed({
@@ -770,7 +905,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       clearSearch,
       query,
       searching: query.trim().length > 0,
-      view,
+      /* The settings route wins while it is set. The view underneath is kept,
+         not cleared, so leaving Settings returns to the pane the user left. */
+      view: settingsSection ? "settings" : view,
       setView,
       /* Gated on mount for the same reason the wizard is: the hydration render
          reads DEFAULT_SETTINGS, where `crm` is true, so passing settings.crm
@@ -817,7 +954,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       clearRemovalTarget,
       settingsFocus,
       settingsAutoTest,
+      settingsSection,
       openSettings,
+      openSettingsSection,
+      closeSettings,
       wizardOpen,
       openWizard,
       finishWizard,
@@ -875,7 +1015,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       clearRemovalTarget,
       settingsFocus,
       settingsAutoTest,
+      settingsSection,
       openSettings,
+      openSettingsSection,
+      closeSettings,
       wizardOpen,
       openWizard,
       finishWizard,

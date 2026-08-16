@@ -47,6 +47,14 @@ import {
   type AgentDriver,
   type DriverChannel,
 } from "./opencode-driver.js";
+import {
+  fetchModels,
+  parseBareModels,
+  parseBulletModels,
+  parseTabbedModels,
+  type ModelLister,
+  type ModelOption,
+} from "./model-list.js";
 import { CRM_TOOL_NAMES } from "../crm/tools.js";
 import { AUTOMATION_TOOL_NAMES } from "../automation/tools.js";
 import { OUTREACH_TOOL_NAMES } from "../outreach/tools.js";
@@ -213,12 +221,7 @@ export type LaunchContext = {
   channel?: DriverChannel;
 };
 
-/**
- * A model the user may pick for an agent. The id is what reaches the CLI's
- * command line, so ids exist only in this file — a request can select one,
- * never define one.
- */
-export type ModelOption = { id: string; label: string };
+export type { ModelOption } from "./model-list.js";
 
 export type AgentSpec = {
   id: string;
@@ -226,8 +229,15 @@ export type AgentSpec = {
   /** Binary name looked up on PATH. */
   bin: string;
   /**
-   * Models this CLI accepts via a flag we have verified. Absent means the
-   * CLI always runs on its own default and the UI shows no picker.
+   * The CLI's own "list your models" command. When set, this is the source of
+   * truth and `models` is never consulted; the launcher runs it, caches the
+   * answer, and validates a picked id against it.
+   */
+  listModels?: ModelLister;
+  /**
+   * Models this CLI accepts, typed out here. Only for a CLI that has no
+   * listing command at all, or as the fallback while `listModels` is failing.
+   * Absent and with no lister means no picker.
    */
   models?: ModelOption[];
   /**
@@ -366,10 +376,11 @@ function grokHomeFor(ctx: LaunchContext): string {
   return join(root, "agent-homes", "grok");
 }
 
-function grokArgs(_ctx: LaunchContext): string[] {
+function grokArgs(_ctx: LaunchContext, model?: string): string[] {
   return [
     ...grokArgsFor(KICKOFF, chatPreapprovedToolNames(), {
       disableWebSearch: true,
+      model,
     }),
     // Same reason as Claude's stream-json, same chat-only rule. Grok's ACP
     // session updates include one tool_call line per call.
@@ -378,20 +389,25 @@ function grokArgs(_ctx: LaunchContext): string[] {
   ];
 }
 
-function grokRunArgs(_ctx: LaunchContext, prompt: string): string[] {
+function grokRunArgs(
+  _ctx: LaunchContext,
+  prompt: string,
+  model?: string,
+): string[] {
   // Spec (Scheduler): the CLI's own web tools stay at the CLI's defaults on a
   // run — we neither grant nor deny them. An automation that must look
   // something up is exactly the case --disable-web-search would break, and
   // the chat path's flag was inherited here by accident.
   return grokArgsFor(prompt, runPreapprovedToolNames(), {
     disableWebSearch: false,
+    model,
   });
 }
 
 function grokArgsFor(
   prompt: string,
   allowed: readonly string[],
-  opts: { disableWebSearch: boolean },
+  opts: { disableWebSearch: boolean; model?: string },
 ): string[] {
   const args = [
     "-p",
@@ -403,6 +419,7 @@ function grokArgsFor(
     "--no-plan",
     "--no-memory",
     ...(opts.disableWebSearch ? ["--disable-web-search"] : []),
+    ...(opts.model ? ["--model", opts.model] : []),
   ];
   for (const name of allowed) {
     args.push("--allow", `MCPTool(boxaide__${name})`);
@@ -521,8 +538,30 @@ function refreshLink(from: string, to: string): void {
 }
 
 /**
- * Models the `claude` CLI's --model flag accepts. Aliases ("sonnet") float
- * with CLI updates; full ids pin the choice the user actually made.
+ * `agy models` prints "id<TAB>Label" for everything the account can reach.
+ */
+const ANTIGRAVITY_LISTER: ModelLister = {
+  args: ["models"],
+  parse: parseTabbedModels,
+};
+
+/**
+ * `opencode models` prints bare "provider/model" ids. --pure matches how the
+ * launcher runs the CLI, so the list is what a launch would actually accept.
+ */
+const OPENCODE_LISTER: ModelLister = {
+  args: ["--pure", "models"],
+  parse: parseBareModels,
+};
+
+/** `grok models` prints a bullet list under a prose header. */
+const GROK_LISTER: ModelLister = { args: ["models"], parse: parseBulletModels };
+
+/**
+ * The `claude` CLI has no listing command — `claude --help` documents --model
+ * but nothing enumerates it, and `claude models` just starts a session with
+ * "models" as the prompt. So this one list stays typed out, and it is the only
+ * one: every other agent reads its models from its own CLI.
  */
 const CLAUDE_MODELS: ModelOption[] = [
   { id: "claude-fable-5", label: "Fable 5" },
@@ -531,29 +570,12 @@ const CLAUDE_MODELS: ModelOption[] = [
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
 ];
 
-const ANTIGRAVITY_MODELS: ModelOption[] = [
-  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
-  { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
-];
-
 /**
  * Pin a model even when the user picked none. OpenCode's own default
  * retries forever when that endpoint is down, and the pane then waits
  * for a chat_await_message that never comes.
  */
 const OPENCODE_DEFAULT_MODEL = "opencode/big-pickle";
-
-const OPENCODE_MODELS: ModelOption[] = [
-  { id: "opencode/big-pickle", label: "Big Pickle" },
-  { id: "opencode/hy3-free", label: "HY3 Free" },
-  { id: "opencode/laguna-s-2.1-free", label: "Laguna S 2.1 Free" },
-  { id: "opencode/mimo-v2.5-free", label: "MiMo V2.5 Free" },
-  { id: "opencode/nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free" },
-  { id: "opencode/nemotron-3.5-lightning-free", label: "Nemotron 3.5 Lightning Free" },
-  { id: "openai/gpt-5.4", label: "GPT-5.4" },
-  { id: "github-copilot/claude-sonnet-5", label: "Claude Sonnet 5 (Copilot)" },
-];
 
 /**
  * Antigravity (agy), headless.
@@ -750,6 +772,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     bin: "grok",
     args: grokArgs,
     runArgs: grokRunArgs,
+    listModels: GROK_LISTER,
     childEnv: grokChildEnv,
     prepare: grokPrepare,
     readEvent: readGrokEvent,
@@ -760,7 +783,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     bin: "agy",
     args: antigravityArgs,
     runArgs: antigravityRunArgs,
-    models: ANTIGRAVITY_MODELS,
+    listModels: ANTIGRAVITY_LISTER,
     prepare: antigravityPrepare,
   },
   {
@@ -769,7 +792,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     bin: "opencode",
     args: opencodeArgs,
     runArgs: opencodeRunArgs,
-    models: OPENCODE_MODELS,
+    listModels: OPENCODE_LISTER,
     childEnv: opencodeChildEnv,
     prepare: opencodePrepare,
     readEvent: readOpenCodeEvent,
@@ -808,6 +831,23 @@ export type LastExit = {
 };
 
 const STDERR_TAIL_LIMIT = 4_096;
+
+/**
+ * How long a CLI's model list is trusted. Long enough that the Agent pane's
+ * polling does not respawn the CLIs, short enough that a CLI update shows up
+ * without restarting Boxaide.
+ */
+const MODEL_CACHE_TTL_MS = 10 * 60 * 1000;
+
+/** A listing that failed is retried on the next poll, not in ten minutes. */
+const MODEL_CACHE_FAILURE_TTL_MS = 30 * 1000;
+
+/**
+ * How long the first, uncached `list()` waits for the CLIs before answering
+ * with an empty picker. Well under the listing timeout, because the same
+ * response carries the running/exited state that the pane polls for.
+ */
+const MODEL_LIST_FIRST_WAIT_MS = 2_000;
 
 /** What a finished one-shot automation run reports back to the scheduler. */
 export type OneShotResult = {
@@ -853,6 +893,19 @@ export class AgentLauncher {
   private driver: AgentDriver | null = null;
   /** Set while a one-shot is alive; closes over that run's kill/status flag. */
   private killOneShot: (() => void) | null = null;
+  /** Per-agent model lists as their CLI last reported them. */
+  private modelCache = new Map<
+    string,
+    {
+      models: ModelOption[];
+      /** The CLI has answered at least once. An empty list is an answer. */
+      answered: boolean;
+      expiresAt: number;
+      inFlight?: Promise<ModelOption[]>;
+    }
+  >();
+  /** Bumped by refreshModels(), so a fetch it invalidated cannot land. */
+  private modelGeneration = 0;
 
   constructor(
     private ctx: LaunchContext,
@@ -861,14 +914,165 @@ export class AgentLauncher {
     private extraBinDirs: string[] = wellKnownBinDirs(),
   ) {}
 
-  list(): ListedAgent[] {
-    return this.registry.map((spec) => ({
-      id: spec.id,
-      label: spec.label,
-      available: this.resolveBin(spec.bin) !== null,
-      supported: spec.args !== undefined,
-      models: spec.models ?? [],
-    }));
+  /**
+   * The registry, with each agent's models as its own CLI reports them.
+   *
+   * The very first call has nothing cached and waits for the CLIs, so the
+   * picker is right the moment the pane opens. Every later call answers from
+   * cache and refreshes in the background — this endpoint is polled every few
+   * seconds for the running/exited state, and that must never wait on a
+   * subprocess. A CLI that fails to list falls back to its typed `models`, or
+   * to an empty picker.
+   */
+  async list(): Promise<ListedAgent[]> {
+    return Promise.all(
+      this.registry.map(async (spec) => {
+        const bin = this.resolveBin(spec.bin);
+        const cached = this.cachedModels(spec, bin);
+        return {
+          id: spec.id,
+          label: spec.label,
+          available: bin !== null,
+          supported: spec.args !== undefined,
+          models: cached ?? (await this.firstModels(spec, bin)),
+        };
+      }),
+    );
+  }
+
+  /**
+   * The cold-cache wait, capped. Waiting is what makes the picker right on the
+   * first poll, but this response also carries the running/exited state, and a
+   * CLI that hangs must not hold that back for the whole listing timeout. Past
+   * the cap the poll answers with an empty picker and the fetch keeps running;
+   * it lands in the cache and the next poll shows it.
+   */
+  private async firstModels(
+    spec: AgentSpec,
+    bin: string | null,
+  ): Promise<ModelOption[]> {
+    // A listing that throws must not fail the endpoint — it is the same
+    // "could not ask" as a CLI that exits non-zero.
+    const fetched = this.modelsFor(spec, bin).catch(() => null);
+    const capped = new Promise<null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), MODEL_LIST_FIRST_WAIT_MS);
+      timer.unref?.();
+    });
+    return (await Promise.race([fetched, capped])) ?? [];
+  }
+
+  /**
+   * Discards every cached model list, so the next `list()` asks the CLIs
+   * again. Reached by `GET /api/agents?refresh=1`, which is how a user who
+   * just updated a CLI sees its new models without waiting out the TTL.
+   */
+  refreshModels(): void {
+    this.modelCache.clear();
+    // Any fetch already running belongs to the state just discarded, so its
+    // answer must not land on top of the cleared cache.
+    this.modelGeneration++;
+  }
+
+  /**
+   * The list as last read, without waiting. Null means nothing has been read
+   * yet for this agent. A stale entry is returned and a refresh started, so a
+   * poll answers now and is correct on the next one.
+   */
+  private cachedModels(
+    spec: AgentSpec,
+    bin: string | null,
+  ): ModelOption[] | null {
+    if (!spec.listModels || bin === null) return spec.models ?? [];
+    const hit = this.modelCache.get(spec.id);
+    // `answered` is what separates "never asked" from "asked, got nothing" —
+    // an empty list is a real answer. Reading emptiness as never-asked made
+    // every poll after a failed listing wait out the fetch timeout.
+    if (!hit?.answered) return null;
+    if (!hit.inFlight && Date.now() >= hit.expiresAt) {
+      // Nobody awaits this one, so it must swallow its own failure: an
+      // unhandled rejection here takes the process down.
+      void this.modelsFor(spec, bin).catch(() => {});
+    }
+    return hit.models;
+  }
+
+  /**
+   * What this agent may be launched with, asking the CLI when the cache is
+   * cold or stale. While a fetch is in flight, concurrent callers await the
+   * same promise instead of spawning their own copy of the CLI. A failed
+   * fetch is cached too, briefly, so a broken or offline CLI is not re-run on
+   * every poll.
+   */
+  private async modelsFor(
+    spec: AgentSpec,
+    bin: string | null,
+  ): Promise<ModelOption[]> {
+    if (!spec.listModels || bin === null) return spec.models ?? [];
+    const hit = this.modelCache.get(spec.id);
+    if (hit?.inFlight) return hit.inFlight;
+    if (hit?.answered && Date.now() < hit.expiresAt) return hit.models;
+
+    // Each refresh carries the generation it was started in. A refreshModels()
+    // during the fetch bumps the counter, and this answer is then dropped
+    // instead of landing on top of the cleared cache with a fresh TTL.
+    const generation = this.modelGeneration;
+    // What the picker is showing right now. A refresh that fails must not
+    // erase it: the ids in it were good a moment ago, and dropping to the
+    // typed list means an empty picker for every CLI that has no typed list.
+    const lastGood = hit?.answered && hit.models.length > 0 ? hit.models : null;
+    const inFlight = fetchModels(
+      bin,
+      spec.listModels,
+      // The spec's own child env, so the listing describes the environment the
+      // agent is actually launched in: OpenCode and Grok both run under an
+      // isolated config home, and a list read from the user's own config can
+      // name providers that the launch cannot resolve. The prepare step runs
+      // first, because that env names config files the CLI is told to read and
+      // on a machine that has never launched this agent they do not exist yet.
+      this.childEnvFor(spec, this.listWorkDir(spec)),
+    )
+      // Never rejects: a listing that throws is the same "could not ask" as a
+      // CLI that exits non-zero. A rejected promise parked in the cache as
+      // `inFlight` would fail every later list() and start() for good.
+      .catch(() => null)
+      .then((fetched) => {
+        const models = fetched ?? lastGood ?? spec.models ?? [];
+        if (generation !== this.modelGeneration) return models;
+        this.modelCache.set(spec.id, {
+          models,
+          answered: true,
+          // A failed listing expires fast, so a CLI that was mid-login or
+          // offline is retried soon instead of showing nothing for ten minutes.
+          expiresAt:
+            Date.now() +
+            (fetched ? MODEL_CACHE_TTL_MS : MODEL_CACHE_FAILURE_TTL_MS),
+        });
+        return models;
+      });
+    this.modelCache.set(spec.id, {
+      models: hit?.models ?? [],
+      // Carried over: a refresh on top of an earlier answer keeps serving that
+      // answer, so a poll never waits on the CLI once the picker is filled.
+      answered: hit?.answered ?? false,
+      expiresAt: 0,
+      inFlight,
+    });
+    return inFlight;
+  }
+
+  /**
+   * Refuses unless this launcher owns no live process. Called before a launch
+   * and again after any await that precedes the spawn — `this.running` is
+   * only trustworthy for as long as the call does not yield.
+   */
+  private assertIdle(): void {
+    const running = this.running;
+    if (running) {
+      throw new LaunchError(409, `${running.id} is already running`);
+    }
+    if (this.oneShot) {
+      throw new LaunchError(409, "an automation run is in progress");
+    }
   }
 
   status(): { running: RunningAgent | null; lastExit: LastExit | null } {
@@ -883,27 +1087,37 @@ export class AgentLauncher {
     return this.running !== null || this.oneShot !== null;
   }
 
-  /** Throws with a message fit for the API response. */
-  start(id: string, model?: string): RunningAgent {
-    if (this.running) {
-      throw new LaunchError(409, `${this.running.id} is already running`);
-    }
-    if (this.oneShot) {
-      throw new LaunchError(409, "an automation run is in progress");
-    }
+  /**
+   * Throws with a message fit for the API response.
+   *
+   * Async because validating the picked model may have to ask the CLI what it
+   * offers; that answer is normally already cached by the list() the UI ran to
+   * draw the picker.
+   */
+  async start(id: string, model?: string): Promise<RunningAgent> {
+    this.assertIdle();
     const spec = this.registry.find((s) => s.id === id);
     if (!spec) throw new LaunchError(404, `unknown agent: ${id}`);
     if (!spec.args) {
       throw new LaunchError(400, `${spec.label} cannot be launched yet`);
     }
-    // The model id becomes an argv element, so only ids from this file's
-    // registry pass — the same rule that protects the agent id itself.
-    if (model !== undefined && !spec.models?.some((m) => m.id === model)) {
-      throw new LaunchError(400, `${spec.label} does not offer that model`);
-    }
     const bin = this.resolveBin(spec.bin);
     if (!bin) {
       throw new LaunchError(400, `${spec.label} is not installed (no ${spec.bin} on PATH)`);
+    }
+    // The model id becomes an argv element, so it must be one the CLI itself
+    // named — the same allowlist rule that protects the agent id, now sourced
+    // from the CLI instead of from a constant in this file.
+    if (model !== undefined) {
+      const offered = await this.modelsFor(spec, bin);
+      if (!offered.some((m) => m.id === model)) {
+        throw new LaunchError(400, `${spec.label} does not offer that model`);
+      }
+      // That await is the only suspension point between the guard at the top
+      // and the spawn below, and it reopens what that guard closed: two
+      // starts racing here would both spawn, and the first child would be
+      // orphaned by the second overwriting this.child.
+      this.assertIdle();
     }
 
     const workDir = this.prepareWorkDir(spec);
@@ -1074,6 +1288,20 @@ export class AgentLauncher {
     mkdirSync(workDir, { recursive: true });
     spec.prepare?.(this.ctx, workDir, this.env);
     return workDir;
+  }
+
+  /**
+   * The workdir a listing is described against — prepared, so the config files
+   * its env points at exist. Preparing is idempotent and writes the same
+   * content a launch would, so doing it early costs nothing. A failure here is
+   * not fatal to a listing: the CLI is asked anyway, against the bare path.
+   */
+  private listWorkDir(spec: AgentSpec): string {
+    try {
+      return this.prepareWorkDir(spec);
+    } catch {
+      return agentWorkDir(this.ctx);
+    }
   }
 
   private childEnvFor(spec: AgentSpec, workDir: string): NodeJS.ProcessEnv {

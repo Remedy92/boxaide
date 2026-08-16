@@ -52,6 +52,7 @@ const GROUPS: Array<[string, Array<[string, string[]]>]> = [
     [
       ["Search mail", ["/"]],
       ["Command palette", ["⌘", "K"]],
+      ["Settings", ["⌘", ","]],
       ["This sheet", ["?"]],
     ],
   ],
