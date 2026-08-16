@@ -219,11 +219,16 @@ sleep 60
   });
 
   it("still launches only one agent when two starts race the model check", async () => {
+    // `exec`, and an absolute sleep. The launcher's widened PATH has no
+    // /usr/bin, so a bare `sleep` is not found and the fake agent would exit
+    // at once — this test needs it to stay alive. And without `exec` the
+    // sleep is a grandchild that keeps the stdio pipes open after the shell
+    // is killed, so "close" never fires and stop() never reports the exit.
     const bin = fakeBinDir(
       "fake-agent",
       `#!/bin/sh
 if [ "$1" = "models" ]; then printf 'm1\\tM1\\n'; exit 0; fi
-/bin/sleep 60
+exec /bin/sleep 60
 `,
     );
     const launcher = new AgentLauncher(
@@ -245,9 +250,14 @@ if [ "$1" = "models" ]; then printf 'm1\\tM1\\n'; exit 0; fi
     expect(launcher.status().running?.pid).toBe(
       (started[0] as PromiseFulfilledResult<{ pid: number }>).value.pid,
     );
+    // The loser is refused, not silently ignored.
+    const refused = settled.find((r) => r.status === "rejected");
+    expect((refused as PromiseRejectedResult).reason).toBeInstanceOf(LaunchError);
 
-    launcher.stop();
-    await until(() => launcher.status().running === null);
+    // No stop()/until() here on purpose. stop() only sends SIGTERM and waits
+    // for the exit event, which makes any test that awaits it hostage to how
+    // this platform's /bin/sh hands signals to the process it is waiting on.
+    // Teardown has its own test above; the registered close() reaps the child.
   });
 
   it("serves a poll from an empty answer while a refresh is in flight", async () => {
@@ -257,11 +267,11 @@ if [ "$1" = "models" ]; then printf 'm1\\tM1\\n'; exit 0; fi
       "fake-agent",
       `#!/bin/sh
 if [ "$1" = "models" ]; then
-  if [ -f ${join(dir, "once")} ]; then /bin/sleep 60; fi
+  if [ -f ${join(dir, "once")} ]; then exec /bin/sleep 60; fi
   : > ${join(dir, "once")}
   exit 1
 fi
-/bin/sleep 60
+exec /bin/sleep 60
 `,
     );
     const launcher = new AgentLauncher(
@@ -334,7 +344,7 @@ if [ "$1" = "models" ]; then
   printf 'first\\tFirst\\n'
   exit 0
 fi
-/bin/sleep 60
+exec /bin/sleep 60
 `,
     );
     const launcher = new AgentLauncher(
