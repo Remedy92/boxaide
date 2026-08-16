@@ -138,21 +138,19 @@ export class CrmService {
             parties.push({ id: contact.id, email: party.email });
           }
 
-          // Opt-out is decided once per message, and only for inbound mail this
-          // sync has not seen before: the walk re-reads the same 200 summaries
-          // every ten minutes, and one body fetch per already-recorded message
-          // would multiply the IMAP traffic by 200 for an answer already stored.
-          const fresh = new Set(
-            parties
-              .filter(
-                (p) => !this.store.hasInteraction(account.id, message.id, p.id),
-              )
-              .map((p) => p.id),
-          );
-          const optOut =
-            !outbound && fresh.size > 0
-              ? await this.detectOptOut(account.id, message)
-              : false;
+          // Opt-out is decided from the full body. The walk re-reads the same
+          // 200 summaries every ten minutes, so a body already judged (flagged,
+          // or fetched and clean) is not fetched again. A first pass that
+          // fell back to the snippet because getMessage failed is not a
+          // judgement: that row stays retryable until a body arrives.
+          const needsDetect =
+            !outbound &&
+            parties.some((p) =>
+              this.store.needsOptOutDecision(account.id, message.id, p.id),
+            );
+          const verdict = needsDetect
+            ? await this.detectOptOut(account.id, message)
+            : { optOut: false, fromBody: false };
 
           for (const party of parties) {
             const added = this.store.addInteraction({
@@ -163,17 +161,18 @@ export class CrmService {
               at: message.date,
               subject: message.subject,
               snippet: message.snippet,
-              optOut,
+              optOut: verdict.optOut,
+              fromBody: verdict.fromBody,
             });
             if (added) interactions += 1;
             // Suppression is written HERE, at flag time, with the address in
             // hand — not by a later sweep. A sweep that re-reads old flags
             // resurrects suppressions a human deliberately removed, and a
             // contact deleted between flag and sweep would take the address
-            // with it while the approved outbox row lived on. Fresh rows only:
-            // each message gets exactly one shot at suppressing, so a human
-            // removal stands until the contact says stop again.
-            if (optOut && fresh.has(party.id)) {
+            // with it while the approved outbox row lived on. Needs-detect
+            // rows only: each message gets one suppress per new verdict, so
+            // a human removal stands until the contact says stop again.
+            if (verdict.optOut && needsDetect) {
               this.optOutSink?.(party.id, party.email);
             }
           }
@@ -191,13 +190,14 @@ export class CrmService {
    * leaked CSS and for a long reply cuts the phrase off. Subject and body are
    * tested separately — a phrase must never be fabricated across the boundary.
    * A fetch that fails or yields no text falls back to the summary rather than
-   * breaking the sync: a missed opt-out is caught by the next message, an
-   * exception here would cost the whole account its derivation.
+   * breaking the sync: the interaction is stored unconfirmed and the next
+   * walk retries the body. An exception here would cost the whole account
+   * its derivation.
    */
   private async detectOptOut(
     accountId: string,
     message: MailMessageSummary,
-  ): Promise<boolean> {
+  ): Promise<{ optOut: boolean; fromBody: boolean }> {
     try {
       const full = await this.mail.getMessage(
         accountId,
@@ -205,18 +205,22 @@ export class CrmService {
         message.folder,
       );
       if (full && full.bodyText.trim()) {
-        return (
-          optOutIntent(full.subject ?? message.subject, "subject") ||
-          optOutIntent(full.bodyText, "body")
-        );
+        return {
+          optOut:
+            optOutIntent(full.subject ?? message.subject, "subject") ||
+            optOutIntent(full.bodyText, "body"),
+          fromBody: true,
+        };
       }
     } catch {
       // Fall through to the summary.
     }
-    return (
-      optOutIntent(message.subject, "subject") ||
-      optOutIntent(message.snippet, "body")
-    );
+    return {
+      optOut:
+        optOutIntent(message.subject, "subject") ||
+        optOutIntent(message.snippet, "body"),
+      fromBody: false,
+    };
   }
 
   /**

@@ -190,6 +190,10 @@ export function registerOutreachRoutes(app: Hono, platform: Platform): void {
     // flags too, or the windowed reply check re-suppresses from the same old
     // rows on the next pass. A new "stop" flags anew and suppresses again.
     platform.crmStore.clearOptOutFlags(email);
+    for (const id of platform.crmStore.contactIdsForEmail(email)) {
+      store.reopenStoppedCampaigns(id);
+    }
+    kickEngine();
     return c.json({ deleted: true });
   });
 

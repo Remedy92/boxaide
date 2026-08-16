@@ -252,7 +252,11 @@ Engine (`OutreachEngine`):
     form (`canonicalEmail`). No other module defines its own copy.
     - CRM sync runs `optOutIntent` over the full inbound body and records the
       verdict on the interaction row (`interactions.opt_out`). That flag is
-      the authority; the engine reads it.
+      the authority; the engine reads it. A fetch that fails or yields no
+      text falls back to the snippet and leaves `opt_out_full = 0`, so the
+      next walk retries the body. A stored 0 with `opt_out_full = 1` is a
+      finished judgement (full body, or a human who un-suppressed) and is
+      not fetched again.
     - The engine's own check runs ONLY when the column itself is absent
       (a process reading a pre-migration database). A stored 0 is a
       judgement — by the sync or by a human who un-suppressed — and is
@@ -285,8 +289,12 @@ Engine (`OutreachEngine`):
   a `campaign_contacts` row or an `outbox` row exists. Fresh rows only, so a
   message suppresses exactly once: removing a suppression through
   `DELETE /api/outreach/suppression/:email` also withdraws the stored flags
-  (`CrmStore.clearOptOutFlags`), and nothing re-reads old flags — a human
-  removal stands until the contact says stop again. This design (no sweep)
+  (`CrmStore.clearOptOutFlags`), restarts every `opted_out`/`suppressed`
+  `campaign_contacts` row for that person at step 0, and nothing re-reads
+  old flags — a human removal stands until the contact says stop again.
+  `campaign_add_contacts` uses the same restart for an `opted_out` or
+  `suppressed` row already in the campaign (`INSERT ... ON CONFLICT DO
+  UPDATE`), so re-adding is not a silent no-op. This design (no sweep)
   exists because a sweep over stored flags resurrects removed suppressions,
   and a contact deleted between flag and sweep takes the address with it
   while an approved outbox row lives on.
