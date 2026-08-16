@@ -799,8 +799,8 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
  * launcher; nothing from a request ever becomes part of a command line.
  */
 function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
-  app.get("/api/agents", (c) =>
-    c.json({ agents: launcher.list(), ...launcher.status() }),
+  app.get("/api/agents", async (c) =>
+    c.json({ agents: await launcher.list(), ...launcher.status() }),
   );
 
   app.post("/api/agents/:id/start", async (c) => {
@@ -819,7 +819,8 @@ function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
       // No body, or not JSON — start on the CLI's default model.
     }
     try {
-      return c.json({ running: launcher.start(c.req.param("id"), model) }, 201);
+      const running = await launcher.start(c.req.param("id"), model);
+      return c.json({ running }, 201);
     } catch (err) {
       if (err instanceof LaunchError) {
         return c.json({ error: err.message }, err.status);
