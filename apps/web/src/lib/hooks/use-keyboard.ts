@@ -27,6 +27,8 @@ export type KeyboardHandlers = {
   focusSearch: () => void;
   commandPalette: () => void;
   shortcuts: () => void;
+  /** ⌘, — the platform's settings key, and it works from a focused input. */
+  settings: () => void;
   goAgent: () => void;
   goInbox: () => void;
   goUnread: () => void;
@@ -85,6 +87,14 @@ export function useKeyboard(
       if (mod && !event.altKey && event.key.toLowerCase() === "k") {
         event.preventDefault();
         h.commandPalette();
+        return;
+      }
+
+      // ⌘, / Ctrl+, is the settings key on every desktop platform, so like
+      // ⌘K it fires from anywhere, including a focused input.
+      if (mod && !event.altKey && event.key === ",") {
+        event.preventDefault();
+        h.settings();
         return;
       }
 

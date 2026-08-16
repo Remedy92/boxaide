@@ -12,7 +12,6 @@ import { ContactPane } from "@/components/crm/contact-pane";
 import { PeopleList } from "@/components/crm/people-list";
 import { PipelineBoard } from "@/components/pipeline/pipeline-board";
 import { RemoveAccountDialog } from "@/components/dialogs/remove-account-dialog";
-import { SettingsDialog } from "@/components/dialogs/settings-dialog";
 import { ShortcutsDialog } from "@/components/dialogs/shortcuts-dialog";
 import { DraftEditor } from "@/components/drafts/draft-editor";
 import { DraftsList } from "@/components/drafts/drafts-list";
@@ -21,6 +20,7 @@ import { OutboxPane } from "@/components/outreach/outbox-pane";
 import { OutreachList } from "@/components/outreach/outreach-list";
 import { SetupWizard } from "@/components/onboarding/setup-wizard";
 import { LeftRail } from "@/components/rail/left-rail";
+import { SettingsView } from "@/components/settings/settings-view";
 import { RailSheet } from "@/components/rail/rail-sheet";
 import { Reader } from "@/components/reader/reader";
 import { useAccounts } from "@/lib/hooks/use-accounts";
@@ -71,7 +71,10 @@ function Shell() {
   const conversing = app.view === "agent";
   const boarding = app.view === "pipeline";
   const automating = app.view === "automations";
-  const singlePane = conversing || boarding || automating;
+  /* Settings is a page like the others, with its own sidebar inside the pane —
+     so it takes the whole workspace and the shell drops to two tracks. */
+  const settingsOpen = app.view === "settings";
+  const singlePane = conversing || boarding || automating || settingsOpen;
   const drafts = useDrafts(app.account, drafting);
   /* The same query the People list issues, so j / k walk exactly the rows on
      screen. React Query dedupes it — one request, two readers. */
@@ -211,6 +214,12 @@ function Shell() {
       },
       escape: () => {
         if (app.clearSearch()) return;
+        // Settings is a page, so Escape leaves it the way the close button
+        // does — back to the view it was opened over.
+        if (settingsOpen) {
+          app.closeSettings();
+          return;
+        }
         // The expanded rail overlay is hand-rolled, not a Radix layer, so
         // nothing else would dismiss it on Escape.
         if (app.railOverlay) {
@@ -279,6 +288,7 @@ function Shell() {
       focusSearch: app.focusSearch,
       commandPalette: () => app.openPalette(),
       shortcuts: () => app.openDialog("shortcuts"),
+      settings: () => app.openSettings(),
       goAgent: () => app.setView("agent"),
       goInbox: () => {
         app.setView("mail");
@@ -421,12 +431,19 @@ function Shell() {
               ? "Agent conversation"
               : automating
                 ? "Automations"
-                : "Pipeline"
+                : settingsOpen
+                  ? "Settings"
+                  : "Pipeline"
           }
           tabIndex={-1}
           className="h-full min-h-0 bg-surface-2"
         >
-          {conversing ? (
+          {settingsOpen ? (
+            <SettingsView
+              onOpenRail={() => app.setRailSheetOpen(true)}
+              showRailButton={app.narrow}
+            />
+          ) : conversing ? (
             <AgentView
               onOpenRail={() => app.setRailSheetOpen(true)}
               showRailButton={app.narrow}
@@ -500,12 +517,6 @@ function Shell() {
       <ComposeDialog
         open={app.dialog === "compose"}
         seed={app.composeSeed}
-        onOpenChange={(open) => (open ? undefined : app.closeDialog())}
-      />
-      <SettingsDialog
-        open={app.dialog === "settings"}
-        focus={app.settingsFocus}
-        autoTest={app.settingsAutoTest}
         onOpenChange={(open) => (open ? undefined : app.closeDialog())}
       />
       <ShortcutsDialog

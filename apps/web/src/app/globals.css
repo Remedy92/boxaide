@@ -315,7 +315,8 @@
    twice. */
 .shell[data-view="agent"],
 .shell[data-view="pipeline"],
-.shell[data-view="automations"] {
+.shell[data-view="automations"],
+.shell[data-view="settings"] {
   grid-template-columns: var(--rail-w) minmax(0, 1fr);
 }
 
@@ -508,5 +509,6 @@
   .shell,
   .shell[data-view="agent"],
   .shell[data-view="pipeline"],
-  .shell[data-view="automations"] { grid-template-columns: minmax(0, 1fr); }
+  .shell[data-view="automations"],
+  .shell[data-view="settings"] { grid-template-columns: minmax(0, 1fr); }
 }
