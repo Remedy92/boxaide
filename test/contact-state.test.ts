@@ -328,3 +328,26 @@ describe("follow-up cadence facts", () => {
     expect(s.firstOutboundAt).toBe(null);
   });
 });
+
+describe("un-suppress", () => {
+  it("makes a contact selectable again", () => {
+    // Cross-module invariant created when the opt-out retry work landed: the
+    // un-suppress route removes the suppression row AND clears the interaction
+    // flags. State reads both, so if either half were missed the contact would
+    // stay blocked forever and the human's decision would do nothing.
+    const h = harness();
+    const c = contact(h, "cameback@acme.test");
+    mail(h, c.id, "in", daysAgo(5), true);
+    h.outreach.addSuppression(c.email, "reply-stop");
+    expect(state(h, c).blockedBy).toBe("opted_out");
+
+    h.outreach.removeSuppression(c.email);
+    h.crm.clearOptOutFlags(c.email);
+
+    const s = state(h, c);
+    expect(s.optedOutAt).toBe(null);
+    expect(s.status).toBe("inbound_only");
+    // Still not a cold-outreach target: they wrote to us and we never replied.
+    expect(s.blockedBy).toBe("in_conversation");
+  });
+});
