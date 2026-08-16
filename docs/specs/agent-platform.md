@@ -31,6 +31,45 @@ outreach engine with human approval. All free, MIT, fully local. No sync.
 6. **Module isolation.** Each module lives in its own directory and touches
    shared files only through the seams already wired (see File map). Do not
    edit another module's directory.
+7. **Contact state is derived, never asserted by an agent.** Whether someone
+   was contacted, replied, or opted out is worked out from the rows written by
+   whatever performed the act — the mail sync, the outreach engine, opt-out
+   detection. No tool writes it. The one exception is intent (`queued`,
+   `do_not_contact`), which no past mail could imply; it is stored in
+   `contact_intent`, one row per contact, replace-on-write.
+
+### Contact state
+
+`src/crm/state.ts`, read through `crm_outreach_state` or the `state` field of
+`crm_contact_get`. Nothing in it is stored.
+
+| Field | Worked out from |
+| --- | --- |
+| `lastOutboundAt` | newest `interactions.direction = 'out'`, or newest `outbox.sent_at` where status `sent` — whichever is later |
+| `firstOutboundAt` | oldest of the same two — the clock a follow-up cadence runs on |
+| `outboundCount` | the LARGER of the two counts, never the sum: once the sync walks Sent, an engine send is also an interaction and no id ties them together |
+| `lastInboundAt` | newest `interactions.direction = 'in'` |
+| `optedOutAt` | earlier of `suppression.at` and the first `interactions.opt_out = 1` |
+| `queuedAt` | oldest unsent `outbox` row, else a `queued` intent |
+| `status` | `opted_out` → `replied` (inbound after our last outbound) → `contacted` → `inbound_only` → `new` |
+| `blockedBy` | `opted_out` → `do_not_contact` → `already_queued` → `in_conversation` (status `replied` OR `inbound_only`: their message is the last word either way) → `cooldown` (a send inside `cooldownDays`, default 30) |
+
+`contactable` is `blockedBy === null`. Three properties matter and all are
+tested: a send recorded by the engine blocks the next run **before** the Sent
+folder is walked, so a run that dies after sending cannot double-send; a
+contact with no state at all reads `new`, never "blocked forever"; and a
+question about named contacts never falls back to a page of unrelated ones,
+however many of the names fail to resolve.
+
+Blocking governs what automated outreach may **pick**. It is not a send ban —
+only suppression is, enforced in the send guard (invariant 2) — so a human or
+an agent acting on a specific instruction can still mail a blocked contact.
+
+**Why not tags.** `contact_tags` is an unordered set with no timestamp. It
+cannot answer "which came last", so a prompt saying "the newest tag wins" was
+unanswerable, and a `queued` tag left behind by a crashed run skipped that
+person permanently. Tags stayed, demoted to labels: they target a selection,
+they never decide eligibility.
 
 ## File map and seams (already wired — do not rewire)
 
@@ -85,6 +124,17 @@ CREATE TABLE IF NOT EXISTS contact_tags (
   contact_id TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
   tag TEXT NOT NULL,
   PRIMARY KEY (contact_id, tag)
+);
+-- Labels only. Tags are an unordered set with no timestamp, so they cannot
+-- express a lifecycle: 'queued' + 'contacted' + 'replied' can all be true at
+-- once with nothing to say which came last. Lifecycle lives in the two rows
+-- below instead.
+CREATE TABLE IF NOT EXISTS contact_intent (
+  contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
+  intent TEXT NOT NULL,                 -- 'queued' | 'do_not_contact'
+  at TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'agent',
+  note TEXT
 );
 CREATE TABLE IF NOT EXISTS notes (
   id TEXT PRIMARY KEY,
@@ -327,7 +377,15 @@ CRM (`src/crm/tools.ts`):
 - `crm_sync` — derive contacts/interactions from mail now; returns counts.
 - `crm_contacts_search` { query?, tag?, limit=50 } — search name/email/org.
 - `crm_contact_get` { contactId | email } — contact + tags + notes +
-  recent interactions (decrypted) + deals.
+  recent interactions (decrypted) + deals + derived `state`.
+- `crm_outreach_state` { contactIds? | emails? | query?/tag?, contactableOnly?,
+  cooldownDays=30, limit=50 } — per contact: status, `contactable`,
+  `blockedBy`, and the timestamps behind them. Derived, never stored; see
+  "Contact state" below. Named contacts that do not resolve come back in
+  `missing` rather than being dropped.
+- `crm_intent_set` { contactId, intent: 'queued' | 'do_not_contact' | 'none',
+  note? } — the stored half of contact state. One row per contact; setting
+  replaces.
 - `crm_contact_upsert` { email, name?, title?, org?, tags?, source='agent' }
 - `crm_contact_delete` { contactId }
 - `crm_note_add` { contactId, text }

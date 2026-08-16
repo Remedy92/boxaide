@@ -35,6 +35,17 @@ function makeId(accountId: string, uid: number): string {
   return `${accountId}:${uid}`;
 }
 
+/** Mirrors the IMAP provider's since filter so the two agree in tests. */
+function applySince<T extends { date: string }>(
+  msgs: T[],
+  since: string | undefined,
+): T[] {
+  if (!since) return msgs;
+  const from = new Date(since);
+  if (Number.isNaN(from.getTime())) return msgs;
+  return msgs.filter((m) => new Date(m.date).getTime() >= from.getTime());
+}
+
 /**
  * In-memory multi-mailbox provider for tests and fixture mode.
  * No network. Same interface as the IMAP provider.
@@ -133,6 +144,10 @@ export class FixtureProvider implements MailProvider {
       (m) => m.folder === folder,
     );
     if (opts.unreadOnly) msgs = msgs.filter((m) => !m.seen);
+    // Before the slice, exactly as IMAP does it: the server selects by date
+    // and `limit` only caps the result. Filtering after would reintroduce the
+    // truncation bug the option exists to remove.
+    msgs = applySince(msgs, opts.since);
     msgs = [...msgs].sort(
       (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
     );
@@ -146,12 +161,13 @@ export class FixtureProvider implements MailProvider {
     const q = opts.query.toLowerCase();
     const folder = opts.folder ?? "INBOX";
     const limit = opts.limit ?? 50;
-    const msgs = this.ensureBox(account.id, account.email)
+    const matched = this.ensureBox(account.id, account.email)
       .filter((m) => m.folder === folder)
       .filter((m) => {
         const hay = `${m.subject} ${m.from} ${m.to} ${m.bodyText}`.toLowerCase();
         return hay.includes(q);
-      })
+      });
+    const msgs = applySince(matched, opts.since)
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
       .slice(0, limit);
     return msgs.map(toSummary);

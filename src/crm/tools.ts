@@ -6,6 +6,7 @@
 import type { Platform, ToolDef } from "../platform.js";
 import type { CrmStore, Organization } from "./store.js";
 import { orgNameFor } from "./service.js";
+import { contactStates } from "./state.js";
 
 const CONTACT_ID_DESC =
   "Contact id from crm_contacts_search or crm_contact_get. Not an email address.";
@@ -41,7 +42,7 @@ export const CRM_TOOLS: ToolDef[] = [
   {
     name: "crm_contact_get",
     description:
-      "Read one contact in full: identity, organisation, tags, notes, recent mail interactions and deals. Pass contactId or email, not both. Returns an error when nobody matches — that is a real answer, not a reason to create the contact.",
+      "Read one contact in full: identity, organisation, tags, notes, recent mail interactions, deals, and `state` — whether they may be contacted and what happened last. Pass contactId or email, not both. Returns an error when nobody matches — that is a real answer, not a reason to create the contact.",
     inputSchema: {
       type: "object",
       properties: {
@@ -60,9 +61,65 @@ export const CRM_TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "crm_outreach_state",
+    description:
+      "Whether each contact may be cold-contacted right now, and what happened last. This is the ONLY correct way to make that decision — it is worked out from recorded mail, sends and opt-outs, so it stays right even when an earlier run stopped halfway. Never decide from tags: they are labels, they carry no order and no time, and a contact can hold several that contradict each other. Read `contactable`, and when it is false read `blockedBy` for the reason. Give contactIds or emails to check named people, or a query/tag to select a page of them.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        contactIds: { type: "array", items: { type: "string" } },
+        emails: { type: "array", items: { type: "string" } },
+        query: {
+          type: "string",
+          description:
+            "Free text matched against name, email and org name, as in crm_contacts_search.",
+        },
+        tag: {
+          type: "string",
+          description:
+            "Narrow the selection to one label. Targeting only — the tag never decides eligibility.",
+        },
+        contactableOnly: {
+          type: "boolean",
+          description: "Return only the contacts that may be contacted now.",
+          default: false,
+        },
+        cooldownDays: {
+          type: "number",
+          description:
+            "Days after a send during which the same person is not contacted again. 0 disables it.",
+          default: 30,
+        },
+        limit: { type: "number", default: 50 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "crm_intent_set",
+    description:
+      "Record a decision about a contact that no record of past mail could imply: 'queued' (I mean to contact this person), 'do_not_contact' (never mail them), or 'none' to clear. A contact holds exactly one intent and setting a new one replaces the old, so this cannot accumulate contradictions. Do NOT use it to record what already happened — that a mail was sent, or that someone replied, is worked out from the mail itself and writing it here would be a second, staler answer.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        contactId: { type: "string", description: CONTACT_ID_DESC },
+        intent: {
+          type: "string",
+          enum: ["queued", "do_not_contact", "none"],
+        },
+        note: {
+          type: "string",
+          description: "Why, for the user to read later.",
+        },
+      },
+      required: ["contactId", "intent"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "crm_contact_upsert",
     description:
-      "Create a contact, or fill in details on one that already exists, keyed by email address. Use it for people the user tells you about; contacts that appear in mail are created by crm_sync on their own, so do not mirror an inbox by hand. Tags are added, never replaced. Passing `org` links the contact to that organisation, creating it when it is new.",
+      "Create a contact, or fill in details on one that already exists, keyed by email address. Use it for people the user tells you about; contacts that appear in mail are created by crm_sync on their own, so do not mirror an inbox by hand. Tags are added, never replaced, and are labels only — industry, persona, source. Do not tag lifecycle ('queued', 'contacted', 'replied'): tags have no order and no time, so a lifecycle written here cannot be read back reliably. Use crm_intent_set for a decision and crm_outreach_state to read what happened. Passing `org` links the contact to that organisation, creating it when it is new.",
     inputSchema: {
       type: "object",
       properties: {
@@ -88,7 +145,7 @@ export const CRM_TOOLS: ToolDef[] = [
   {
     name: "crm_contact_delete",
     description:
-      "Delete a contact together with its tags, notes and interaction history. This cannot be undone and the next crm_sync will recreate a bare contact if the person is still in the mailbox, so prefer a tag or a note when the user only wants the record set aside. Deals survive with an empty contact field.",
+      "Delete a contact together with its tags, intent, notes and interaction history. This cannot be undone and the next crm_sync will recreate a bare contact if the person is still in the mailbox, so prefer crm_intent_set 'do_not_contact' when the user only wants them left alone. Deals survive with an empty contact field.",
     inputSchema: {
       type: "object",
       properties: { contactId: { type: "string", description: CONTACT_ID_DESC } },
@@ -250,6 +307,63 @@ export async function dispatchCrmTool(
       );
       if (!detail) throw new Error(`contact not found: ${contactId ?? email}`);
       return detail;
+    }
+
+    case "crm_outreach_state": {
+      const cooldownDays = num(args.cooldownDays) ?? undefined;
+      const limit = num(args.limit) ?? 50;
+      const ids = Array.isArray(args.contactIds) ? args.contactIds.map(String) : [];
+      const emails = Array.isArray(args.emails) ? args.emails.map(String) : [];
+
+      // Named people resolve one by one so a missing id is reported rather
+      // than silently dropping out of the answer — an outreach run that
+      // treats "not found" as "not blocked" is exactly the double-send this
+      // tool exists to stop.
+      const named = new Map<string, { id: string; email: string }>();
+      const missing: string[] = [];
+      for (const id of ids) {
+        const contact = store.getContact(id);
+        if (contact) named.set(contact.id, { id: contact.id, email: contact.email });
+        else missing.push(id);
+      }
+      for (const email of emails) {
+        const contact = store.getContactByEmail(email);
+        if (contact) named.set(contact.id, { id: contact.id, email: contact.email });
+        else missing.push(email);
+      }
+
+      // Whether the caller NAMED anyone, not whether anyone resolved. Falling
+      // back on the selection branch here would answer a question about one
+      // unknown address with a page of unrelated contacts, every one of them
+      // carrying `contactable` — a list the caller would then cold-mail.
+      const askedForNames = ids.length > 0 || emails.length > 0;
+      let states = askedForNames
+        ? contactStates(store.db, [...named.values()], { cooldownDays })
+        : store.states(
+            { query: str(args.query), tag: str(args.tag), limit },
+            { cooldownDays },
+          );
+      if (args.contactableOnly) states = states.filter((s) => s.contactable);
+      return missing.length ? { states, missing } : { states };
+    }
+
+    case "crm_intent_set": {
+      const contactId = String(args.contactId ?? "");
+      if (!store.getContact(contactId)) {
+        throw new Error(`contact not found: ${contactId}`);
+      }
+      const intent = String(args.intent ?? "");
+      if (intent === "none") {
+        return { contactId, intent: null, cleared: store.clearIntent(contactId) };
+      }
+      if (intent !== "queued" && intent !== "do_not_contact") {
+        throw new Error(
+          `intent must be 'queued', 'do_not_contact' or 'none', got '${intent}'`,
+        );
+      }
+      return {
+        intent: store.setIntent(contactId, intent, { note: str(args.note) }),
+      };
     }
 
     case "crm_contact_upsert": {

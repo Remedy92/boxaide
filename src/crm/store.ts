@@ -9,6 +9,21 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { decryptSecret, encryptSecret } from "../crypto/secrets.js";
 import { canonicalEmail } from "../outreach/opt-out.js";
+import {
+  type ContactIntent,
+  type ContactState,
+  type StateOpts,
+  contactState,
+  contactStates,
+} from "./state.js";
+
+export type ContactIntentRow = {
+  contactId: string;
+  intent: ContactIntent;
+  at: string;
+  source: string;
+  note: string | null;
+};
 
 export type Organization = {
   id: string;
@@ -80,6 +95,11 @@ export type ContactDetail = {
   notes: Note[];
   interactions: Interaction[];
   deals: Deal[];
+  /**
+   * Worked out from the rows below, not stored. Read this — never the tags —
+   * to decide whether someone may be contacted.
+   */
+  state: ContactState;
 };
 
 /** The board: stages in order, each with its deals in board order. */
@@ -157,6 +177,20 @@ export class CrmStore {
         contact_id TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
         tag TEXT NOT NULL,
         PRIMARY KEY (contact_id, tag)
+      );
+      -- Intent, the one part of contact state that cannot be worked out from
+      -- recorded mail: meaning to contact someone, or meaning never to. The
+      -- contact id is the whole primary key, so a contact holds exactly one
+      -- intent and setting a new one replaces the old. That is the property
+      -- tags lacked — an unordered set could hold 'queued' and 'contacted' at
+      -- once with no way to tell which came last. Everything else about
+      -- outreach state is derived; see src/crm/state.ts.
+      CREATE TABLE IF NOT EXISTS contact_intent (
+        contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
+        intent TEXT NOT NULL,
+        at TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'agent',
+        note TEXT
       );
       CREATE TABLE IF NOT EXISTS notes (
         id TEXT PRIMARY KEY,
@@ -452,6 +486,7 @@ export class CrmStore {
     // the children explicitly so a removed contact leaves nothing behind.
     const drop = this.db.transaction((contactId: string) => {
       this.db.prepare(`DELETE FROM contact_tags WHERE contact_id = ?`).run(contactId);
+      this.db.prepare(`DELETE FROM contact_intent WHERE contact_id = ?`).run(contactId);
       this.db.prepare(`DELETE FROM notes WHERE contact_id = ?`).run(contactId);
       this.db.prepare(`DELETE FROM interactions WHERE contact_id = ?`).run(contactId);
       this.db
@@ -491,6 +526,74 @@ export class CrmStore {
       this.db
         .prepare(`DELETE FROM contact_tags WHERE contact_id = ? AND tag = ?`)
         .run(contactId, tag).changes > 0
+    );
+  }
+
+  /* ---- intent ----------------------------------------------------------- */
+
+  /**
+   * Replaces whatever intent the contact held. There is no additive form on
+   * purpose: two intents at once is the ambiguity this table exists to remove.
+   */
+  setIntent(
+    contactId: string,
+    intent: ContactIntent,
+    opts: { source?: string; note?: string; at?: Date } = {},
+  ): ContactIntentRow {
+    const row: ContactIntentRow = {
+      contactId,
+      intent,
+      at: (opts.at ?? new Date()).toISOString(),
+      source: opts.source ?? "agent",
+      note: opts.note ?? null,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO contact_intent (contact_id, intent, at, source, note)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(contact_id) DO UPDATE SET
+           intent = excluded.intent, at = excluded.at,
+           source = excluded.source, note = excluded.note`,
+      )
+      .run(row.contactId, row.intent, row.at, row.source, row.note);
+    return row;
+  }
+
+  getIntent(contactId: string): ContactIntentRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT contact_id as contactId, intent, at, source, note
+           FROM contact_intent WHERE contact_id = ?`,
+      )
+      .get(contactId) as ContactIntentRow | undefined;
+    return row ?? null;
+  }
+
+  clearIntent(contactId: string): boolean {
+    return (
+      this.db
+        .prepare(`DELETE FROM contact_intent WHERE contact_id = ?`)
+        .run(contactId).changes > 0
+    );
+  }
+
+  /**
+   * State for a page of contacts, worked out rather than stored. `tag` narrows
+   * by label, which is all tags are used for now — targeting, never eligibility.
+   */
+  states(
+    opts: { query?: string; tag?: string; limit?: number } = {},
+    stateOpts: StateOpts = {},
+  ): ContactState[] {
+    const contacts = this.searchContacts({
+      query: opts.query,
+      tag: opts.tag,
+      limit: opts.limit ?? 200,
+    });
+    return contactStates(
+      this.db,
+      contacts.map((c) => ({ id: c.id, email: c.email })),
+      stateOpts,
     );
   }
 
@@ -885,6 +988,7 @@ export class CrmStore {
       notes: this.listNotes(contact.id),
       interactions: this.listInteractions(contact.id, opts.interactionLimit ?? 50),
       deals: this.dealsForContact(contact.id),
+      state: contactState(this.db, { id: contact.id, email: contact.email }),
     };
   }
 

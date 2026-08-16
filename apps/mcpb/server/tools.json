@@ -10,7 +10,7 @@
   },
   {
     "name": "messages_list",
-    "description": "List message summaries from one account (alias/id) or all accounts. Unified inbox when account is 'all'. Returns { messages, errors }; a non-empty errors array means some accounts failed and the list is incomplete.",
+    "description": "List message summaries from one account (alias/id) or all accounts. Unified inbox when account is 'all'. Returns { messages, errors }; a non-empty errors array means some accounts failed and the list is incomplete. Without `since` this returns the newest `limit` messages and nothing older, so it CANNOT answer 'everything from the last day' on its own — pass `since` whenever you mean a period of time, and raise `limit` to cover the busiest expected day.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -31,6 +31,10 @@
         "unreadOnly": {
           "type": "boolean",
           "default": false
+        },
+        "since": {
+          "type": "string",
+          "description": "ISO timestamp. Returns only mail received at or after it. This is the only way to bound a read by time; a period written in prose is ignored."
         }
       },
       "additionalProperties": false
@@ -52,6 +56,10 @@
         "limit": {
           "type": "number",
           "default": 25
+        },
+        "since": {
+          "type": "string",
+          "description": "ISO timestamp. Narrows the search to mail received at or after it."
         }
       },
       "required": [
@@ -399,7 +407,7 @@
   },
   {
     "name": "crm_contact_get",
-    "description": "Read one contact in full: identity, organisation, tags, notes, recent mail interactions and deals. Pass contactId or email, not both. Returns an error when nobody matches — that is a real answer, not a reason to create the contact.",
+    "description": "Read one contact in full: identity, organisation, tags, notes, recent mail interactions, deals, and `state` — whether they may be contacted and what happened last. Pass contactId or email, not both. Returns an error when nobody matches — that is a real answer, not a reason to create the contact.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -421,8 +429,82 @@
     }
   },
   {
+    "name": "crm_outreach_state",
+    "description": "Whether each contact may be cold-contacted right now, and what happened last. This is the ONLY correct way to make that decision — it is worked out from recorded mail, sends and opt-outs, so it stays right even when an earlier run stopped halfway. Never decide from tags: they are labels, they carry no order and no time, and a contact can hold several that contradict each other. Read `contactable`, and when it is false read `blockedBy` for the reason. Give contactIds or emails to check named people, or a query/tag to select a page of them.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "contactIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "emails": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "query": {
+          "type": "string",
+          "description": "Free text matched against name, email and org name, as in crm_contacts_search."
+        },
+        "tag": {
+          "type": "string",
+          "description": "Narrow the selection to one label. Targeting only — the tag never decides eligibility."
+        },
+        "contactableOnly": {
+          "type": "boolean",
+          "description": "Return only the contacts that may be contacted now.",
+          "default": false
+        },
+        "cooldownDays": {
+          "type": "number",
+          "description": "Days after a send during which the same person is not contacted again. 0 disables it.",
+          "default": 30
+        },
+        "limit": {
+          "type": "number",
+          "default": 50
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_intent_set",
+    "description": "Record a decision about a contact that no record of past mail could imply: 'queued' (I mean to contact this person), 'do_not_contact' (never mail them), or 'none' to clear. A contact holds exactly one intent and setting a new one replaces the old, so this cannot accumulate contradictions. Do NOT use it to record what already happened — that a mail was sent, or that someone replied, is worked out from the mail itself and writing it here would be a second, staler answer.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "contactId": {
+          "type": "string",
+          "description": "Contact id from crm_contacts_search or crm_contact_get. Not an email address."
+        },
+        "intent": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "do_not_contact",
+            "none"
+          ]
+        },
+        "note": {
+          "type": "string",
+          "description": "Why, for the user to read later."
+        }
+      },
+      "required": [
+        "contactId",
+        "intent"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "crm_contact_upsert",
-    "description": "Create a contact, or fill in details on one that already exists, keyed by email address. Use it for people the user tells you about; contacts that appear in mail are created by crm_sync on their own, so do not mirror an inbox by hand. Tags are added, never replaced. Passing `org` links the contact to that organisation, creating it when it is new.",
+    "description": "Create a contact, or fill in details on one that already exists, keyed by email address. Use it for people the user tells you about; contacts that appear in mail are created by crm_sync on their own, so do not mirror an inbox by hand. Tags are added, never replaced, and are labels only — industry, persona, source. Do not tag lifecycle ('queued', 'contacted', 'replied'): tags have no order and no time, so a lifecycle written here cannot be read back reliably. Use crm_intent_set for a decision and crm_outreach_state to read what happened. Passing `org` links the contact to that organisation, creating it when it is new.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -463,7 +545,7 @@
   },
   {
     "name": "crm_contact_delete",
-    "description": "Delete a contact together with its tags, notes and interaction history. This cannot be undone and the next crm_sync will recreate a bare contact if the person is still in the mailbox, so prefer a tag or a note when the user only wants the record set aside. Deals survive with an empty contact field.",
+    "description": "Delete a contact together with its tags, intent, notes and interaction history. This cannot be undone and the next crm_sync will recreate a bare contact if the person is still in the mailbox, so prefer crm_intent_set 'do_not_contact' when the user only wants them left alone. Deals survive with an empty contact field.",
     "inputSchema": {
       "type": "object",
       "properties": {

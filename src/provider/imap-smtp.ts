@@ -452,9 +452,34 @@ type FetchedHead = {
     subject?: string;
     date?: Date | string;
   };
+  /** Server receive time. Only fetched on a since-filtered read. */
+  internalDate?: Date | string;
   flags?: Set<string>;
   bodyStructure?: MessageStructureObject;
 };
+
+/** Rejects blanks and unparseable input rather than filtering on NaN. */
+export function parseSince(since: string | undefined): Date | null {
+  if (!since) return null;
+  const at = new Date(since);
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+
+/**
+ * The precise half of the since filter. SINCE is day-granular, so a request
+ * for "since 17:00 yesterday" comes back holding all of yesterday; this drops
+ * the part of that day the caller did not ask for.
+ *
+ * Receive time wins over the Date header: the header is written by the sender
+ * and a wrong clock on their side would otherwise hide a message that really
+ * did arrive inside the window.
+ */
+export function withinSince(head: FetchedHead, since: Date): boolean {
+  const stamp = head.internalDate ?? head.envelope?.date;
+  if (!stamp) return true;
+  const at = new Date(stamp);
+  return Number.isNaN(at.getTime()) ? true : at.getTime() >= since.getTime();
+}
 
 /**
  * Second, bounded pass: fetch only the leading bytes of each message's text
@@ -640,22 +665,41 @@ export class ImapSmtpProvider implements MailProvider {
     const accountId = account.id;
     const folder = opts.folder ?? "INBOX";
     const limit = opts.limit ?? 50;
+    const since = parseSince(opts.since);
     return withImap(accountId, account.creds, async (client) => {
       const lock = await client.getMailboxLock(folder, { readOnly: true });
       try {
         const mb = client.mailbox;
         if (!mb) return [];
-        const window = uidWindow(mb.exists, limit, opts.offset ?? 0);
-        if (!window) return [];
-        const range = `${window.start}:${window.end}`;
+        // Two different reads share the rest of this method. Without `since`
+        // the window is the tail of the mailbox — newest N, whatever their
+        // age. With it the server picks the set by date and `limit` only caps
+        // how much of that set comes back, so a quiet week returns few rows
+        // and a busy one is capped rather than silently truncated to 25.
+        let range: string | number[];
+        if (since) {
+          const uids = await client.search({ since }, { uid: true });
+          if (!uids || uids.length === 0) return [];
+          range = uids.slice(-limit);
+        } else {
+          const window = uidWindow(mb.exists, limit, opts.offset ?? 0);
+          if (!window) return [];
+          range = `${window.start}:${window.end}`;
+        }
         const heads: FetchedHead[] = [];
-        for await (const msg of client.fetch(range, {
-          uid: true,
-          envelope: true,
-          flags: true,
-          bodyStructure: true,
-        })) {
+        for await (const msg of client.fetch(
+          range,
+          {
+            uid: true,
+            envelope: true,
+            flags: true,
+            bodyStructure: true,
+            internalDate: Boolean(since),
+          },
+          { uid: Array.isArray(range) },
+        )) {
           if (opts.unreadOnly && msg.flags?.has("\\Seen")) continue;
+          if (since && !withinSince(msg, since)) continue;
           heads.push(msg);
         }
         const snippets = await attachSnippets(client, heads);
@@ -677,11 +721,15 @@ export class ImapSmtpProvider implements MailProvider {
     const accountId = account.id;
     const folder = opts.folder ?? "INBOX";
     const limit = opts.limit ?? 50;
+    const since = parseSince(opts.since);
     return withImap(accountId, account.creds, async (client) => {
       const lock = await client.getMailboxLock(folder, { readOnly: true });
       try {
         // IMAP TEXT search — provider-dependent quality
-        const uids = await client.search({ text: opts.query }, { uid: true });
+        const uids = await client.search(
+          since ? { text: opts.query, since } : { text: opts.query },
+          { uid: true },
+        );
         if (!uids || uids.length === 0) return [];
         const slice = uids.slice(-limit);
         const heads: FetchedHead[] = [];
@@ -692,9 +740,11 @@ export class ImapSmtpProvider implements MailProvider {
             envelope: true,
             flags: true,
             bodyStructure: true,
+            internalDate: Boolean(since),
           },
           { uid: true },
         )) {
+          if (since && !withinSince(msg, since)) continue;
           heads.push(msg);
         }
         const snippets = await attachSnippets(client, heads);

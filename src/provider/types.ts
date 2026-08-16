@@ -72,14 +72,22 @@ export type MailMessage = MailMessageSummary & {
   references?: string;
 };
 
-export type ListMessagesOpts = {
+/**
+ * ISO timestamp. IMAP SINCE compares whole days, so the server hands back the
+ * whole day and the provider trims the remainder against the exact instant.
+ * Without it a caller asking for "the last 24 hours" gets the newest `limit`
+ * messages instead, which silently drops mail after a busy period.
+ */
+export type SinceOpt = { since?: string };
+
+export type ListMessagesOpts = SinceOpt & {
   folder?: string;
   limit?: number;
   offset?: number;
   unreadOnly?: boolean;
 };
 
-export type SearchMessagesOpts = {
+export type SearchMessagesOpts = SinceOpt & {
   query: string;
   folder?: string;
   limit?: number;
