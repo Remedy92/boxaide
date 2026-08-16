@@ -218,6 +218,78 @@ sleep 60
     await until(() => launcher.status().running === null);
   });
 
+  it("still launches only one agent when two starts race the model check", async () => {
+    const bin = fakeBinDir(
+      "fake-agent",
+      `#!/bin/sh
+if [ "$1" = "models" ]; then printf 'm1\\tM1\\n'; exit 0; fi
+/bin/sleep 60
+`,
+    );
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({ listModels: { args: ["models"], parse: parseTabbedModels } }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    // Validating the model awaits the CLI, and both calls park there before
+    // either has spawned. Without a re-check on the way out, both spawn and
+    // the first child is orphaned by the second overwriting this.child.
+    const settled = await Promise.allSettled([
+      launcher.start("fake", "m1"),
+      launcher.start("fake", "m1"),
+    ]);
+    const started = settled.filter((r) => r.status === "fulfilled");
+    expect(started).toHaveLength(1);
+    expect(launcher.status().running?.pid).toBe(
+      (started[0] as PromiseFulfilledResult<{ pid: number }>).value.pid,
+    );
+
+    launcher.stop();
+    await until(() => launcher.status().running === null);
+  });
+
+  it("serves a poll from an empty answer while a refresh is in flight", async () => {
+    // Lists nothing the first time, then hangs — a CLI that loses its network.
+    const dir = tempDir();
+    const bin = fakeBinDir(
+      "fake-agent",
+      `#!/bin/sh
+if [ "$1" = "models" ]; then
+  if [ -f ${join(dir, "once")} ]; then /bin/sleep 60; fi
+  : > ${join(dir, "once")}
+  exit 1
+fi
+/bin/sleep 60
+`,
+    );
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({ listModels: { args: ["models"], parse: parseTabbedModels } }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    expect((await launcher.list())[0].models).toEqual([]);
+    // Age that answer past its TTL, so the next poll serves it and starts a
+    // refresh against the now-hanging CLI. Poking the cache directly is the
+    // only way to reach that state without sleeping out the failure TTL.
+    const cache = (
+      launcher as unknown as {
+        modelCache: Map<string, { expiresAt: number }>;
+      }
+    ).modelCache;
+    cache.get("fake")!.expiresAt = Date.now() - 1;
+    await launcher.list();
+
+    // The poll after that must not wait on the hung refresh. It did before:
+    // an empty answer was indistinguishable from never having asked.
+    const started = Date.now();
+    await launcher.list();
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   it("asks the CLI once and serves the poll from cache", async () => {
     const dir = tempDir();
     const counter = join(dir, "calls");
@@ -249,6 +321,38 @@ sleep 60
     launcher.refreshModels();
     await launcher.list();
     expect(readFileSync(counter, "utf8").trim().split("\n")).toHaveLength(2);
+  });
+
+  it("does not let a fetch that a refresh invalidated land in the cache", async () => {
+    const dir = tempDir();
+    const bin = fakeBinDir(
+      "fake-agent",
+      `#!/bin/sh
+if [ "$1" = "models" ]; then
+  if [ -f ${join(dir, "once")} ]; then printf 'second\\tSecond\\n'; exit 0; fi
+  : > ${join(dir, "once")}
+  printf 'first\\tFirst\\n'
+  exit 0
+fi
+/bin/sleep 60
+`,
+    );
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({ listModels: { args: ["models"], parse: parseTabbedModels } }),
+      { PATH: bin },
+    );
+
+    // Refresh while the first fetch is still running. Its answer belongs to
+    // the state that was just discarded, so it must not repopulate the cache
+    // with a full TTL and silently undo the refresh.
+    const inFlight = launcher.list();
+    launcher.refreshModels();
+    await inFlight;
+
+    expect((await launcher.list())[0].models).toEqual([
+      { id: "second", label: "Second" },
+    ]);
   });
 
   it("falls back to the typed list when the CLI cannot answer", async () => {

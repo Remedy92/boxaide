@@ -889,8 +889,16 @@ export class AgentLauncher {
   /** Per-agent model lists as their CLI last reported them. */
   private modelCache = new Map<
     string,
-    { models: ModelOption[]; expiresAt: number; inFlight?: Promise<ModelOption[]> }
+    {
+      models: ModelOption[];
+      /** The CLI has answered at least once. An empty list is an answer. */
+      answered: boolean;
+      expiresAt: number;
+      inFlight?: Promise<ModelOption[]>;
+    }
   >();
+  /** Bumped by refreshModels(), so a fetch it invalidated cannot land. */
+  private modelGeneration = 0;
 
   constructor(
     private ctx: LaunchContext,
@@ -927,10 +935,14 @@ export class AgentLauncher {
 
   /**
    * Discards every cached model list, so the next `list()` asks the CLIs
-   * again. For an explicit refresh, and after a CLI update.
+   * again. Reached by `GET /api/agents?refresh=1`, which is how a user who
+   * just updated a CLI sees its new models without waiting out the TTL.
    */
   refreshModels(): void {
     this.modelCache.clear();
+    // Any fetch already running belongs to the state just discarded, so its
+    // answer must not land on top of the cleared cache.
+    this.modelGeneration++;
   }
 
   /**
@@ -944,11 +956,11 @@ export class AgentLauncher {
   ): ModelOption[] | null {
     if (!spec.listModels || bin === null) return spec.models ?? [];
     const hit = this.modelCache.get(spec.id);
-    // expiresAt 0 with nothing held is the never-answered state: the caller
-    // has to wait. A refresh in flight over an earlier answer serves that
-    // answer, so polling is never blocked once the picker has been filled.
-    if (!hit || (hit.expiresAt === 0 && hit.models.length === 0)) return null;
-    if (hit.expiresAt !== 0 && Date.now() >= hit.expiresAt) {
+    // `answered` is what separates "never asked" from "asked, got nothing" —
+    // an empty list is a real answer. Reading emptiness as never-asked made
+    // every poll after a failed listing wait out the fetch timeout.
+    if (!hit?.answered) return null;
+    if (!hit.inFlight && Date.now() >= hit.expiresAt) {
       void this.modelsFor(spec, bin);
     }
     return hit.models;
@@ -968,16 +980,27 @@ export class AgentLauncher {
     if (!spec.listModels || bin === null) return spec.models ?? [];
     const hit = this.modelCache.get(spec.id);
     if (hit?.inFlight) return hit.inFlight;
-    if (hit && Date.now() < hit.expiresAt) return hit.models;
+    if (hit?.answered && Date.now() < hit.expiresAt) return hit.models;
 
+    // Each refresh carries the generation it was started in. A refreshModels()
+    // during the fetch bumps the counter, and this answer is then dropped
+    // instead of landing on top of the cleared cache with a fresh TTL.
+    const generation = this.modelGeneration;
     const inFlight = fetchModels(
       bin,
       spec.listModels,
-      this.baseEnvWith({}),
+      // The spec's own child env, so the listing describes the environment the
+      // agent is actually launched in: OpenCode and Grok both run under an
+      // isolated config home, and a list read from the user's own config can
+      // name providers that the launch cannot resolve. The workdir may not
+      // exist yet, which is fine — these entries only name paths.
+      this.childEnvFor(spec, agentWorkDir(this.ctx)),
     ).then((fetched) => {
       const models = fetched ?? spec.models ?? [];
+      if (generation !== this.modelGeneration) return models;
       this.modelCache.set(spec.id, {
         models,
+        answered: true,
         // A failed listing expires fast, so a CLI that was mid-login or
         // offline is retried soon instead of showing nothing for ten minutes.
         expiresAt:
@@ -986,14 +1009,30 @@ export class AgentLauncher {
       });
       return models;
     });
-    // expiresAt 0 marks "never answered yet", which is what makes the first
-    // list() wait instead of showing an empty picker.
     this.modelCache.set(spec.id, {
       models: hit?.models ?? [],
+      // Carried over: a refresh on top of an earlier answer keeps serving that
+      // answer, so a poll never waits on the CLI once the picker is filled.
+      answered: hit?.answered ?? false,
       expiresAt: 0,
       inFlight,
     });
     return inFlight;
+  }
+
+  /**
+   * Refuses unless this launcher owns no live process. Called before a launch
+   * and again after any await that precedes the spawn — `this.running` is
+   * only trustworthy for as long as the call does not yield.
+   */
+  private assertIdle(): void {
+    const running = this.running;
+    if (running) {
+      throw new LaunchError(409, `${running.id} is already running`);
+    }
+    if (this.oneShot) {
+      throw new LaunchError(409, "an automation run is in progress");
+    }
   }
 
   status(): { running: RunningAgent | null; lastExit: LastExit | null } {
@@ -1016,12 +1055,7 @@ export class AgentLauncher {
    * draw the picker.
    */
   async start(id: string, model?: string): Promise<RunningAgent> {
-    if (this.running) {
-      throw new LaunchError(409, `${this.running.id} is already running`);
-    }
-    if (this.oneShot) {
-      throw new LaunchError(409, "an automation run is in progress");
-    }
+    this.assertIdle();
     const spec = this.registry.find((s) => s.id === id);
     if (!spec) throw new LaunchError(404, `unknown agent: ${id}`);
     if (!spec.args) {
@@ -1039,6 +1073,11 @@ export class AgentLauncher {
       if (!offered.some((m) => m.id === model)) {
         throw new LaunchError(400, `${spec.label} does not offer that model`);
       }
+      // That await is the only suspension point between the guard at the top
+      // and the spawn below, and it reopens what that guard closed: two
+      // starts racing here would both spawn, and the first child would be
+      // orphaned by the second overwriting this.child.
+      this.assertIdle();
     }
 
     const workDir = this.prepareWorkDir(spec);

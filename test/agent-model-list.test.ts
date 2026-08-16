@@ -69,6 +69,33 @@ describe("model list parsers", () => {
       { id: "grok-4.5", label: "grok-4.5" },
     ]);
   });
+
+  it("ignores grok's bullets when they are prose, not a model list", () => {
+    // A CLI that cannot list prints its own bulleted guidance. Reading those
+    // as ids filled the picker with "run" and "or", and start() then accepted
+    // them, so `--model run` reached the command line.
+    const output = [
+      "Not signed in.",
+      "",
+      "To fix this:",
+      "  - run `grok login` first",
+      "  - or set XAI_API_KEY",
+    ].join("\n");
+    expect(parseBulletModels(output)).toEqual([]);
+  });
+
+  it("stops reading grok's list at the end of the bullets", () => {
+    const output = [
+      "Available models:",
+      "  * grok-4.6 (default)",
+      "",
+      "Notes:",
+      "  - see https://docs.x.ai for pricing",
+    ].join("\n");
+    expect(parseBulletModels(output)).toEqual([
+      { id: "grok-4.6", label: "grok-4.6 (default)" },
+    ]);
+  });
 });
 
 describe("fetchModels", () => {

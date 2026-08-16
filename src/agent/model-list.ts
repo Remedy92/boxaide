@@ -157,12 +157,27 @@ export function parseBareModels(output: string): ModelOption[] {
  *   Available models:
  *     * grok-4.6 (default)
  *     - grok-4.5
+ *
+ * Only bullets under that header count. A bare bullet is no evidence of a
+ * model — a CLI that cannot list prints prose with bullets of its own
+ * ("- run `grok login` first"), and reading those as ids fills the picker
+ * with words that then reach --model.
  */
 export function parseBulletModels(output: string): ModelOption[] {
   const out: ModelOption[] = [];
+  let inList = false;
   for (const line of output.split("\n")) {
+    if (/^\s*available models:/i.test(line)) {
+      inList = true;
+      continue;
+    }
     const match = /^\s*[*-]\s+(\S+)(.*)$/.exec(line);
-    if (!match) continue;
+    if (!match) {
+      // The list runs to the first line that is neither a bullet nor blank.
+      if (inList && line.trim() !== "") inList = false;
+      continue;
+    }
+    if (!inList) continue;
     const id = match[1];
     const isDefault = /\(default\)/.test(match[2]);
     out.push({ id, label: isDefault ? `${id} (default)` : id });
