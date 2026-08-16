@@ -84,7 +84,7 @@ export class Store {
   readonly db: Database.Database;
 
   constructor(
-    private masterKey: Buffer,
+    readonly masterKey: Buffer,
     dbPath: string | ":memory:",
   ) {
     this.db = new Database(dbPath);

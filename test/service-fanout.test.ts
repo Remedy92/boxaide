@@ -71,6 +71,23 @@ class FlakyProvider implements MailProvider {
     return [summary(account.id, "Good account mail")];
   }
 
+  async syncMailbox(account: ProviderAccount) {
+    this.guard(account);
+    const messages = [summary(account.id, "Good account mail")];
+    return {
+      replaced: true,
+      messages,
+      vanishedUids: [],
+      flagUpdates: [],
+      cursor: {
+        uidvalidity: 1,
+        highestModseq: null,
+        uidnext: 2,
+        exists: 1,
+      },
+    };
+  }
+
   async searchMessages(
     account: ProviderAccount,
     _opts: SearchMessagesOpts,

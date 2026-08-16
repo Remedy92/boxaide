@@ -27,7 +27,6 @@ import { cn } from "@/lib/utils";
  * navigation then simply opens the inbox in the same tab.
  */
 
-const REFRESH_MAIL_MS = 30_000;
 const REFRESH_AGENT_MS = 8_000;
 const LIST_LIMIT = 9;
 
@@ -70,7 +69,7 @@ export default function TrayPage() {
     enabled: ctx.ready,
     queryFn: ({ signal }) =>
       listMessages({ account: "all", limit: LIST_LIMIT }, { ...ctx, signal }),
-    refetchInterval: REFRESH_MAIL_MS,
+    staleTime: 30_000,
   });
 
   const agent = useQuery({

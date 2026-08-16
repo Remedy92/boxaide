@@ -334,6 +334,7 @@ export async function startServer(
   // The serve process is the one place platform timers run (CRM sync,
   // automation scheduler, outreach engine).
   runtime.platform.start();
+  runtime.mail.start();
   // Same rule for the update check: one process asks, and only the one with a
   // UI attached to the answer.
   runtime.update.start();
@@ -360,6 +361,7 @@ export async function startServer(
       // mid-shutdown would spawn a child the close below never sees.
       runtime.platform.stop();
       runtime.update.stop();
+      runtime.mail.stop();
       // The launched agent first: it holds an open long poll against the
       // channel, and an orphaned child process would outlive the app.
       runtime.launcher.close();

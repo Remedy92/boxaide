@@ -7,6 +7,7 @@ import {
   imapErrorText,
   imapAuthOptions,
   smtpAuthOptions,
+  mailboxNeedsFullResync,
   draftsMailboxPath,
   draftFromImapSource,
 } from "../src/provider/imap-smtp.js";
@@ -85,6 +86,20 @@ describe("uidWindow (listMessages sequence range)", () => {
   it("returns null once the offset walks past the oldest message", () => {
     expect(uidWindow(3, 25, 10)).toBeNull();
     expect(uidWindow(3, 25, 3)).toBeNull();
+  });
+});
+
+describe("mailboxNeedsFullResync", () => {
+  it("is true with no stored cursor", () => {
+    expect(mailboxNeedsFullResync(null, 1)).toBe(true);
+  });
+
+  it("is true when uidvalidity changes", () => {
+    expect(mailboxNeedsFullResync({ uidvalidity: 1 }, 2)).toBe(true);
+  });
+
+  it("is false when uidvalidity matches", () => {
+    expect(mailboxNeedsFullResync({ uidvalidity: 7 }, 7)).toBe(false);
   });
 });
 

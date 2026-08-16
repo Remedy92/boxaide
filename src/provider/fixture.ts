@@ -12,9 +12,11 @@ import type {
   MailMessageSummary,
   MailProvider,
   ProviderAccount,
+  MailboxSyncResult,
   SearchMessagesOpts,
   SendMessageInput,
   SendResult,
+  SyncMailboxOpts,
 } from "./types.js";
 
 /** `inReplyTo` has no place on a delivered message; a draft needs to keep it. */
@@ -53,6 +55,7 @@ function applySince<T extends { date: string }>(
 export class FixtureProvider implements MailProvider {
   private boxes = new Map<string, Stored[]>();
   private nextUid = new Map<string, number>();
+  private uidValidity = new Map<string, number>();
   private sent: Array<SendMessageInput & { accountId: string; messageId: string }> =
     [];
 
@@ -95,6 +98,7 @@ export class FixtureProvider implements MailProvider {
   clear(): void {
     this.boxes.clear();
     this.nextUid.clear();
+    this.uidValidity.clear();
     this.sent = [];
   }
 
@@ -152,6 +156,50 @@ export class FixtureProvider implements MailProvider {
       (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
     );
     return msgs.slice(offset, offset + limit).map(toSummary);
+  }
+
+  async syncMailbox(
+    account: ProviderAccount,
+    opts: SyncMailboxOpts = {},
+  ): Promise<MailboxSyncResult> {
+    const folder = opts.folder ?? "INBOX";
+    const uidvalidity = this.uidValidity.get(account.id) ?? 1;
+    const messages = await this.listMessages(account, {
+      folder,
+      limit: opts.limit,
+      offset: opts.offset,
+    });
+    const box = this.ensureBox(account.id, account.email).filter(
+      (m) => m.folder === folder,
+    );
+    const replaced =
+      opts.fullWindow === true ||
+      !opts.cursor ||
+      opts.cursor.uidvalidity !== uidvalidity;
+    const currentUids = new Set(box.map((m) => m.uid));
+    const vanishedUids = replaced
+      ? []
+      : (opts.knownUids ?? []).filter((uid) => !currentUids.has(uid));
+    return {
+      replaced,
+      messages,
+      vanishedUids,
+      flagUpdates: replaced
+        ? []
+        : messages.map((m) => ({ uid: m.uid, seen: m.seen })),
+      cursor: {
+        uidvalidity,
+        highestModseq: String(this.nextUid.get(account.id) ?? 1),
+        uidnext: this.nextUid.get(account.id) ?? 1,
+        exists: box.length,
+      },
+      thin: opts.skipSnippets === true,
+    };
+  }
+
+  /** Tests bump this to force a uidvalidity wipe. */
+  setUidValidity(accountId: string, value: number): void {
+    this.uidValidity.set(accountId, value);
   }
 
   async searchMessages(
@@ -218,9 +266,11 @@ export class FixtureProvider implements MailProvider {
       accountEmail: account.email,
     });
 
+    const copied = toSummary(box[box.length - 1]);
     return {
       messageId,
       accepted: input.to.split(",").map((s) => s.trim()),
+      copied,
     };
   }
 

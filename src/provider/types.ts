@@ -80,11 +80,20 @@ export type MailMessage = MailMessageSummary & {
  */
 export type SinceOpt = { since?: string };
 
+/** Tray-sized lists skip snippet FETCHes. */
+export const TRAY_LIST_LIMIT = 9;
+
+export function skipSnippetsForLimit(limit: number): boolean {
+  return limit <= TRAY_LIST_LIMIT;
+}
+
 export type ListMessagesOpts = SinceOpt & {
   folder?: string;
   limit?: number;
   offset?: number;
   unreadOnly?: boolean;
+  /** Blocking IMAP fill even when the index is warm. CRM sync uses this. */
+  refresh?: boolean;
 };
 
 export type SearchMessagesOpts = SinceOpt & {
@@ -107,6 +116,8 @@ export type SendMessageInput = {
 export type SendResult = {
   messageId: string;
   accepted: string[];
+  /** Sent-folder copy, when APPEND (or the fixture) named the new uid. */
+  copied?: MailMessageSummary;
 };
 
 export type ConnectionTestResult = {
@@ -155,6 +166,38 @@ export type ListDraftsOpts = {
   limit?: number;
 };
 
+/** IMAP resync cursor stored in mailbox_state. */
+export type MailboxCursor = {
+  uidvalidity: number;
+  highestModseq: string | null;
+  uidnext: number | null;
+  exists: number;
+};
+
+export type SyncMailboxOpts = {
+  folder?: string;
+  limit?: number;
+  offset?: number;
+  /** Skip bodyStructure + snippet FETCHes (tray-sized lists). */
+  skipSnippets?: boolean;
+  cursor?: MailboxCursor | null;
+  /** Ignore CHANGEDSINCE and refill the sequence window of `limit`. */
+  fullWindow?: boolean;
+  /** Indexed UIDs; used to detect expunges when VANISHED is missing. */
+  knownUids?: number[];
+};
+
+export type MailboxSyncResult = {
+  /** True when the indexed window was replaced (cold fill or uidvalidity). */
+  replaced: boolean;
+  messages: MailMessageSummary[];
+  vanishedUids: number[];
+  flagUpdates: Array<{ uid: number; seen: boolean }>;
+  cursor: MailboxCursor;
+  /** Snippet/attachment fields are placeholders; do not overwrite richer rows. */
+  thin?: boolean;
+};
+
 export type MailFolder = {
   name: string;
   path: string;
@@ -169,6 +212,24 @@ export interface MailProvider {
     account: ProviderAccount,
     opts?: ListMessagesOpts,
   ): Promise<MailMessageSummary[]>;
+  /**
+   * Fill or incrementally update a folder window. `replaced` means the caller
+   * should drop cached rows for that folder before upserting.
+   */
+  syncMailbox(
+    account: ProviderAccount,
+    opts?: SyncMailboxOpts,
+  ): Promise<MailboxSyncResult>;
+  /**
+   * Keep the connection selected on `folder` and invoke `onChange` on EXISTS /
+   * FLAGS / EXPUNGE. Returns an unsubscribe. Optional: fixture has nothing to
+   * watch.
+   */
+  watchMailbox?(
+    account: ProviderAccount,
+    folder: string,
+    onChange: () => void,
+  ): () => void;
   searchMessages(
     account: ProviderAccount,
     opts: SearchMessagesOpts,

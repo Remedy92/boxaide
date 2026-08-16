@@ -1,8 +1,9 @@
 import { ImapFlow } from "imapflow";
-import type { MessageStructureObject } from "imapflow";
+import type { ExpungeEvent, MessageStructureObject } from "imapflow";
 import nodemailer from "nodemailer";
 import type { SendMailOptions } from "nodemailer";
 import { parseRfc822, formatAddress, stripHtml } from "./mime.js";
+import { skipSnippetsForLimit } from "./types.js";
 import type {
   AccountCredentials,
   ConnectionTestResult,
@@ -15,14 +16,23 @@ import type {
   MailMessage,
   MailMessageSummary,
   MailProvider,
+  MailboxCursor,
+  MailboxSyncResult,
   ProviderAccount,
   SearchMessagesOpts,
   SendMessageInput,
   SendResult,
+  SyncMailboxOpts,
 } from "./types.js";
 
 /** Idle time before a pooled IMAP connection is logged out. */
 const IDLE_MS = 60_000;
+/** Accounts whose INBOX we keep selected instead of logging out. */
+const keepAlive = new Set<string>();
+const watchers = new Map<
+  string,
+  { client: ImapFlow; onExists: () => void; onFlags: () => void }
+>();
 /** Guards against a hung server holding a request open forever. */
 const CONNECT_TIMEOUT_MS = 15_000;
 const GREETING_TIMEOUT_MS = 10_000;
@@ -114,6 +124,7 @@ function newClient(creds: AccountCredentials): ImapFlow {
     secure: creds.imapSecure,
     auth: imapAuthOptions(creds),
     logger: false,
+    qresync: true,
     connectionTimeout: CONNECT_TIMEOUT_MS,
     greetingTimeout: GREETING_TIMEOUT_MS,
     socketTimeout: SOCKET_TIMEOUT_MS,
@@ -130,8 +141,11 @@ function clearIdle(entry: Pooled): void {
 function scheduleIdle(key: string, entry: Pooled): void {
   clearIdle(entry);
   if (entry.busy > 0 || pool.get(key) !== entry) return;
+  // Indexed inboxes stay selected so ImapFlow can IDLE instead of logging out.
+  if (keepAlive.has(key)) return;
   entry.timer = setTimeout(() => {
     if (entry.busy > 0 || pool.get(key) !== entry) return;
+    if (keepAlive.has(key)) return;
     pool.delete(key);
     entry.client.logout().catch(() => entry.client.close());
   }, IDLE_MS);
@@ -271,6 +285,8 @@ async function withTempImap<T>(
 
 /** Close every pooled connection. Call on shutdown. */
 export async function closeAll(): Promise<void> {
+  keepAlive.clear();
+  watchers.clear();
   const entries = [...pool.entries()];
   pool.clear();
   connecting.clear();
@@ -553,6 +569,15 @@ export function uidWindow(
   return { start, end };
 }
 
+/** True when the stored uidvalidity cannot be used for CHANGEDSINCE. */
+export function mailboxNeedsFullResync(
+  stored: { uidvalidity: number } | null | undefined,
+  uidvalidity: number,
+): boolean {
+  if (!stored) return true;
+  return stored.uidvalidity !== uidvalidity;
+}
+
 function sentMailboxPath(
   boxes: { name: string; path: string; specialUse?: string }[],
 ): string | null {
@@ -641,6 +666,62 @@ async function appendedDraftUid(
   }
 }
 
+function cursorFromMailbox(mb: {
+  exists: number;
+  uidValidity?: bigint | number;
+  uidNext?: number;
+  highestModseq?: bigint;
+}): MailboxCursor {
+  return {
+    uidvalidity: Number(mb.uidValidity ?? 0),
+    highestModseq:
+      mb.highestModseq != null ? String(mb.highestModseq) : null,
+    uidnext: mb.uidNext ?? null,
+    exists: mb.exists,
+  };
+}
+
+async function collectHeads(
+  client: ImapFlow,
+  range: string | number[],
+  withSnippets: boolean,
+  extra?: { uid?: boolean; changedSince?: bigint; internalDate?: boolean },
+): Promise<FetchedHead[]> {
+  const query = {
+    uid: true as const,
+    envelope: true as const,
+    flags: true as const,
+    ...(withSnippets ? { bodyStructure: true as const } : {}),
+    ...(extra?.internalDate ? { internalDate: true as const } : {}),
+  };
+  const heads: FetchedHead[] = [];
+  const opts =
+    extra?.uid || extra?.changedSince
+      ? { uid: extra.uid, changedSince: extra.changedSince }
+      : undefined;
+  for await (const msg of client.fetch(range, query, opts)) {
+    heads.push(msg);
+  }
+  return heads;
+}
+
+async function headsToSummaries(
+  client: ImapFlow,
+  accountId: string,
+  folder: string,
+  heads: FetchedHead[],
+  withSnippets: boolean,
+): Promise<MailMessageSummary[]> {
+  const snippets = withSnippets
+    ? await attachSnippets(client, heads)
+    : new Map<number, string>();
+  return heads
+    .map((msg) =>
+      envelopeToSummary(accountId, folder, msg, snippets.get(msg.uid)),
+    )
+    .reverse();
+}
+
 export class ImapSmtpProvider implements MailProvider {
   async testConnection(
     creds: AccountCredentials,
@@ -662,23 +743,27 @@ export class ImapSmtpProvider implements MailProvider {
     account: ProviderAccount,
     opts: ListMessagesOpts = {},
   ): Promise<MailMessageSummary[]> {
-    const accountId = account.id;
     const folder = opts.folder ?? "INBOX";
     const limit = opts.limit ?? 50;
     const since = parseSince(opts.since);
-    return withImap(accountId, account.creds, async (client) => {
+    const withSnippets = !skipSnippetsForLimit(limit);
+    return withImap(account.id, account.creds, async (client) => {
       const lock = await client.getMailboxLock(folder, { readOnly: true });
       try {
         const mb = client.mailbox;
         if (!mb) return [];
-        // Two different reads share the rest of this method. Without `since`
-        // the window is the tail of the mailbox — newest N, whatever their
-        // age. With it the server picks the set by date and `limit` only caps
-        // how much of that set comes back, so a quiet week returns few rows
-        // and a busy one is capped rather than silently truncated to 25.
+        // Three reads share the rest of this method. Without `since` the
+        // window is the tail of the mailbox — newest N, whatever their age.
+        // With it the server picks the set by date and `limit` only caps how
+        // much of that set comes back, so a quiet week returns few rows and a
+        // busy one is capped rather than silently truncated to 25.
         let range: string | number[];
         if (since) {
           const uids = await client.search({ since }, { uid: true });
+          if (!uids || uids.length === 0) return [];
+          range = uids.slice(-limit);
+        } else if (opts.unreadOnly) {
+          const uids = await client.search({ seen: false }, { uid: true });
           if (!uids || uids.length === 0) return [];
           range = uids.slice(-limit);
         } else {
@@ -686,32 +771,204 @@ export class ImapSmtpProvider implements MailProvider {
           if (!window) return [];
           range = `${window.start}:${window.end}`;
         }
-        const heads: FetchedHead[] = [];
-        for await (const msg of client.fetch(
-          range,
-          {
-            uid: true,
-            envelope: true,
-            flags: true,
-            bodyStructure: true,
-            internalDate: Boolean(since),
-          },
-          { uid: Array.isArray(range) },
-        )) {
-          if (opts.unreadOnly && msg.flags?.has("\\Seen")) continue;
-          if (since && !withinSince(msg, since)) continue;
-          heads.push(msg);
-        }
-        const snippets = await attachSnippets(client, heads);
-        return heads
-          .map((msg) =>
-            envelopeToSummary(accountId, folder, msg, snippets.get(msg.uid)),
-          )
-          .reverse();
+        const heads = await collectHeads(client, range, withSnippets, {
+          uid: Array.isArray(range),
+          internalDate: since != null,
+        });
+        // The since search is day-granular and the unread search ran before
+        // this fetch, so both sets still need trimming against the exact ask.
+        const kept = heads.filter((msg) => {
+          if (opts.unreadOnly && msg.flags?.has("\\Seen")) return false;
+          if (since && !withinSince(msg, since)) return false;
+          return true;
+        });
+        return headsToSummaries(client, account.id, folder, kept, withSnippets);
       } finally {
         lock.release();
       }
     });
+  }
+
+  async syncMailbox(
+    account: ProviderAccount,
+    opts: SyncMailboxOpts = {},
+  ): Promise<MailboxSyncResult> {
+    const folder = opts.folder ?? "INBOX";
+    const limit = opts.limit ?? 50;
+    const withSnippets = opts.skipSnippets !== true;
+    return withImap(account.id, account.creds, async (client) => {
+      const lock = await client.getMailboxLock(folder, { readOnly: true });
+      try {
+        const mb = client.mailbox;
+        if (!mb) {
+          return {
+            replaced: true,
+            messages: [],
+            vanishedUids: [],
+            flagUpdates: [],
+            cursor: {
+              uidvalidity: 0,
+              highestModseq: null,
+              uidnext: null,
+              exists: 0,
+            },
+          };
+        }
+        const cursor = cursorFromMailbox(mb);
+        const full = async (): Promise<MailboxSyncResult> => {
+          const window = uidWindow(mb.exists, limit, opts.offset ?? 0);
+          if (!window) {
+            return {
+              replaced: true,
+              messages: [],
+              vanishedUids: [],
+              flagUpdates: [],
+              cursor,
+            };
+          }
+          const heads = await collectHeads(
+            client,
+            `${window.start}:${window.end}`,
+            withSnippets,
+          );
+          const messages = await headsToSummaries(
+            client,
+            account.id,
+            folder,
+            heads,
+            withSnippets,
+          );
+          return {
+            replaced: true,
+            messages,
+            vanishedUids: [],
+            flagUpdates: [],
+            cursor,
+            thin: opts.skipSnippets === true,
+          };
+        };
+
+        if (
+          opts.fullWindow ||
+          mailboxNeedsFullResync(opts.cursor, cursor.uidvalidity)
+        ) {
+          return full();
+        }
+
+        const since = opts.cursor?.highestModseq;
+        if (since && mb.highestModseq != null) {
+          try {
+            const vanishedUids: number[] = [];
+            const onExpunge = (evt: ExpungeEvent) => {
+              if (evt.uid != null) vanishedUids.push(evt.uid);
+            };
+            client.on("expunge", onExpunge);
+            let heads: FetchedHead[];
+            try {
+              heads = await collectHeads(client, "1:*", withSnippets, {
+                changedSince: BigInt(since),
+              });
+            } finally {
+              client.off("expunge", onExpunge);
+            }
+            if (opts.knownUids && opts.knownUids.length > 0) {
+              const still = await client.search(
+                { uid: opts.knownUids.join(",") },
+                { uid: true },
+              );
+              const stillSet = new Set(still || []);
+              for (const uid of opts.knownUids) {
+                if (!stillSet.has(uid) && !vanishedUids.includes(uid)) {
+                  vanishedUids.push(uid);
+                }
+              }
+            }
+            const messages = await headsToSummaries(
+              client,
+              account.id,
+              folder,
+              heads,
+              withSnippets,
+            );
+            return {
+              replaced: false,
+              messages,
+              vanishedUids,
+              flagUpdates: messages.map((m) => ({
+                uid: m.uid,
+                seen: m.seen,
+              })),
+              cursor,
+              thin: opts.skipSnippets === true,
+            };
+          } catch (err) {
+            const text = imapErrorText(err);
+            if (/not found|expired|modseq|CONDSTORE|QRESYNC/i.test(text)) {
+              return full();
+            }
+            throw err;
+          }
+        }
+
+        return full();
+      } finally {
+        lock.release();
+      }
+    });
+  }
+
+  watchMailbox(
+    account: ProviderAccount,
+    folder: string,
+    onChange: () => void,
+  ): () => void {
+    const key = account.id;
+    keepAlive.add(key);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const fire = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(onChange, 250);
+      timer.unref?.();
+    };
+    const attach = (client: ImapFlow) => {
+      const prev = watchers.get(key);
+      if (prev) {
+        prev.client.off("exists", prev.onExists);
+        prev.client.off("expunge", prev.onExists);
+        prev.client.off("flags", prev.onFlags);
+      }
+      const onExists = () => fire();
+      const onFlags = () => fire();
+      client.on("exists", onExists);
+      client.on("expunge", onExists);
+      client.on("flags", onFlags);
+      watchers.set(key, { client, onExists, onFlags });
+    };
+
+    void withImap(key, account.creds, async (client) => {
+      attach(client);
+      const lock = await client.getMailboxLock(folder, { readOnly: true });
+      lock.release();
+    }).catch((err) => {
+      console.warn(
+        `[imap] watch ${folder} failed for ${account.email}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      const prev = watchers.get(key);
+      if (prev) {
+        prev.client.off("exists", prev.onExists);
+        prev.client.off("expunge", prev.onExists);
+        prev.client.off("flags", prev.onFlags);
+        watchers.delete(key);
+      }
+      keepAlive.delete(key);
+      const entry = pool.get(key);
+      if (entry) scheduleIdle(key, entry);
+    };
   }
 
   async searchMessages(
@@ -837,7 +1094,12 @@ export class ImapSmtpProvider implements MailProvider {
 
     // Gmail copies SMTP sends into Sent by itself; Fastmail and generic IMAP
     // do not. A failed copy must never fail a delivered message.
-    await this.appendToSent(account, raw).catch((err: unknown) => {
+    let copied: MailMessageSummary | undefined;
+    await this.appendToSent(account, raw)
+      .then((summary) => {
+        copied = summary ?? undefined;
+      })
+      .catch((err: unknown) => {
       console.warn(
         `[imap] Sent copy failed for ${account.email}:`,
         err instanceof Error ? err.message : String(err),
@@ -847,18 +1109,35 @@ export class ImapSmtpProvider implements MailProvider {
     return {
       messageId: info.messageId ?? composed.messageId ?? "",
       accepted: (info.accepted ?? []).map(String),
+      copied,
     };
   }
 
   private async appendToSent(
     account: ProviderAccount,
     raw: Buffer,
-  ): Promise<void> {
-    await withImap(account.id, account.creds, async (client) => {
+  ): Promise<MailMessageSummary | null> {
+    return withImap(account.id, account.creds, async (client) => {
       const boxes = await client.list();
       const path = sentMailboxPath(boxes);
       if (!path) throw new Error("no Sent mailbox found");
-      await client.append(path, raw, ["\\Seen"], new Date());
+      const appended = await client.append(path, raw, ["\\Seen"], new Date());
+      if (!appended || appended.uid == null) return null;
+      const uid = appended.uid;
+      const lock = await client.getMailboxLock(path, { readOnly: true });
+      try {
+        const heads = await collectHeads(client, [uid], true, { uid: true });
+        const messages = await headsToSummaries(
+          client,
+          account.id,
+          path,
+          heads,
+          true,
+        );
+        return messages[0] ?? null;
+      } finally {
+        lock.release();
+      }
     });
   }
 
