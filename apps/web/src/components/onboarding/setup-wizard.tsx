@@ -32,6 +32,7 @@ import { useApp } from "@/lib/hooks/use-app-state";
 import { useSettings, useUpdateSettings } from "@/lib/hooks/use-settings";
 import { hostLabel, isValidBaseUrl, normalizeBaseUrl } from "@/lib/settings";
 import { cn } from "@/lib/utils";
+import { takeDesktopBootstrapCapability } from "@/lib/desktop-bootstrap";
 
 /**
  * First run, for someone who has never configured a mail client.
@@ -45,10 +46,9 @@ import { cn } from "@/lib/utils";
  * (through useUpdateSettings, which purges the query cache when either
  * changes), and one mailbox through POST /api/accounts.
  *
- * /api/local-bootstrap is called under exactly one condition: the page's own
- * origin IS the server address and that origin is loopback — the page is the
- * server's own UI, so step one completes with no copy-paste. Served from
- * anywhere else, a human pastes the token.
+ * /api/local-bootstrap is called only when the desktop shell supplied a
+ * one-time capability in the URL fragment. Served in a normal browser, a
+ * human pastes the token even when the page itself came from loopback.
  */
 
 type StepId = 1 | 2 | 3 | 4;
@@ -165,6 +165,7 @@ function ServerStep({
      the fallback for a remotely hosted page or a server that is not running,
      and those are the only audiences the address and token fields have. */
   const [phase, setPhase] = React.useState<"detecting" | "manual">("detecting");
+  const [bootstrapCapability] = React.useState(takeDesktopBootstrapCapability);
 
   /* The address this page was served from. When Boxaide serves its own build,
      that address IS the server — no typing, no CORS, no local-network prompt.
@@ -207,19 +208,19 @@ function ServerStep({
      succeeds and step one passes before the heading has been read. Deployed to
      a static host, the page origin is not a mail server and adopting it would
      be a confident wrong answer. */
-  /* Same-origin loopback only: the page IS the server's own UI, so ask it for
-     the token instead of sending a person into a hidden data folder. The fetch
-     goes to the page's OWN origin — /api/local-bootstrap answers with no CORS
-     headers by design, so it is only readable same-origin, and the server
-     additionally requires a loopback Host. The page origin is then adopted as
-     the base URL, which keeps every later request same-origin too. Failure is
-     silent on purpose — the manual paste path below is the fallback, not an
-     error state. */
+  /* Desktop capability only: same-origin loopback is not identity because any
+     local process can call it. The shell places an unguessable, one-use secret
+     in the fragment; the browser strips it immediately and presents it here.
+     Failure is silent — manual paste remains the browser fallback. */
   const adoptLocalToken = React.useCallback(
     async (url: string): Promise<boolean> => {
       setAuth({ status: "checking" });
       try {
-        const boot = await getLocalBootstrap({ baseUrl: url, token: "" });
+        if (!bootstrapCapability) return false;
+        const boot = await getLocalBootstrap(
+          { baseUrl: url, token: "" },
+          bootstrapCapability,
+        );
         const api = await getApiHealth({ baseUrl: url, token: boot.token });
         setBaseUrl(url);
         setToken(boot.token);
@@ -231,7 +232,7 @@ function ServerStep({
         return false;
       }
     },
-    [update],
+    [bootstrapCapability, update],
   );
 
   /* A token from an earlier visit: prove it still works, silently. */

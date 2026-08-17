@@ -214,7 +214,7 @@ CREATE TABLE IF NOT EXISTS automation_runs (
   finished_at TEXT,
   status TEXT NOT NULL,           -- 'running' | 'ok' | 'error' | 'killed'
   exit_code INTEGER,
-  log_enc TEXT                    -- captured stdout+stderr, truncated to 64 KiB
+  log_enc TEXT                    -- run log, truncated to 64 KiB, tail kept
 );
 ```
 
@@ -222,12 +222,40 @@ Scheduler (`AutomationScheduler`):
 - `cron-parser` (add to root package.json dependencies) computes
   `next_run_at`. A 30s interval finds due enabled automations and pushes them
   onto an in-process FIFO. One run executes at a time (invariant 4).
-- A run spawns a one-shot headless CLI agent. Extend `AgentLauncher`
-  (`src/agent/launcher.ts`) with a `runOnce` path: same binary resolution,
+- A run spawns a one-shot headless CLI agent. `AgentLauncher`
+  (`src/agent/launcher.ts`) owns the `runOnce` path: same binary resolution,
   same MCP wiring, but prompt = the automation's prompt plus a fixed preamble
-  (below), no chat loop, capture stdout/stderr into the run row, 15-minute
-  hard timeout then SIGKILL and status 'killed'. `runOnce` must not disturb
-  the interactive chat agent: when a chat agent is running, queue behind it.
+  (below), and no chat loop. `runOnce` must not disturb the interactive chat
+  agent: when a chat agent is running, queue behind it.
+- Run log: a spec whose `runArgs` ask for an event stream (`claude` adds
+  `--output-format stream-json --verbose`) also carries a `renderRunLine`, and
+  the log stores that rendering — session start, assistant text, `[tool]`
+  lines, result and errors — plus raw stderr, which stays raw because a crash
+  writes plain text there. Specs without a stream store raw captured
+  stdout+stderr. Either way the log is truncated to 64 KiB, tail kept: a run
+  that failed says why in its last lines.
+- Three kill paths, all SIGKILL, each appending a note to the log so a killed
+  run is never empty:
+  - First-output watchdog (`ONESHOT_FIRST_OUTPUT_TIMEOUT_MS`, 2 min): a streaming run
+    that writes no stdout at all in the window never started, so it is ended
+    early with status 'error'. First stdout disarms the timer — a healthy
+    Claude session prints its start line within seconds, and a gap after that
+    is a long tool, not a hang. A wedge after startup waits for the deadline.
+    stderr does not feed it, because startup noise is not the agent speaking.
+    Non-streaming specs print nothing until the end and get no watchdog.
+  - Hard deadline (`ONESHOT_TIMEOUT_MS`, 15 min): status 'killed'.
+  - Manual stop (`killRun`, from the UI): status 'killed'.
+- Run duration is the honest one: the launcher resolves on stream close, or
+  `ONESHOT_CLOSE_GRACE_MS` (2 s) after process exit when a leftover grandchild
+  still holds a pipe open. A 15-minute timeout reports about 15 minutes.
+- The `claude` CLI runs under an isolated config home — `CLAUDE_CONFIG_DIR`
+  set to `<dataDir>/agent-homes/claude` — mirroring grok's isolated
+  `GROK_HOME`. `--strict-mcp-config` only covers MCP servers; the isolated
+  home is what keeps the user's personal hooks, skills, output styles and
+  subagents out of a process Boxaide is responsible for. Credentials are
+  copied in per launch and auth-relevant settings keys (`env`, `apiKeyHelper`)
+  are carried over; hooks are not. Applies to chat and scheduled runs alike —
+  the isolation is about whose config runs, not which path.
 - Run preamble (verbatim, prepended to every automation prompt):
   "You are a scheduled Boxaide automation. Do the task below using the Boxaide
   MCP tools, then exit. You cannot talk to the user: do not call chat tools;

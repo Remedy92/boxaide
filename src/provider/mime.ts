@@ -1,5 +1,10 @@
 import { simpleParser } from "mailparser";
 
+/** Includes MIME encoding and attachments; checked before mailparser allocates. */
+export const MAX_RFC822_SOURCE_BYTES = 50 * 1024 * 1024;
+/** Raw sender HTML is source-view only and never needs to be unbounded. */
+export const MAX_BODY_HTML_CHARS = 250_000;
+
 export type ParsedMailBody = {
   bodyText: string;
   bodyHtml?: string;
@@ -29,6 +34,14 @@ const CALENDAR_MAX_CHARS = 100_000;
  * This is the shipped body path for IMAP getMessage.
  */
 export async function parseRfc822(raw: string | Buffer): Promise<ParsedMailBody> {
+  const bytes = Buffer.isBuffer(raw)
+    ? raw.byteLength
+    : Buffer.byteLength(raw, "utf8");
+  if (bytes > MAX_RFC822_SOURCE_BYTES) {
+    throw new Error(
+      `message source exceeds the ${MAX_RFC822_SOURCE_BYTES}-byte safety limit`,
+    );
+  }
   const parsed = await simpleParser(raw);
   const bodyText =
     (typeof parsed.text === "string" && parsed.text.trim()) ||
@@ -36,7 +49,7 @@ export async function parseRfc822(raw: string | Buffer): Promise<ParsedMailBody>
     "";
   const bodyHtml =
     typeof parsed.html === "string" && parsed.html.trim()
-      ? parsed.html
+      ? parsed.html.slice(0, MAX_BODY_HTML_CHARS)
       : undefined;
 
   return {

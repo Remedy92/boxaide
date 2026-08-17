@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { serve, type ServerType } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import type { AppConfig } from "./config.js";
@@ -19,6 +20,7 @@ import {
   isAllowedOrigin,
   isLocalHostHeader,
   isLoopbackBindAddress,
+  tokensMatch,
 } from "./api/routes.js";
 import { securityHeaders } from "./api/security-headers.js";
 import { handleMcpJsonRpc } from "./mcp/server.js";
@@ -51,6 +53,11 @@ type JsonRpcMessage = {
   method?: string;
   params?: unknown;
 };
+
+/** Large enough for normal drafts and settings, small enough to bound JSON parsing. */
+export const MAX_HTTP_BODY_BYTES = 1024 * 1024;
+/** Prevent one authenticated request from multiplying work without bound. */
+export const MAX_MCP_BATCH_MESSAGES = 50;
 
 export type Runtime = {
   config: AppConfig;
@@ -125,18 +132,25 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
   });
 
   // No timers yet — `startServer` starts them. A stdio `boxaide mcp` process
-  // has no UI to show an update in and must not poll GitHub every six hours.
+  // has no UI to show an update in and must not poll GitHub on a timer.
   const update = new UpdateService({
     driver: overrides.updateDriver,
     currentVersion: overrides.appVersion,
   });
 
   const app = new Hono();
+  let bootstrapCapability = config.bootstrapCapability ?? null;
 
   // First middleware registered, so every route below — UI, API, MCP and any
   // error response — carries the headers. It runs after the handler and only
   // sets headers, so it cannot short-circuit a request.
   app.use("*", securityHeaders());
+  const boundedBody = bodyLimit({
+    maxSize: MAX_HTTP_BODY_BYTES,
+    onError: (c) => c.json({ error: "request body too large" }, 413),
+  });
+  app.use("/api/*", boundedBody);
+  app.use("/mcp", boundedBody);
 
   // Public health (no auth) for smoke checks. It carries CORS headers so an
   // allowlisted browser origin can tell "server unreachable" apart from
@@ -148,7 +162,11 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     return c.json({ ok: true, service: "boxaide", fixture: config.fixtureMode });
   });
 
-  // Localhost-only bootstrap so the web UI can pick up the token without copy-paste
+  // Desktop-only bootstrap. Loopback is a network location, not an identity:
+  // any process under the local account can call this endpoint. The Electron
+  // shell therefore gives its renderer a random capability in the URL
+  // fragment (which HTTP never receives), and the page presents it once in a
+  // header. Plain browsers use the manual token path.
   app.get("/api/local-bootstrap", (c) => {
     // This handler is registered before the /api/* auth middleware, so it
     // carries its own Origin guard.
@@ -167,6 +185,13 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     if (!isLocalHostHeader(c.req.header("host"))) {
       return c.json({ error: "localhost only" }, 403);
     }
+    const provided = c.req.header("x-boxaide-bootstrap") ?? "";
+    if (!bootstrapCapability || !tokensMatch(provided, bootstrapCapability)) {
+      return c.json({ error: "desktop capability required" }, 401);
+    }
+    // Consume before constructing the response. A retry, local race, or page
+    // reload cannot turn the short-lived capability into a second credential.
+    bootstrapCapability = null;
     // This body is the plaintext bearer token. It carries no CORS headers, so
     // no cross-origin page can read it — but without these it stays
     // heuristically cacheable by the browser and by any local proxy, and the
@@ -271,6 +296,16 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
       );
     }
     const messages = Array.isArray(body) ? body : [body];
+    if (messages.length > MAX_MCP_BATCH_MESSAGES) {
+      return c.json(
+        {
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32600, message: "JSON-RPC batch is too large" },
+        },
+        400,
+      );
+    }
     const results = [];
     for (const msg of messages) {
       const res = await handleMcpJsonRpc(

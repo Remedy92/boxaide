@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const TOKEN = "test-token-abcdefghijklmnop";
+const BOOTSTRAP = "desktop-bootstrap-capability-test";
 
 function makeRuntime(allowedOrigins: string[] = []): Runtime {
   return createRuntime({
@@ -26,6 +27,7 @@ function makeRuntime(allowedOrigins: string[] = []): Runtime {
     host: "127.0.0.1",
     port: 0,
     fixtureMode: true,
+    bootstrapCapability: BOOTSTRAP,
     allowedOrigins,
     store: new Store(randomBytes(32), ":memory:"),
     provider: new FixtureProvider(),
@@ -232,10 +234,29 @@ describe("HTTP security surface (shipped app)", () => {
 
   it("hands the token to a genuine loopback request", async () => {
     const res = await runtime.app.request("/api/local-bootstrap", {
-      headers: { Host: "127.0.0.1:8787" },
+      headers: {
+        Host: "127.0.0.1:8787",
+        "X-Boxaide-Bootstrap": BOOTSTRAP,
+      },
     });
     expect(res.status).toBe(200);
     expect((await res.json()).token).toBe(TOKEN);
+    const replay = await runtime.app.request("/api/local-bootstrap", {
+      headers: {
+        Host: "127.0.0.1:8787",
+        "X-Boxaide-Bootstrap": BOOTSTRAP,
+      },
+    });
+    expect(replay.status).toBe(401);
+    expect(await replay.text()).not.toContain(TOKEN);
+  });
+
+  it("does not treat another local process as the desktop app", async () => {
+    const res = await runtime.app.request("/api/local-bootstrap", {
+      headers: { Host: "127.0.0.1:8787" },
+    });
+    expect(res.status).toBe(401);
+    expect(await res.text()).not.toContain(TOKEN);
   });
 
   it("withholds the token entirely when the bind address is not loopback", async () => {
@@ -284,6 +305,36 @@ describe("HTTP security surface (shipped app)", () => {
       headers: { Authorization: TOKEN },
     });
     expect(bare.status).toBe(401);
+  });
+
+  it("rejects oversized JSON bodies before parsing or persistence", async () => {
+    const res = await runtime.app.request("/api/automations", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        name: "large",
+        cron: "0 8 * * *",
+        prompt: "x".repeat(1024 * 1024),
+      }),
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: "request body too large" });
+    expect(runtime.platform.automationStore.list()).toEqual([]);
+  });
+
+  it("rejects oversized MCP batches before dispatch", async () => {
+    const batch = Array.from({ length: 51 }, (_, id) => ({
+      jsonrpc: "2.0",
+      id,
+      method: "ping",
+    }));
+    const res = await runtime.app.request("/mcp", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify(batch),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.message).toMatch(/batch is too large/);
   });
 
   it("gates the agent-platform routes behind the same token", async () => {
@@ -563,7 +614,10 @@ describe("CORS allowlist over HTTP", () => {
 
   it("marks the local-bootstrap token response uncacheable", async () => {
     const res = await open.app.request("/api/local-bootstrap", {
-      headers: { Host: "127.0.0.1:8787" },
+      headers: {
+        Host: "127.0.0.1:8787",
+        "X-Boxaide-Bootstrap": BOOTSTRAP,
+      },
     });
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");

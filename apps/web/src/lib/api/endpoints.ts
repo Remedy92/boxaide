@@ -6,10 +6,9 @@
  *   GET /api/agent-connect  — its response embeds the full bearer token; the
  *     MCP snippet is built client-side from localStorage instead (§6.7).
  *
- * Called from exactly one place, under one condition:
- *   GET /api/local-bootstrap — hands out the token in plaintext. The wizard
- *     calls it only when the page is served same-origin from loopback, i.e.
- *     the page IS the server's own UI (getLocalBootstrap documents the guard).
+ * Called only with a desktop-shell capability:
+ *   GET /api/local-bootstrap — exchanges a one-time fragment secret for the
+ *     persistent token. Same-origin loopback alone is intentionally not enough.
  */
 
 import { query, request, stream } from "@/lib/api/client";
@@ -102,16 +101,19 @@ export type LocalBootstrapResponse = {
 };
 
 /**
- * The token, in plaintext. The server only answers when the Host header is
- * loopback and the Origin is absent or loopback; the caller must additionally
- * hold to the client-side rule: only when the page's own origin IS `baseUrl`
- * and that origin is loopback. Anywhere else, a human pastes the token.
+ * The token, in plaintext. The server answers only on loopback when the caller
+ * presents the desktop shell's one-time capability. Anywhere else, a human
+ * pastes the token.
  */
-export function getLocalBootstrap(ctx: Ctx): Promise<LocalBootstrapResponse> {
+export function getLocalBootstrap(
+  ctx: Ctx,
+  capability: string,
+): Promise<LocalBootstrapResponse> {
   return request<LocalBootstrapResponse>("/api/local-bootstrap", {
     baseUrl: ctx.baseUrl,
     token: "",
     signal: ctx.signal,
+    headers: { "X-Boxaide-Bootstrap": capability },
   });
 }
 
@@ -1402,9 +1404,19 @@ export type RunningLocalAgent = {
   model: string | null;
 };
 
+/**
+ * Why the last launch ended. Mirrors ExitReason in src/agent/launcher.ts.
+ *
+ * The exit code cannot answer this: a driven agent has no process exit at all,
+ * and a child that was asked to stop dies on a signal with no code. Read the
+ * reason, not the code, to decide whether something went wrong.
+ */
+export type LocalAgentExitReason = "stopped" | "error" | "exited";
+
 export type LocalAgentExit = {
   id: string;
   code: number | null;
+  reason: LocalAgentExitReason;
   at: string;
   stderrTail: string;
 };

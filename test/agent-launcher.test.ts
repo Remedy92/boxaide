@@ -3,7 +3,19 @@
  * scripts — never at a real agent CLI, which would burn the user's account
  * and hang the suite.
  */
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,8 +23,14 @@ import {
   AgentLauncher,
   KNOWN_AGENTS,
   LaunchError,
+  claudeTurnArgs,
+  oneShotDeadlineNote,
+  oneShotSilentNote,
   type AgentSpec,
+  type DriveOptions,
 } from "../src/agent/launcher.js";
+import { renderClaudeRunLine } from "../src/agent/agent-stream.js";
+import { DRIVEN_SYSTEM, type DriverChannel } from "../src/agent/driver.js";
 import { parseTabbedModels } from "../src/agent/model-list.js";
 
 const cleanups: (() => void)[] = [];
@@ -24,6 +42,16 @@ function tempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "mailmux-launcher-"));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
+}
+
+/** Read a path that must be a regular file, not a symlink. */
+function readRegular(path: string): string {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** A bin directory holding one fake executable that sleeps until killed. */
@@ -52,6 +80,22 @@ function specs(over: Partial<AgentSpec> = {}): AgentSpec[] {
       ...over,
     },
   ];
+}
+
+/**
+ * Enough of the channel to satisfy a spec's `drive`. The launcher only checks
+ * that one is there; what a driver does with it is the driver tests' business.
+ */
+function fakeChannel(): DriverChannel {
+  return {
+    awaitUserTurn: () => new Promise(() => {}),
+    post: () => undefined,
+    releaseLease: () => "released",
+    noteAgentActivity: () => {},
+    setDriven: () => {},
+    needsTitle: () => false,
+    nameChat: () => false,
+  };
 }
 
 async function until(check: () => boolean, ms = 3_000): Promise<void> {
@@ -108,6 +152,155 @@ describe("AgentLauncher", () => {
     expect(seen).toEqual(["fake", null]);
   });
 
+  it("runs a driven agent that has no child of its own", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const seen: Array<string | null> = [];
+    let stop!: (error: string | null) => void;
+    let stopped = 0;
+    let handed!: DriveOptions;
+    const launcher = new AgentLauncher(
+      { ...CTX, channel: fakeChannel(), onRunningChange: (id) => seen.push(id) },
+      specs({
+        args: undefined,
+        drive: (_ctx, opts) => {
+          handed = opts;
+          stop = opts.onStop;
+          return {
+            // Idempotent, as the AgentDriver contract requires, and reporting
+            // the end of its loop from inside stop() — which for an agent with
+            // no child is the only exit there is.
+            stop: () => {
+              if (stopped > 0) return;
+              stopped += 1;
+              opts.onStop(null);
+            },
+          };
+        },
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    const running = await launcher.start("fake");
+    expect(seen).toEqual(["fake"]);
+    // Nothing was spawned, so there is no one process to name.
+    expect(running.pid).toBe(-1);
+    expect(launcher.status().running?.id).toBe("fake");
+    expect(launcher.busy()).toBe(true);
+    // The driver spawns its own children, so it is handed the binary and the
+    // full environment a launcher spawn would have used.
+    expect(handed.child).toBeNull();
+    expect(handed.bin).toBe(join(bin, "fake-agent"));
+    expect(handed.env.PATH).toContain(bin);
+    expect(stop).toBeTypeOf("function");
+
+    launcher.stop();
+    await until(() => launcher.status().running === null);
+    expect(stopped).toBe(1);
+    expect(seen).toEqual(["fake", null]);
+    // Asked for, so not a crash — and no invented exit code: a loop is not a
+    // process, and the rail reads the reason.
+    expect(launcher.status().lastExit).toMatchObject({
+      id: "fake",
+      code: null,
+      reason: "stopped",
+    });
+  });
+
+  it("reports a driver that gave up as an exit the pane can explain", async () => {
+    const bin = fakeBinDir("fake-agent");
+    let give!: (error: string | null) => void;
+    const launcher = new AgentLauncher(
+      { ...CTX, channel: fakeChannel() },
+      specs({
+        args: undefined,
+        drive: (_ctx, opts) => {
+          give = opts.onStop;
+          return { stop: () => {} };
+        },
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    await launcher.start("fake");
+    give("Invalid API key");
+    await until(() => launcher.status().running === null);
+
+    const exit = launcher.status().lastExit;
+    expect(exit?.reason).toBe("error");
+    expect(exit?.code).toBeNull();
+    expect(exit?.stderrTail).toContain("Invalid API key");
+  });
+
+  it("does not leave a running agent behind when its driver cannot start", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const launcher = new AgentLauncher(
+      { ...CTX, channel: fakeChannel() },
+      specs({
+        args: undefined,
+        drive: () => {
+          throw new Error("no session store");
+        },
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    // The launch fails as a launch, rather than reporting an agent that answers
+    // nothing: `running` stuck true would 409 every later start and block the
+    // scheduler until the app restarted.
+    await expect(launcher.start("fake")).rejects.toThrowError(/no session store/);
+    expect(launcher.status().running).toBeNull();
+    expect(launcher.busy()).toBe(false);
+    expect(launcher.status().lastExit).toMatchObject({
+      id: "fake",
+      reason: "error",
+    });
+    expect(launcher.status().lastExit?.stderrTail).toContain("no session store");
+    // And the slot is free, so the next start works.
+    const again = new AgentLauncher(
+      { ...CTX, channel: fakeChannel() },
+      specs({ args: undefined, drive: () => ({ stop: () => {} }) }),
+      { PATH: bin },
+    );
+    cleanups.push(() => again.close());
+    await expect(again.start("fake")).resolves.toMatchObject({ id: "fake" });
+  });
+
+  it("does not wedge when a driven-only spec's driver declines", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const launcher = new AgentLauncher(
+      // A channel is there, so the guard at the top of start() passes and the
+      // decline can only be seen after the launch was recorded.
+      { ...CTX, channel: fakeChannel() },
+      specs({ args: undefined, drive: () => null }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    await expect(launcher.start("fake")).rejects.toThrowError(
+      /could not start its loop/,
+    );
+    expect(launcher.status().running).toBeNull();
+    expect(launcher.busy()).toBe(false);
+  });
+
+  it("refuses a driven launch in a process with no conversation", async () => {
+    // A driven agent is nothing but its loop, and a loop needs a channel to
+    // wait on. Reporting a running agent that answers nothing is worse.
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({ args: undefined, drive: () => null }),
+      { PATH: fakeBinDir("fake-agent") },
+    );
+    await expect(launcher.start("fake")).rejects.toThrowError(
+      /needs the Boxaide conversation/,
+    );
+    expect(launcher.status().running).toBeNull();
+    expect((await launcher.list())[0].supported).toBe(true);
+  });
+
   it("refuses a second agent while one runs", async () => {
     const bin = fakeBinDir("fake-agent");
     const launcher = new AgentLauncher(CTX, specs(), { PATH: bin });
@@ -130,7 +323,25 @@ describe("AgentLauncher", () => {
 
     const exit = launcher.status().lastExit;
     expect(exit?.code).toBe(3);
+    // Nobody asked for this one, so the rail is right to call it out.
+    expect(exit?.reason).toBe("exited");
     expect(exit?.stderrTail).toContain("auth expired");
+  });
+
+  it("records a stop as stopped even though the child dies on a signal", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const launcher = new AgentLauncher(CTX, specs(), { PATH: bin });
+    cleanups.push(() => launcher.close());
+
+    await launcher.start("fake");
+    launcher.stop();
+    await until(() => launcher.status().running === null);
+
+    const exit = launcher.status().lastExit;
+    // SIGTERM leaves no exit code, so the code alone cannot tell this from a
+    // crash. Only the launcher knows it was asked.
+    expect(exit?.code).toBeNull();
+    expect(exit?.reason).toBe("stopped");
   });
 
   it("rejects unknown, unsupported and uninstalled agents with API-shaped errors", async () => {
@@ -397,35 +608,78 @@ sleep 60
     );
   });
 
-  it("adds --model to the Claude command line only when picked", () => {
+  it("launches Claude Code as a driver with no long-lived child", () => {
     const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
-    expect(claude.args!(CTX)).not.toContain("--model");
-    const withModel = claude.args!(CTX, "claude-fable-5");
+    // `claude` has no server mode, so there is nothing to keep running: the
+    // driver spawns one `-p` process per user turn and resumes across them.
+    expect(claude.args).toBeUndefined();
+    expect(claude.drive).toBeTypeOf("function");
+    // Automations are unchanged — a one-shot prompt already exits when done.
+    expect(claude.runArgs).toBeTypeOf("function");
+  });
+
+  it("adds --model to a Claude turn's command line only when picked", () => {
+    const turn = { prompt: "what came in?", system: "be brief", sessionId: null };
+    expect(claudeTurnArgs(CTX, turn)).not.toContain("--model");
+    const withModel = claudeTurnArgs(CTX, turn, "claude-fable-5");
     expect(withModel[withModel.indexOf("--model") + 1]).toBe("claude-fable-5");
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
     expect(claude.models?.map((m) => m.id)).toContain("claude-fable-5");
   });
 
-  it("adds --model to Antigravity and OpenCode command lines only when picked", () => {
-    const antigravity = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
-    expect(antigravity.args!(CTX)).not.toContain("--model");
-    const agyWithModel = antigravity.args!(CTX, "gemini-3.1-pro-high");
-    expect(agyWithModel[agyWithModel.indexOf("--model") + 1]).toBe("gemini-3.1-pro-high");
-    // No typed-out list: the ids come from `agy models` at request time.
-    expect(antigravity.models).toBeUndefined();
-    expect(antigravity.listModels?.args).toEqual(["models"]);
+  it("carries the user turn, the framing and the session on a Claude turn", () => {
+    const fresh = claudeTurnArgs(CTX, {
+      prompt: "what came in?",
+      system: "be brief",
+      sessionId: null,
+    });
+    // Last, and behind `--`: the prompt is a positional argument and it is the
+    // user's text verbatim, so option parsing has to be closed first.
+    expect(fresh.slice(-2)).toEqual(["--", "what came in?"]);
+    expect(fresh[fresh.indexOf("--append-system-prompt") + 1]).toBe("be brief");
+    // Nothing to resume yet, and the stream is what the driver reads the
+    // session id, the answer and the presence lines out of.
+    expect(fresh).not.toContain("--resume");
+    expect(fresh[fresh.indexOf("--output-format") + 1]).toBe("stream-json");
+    expect(fresh).toContain("--verbose");
 
+    const resumed = claudeTurnArgs(CTX, {
+      prompt: "anything else?",
+      system: "be brief",
+      sessionId: "ses-1",
+    });
+    expect(resumed[resumed.indexOf("--resume") + 1]).toBe("ses-1");
+  });
+
+  it("hands a dash-leading message to the CLI as a prompt, not as options", () => {
+    // Verified against claude 2.1.233: `-p` is a boolean flag and the prompt is
+    // positional, so `-p --version` prints the version and exits and `-p --help
+    // hi` fails with "unknown option". A chat message may begin with anything.
+    const turn = claudeTurnArgs(CTX, {
+      prompt: "--version --help  what came in?",
+      system: "be brief",
+      sessionId: "ses-1",
+    });
+    expect(turn.slice(-2)).toEqual(["--", "--version --help  what came in?"]);
+    // Exactly one terminator, and nothing after the prompt that could be read
+    // as a flag.
+    expect(turn.filter((arg) => arg === "--")).toHaveLength(1);
+
+    // Automations get the same treatment. Their prompt opens with the run
+    // preamble today, which is the only reason this was not already breaking.
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const run = claude.runArgs!(CTX, "--dangerously-skip-permissions");
+    expect(run.slice(-2)).toEqual(["--", "--dangerously-skip-permissions"]);
+  });
+
+  it("does not launch agents whose CLIs cannot enforce per-tool permissions", () => {
+    const antigravity = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
     const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
-    // The chat launch is a server now, so the pick reaches the model over the
-    // API per prompt, not on the command line. Automations still pin it in
-    // argv: OpenCode's own default retries forever when that endpoint is down.
-    expect(opencode.args!(CTX)).not.toContain("--model");
-    const opencodeRun = opencode.runArgs!(CTX, "do the thing");
-    expect(opencodeRun[opencodeRun.indexOf("--model") + 1]).toBe("opencode/big-pickle");
-    const opencodeWithModel = opencode.runArgs!(CTX, "do the thing", "openai/gpt-5.4");
-    expect(opencodeWithModel[opencodeWithModel.indexOf("--model") + 1]).toBe("openai/gpt-5.4");
-    // Same: `opencode models` is the list, and --pure matches the launch.
-    expect(opencode.models).toBeUndefined();
-    expect(opencode.listModels?.args).toEqual(["--pure", "models"]);
+    for (const spec of [antigravity, opencode]) {
+      expect(spec.args).toBeUndefined();
+      expect(spec.runArgs).toBeUndefined();
+      expect(spec.prepare).toBeUndefined();
+    }
   });
 
   it("reads Grok's models from its CLI and passes the pick on the command line", () => {
@@ -437,9 +691,8 @@ sleep 60
     expect(grok.listModels?.args).toEqual(["models"]);
   });
 
-  it("writes valid opencode.json config for OpenCode", () => {
-    const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
-    expect(opencode.prepare).toBeTypeOf("function");
+  it("keeps Claude's bearer out of argv and in a mode-0600 config", () => {
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
     const ctx = {
       mcpUrl: "http://127.0.0.1:8787/mcp",
       bearerToken: "secret-token-xyz",
@@ -447,79 +700,69 @@ sleep 60
     };
     const workDir = join(ctx.dataDir, "agent-workdir");
     mkdirSync(workDir, { recursive: true });
-    opencode.prepare!(ctx, workDir, {});
-    const content = JSON.parse(readFileSync(join(workDir, "opencode.json"), "utf8"));
+    claude.prepare!(ctx, workDir, {});
+    const path = join(workDir, "claude-mcp.json");
+    const args = claudeTurnArgs(ctx, {
+      prompt: "what came in?",
+      system: "be brief",
+      sessionId: null,
+    });
+    expect(args.join(" ")).not.toContain(ctx.bearerToken);
+    expect(args[args.indexOf("--mcp-config") + 1]).toBe(path);
+    const content = JSON.parse(readFileSync(path, "utf8"));
     expect(content).toEqual({
-      $schema: "https://opencode.ai/config.json",
-      model: "opencode/big-pickle",
-      mcp: {
+      mcpServers: {
         boxaide: {
-          type: "remote",
+          type: "http",
           url: ctx.mcpUrl,
-          enabled: true,
-          oauth: false,
-          timeout: 120_000,
           headers: {
             Authorization: `Bearer ${ctx.bearerToken}`,
           },
         },
       },
     });
-  });
-
-  it("launches OpenCode pinned to the empty workdir with an isolated config", () => {
-    const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
-    const ctx = {
-      mcpUrl: "http://127.0.0.1:8787/mcp",
-      bearerToken: "secret-token-xyz",
-      dataDir: tempDir(),
-    };
-    const workDir = join(ctx.dataDir, "agent-workdir");
-    // Chat runs the server; the driver holds the loop and passes --dir's job
-    // as ?directory= per call.
-    const args = opencode.args!(ctx);
-    expect(args[0]).toBe("--pure");
-    expect(args).toContain("serve");
-    expect(args[args.indexOf("--port") + 1]).toBe("0");
-    expect(args[args.indexOf("--hostname") + 1]).toBe("127.0.0.1");
-    expect(opencode.drive).toBeTypeOf("function");
-    expect(opencode.readEvent).toBeTypeOf("function");
-
-    mkdirSync(workDir, { recursive: true });
-    opencode.prepare!(ctx, workDir, {});
-    const env = opencode.childEnv!(ctx, workDir);
-    expect(env.XDG_CONFIG_HOME).toBe(join(ctx.dataDir, "agent-homes", "opencode", "config"));
-    expect(env.OPENCODE_CONFIG).toBe(join(workDir, "opencode.json"));
-    // A fresh server password per launch, readable by the driver.
-    expect(env.OPENCODE_SERVER_PASSWORD).toBeTruthy();
-    expect(opencode.childEnv!(ctx, workDir).OPENCODE_SERVER_PASSWORD).not.toBe(
-      env.OPENCODE_SERVER_PASSWORD,
-    );
-    // The automation path is unchanged: still a one-shot `run`.
-    expect(opencode.runArgs!(ctx, "do the thing")).toContain("run");
-    expect(opencode.runArgs!(ctx, "do the thing")[
-      opencode.runArgs!(ctx, "do the thing").indexOf("--dir") + 1
-    ]).toBe(workDir);
-    expect(opencode.runArgs!(ctx, "do the thing")).toContain("--dir");
-    expect(opencode.runArgs!(ctx, "do the thing")).not.toContain("--format");
+    const mode = statSync(path).mode & 0o777;
+    expect(mode).toBe(0o600);
   });
 
   it("pre-approves read and draft tools and never message_send", () => {
-    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code");
-    const args = claude!.args!(CTX);
+    const args = claudeTurnArgs(CTX, { prompt: "hi", system: "s", sessionId: null });
     const allowed = args[args.indexOf("--allowedTools") + 1];
     expect(allowed).toContain("mcp__boxaide__draft_create");
-    expect(allowed).toContain("mcp__boxaide__chat_await_message");
     expect(allowed).not.toContain("message_send");
     // The agent must not inherit the user's other MCP servers.
     expect(args).toContain("--strict-mcp-config");
   });
 
+  it("keeps the loop's tools off a driven session's allowlist, but not chat_history", () => {
+    // Boxaide holds the loop for Claude Code, so its model must not be able to
+    // ask for a message: two askers on one channel is a double answer.
+    const args = claudeTurnArgs(CTX, { prompt: "hi", system: "s", sessionId: null });
+    const allowed = args[args.indexOf("--allowedTools") + 1];
+    expect(allowed).not.toContain("chat_await_message");
+    expect(allowed).not.toContain("chat_say");
+    expect(allowed).not.toContain("chat_activity");
+    // chat_history takes no lease, the MCP server does not refuse it for a
+    // driven session, and it is how a session whose resume was refused reads
+    // back what it no longer remembers.
+    expect(allowed).toContain("mcp__boxaide__chat_history");
+    // Which the framing has to agree with, or the model will not call it.
+    expect(DRIVEN_SYSTEM).toContain("chat_history");
+
+    // A KICKOFF launch still needs them all: there the model runs the loop.
+    const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
+    expect(grok.args!(CTX)).toContain("MCPTool(boxaide__chat_await_message)");
+
+    // A scheduled run gets none of it: there is no conversation to be in.
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const run = claude.runArgs!(CTX, "do the thing");
+    expect(run[run.indexOf("--allowedTools") + 1]).not.toContain("chat_");
+  });
+
   it("pre-approves the platform tools for the interactive agent too", () => {
     // The Automations UI tells users to ask the in-app agent to create an
     // automation; before this, only the scheduled path knew those tools.
-    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
-    const args = claude.args!(CTX);
+    const args = claudeTurnArgs(CTX, { prompt: "hi", system: "s", sessionId: null });
     const allowed = args[args.indexOf("--allowedTools") + 1];
     expect(allowed).toContain("mcp__boxaide__automation_create");
     expect(allowed).toContain("mcp__boxaide__crm_contact_upsert");
@@ -536,14 +779,6 @@ sleep 60
   it("asks the chat agent for its event stream, and a run for plain text", () => {
     // The stream is how the Agent pane knows a launched CLI is still working
     // while it does its own file and shell work, calling nothing here.
-    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
-    const claudeArgs = claude.args!(CTX);
-    expect(claudeArgs[claudeArgs.indexOf("--output-format") + 1]).toBe(
-      "stream-json",
-    );
-    expect(claudeArgs).toContain("--verbose");
-    expect(claude.readEvent).toBeTypeOf("function");
-
     const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
     const grokArgs = grok.args!(CTX);
     expect(grokArgs[grokArgs.indexOf("--output-format") + 1]).toBe(
@@ -551,9 +786,94 @@ sleep 60
     );
     expect(grok.readEvent).toBeTypeOf("function");
 
-    // A scheduled run has no pane to update, and its log is read by a human.
-    expect(claude.runArgs!(CTX, "do the thing")).not.toContain("--output-format");
+    // Grok's run still writes plain text; Claude's `-p` prints nothing at all
+    // until it exits, so its run asks for the stream and renders it instead.
     expect(grok.runArgs!(CTX, "do the thing")).not.toContain("--output-format");
+    expect(grok.renderRunLine).toBeUndefined();
+  });
+
+  it("streams a Claude run so its log is readable while it works", () => {
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const args = claude.runArgs!(CTX, "do the thing");
+    expect(args[args.indexOf("--output-format") + 1]).toBe("stream-json");
+    expect(args).toContain("--verbose");
+    expect(claude.renderRunLine).toBeTypeOf("function");
+    // The run wiring is otherwise untouched.
+    expect(args[0]).toBe("-p");
+    expect(args).toContain("--strict-mcp-config");
+    const allowed = args[args.indexOf("--allowedTools") + 1];
+    expect(allowed).not.toContain("chat_await_message");
+    expect(allowed).not.toContain("message_send");
+  });
+
+  it("gives Claude its own config home so a run cannot load the user's setup", () => {
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const ctx = { ...CTX, dataDir: tempDir() };
+    const workDir = join(ctx.dataDir, "agent-workdir");
+    mkdirSync(workDir, { recursive: true });
+    const home = join(ctx.dataDir, "agent-homes", "claude");
+    expect(claude.childEnv!(ctx, workDir).CLAUDE_CONFIG_DIR).toBe(home);
+
+    // No credentials file (macOS keychain auth): the home exists, empty.
+    const bareParent = tempDir();
+    claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: bareParent });
+    expect(existsSync(home)).toBe(true);
+    expect(existsSync(join(home, ".credentials.json"))).toBe(false);
+    expect(existsSync(join(home, "settings.json"))).toBe(false);
+
+    // With one, it is copied so the isolated home still authenticates. Never a
+    // symlink: the CLI rewrites this file on a token refresh, and through a
+    // link that write would land in the user's own ~/.claude.
+    writeFileSync(join(bareParent, ".credentials.json"), '{"token":"x"}');
+    claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: bareParent });
+    const copied = join(home, ".credentials.json");
+    // O_NOFOLLOW: a leftover symlink would throw instead of reading through.
+    expect(readRegular(copied)).toBe('{"token":"x"}');
+
+    // And it is refreshed per launch, so a rotated token is not left behind.
+    writeFileSync(join(bareParent, ".credentials.json"), '{"token":"y"}');
+    claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: bareParent });
+    expect(readRegular(copied)).toBe('{"token":"y"}');
+  });
+
+  it("carries only Claude's auth settings across the isolation boundary", () => {
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    /** Prepares a fresh isolated home against the given parent settings.json. */
+    function prepareWith(settings: string | null): string {
+      const ctx = { ...CTX, dataDir: tempDir() };
+      const workDir = join(ctx.dataDir, "agent-workdir");
+      mkdirSync(workDir, { recursive: true });
+      const parent = tempDir();
+      if (settings !== null) {
+        writeFileSync(join(parent, "settings.json"), settings);
+      }
+      claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: parent });
+      return join(ctx.dataDir, "agent-homes", "claude", "settings.json");
+    }
+
+    // Users who authenticate through settings.json have no credentials file at
+    // all, so `env` and `apiKeyHelper` must survive isolation. Nothing else
+    // does — hooks and statusLine are what the isolated home exists to exclude.
+    const written = prepareWith(
+      JSON.stringify({
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+        apiKeyHelper: "/bin/echo sk-test",
+        hooks: { PreToolUse: [{ matcher: "Bash", hooks: [] }] },
+        statusLine: { type: "command", command: "whoami" },
+        outputStyle: "ste",
+        model: "claude-opus-5",
+      }),
+    );
+    expect(JSON.parse(readFileSync(written, "utf8"))).toEqual({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      apiKeyHelper: "/bin/echo sk-test",
+    });
+
+    // Nothing to carry, no file at all: absent, auth-free, and malformed all
+    // leave the isolated home alone instead of failing the launch.
+    expect(existsSync(prepareWith(null))).toBe(false);
+    expect(existsSync(prepareWith('{"hooks":{},"outputStyle":"ste"}'))).toBe(false);
+    expect(existsSync(prepareWith("{ not json"))).toBe(false);
   });
 
   it("leaves Grok's own web tools at the CLI default on a one-shot run", () => {
@@ -626,6 +946,162 @@ sleep 60
   });
 });
 
+describe("one-shot automation runs", () => {
+  /**
+   * A launcher over one fake CLI that carries runs. Streaming by default —
+   * `renderRunLine` is what arms the first-output watchdog, so a spec without
+   * it stands in for the CLIs that print nothing until they are done.
+   */
+  function runner(script: string, streaming = true): AgentLauncher {
+    const bin = fakeBinDir("fake-agent", script);
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({
+        runArgs: () => [],
+        ...(streaming ? { renderRunLine: renderClaudeRunLine } : {}),
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+    return launcher;
+  }
+
+  it("renders a stream-json run into a log a person can read", async () => {
+    const launcher = runner(
+      `#!/bin/sh
+printf '{"type":"system","subtype":"init","model":"claude-opus-5"}\\n'
+printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__boxaide__messages_list"}]}}\\n'
+printf '{"type":"result","subtype":"success","result":"filed two threads"}\\n'
+`,
+    );
+    const result = await launcher.runOnce({ prompt: "do the thing" });
+    expect(result.status).toBe("ok");
+    expect(result.log).toContain("[claude] session started (model claude-opus-5)");
+    expect(result.log).toContain("[tool] messages_list");
+    expect(result.log).toContain("[claude] result: filed two threads");
+    // The raw NDJSON never reaches the log.
+    expect(result.log).not.toContain('"type":"assistant"');
+  });
+
+  it("kills a run that never writes anything, and says so", async () => {
+    const launcher = runner("#!/bin/sh\nexec /bin/sleep 30\n");
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      firstOutputTimeoutMs: 200,
+    });
+    // 'error', not 'killed': a run that never spoke did not start.
+    expect(result.status).toBe("error");
+    expect(result.log).toContain(oneShotSilentNote(200));
+  });
+
+  it("lets a run that already spoke wait for the deadline", async () => {
+    // First stdout disarms the watchdog. A quiet stretch after that is a long
+    // tool, not a hang; only the deadline may stop it.
+    const launcher = runner("#!/bin/sh\necho working\nexec /bin/sleep 30\n");
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      firstOutputTimeoutMs: 400,
+      timeoutMs: 900,
+    });
+    expect(result.status).toBe("killed");
+    expect(result.log).toContain("working");
+    expect(result.log).toContain(oneShotDeadlineNote(900));
+    expect(result.log).not.toContain(oneShotSilentNote(400));
+  });
+
+  it("leaves a run that spoke once alone, even when it then goes quiet", async () => {
+    const launcher = runner(
+      "#!/bin/sh\necho working\n/bin/sleep 0.8\necho done\n",
+    );
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      firstOutputTimeoutMs: 400,
+    });
+    expect(result.status).toBe("ok");
+    expect(result.log).toContain("working");
+    expect(result.log).toContain("done");
+    expect(result.log).not.toContain("[boxaide] stopped");
+  });
+
+  it("does not watch a run whose CLI never narrates itself", async () => {
+    // Antigravity, OpenCode and Grok runs print nothing until they finish.
+    // Silence is their healthy state, and killing them for it killed real runs.
+    const launcher = runner("#!/bin/sh\n/bin/sleep 1\necho done\n", false);
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      firstOutputTimeoutMs: 200,
+    });
+    expect(result.status).toBe("ok");
+    expect(result.log).toContain("done");
+    expect(result.log).not.toContain("[boxaide] stopped");
+  });
+
+  it("does not let stderr noise stand in for the agent speaking", async () => {
+    // Update checks and deprecation warnings arrive on stderr from a process
+    // whose session never started. Only stdout is the agent working.
+    const launcher = runner(
+      `#!/bin/sh
+i=0
+while [ $i -lt 25 ]; do echo noise >&2; /bin/sleep 0.1; i=$((i+1)); done
+exec /bin/sleep 30
+`,
+    );
+    const started = Date.now();
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      firstOutputTimeoutMs: 300,
+      closeGraceMs: 300,
+    });
+    expect(result.status).toBe("error");
+    expect(result.log).toContain(oneShotSilentNote(300));
+    // The kill lands while the noise is still flowing. Elapsed is the whole
+    // assertion: a timer fed by stderr would instead run out the 2.5s of it.
+    expect(Date.now() - started).toBeLessThan(1_500);
+  });
+
+  it("keeps a killed run's unfinished last line in the log", async () => {
+    // No trailing newline, so the splitter is still holding it when the kill
+    // lands. It is the best evidence of what the run was doing when it died.
+    const launcher = runner(
+      "#!/bin/sh\nprintf 'halfway through a thought'\nexec /bin/sleep 30\n",
+    );
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      timeoutMs: 400,
+      firstOutputTimeoutMs: 10_000,
+    });
+    expect(result.status).toBe("killed");
+    expect(result.log).toContain("halfway through a thought");
+  });
+
+  it("explains a deadline kill in the log with the deadline it actually used", async () => {
+    const launcher = runner("#!/bin/sh\nexec /bin/sleep 30\n");
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      timeoutMs: 200,
+      firstOutputTimeoutMs: 10_000,
+    });
+    expect(result.status).toBe("killed");
+    expect(result.log).toContain(oneShotDeadlineNote(200));
+    // The note states the real window, not a hardcoded 15 minutes.
+    expect(result.log).toContain("0.2-second");
+    expect(oneShotDeadlineNote(15 * 60 * 1000)).toContain("15-minute");
+  });
+
+  it("finishes when the agent exits, not when the last pipe holder does", async () => {
+    // A detached grandchild inherits stdout and keeps it open long after the
+    // agent is gone. Waiting for "close" reported that wait as run duration.
+    const launcher = runner("#!/bin/sh\n/bin/sleep 3 &\necho done\nexit 0\n");
+    const started = Date.now();
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      closeGraceMs: 200,
+    });
+    expect(result.status).toBe("ok");
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
+
 describe("launcher routes", () => {
   it("requires auth, lists agents, and maps LaunchError to its status", async () => {
     const { createRuntime } = await import("../src/app.js");
@@ -657,10 +1133,10 @@ describe("launcher routes", () => {
     expect(body.agents.map((a: { id: string }) => a.id)).toContain("opencode");
     expect(body.agents.map((a: { id: string }) => a.id)).not.toContain("gemini");
     expect(body.agents.find((a: { id: string }) => a.id === "antigravity")?.supported).toBe(
-      true,
+      false,
     );
     expect(body.agents.find((a: { id: string }) => a.id === "opencode")?.supported).toBe(
-      true,
+      false,
     );
     expect(body.agents.find((a: { id: string }) => a.id === "grok")?.supported).toBe(
       true,

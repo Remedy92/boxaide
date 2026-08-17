@@ -233,9 +233,12 @@ agent is a local CLI you already have — Claude Code, Grok, Codex, Cursor,
 Claude Desktop — talking MCP. The four `chat_*` tools hold the conversation in
 the Boxaide window instead of in that client's terminal.
 
-**Start** / **Stop** on the rail spawn or kill the installed CLI and feed it
-the kickoff prompt (`src/agent/launcher.ts`). You can still paste the same
-loop into a client you launched yourself:
+**Start** / **Stop** on the rail run or kill the installed CLI
+(`src/agent/launcher.ts`). For Claude Code, Boxaide holds the loop itself and
+the CLI is only asked to answer one message at a time — so the conversation
+cannot end because a model decided it was finished. The others are handed the
+kickoff prompt below and run the loop themselves. Either way you can still
+paste that loop into a client you launched yourself:
 
 ```
 You are my Boxaide inbox agent. Use the Boxaide MCP tools.
@@ -393,7 +396,7 @@ Each `BOXAIDE_*` name is preferred. Then `SLEY_*`, then `MAILMUX_*`.
 
 The default binds to loopback, so only your own machine can reach the server. Change it and the server answers on the network, where the bearer token is the only thing between a stranger and your mail.
 
-One behaviour changes on a non-loopback bind: `/api/local-bootstrap`, which hands out the bearer token in plaintext, answers `404` and hands out nothing. Its `Host` and `Origin` checks are browser guards, and a remote client picks both headers itself. Paste the token in by hand instead; it is in `~/.boxaide/bearer.token`.
+One behaviour changes on a non-loopback bind: `/api/local-bootstrap`, which exchanges the desktop app's one-time capability for the bearer token, answers `404` and hands out nothing. A normal browser never receives that capability, including on loopback. Paste the token in by hand instead; it is in `~/.boxaide/bearer.token`.
 
 ### Master key (`BOXAIDE_MASTER_KEY`)
 
@@ -435,7 +438,7 @@ Rules:
 - Anyone who can serve a page at that exact hostname can reach your server **if they also have your bearer token**. On shared hosting platforms that includes preview deployments and anyone with deploy access. Prefer a custom domain you control over a platform-assigned hostname.
 - It is the only remaining barrier against a DNS-rebinding page reaching your loopback service, so the list should stay as short as you can make it.
 - The token is still required on every request. `Access-Control-Allow-Credentials` is never sent — Boxaide authenticates by header, never by cookie — so no page can ride ambient credentials.
-- `/api/local-bootstrap`, which hands out the bearer token in plaintext, is **not** widened by this variable. It stays loopback-only. A remote page must have its token pasted in by a human.
+- `/api/local-bootstrap` is **not** widened by this variable. It requires loopback plus the desktop shell's one-time capability. A browser page must have its token pasted in by a human.
 
 ## Architecture
 

@@ -13,11 +13,13 @@ import { displayName } from "@/lib/format/address";
 import { formatListDate } from "@/lib/format/date";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
+import { takeDesktopBootstrapCapability } from "@/lib/desktop-bootstrap";
 
 /**
  * The menu-bar popover. Loaded by the desktop shell's tray window at `/tray/`,
- * always same-origin with the server, so `/api/local-bootstrap` supplies the
- * token even when this window never went through the wizard.
+ * always same-origin with the server. It normally reads the token already
+ * saved by the main desktop window; a fragment capability is supported for a
+ * direct shell launch without weakening bootstrap for ordinary browsers.
  *
  * It is a glance, not a client: recent mail, whether an agent is listening,
  * one button into the app. Clicking anything that needs more room navigates
@@ -47,12 +49,19 @@ function useTrayCtx() {
   const [origin] = React.useState(() =>
     typeof window === "undefined" ? "" : window.location.origin,
   );
+  const [bootstrapCapability] = React.useState(takeDesktopBootstrapCapability);
 
   const bootstrap = useQuery({
     queryKey: ["tray-bootstrap", origin],
-    enabled: origin.length > 0 && settings.token.length === 0,
+    enabled:
+      origin.length > 0 &&
+      settings.token.length === 0 &&
+      bootstrapCapability.length > 0,
     queryFn: ({ signal }) =>
-      getLocalBootstrap({ baseUrl: origin, token: "", signal }),
+      getLocalBootstrap(
+        { baseUrl: origin, token: "", signal },
+        bootstrapCapability,
+      ),
     staleTime: Infinity,
     retry: false,
   });

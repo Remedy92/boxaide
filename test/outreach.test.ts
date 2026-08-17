@@ -8,7 +8,11 @@ import { MailService } from "../src/mail/service.js";
 import { createPlatform, type Platform } from "../src/platform.js";
 import type { AgentLauncher } from "../src/agent/launcher.js";
 import { OutreachEngine, renderTemplate } from "../src/outreach/engine.js";
-import { OPT_OUT_FOOTER } from "../src/outreach/store.js";
+import {
+  MAX_CAMPAIGN_CONTACTS_PER_REQUEST,
+  MAX_OUTREACH_BODY_BYTES,
+  OPT_OUT_FOOTER,
+} from "../src/outreach/store.js";
 import { OPT_OUT_KEYWORD, optOutIntent } from "../src/outreach/opt-out.js";
 import { dispatchOutreachTool, OUTREACH_TOOLS } from "../src/outreach/tools.js";
 import { registerOutreachRoutes } from "../src/outreach/routes.js";
@@ -169,6 +173,27 @@ describe("outreach", () => {
     platform.outreachStore.updateCampaign(campaign.id, { status: "active" });
     return campaign;
   }
+
+  it("bounds campaign bodies and bulk contact additions", () => {
+    expect(() =>
+      platform.outreachStore.createCampaign({
+        name: "oversized",
+        accountId,
+        steps: [{ subject: "hello", body: "x".repeat(MAX_OUTREACH_BODY_BYTES + 1) }],
+      }),
+    ).toThrow(/step body must be at most/);
+
+    const campaign = makeCampaign();
+    expect(() =>
+      platform.outreachStore.addCampaignContacts(
+        campaign.id,
+        Array.from(
+          { length: MAX_CAMPAIGN_CONTACTS_PER_REQUEST + 1 },
+          (_, index) => `contact-${index}`,
+        ),
+      ),
+    ).toThrow(/contactIds must contain at most/);
+  });
 
   /* ---- lifecycle ------------------------------------------------------ */
 

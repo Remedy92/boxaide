@@ -28,6 +28,8 @@ export type Options = {
   token: string;
   /** Extra facts for the transport classifier when a fetch throws (§7.4). */
   transport?: TransportContext;
+  /** Narrow escape hatch for non-auth headers such as desktop bootstrap. */
+  headers?: Readonly<Record<string, string>>;
 };
 
 /** Strip trailing slashes so `${base}${path}` never doubles up. */
@@ -38,7 +40,7 @@ export function normalizeBaseUrl(baseUrl: string): string {
 export async function request<T>(path: string, o: Options): Promise<T> {
   if (!o.baseUrl) throw new ApiError("No server URL set.", 0, "no-base-url", "");
   const url = `${normalizeBaseUrl(o.baseUrl)}${path}`;
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...o.headers };
   if (o.token) headers.Authorization = `Bearer ${o.token}`;
   if (o.body !== undefined) headers["Content-Type"] = "application/json";
 

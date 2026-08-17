@@ -3,6 +3,7 @@
 import { BookOpen, Plug } from "lucide-react";
 import { toast } from "sonner";
 import { SectionLabel, Spinner } from "@/components/atoms";
+import { agentExitedBadly } from "@/components/rail/agent-exit";
 import { NavItem } from "@/components/rail/nav-item";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -110,10 +111,7 @@ function LocalAgentList() {
         const model = agent.models.some((m) => m.id === agentModel)
           ? agentModel
           : undefined;
-        // A crash is only worth surfacing on the agent it belongs to, and
-        // only until the next successful start replaces it.
-        const crashed =
-          !running && lastExit?.id === agent.id && lastExit.code !== 0;
+        const crashed = agentExitedBadly(agent.id, { running, lastExit });
         return (
           <div
             key={agent.id}
