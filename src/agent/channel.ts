@@ -44,6 +44,7 @@ import {
   type Store,
   type StoredChat,
   type StoredTurn,
+  type UnclaimResult,
 } from "../db/store.js";
 
 export type Turn = StoredTurn;
@@ -798,12 +799,21 @@ export class AgentChannel {
   /**
    * Ends the in-memory hold and writes that to disk. A released row is offered
    * to the next waiter; a dead-lettered one stays claimed for the UI warning.
+   *
+   * The result is returned because a driven loop needs it: `dead_lettered` is
+   * this channel saying the message will never be handed over again, which is
+   * the one failure retrying cannot fix.
    */
-  releaseLease(seq: number, options: { revertAttempt?: boolean } = {}): void {
+  releaseLease(seq: number, options: { revertAttempt?: boolean } = {}): UnclaimResult {
     if (this.work?.seq === seq) this.work = null;
+    // Closed is shutdown, and the store may already be closed with it — the same
+    // reason awaitUserTurn answers null rather than reaching for a row. A driver
+    // parked here is being stopped, and the next process releases orphan leases.
+    if (this.closed) return "missing";
     const result = this.store.unclaimUserTurn(seq, options);
     if (result === "released") this.handOff();
     else this.emitPresence();
+    return result;
   }
 
   private releaseWork(options: { revertAttempt?: boolean } = {}): void {

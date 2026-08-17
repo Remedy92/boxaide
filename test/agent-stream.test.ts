@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  claudeTurnReader,
   lineSplitter,
-  readClaudeEvent,
+  readClaudeLine,
   readGrokEvent,
   readOpenCodeEvent,
   renderClaudeRunLine,
+  type ClaudeTurnOutcome,
 } from "../src/agent/agent-stream.js";
 
 /**
@@ -13,7 +15,11 @@ import {
  * streaming-json` against a prompt that reads a file. Hand-written shapes would
  * only prove this file agrees with itself.
  */
-describe("readClaudeEvent", () => {
+function outcome(): ClaudeTurnOutcome {
+  return { text: null, sessionId: null, error: null };
+}
+
+describe("readClaudeLine", () => {
   it("names the tool on an assistant tool_use block", () => {
     const line = JSON.stringify({
       type: "assistant",
@@ -24,7 +30,7 @@ describe("readClaudeEvent", () => {
         ],
       },
     });
-    expect(readClaudeEvent(line)).toBe("Read");
+    expect(readClaudeLine(line, outcome())).toBe("Read");
   });
 
   it("strips the MCP prefix so Boxaide's own tools keep one name", () => {
@@ -34,7 +40,7 @@ describe("readClaudeEvent", () => {
         content: [{ type: "tool_use", name: "mcp__boxaide__messages_list" }],
       },
     });
-    expect(readClaudeEvent(line)).toBe("messages_list");
+    expect(readClaudeLine(line, outcome())).toBe("messages_list");
   });
 
   it("names nothing for text, results and hook records", () => {
@@ -44,13 +50,106 @@ describe("readClaudeEvent", () => {
       { type: "system", subtype: "hook_started", hook_name: "SessionStart" },
       { type: "result", subtype: "success" },
     ]) {
-      expect(readClaudeEvent(JSON.stringify(event))).toBeNull();
+      expect(readClaudeLine(JSON.stringify(event), outcome())).toBeNull();
     }
   });
 
   it("survives a line that is not JSON", () => {
-    expect(readClaudeEvent("Loading...")).toBeNull();
-    expect(readClaudeEvent("{ truncated")).toBeNull();
+    expect(readClaudeLine("Loading...", outcome())).toBeNull();
+    expect(readClaudeLine("{ truncated", outcome())).toBeNull();
+  });
+
+  it("reads the session id off any line, and the answer off the result", () => {
+    const found = outcome();
+    readClaudeLine(
+      JSON.stringify({ type: "system", subtype: "init", session_id: "ses-1" }),
+      found,
+    );
+    expect(found.sessionId).toBe("ses-1");
+    // A tool line is both a label and part of the turn: one parse serves both.
+    expect(
+      readClaudeLine(
+        JSON.stringify({
+          type: "assistant",
+          session_id: "ses-1",
+          message: { content: [{ type: "tool_use", name: "Bash" }] },
+        }),
+        found,
+      ),
+    ).toBe("Bash");
+    readClaudeLine(
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "  two invoices came in  ",
+        session_id: "ses-1",
+      }),
+      found,
+    );
+    expect(found).toEqual({
+      text: "two invoices came in",
+      sessionId: "ses-1",
+      error: null,
+    });
+  });
+
+  it("reads a refused resume as the turn's error, with the session it reported", () => {
+    const found = outcome();
+    readClaudeLine(
+      JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["No conversation found with session ID: ses-gone"],
+        session_id: "ses-gone",
+      }),
+      found,
+    );
+    expect(found.text).toBeNull();
+    expect(found.sessionId).toBe("ses-gone");
+    expect(found.error).toContain("No conversation found");
+  });
+});
+
+describe("claudeTurnReader", () => {
+  it("reports every line as liveness and keeps the answer", () => {
+    const found = outcome();
+    const tools: Array<string | null> = [];
+    const feed = claudeTurnReader(found, (tool) => tools.push(tool));
+    feed(`${JSON.stringify({ type: "system", session_id: "ses-1" })}\n`);
+    feed(
+      `${JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", name: "Grep" }] },
+      })}\n`,
+    );
+    feed(
+      `${JSON.stringify({ type: "result", is_error: false, result: "done" })}\n`,
+    );
+    expect(tools).toEqual([null, "Grep", null]);
+    expect(found).toEqual({ text: "done", sessionId: "ses-1", error: null });
+  });
+
+  it("reads a result line that arrived without its closing newline", () => {
+    const found = outcome();
+    const feed = claudeTurnReader(found, () => {});
+    // The CLI is not required to newline-terminate its last write, and the last
+    // thing a turn writes is what the turn is worth.
+    feed(JSON.stringify({ type: "result", is_error: false, result: "the answer" }));
+    expect(found.text).toBeNull();
+    feed.flush();
+    expect(found.text).toBe("the answer");
+  });
+
+  it("keeps a result line far past the presence reader's cap", () => {
+    const found = outcome();
+    const feed = claudeTurnReader(found, () => {});
+    // Over 256KB: the presence cap would drop this, scoring a finished turn as
+    // "no answer", re-running it and dead-lettering the message.
+    const long = "x".repeat(400_000);
+    feed(`${JSON.stringify({ type: "result", is_error: false, result: long })}\n`);
+    expect(found.text).toHaveLength(400_000);
   });
 });
 
@@ -274,5 +373,25 @@ describe("lineSplitter", () => {
     feed.flush();
     feed.flush();
     expect(seen).toEqual(["done"]);
+  });
+
+  it("flushes the unterminated tail, and nothing when there is none", () => {
+    const seen: string[] = [];
+    const feed = lineSplitter((line) => seen.push(line));
+    feed("done\ntrailing");
+    feed.flush();
+    expect(seen).toEqual(["done", "trailing"]);
+    // Flushing twice, or on an empty buffer, reports nothing.
+    feed.flush();
+    expect(seen).toEqual(["done", "trailing"]);
+  });
+
+  it("flushes nothing from a line it already gave up on", () => {
+    const seen: string[] = [];
+    const feed = lineSplitter((line) => seen.push(line), { maxLine: 100 });
+    feed("x".repeat(200));
+    expect(seen).toEqual(["x".repeat(100)]);
+    feed.flush();
+    expect(seen).toEqual(["x".repeat(100)]);
   });
 });

@@ -23,11 +23,14 @@ import {
   AgentLauncher,
   KNOWN_AGENTS,
   LaunchError,
+  claudeTurnArgs,
   oneShotDeadlineNote,
   oneShotSilentNote,
   type AgentSpec,
+  type DriveOptions,
 } from "../src/agent/launcher.js";
 import { renderClaudeRunLine } from "../src/agent/agent-stream.js";
+import { DRIVEN_SYSTEM, type DriverChannel } from "../src/agent/driver.js";
 import { parseTabbedModels } from "../src/agent/model-list.js";
 
 const cleanups: (() => void)[] = [];
@@ -77,6 +80,22 @@ function specs(over: Partial<AgentSpec> = {}): AgentSpec[] {
       ...over,
     },
   ];
+}
+
+/**
+ * Enough of the channel to satisfy a spec's `drive`. The launcher only checks
+ * that one is there; what a driver does with it is the driver tests' business.
+ */
+function fakeChannel(): DriverChannel {
+  return {
+    awaitUserTurn: () => new Promise(() => {}),
+    post: () => undefined,
+    releaseLease: () => "released",
+    noteAgentActivity: () => {},
+    setDriven: () => {},
+    needsTitle: () => false,
+    nameChat: () => false,
+  };
 }
 
 async function until(check: () => boolean, ms = 3_000): Promise<void> {
@@ -133,6 +152,155 @@ describe("AgentLauncher", () => {
     expect(seen).toEqual(["fake", null]);
   });
 
+  it("runs a driven agent that has no child of its own", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const seen: Array<string | null> = [];
+    let stop!: (error: string | null) => void;
+    let stopped = 0;
+    let handed!: DriveOptions;
+    const launcher = new AgentLauncher(
+      { ...CTX, channel: fakeChannel(), onRunningChange: (id) => seen.push(id) },
+      specs({
+        args: undefined,
+        drive: (_ctx, opts) => {
+          handed = opts;
+          stop = opts.onStop;
+          return {
+            // Idempotent, as the AgentDriver contract requires, and reporting
+            // the end of its loop from inside stop() — which for an agent with
+            // no child is the only exit there is.
+            stop: () => {
+              if (stopped > 0) return;
+              stopped += 1;
+              opts.onStop(null);
+            },
+          };
+        },
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    const running = await launcher.start("fake");
+    expect(seen).toEqual(["fake"]);
+    // Nothing was spawned, so there is no one process to name.
+    expect(running.pid).toBe(-1);
+    expect(launcher.status().running?.id).toBe("fake");
+    expect(launcher.busy()).toBe(true);
+    // The driver spawns its own children, so it is handed the binary and the
+    // full environment a launcher spawn would have used.
+    expect(handed.child).toBeNull();
+    expect(handed.bin).toBe(join(bin, "fake-agent"));
+    expect(handed.env.PATH).toContain(bin);
+    expect(stop).toBeTypeOf("function");
+
+    launcher.stop();
+    await until(() => launcher.status().running === null);
+    expect(stopped).toBe(1);
+    expect(seen).toEqual(["fake", null]);
+    // Asked for, so not a crash — and no invented exit code: a loop is not a
+    // process, and the rail reads the reason.
+    expect(launcher.status().lastExit).toMatchObject({
+      id: "fake",
+      code: null,
+      reason: "stopped",
+    });
+  });
+
+  it("reports a driver that gave up as an exit the pane can explain", async () => {
+    const bin = fakeBinDir("fake-agent");
+    let give!: (error: string | null) => void;
+    const launcher = new AgentLauncher(
+      { ...CTX, channel: fakeChannel() },
+      specs({
+        args: undefined,
+        drive: (_ctx, opts) => {
+          give = opts.onStop;
+          return { stop: () => {} };
+        },
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    await launcher.start("fake");
+    give("Invalid API key");
+    await until(() => launcher.status().running === null);
+
+    const exit = launcher.status().lastExit;
+    expect(exit?.reason).toBe("error");
+    expect(exit?.code).toBeNull();
+    expect(exit?.stderrTail).toContain("Invalid API key");
+  });
+
+  it("does not leave a running agent behind when its driver cannot start", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const launcher = new AgentLauncher(
+      { ...CTX, channel: fakeChannel() },
+      specs({
+        args: undefined,
+        drive: () => {
+          throw new Error("no session store");
+        },
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    // The launch fails as a launch, rather than reporting an agent that answers
+    // nothing: `running` stuck true would 409 every later start and block the
+    // scheduler until the app restarted.
+    await expect(launcher.start("fake")).rejects.toThrowError(/no session store/);
+    expect(launcher.status().running).toBeNull();
+    expect(launcher.busy()).toBe(false);
+    expect(launcher.status().lastExit).toMatchObject({
+      id: "fake",
+      reason: "error",
+    });
+    expect(launcher.status().lastExit?.stderrTail).toContain("no session store");
+    // And the slot is free, so the next start works.
+    const again = new AgentLauncher(
+      { ...CTX, channel: fakeChannel() },
+      specs({ args: undefined, drive: () => ({ stop: () => {} }) }),
+      { PATH: bin },
+    );
+    cleanups.push(() => again.close());
+    await expect(again.start("fake")).resolves.toMatchObject({ id: "fake" });
+  });
+
+  it("does not wedge when a driven-only spec's driver declines", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const launcher = new AgentLauncher(
+      // A channel is there, so the guard at the top of start() passes and the
+      // decline can only be seen after the launch was recorded.
+      { ...CTX, channel: fakeChannel() },
+      specs({ args: undefined, drive: () => null }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    await expect(launcher.start("fake")).rejects.toThrowError(
+      /could not start its loop/,
+    );
+    expect(launcher.status().running).toBeNull();
+    expect(launcher.busy()).toBe(false);
+  });
+
+  it("refuses a driven launch in a process with no conversation", async () => {
+    // A driven agent is nothing but its loop, and a loop needs a channel to
+    // wait on. Reporting a running agent that answers nothing is worse.
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({ args: undefined, drive: () => null }),
+      { PATH: fakeBinDir("fake-agent") },
+    );
+    await expect(launcher.start("fake")).rejects.toThrowError(
+      /needs the Boxaide conversation/,
+    );
+    expect(launcher.status().running).toBeNull();
+    expect((await launcher.list())[0].supported).toBe(true);
+  });
+
   it("refuses a second agent while one runs", async () => {
     const bin = fakeBinDir("fake-agent");
     const launcher = new AgentLauncher(CTX, specs(), { PATH: bin });
@@ -155,7 +323,25 @@ describe("AgentLauncher", () => {
 
     const exit = launcher.status().lastExit;
     expect(exit?.code).toBe(3);
+    // Nobody asked for this one, so the rail is right to call it out.
+    expect(exit?.reason).toBe("exited");
     expect(exit?.stderrTail).toContain("auth expired");
+  });
+
+  it("records a stop as stopped even though the child dies on a signal", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const launcher = new AgentLauncher(CTX, specs(), { PATH: bin });
+    cleanups.push(() => launcher.close());
+
+    await launcher.start("fake");
+    launcher.stop();
+    await until(() => launcher.status().running === null);
+
+    const exit = launcher.status().lastExit;
+    // SIGTERM leaves no exit code, so the code alone cannot tell this from a
+    // crash. Only the launcher knows it was asked.
+    expect(exit?.code).toBeNull();
+    expect(exit?.reason).toBe("stopped");
   });
 
   it("rejects unknown, unsupported and uninstalled agents with API-shaped errors", async () => {
@@ -422,12 +608,68 @@ sleep 60
     );
   });
 
-  it("adds --model to the Claude command line only when picked", () => {
+  it("launches Claude Code as a driver with no long-lived child", () => {
     const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
-    expect(claude.args!(CTX)).not.toContain("--model");
-    const withModel = claude.args!(CTX, "claude-fable-5");
+    // `claude` has no server mode, so there is nothing to keep running: the
+    // driver spawns one `-p` process per user turn and resumes across them.
+    expect(claude.args).toBeUndefined();
+    expect(claude.drive).toBeTypeOf("function");
+    // Automations are unchanged — a one-shot prompt already exits when done.
+    expect(claude.runArgs).toBeTypeOf("function");
+  });
+
+  it("adds --model to a Claude turn's command line only when picked", () => {
+    const turn = { prompt: "what came in?", system: "be brief", sessionId: null };
+    expect(claudeTurnArgs(CTX, turn)).not.toContain("--model");
+    const withModel = claudeTurnArgs(CTX, turn, "claude-fable-5");
     expect(withModel[withModel.indexOf("--model") + 1]).toBe("claude-fable-5");
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
     expect(claude.models?.map((m) => m.id)).toContain("claude-fable-5");
+  });
+
+  it("carries the user turn, the framing and the session on a Claude turn", () => {
+    const fresh = claudeTurnArgs(CTX, {
+      prompt: "what came in?",
+      system: "be brief",
+      sessionId: null,
+    });
+    // Last, and behind `--`: the prompt is a positional argument and it is the
+    // user's text verbatim, so option parsing has to be closed first.
+    expect(fresh.slice(-2)).toEqual(["--", "what came in?"]);
+    expect(fresh[fresh.indexOf("--append-system-prompt") + 1]).toBe("be brief");
+    // Nothing to resume yet, and the stream is what the driver reads the
+    // session id, the answer and the presence lines out of.
+    expect(fresh).not.toContain("--resume");
+    expect(fresh[fresh.indexOf("--output-format") + 1]).toBe("stream-json");
+    expect(fresh).toContain("--verbose");
+
+    const resumed = claudeTurnArgs(CTX, {
+      prompt: "anything else?",
+      system: "be brief",
+      sessionId: "ses-1",
+    });
+    expect(resumed[resumed.indexOf("--resume") + 1]).toBe("ses-1");
+  });
+
+  it("hands a dash-leading message to the CLI as a prompt, not as options", () => {
+    // Verified against claude 2.1.233: `-p` is a boolean flag and the prompt is
+    // positional, so `-p --version` prints the version and exits and `-p --help
+    // hi` fails with "unknown option". A chat message may begin with anything.
+    const turn = claudeTurnArgs(CTX, {
+      prompt: "--version --help  what came in?",
+      system: "be brief",
+      sessionId: "ses-1",
+    });
+    expect(turn.slice(-2)).toEqual(["--", "--version --help  what came in?"]);
+    // Exactly one terminator, and nothing after the prompt that could be read
+    // as a flag.
+    expect(turn.filter((arg) => arg === "--")).toHaveLength(1);
+
+    // Automations get the same treatment. Their prompt opens with the run
+    // preamble today, which is the only reason this was not already breaking.
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const run = claude.runArgs!(CTX, "--dangerously-skip-permissions");
+    expect(run.slice(-2)).toEqual(["--", "--dangerously-skip-permissions"]);
   });
 
   it("does not launch agents whose CLIs cannot enforce per-tool permissions", () => {
@@ -460,7 +702,11 @@ sleep 60
     mkdirSync(workDir, { recursive: true });
     claude.prepare!(ctx, workDir, {});
     const path = join(workDir, "claude-mcp.json");
-    const args = claude.args!(ctx);
+    const args = claudeTurnArgs(ctx, {
+      prompt: "what came in?",
+      system: "be brief",
+      sessionId: null,
+    });
     expect(args.join(" ")).not.toContain(ctx.bearerToken);
     expect(args[args.indexOf("--mcp-config") + 1]).toBe(path);
     const content = JSON.parse(readFileSync(path, "utf8"));
@@ -480,21 +726,43 @@ sleep 60
   });
 
   it("pre-approves read and draft tools and never message_send", () => {
-    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code");
-    const args = claude!.args!(CTX);
+    const args = claudeTurnArgs(CTX, { prompt: "hi", system: "s", sessionId: null });
     const allowed = args[args.indexOf("--allowedTools") + 1];
     expect(allowed).toContain("mcp__boxaide__draft_create");
-    expect(allowed).toContain("mcp__boxaide__chat_await_message");
     expect(allowed).not.toContain("message_send");
     // The agent must not inherit the user's other MCP servers.
     expect(args).toContain("--strict-mcp-config");
   });
 
+  it("keeps the loop's tools off a driven session's allowlist, but not chat_history", () => {
+    // Boxaide holds the loop for Claude Code, so its model must not be able to
+    // ask for a message: two askers on one channel is a double answer.
+    const args = claudeTurnArgs(CTX, { prompt: "hi", system: "s", sessionId: null });
+    const allowed = args[args.indexOf("--allowedTools") + 1];
+    expect(allowed).not.toContain("chat_await_message");
+    expect(allowed).not.toContain("chat_say");
+    expect(allowed).not.toContain("chat_activity");
+    // chat_history takes no lease, the MCP server does not refuse it for a
+    // driven session, and it is how a session whose resume was refused reads
+    // back what it no longer remembers.
+    expect(allowed).toContain("mcp__boxaide__chat_history");
+    // Which the framing has to agree with, or the model will not call it.
+    expect(DRIVEN_SYSTEM).toContain("chat_history");
+
+    // A KICKOFF launch still needs them all: there the model runs the loop.
+    const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
+    expect(grok.args!(CTX)).toContain("MCPTool(boxaide__chat_await_message)");
+
+    // A scheduled run gets none of it: there is no conversation to be in.
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const run = claude.runArgs!(CTX, "do the thing");
+    expect(run[run.indexOf("--allowedTools") + 1]).not.toContain("chat_");
+  });
+
   it("pre-approves the platform tools for the interactive agent too", () => {
     // The Automations UI tells users to ask the in-app agent to create an
     // automation; before this, only the scheduled path knew those tools.
-    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
-    const args = claude.args!(CTX);
+    const args = claudeTurnArgs(CTX, { prompt: "hi", system: "s", sessionId: null });
     const allowed = args[args.indexOf("--allowedTools") + 1];
     expect(allowed).toContain("mcp__boxaide__automation_create");
     expect(allowed).toContain("mcp__boxaide__crm_contact_upsert");
@@ -511,14 +779,6 @@ sleep 60
   it("asks the chat agent for its event stream, and a run for plain text", () => {
     // The stream is how the Agent pane knows a launched CLI is still working
     // while it does its own file and shell work, calling nothing here.
-    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
-    const claudeArgs = claude.args!(CTX);
-    expect(claudeArgs[claudeArgs.indexOf("--output-format") + 1]).toBe(
-      "stream-json",
-    );
-    expect(claudeArgs).toContain("--verbose");
-    expect(claude.readEvent).toBeTypeOf("function");
-
     const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
     const grokArgs = grok.args!(CTX);
     expect(grokArgs[grokArgs.indexOf("--output-format") + 1]).toBe(

@@ -1151,9 +1151,19 @@ export type RunningLocalAgent = {
   model: string | null;
 };
 
+/**
+ * Why the last launch ended. Mirrors ExitReason in src/agent/launcher.ts.
+ *
+ * The exit code cannot answer this: a driven agent has no process exit at all,
+ * and a child that was asked to stop dies on a signal with no code. Read the
+ * reason, not the code, to decide whether something went wrong.
+ */
+export type LocalAgentExitReason = "stopped" | "error" | "exited";
+
 export type LocalAgentExit = {
   id: string;
   code: number | null;
+  reason: LocalAgentExitReason;
   at: string;
   stderrTail: string;
 };
