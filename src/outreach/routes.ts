@@ -6,9 +6,14 @@
  */
 import type { Context, Hono } from "hono";
 import type { Platform } from "../platform.js";
-import { MAX_LIMIT } from "../api/routes.js";
+import { MAX_LIST_LIMIT as MAX_LIMIT, parseListLimit } from "../input-limits.js";
 import { readContacts } from "./crm-read.js";
-import type { CampaignStatus, OutboxStatus, StepInput } from "./store.js";
+import {
+  MAX_CAMPAIGN_CONTACTS_PER_REQUEST,
+  type CampaignStatus,
+  type OutboxStatus,
+  type StepInput,
+} from "./store.js";
 
 const OUTBOX_STATUSES: ReadonlySet<string> = new Set([
   "pending",
@@ -23,11 +28,7 @@ function errMessage(err: unknown): string {
 }
 
 function parseLimit(raw: string | undefined): number | null {
-  if (raw === undefined || raw === "") return 50;
-  if (!/^\d+$/.test(raw)) return null;
-  const limit = Number(raw);
-  if (limit < 1 || limit > MAX_LIMIT) return null;
-  return limit;
+  return parseListLimit(raw, 50);
 }
 
 function stepsOf(raw: unknown): StepInput[] {
@@ -102,8 +103,19 @@ export function registerOutreachRoutes(app: Hono, platform: Platform): void {
   app.post("/api/outreach/campaigns/:id/contacts", async (c) => {
     const id = c.req.param("id");
     if (!store.getCampaign(id)) return c.json({ error: "not found" }, 404);
-    const body = await c.req.json<{ contactIds?: string[] }>();
-    const ids = (body.contactIds ?? []).map((v) => String(v));
+    const body = await c.req.json<{ contactIds?: unknown }>();
+    if (!Array.isArray(body.contactIds)) {
+      return c.json({ error: "contactIds must be an array" }, 400);
+    }
+    if (body.contactIds.length > MAX_CAMPAIGN_CONTACTS_PER_REQUEST) {
+      return c.json(
+        {
+          error: `contactIds must contain at most ${MAX_CAMPAIGN_CONTACTS_PER_REQUEST} entries`,
+        },
+        400,
+      );
+    }
+    const ids = body.contactIds.map((v) => String(v));
     const contacts = readContacts(platform.crmStore.db, ids);
     const known = new Set(contacts.map((k) => k.id));
     const refused = contacts

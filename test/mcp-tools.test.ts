@@ -93,6 +93,20 @@ describe("MCP tool surface", () => {
     }
   });
 
+  it("advertises and enforces the same 200-item list ceiling", async () => {
+    const listTool = TOOLS.find((tool) => tool.name === "messages_list")!;
+    expect(listTool.inputSchema.properties.limit).toMatchObject({
+      minimum: 1,
+      maximum: 200,
+    });
+    const result = (await call(mail, "messages_list", {
+      account: "personal",
+      limit: 201,
+    })) as ToolResult & { result: { isError?: boolean } };
+    expect(result.result.isError).toBe(true);
+    expect(payloadOf(result).error).toMatch(/between 1 and 200/);
+  });
+
   it("advertises the platform tools only when a platform is wired, and never an outbox approval tool", async () => {
     const platform = createPlatform({
       db: store.db,

@@ -53,6 +53,6 @@ src/lib/          types, settings, api/ (the only fetch), format/, hooks/
 
 - **Never render `message.bodyHtml`.** It is raw unsanitised sender HTML and there is no sanitiser here. The reader renders `bodyText` only; "View HTML source" shows it escaped inside a `<pre>`. `react/no-danger` is an ESLint error. The only `dangerouslySetInnerHTML` is the desktop UA marker in `layout.tsx`.
 - **Never call `/api/agent-connect`.** Its response embeds the bearer token. The MCP snippet is built client-side from `localStorage`.
-- **`/api/local-bootstrap` is loopback-only.** The setup wizard and the tray popover call it when the page origin is the server and that origin is loopback. Served from anywhere else, a human pastes the token; the server enforces the same boundary.
+- **`/api/local-bootstrap` is desktop-only.** Loopback is not identity. The Electron shell puts a one-time capability in the URL fragment; the page strips and exchanges it. A normal browser pastes the token, even when served by Boxaide itself.
 - **Never fetch outside `src/lib/api/client.ts`.** It is the one place the token becomes an `Authorization` header, and the one place the base URL is resolved.
 - **Only draw what the server can do.** Before adding a control, find its endpoint in `src/api/routes.ts`. There is no archive, delete, move, star, label, snooze, thread or attachment download. Unread and agent presence do exist: `POST /api/messages/:accountId/:messageId/read`, `GET /api/agent/state`, `GET /api/agent/stream`, `GET /api/agents` plus start/stop.

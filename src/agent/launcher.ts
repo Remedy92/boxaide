@@ -21,10 +21,10 @@
  *  - One agent at a time. The channel hands each user message to exactly one
  *    waiter; a second launched agent would race it for every message.
  */
-import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
   copyFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   realpathSync,
@@ -38,20 +38,15 @@ import {
   lineSplitter,
   readClaudeEvent,
   readGrokEvent,
-  readOpenCodeEvent,
   type ReadEvent,
 } from "./agent-stream.js";
 import {
-  OpenCodeDriver,
-  serveBaseUrl,
   type AgentDriver,
   type DriverChannel,
 } from "./opencode-driver.js";
 import {
   fetchModels,
-  parseBareModels,
   parseBulletModels,
-  parseTabbedModels,
   type ModelLister,
   type ModelOption,
 } from "./model-list.js";
@@ -343,6 +338,18 @@ function claudeArgsFor(
     prompt,
     ...(model ? ["--model", model] : []),
     "--mcp-config",
+    join(agentWorkDir(ctx), "claude-mcp.json"),
+    "--strict-mcp-config",
+    "--allowedTools",
+    allowedTools.join(","),
+  ];
+}
+
+/** Keep the primary bearer out of process listings and crash-report argv. */
+function claudePrepare(ctx: LaunchContext, workDir: string): void {
+  const path = join(workDir, "claude-mcp.json");
+  writeFileSync(
+    path,
     JSON.stringify({
       mcpServers: {
         boxaide: {
@@ -352,10 +359,11 @@ function claudeArgsFor(
         },
       },
     }),
-    "--strict-mcp-config",
-    "--allowedTools",
-    allowedTools.join(","),
-  ];
+    { mode: 0o600 },
+  );
+  // writeFile preserves an existing file's mode; force the invariant even if
+  // an earlier build or local user created it more broadly.
+  chmodSync(path, 0o600);
 }
 
 /**
@@ -537,23 +545,6 @@ function refreshLink(from: string, to: string): void {
   }
 }
 
-/**
- * `agy models` prints "id<TAB>Label" for everything the account can reach.
- */
-const ANTIGRAVITY_LISTER: ModelLister = {
-  args: ["models"],
-  parse: parseTabbedModels,
-};
-
-/**
- * `opencode models` prints bare "provider/model" ids. --pure matches how the
- * launcher runs the CLI, so the list is what a launch would actually accept.
- */
-const OPENCODE_LISTER: ModelLister = {
-  args: ["--pure", "models"],
-  parse: parseBareModels,
-};
-
 /** `grok models` prints a bullet list under a prose header. */
 const GROK_LISTER: ModelLister = { args: ["models"], parse: parseBulletModels };
 
@@ -570,190 +561,10 @@ const CLAUDE_MODELS: ModelOption[] = [
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
 ];
 
-/**
- * Pin a model even when the user picked none. OpenCode's own default
- * retries forever when that endpoint is down, and the pane then waits
- * for a chat_await_message that never comes.
- */
-const OPENCODE_DEFAULT_MODEL = "opencode/big-pickle";
-
-/**
- * Antigravity (agy), headless.
- */
-function antigravityArgs(_ctx: LaunchContext, model?: string): string[] {
-  return [
-    "-p",
-    KICKOFF,
-    "--dangerously-skip-permissions",
-    "--output-format",
-    "stream-json",
-    ...(model ? ["--model", model] : []),
-  ];
-}
-
-function antigravityRunArgs(
-  _ctx: LaunchContext,
-  prompt: string,
-  model?: string,
-): string[] {
-  return [
-    "-p",
-    prompt,
-    "--dangerously-skip-permissions",
-    ...(model ? ["--model", model] : []),
-  ];
-}
-
-function antigravityPrepare(ctx: LaunchContext, workDir: string): void {
-  const agentsDir = join(workDir, ".agents");
-  mkdirSync(agentsDir, { recursive: true });
-  writeFileSync(
-    join(agentsDir, "mcp_config.json"),
-    JSON.stringify(
-      {
-        mcpServers: {
-          boxaide: {
-            serverUrl: ctx.mcpUrl,
-            headers: { Authorization: `Bearer ${ctx.bearerToken}` },
-          },
-        },
-      },
-      null,
-      2,
-    ),
-    { mode: 0o600 },
-  );
-}
-
-/**
- * OpenCode, headless.
- *
- * `run` ignores spawn cwd and walks to a git checkout (observed: it left the
- * empty workdir and opened this repo). --dir pins it. Global
- * ~/.config/opencode/opencode.json is merged unless XDG_CONFIG_HOME is
- * elsewhere, and that file on a real machine starts the user's other MCP
- * servers. Auth stays in the default data dir so the process still has keys.
- */
 function agentWorkDir(ctx: LaunchContext): string {
   return ctx.dataDir === ":memory:"
     ? join(tmpdir(), "boxaide-agent")
     : join(ctx.dataDir, "agent-workdir");
-}
-
-function opencodeHomeFor(ctx: LaunchContext): string {
-  const root =
-    ctx.dataDir === ":memory:" ? join(tmpdir(), "boxaide-agent") : ctx.dataDir;
-  return join(root, "agent-homes", "opencode");
-}
-
-/**
- * Chat launch: the server, not a one-shot `run`.
- *
- * `run` answers once and exits, so the loop only exists for as long as the
- * model keeps choosing to call chat_await_message. The server has no such
- * opinion — it stays up and the driver holds the loop (see opencode-driver.ts).
- * The port is 0 and read back off stdout, since a port picked here can be taken
- * by the time the child binds. Errors are printed because a 500 from this
- * server carries only a reference id; the trace goes to stderr.
- */
-function opencodeArgs(_ctx: LaunchContext, _model?: string): string[] {
-  return [
-    "--pure",
-    "serve",
-    "--port",
-    "0",
-    "--hostname",
-    "127.0.0.1",
-    "--print-logs",
-    "--log-level",
-    "ERROR",
-  ];
-}
-
-function opencodeDrive(
-  ctx: LaunchContext,
-  opts: { child: ChildProcess; workDir: string; model?: string; env: Record<string, string> },
-): AgentDriver | null {
-  // Without a channel there is nobody to drive for: the launcher still runs
-  // the server, and the MCP tier is unaffected.
-  if (!ctx.channel) return null;
-  return new OpenCodeDriver({
-    channel: ctx.channel,
-    agent: "opencode",
-    baseUrl: serveBaseUrl(opts.child),
-    directory: agentWorkDir(ctx),
-    password: opts.env.OPENCODE_SERVER_PASSWORD ?? null,
-    model: opts.model ?? OPENCODE_DEFAULT_MODEL,
-  }).start();
-}
-
-function opencodeRunArgs(
-  ctx: LaunchContext,
-  prompt: string,
-  model?: string,
-): string[] {
-  return opencodeArgsFor(ctx, prompt, model, { formatJson: false });
-}
-
-function opencodeArgsFor(
-  ctx: LaunchContext,
-  prompt: string,
-  model: string | undefined,
-  opts: { formatJson: boolean },
-): string[] {
-  return [
-    "--pure",
-    "run",
-    "--auto",
-    "--dir",
-    agentWorkDir(ctx),
-    ...(opts.formatJson ? ["--format", "json"] : []),
-    "--model",
-    model ?? OPENCODE_DEFAULT_MODEL,
-    prompt,
-  ];
-}
-
-function opencodeChildEnv(
-  ctx: LaunchContext,
-  workDir: string,
-): Record<string, string> {
-  return {
-    XDG_CONFIG_HOME: join(opencodeHomeFor(ctx), "config"),
-    OPENCODE_CONFIG: join(workDir, "opencode.json"),
-    // Loopback still means every local account, and this server executes
-    // whatever it is prompted. A fresh secret per launch; the driver gets the
-    // same env map the child was spawned with.
-    OPENCODE_SERVER_PASSWORD: randomUUID(),
-  };
-}
-
-function opencodePrepare(ctx: LaunchContext, workDir: string): void {
-  mkdirSync(join(opencodeHomeFor(ctx), "config"), { recursive: true });
-  writeFileSync(
-    join(workDir, "opencode.json"),
-    JSON.stringify(
-      {
-        $schema: "https://opencode.ai/config.json",
-        model: OPENCODE_DEFAULT_MODEL,
-        mcp: {
-          boxaide: {
-            type: "remote",
-            url: ctx.mcpUrl,
-            enabled: true,
-            oauth: false,
-            timeout: 120_000,
-            headers: {
-              Authorization: `Bearer ${ctx.bearerToken}`,
-            },
-          },
-        },
-      },
-      null,
-      2,
-    ),
-    { mode: 0o600 },
-  );
 }
 
 export const KNOWN_AGENTS: AgentSpec[] = [
@@ -764,6 +575,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     args: claudeArgs,
     runArgs: claudeRunArgs,
     models: CLAUDE_MODELS,
+    prepare: claudePrepare,
     readEvent: readClaudeEvent,
   },
   {
@@ -781,25 +593,15 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     id: "antigravity",
     label: "Antigravity",
     bin: "agy",
-    args: antigravityArgs,
-    runArgs: antigravityRunArgs,
-    listModels: ANTIGRAVITY_LISTER,
-    prepare: antigravityPrepare,
   },
   {
     id: "opencode",
     label: "OpenCode",
     bin: "opencode",
-    args: opencodeArgs,
-    runArgs: opencodeRunArgs,
-    listModels: OPENCODE_LISTER,
-    childEnv: opencodeChildEnv,
-    prepare: opencodePrepare,
-    readEvent: readOpenCodeEvent,
-    drive: opencodeDrive,
   },
-  // Detected and shown, not yet launchable: their CLIs have no verified way
-  // to take an MCP server plus a per-tool allowlist on one command line.
+  // Detected and shown, not launchable: these CLIs have no verified way to
+  // enforce Boxaide's per-tool boundary. A full bearer plus global approval
+  // would let an injected prompt send mail or mutate the platform.
   { id: "codex", label: "Codex", bin: "codex" },
 ];
 

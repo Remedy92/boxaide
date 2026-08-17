@@ -3,7 +3,7 @@
  * scripts — never at a real agent CLI, which would burn the user's account
  * and hang the suite.
  */
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -405,27 +405,14 @@ sleep 60
     expect(claude.models?.map((m) => m.id)).toContain("claude-fable-5");
   });
 
-  it("adds --model to Antigravity and OpenCode command lines only when picked", () => {
+  it("does not launch agents whose CLIs cannot enforce per-tool permissions", () => {
     const antigravity = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
-    expect(antigravity.args!(CTX)).not.toContain("--model");
-    const agyWithModel = antigravity.args!(CTX, "gemini-3.1-pro-high");
-    expect(agyWithModel[agyWithModel.indexOf("--model") + 1]).toBe("gemini-3.1-pro-high");
-    // No typed-out list: the ids come from `agy models` at request time.
-    expect(antigravity.models).toBeUndefined();
-    expect(antigravity.listModels?.args).toEqual(["models"]);
-
     const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
-    // The chat launch is a server now, so the pick reaches the model over the
-    // API per prompt, not on the command line. Automations still pin it in
-    // argv: OpenCode's own default retries forever when that endpoint is down.
-    expect(opencode.args!(CTX)).not.toContain("--model");
-    const opencodeRun = opencode.runArgs!(CTX, "do the thing");
-    expect(opencodeRun[opencodeRun.indexOf("--model") + 1]).toBe("opencode/big-pickle");
-    const opencodeWithModel = opencode.runArgs!(CTX, "do the thing", "openai/gpt-5.4");
-    expect(opencodeWithModel[opencodeWithModel.indexOf("--model") + 1]).toBe("openai/gpt-5.4");
-    // Same: `opencode models` is the list, and --pure matches the launch.
-    expect(opencode.models).toBeUndefined();
-    expect(opencode.listModels?.args).toEqual(["--pure", "models"]);
+    for (const spec of [antigravity, opencode]) {
+      expect(spec.args).toBeUndefined();
+      expect(spec.runArgs).toBeUndefined();
+      expect(spec.prepare).toBeUndefined();
+    }
   });
 
   it("reads Grok's models from its CLI and passes the pick on the command line", () => {
@@ -437,9 +424,8 @@ sleep 60
     expect(grok.listModels?.args).toEqual(["models"]);
   });
 
-  it("writes valid opencode.json config for OpenCode", () => {
-    const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
-    expect(opencode.prepare).toBeTypeOf("function");
+  it("keeps Claude's bearer out of argv and in a mode-0600 config", () => {
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
     const ctx = {
       mcpUrl: "http://127.0.0.1:8787/mcp",
       bearerToken: "secret-token-xyz",
@@ -447,61 +433,25 @@ sleep 60
     };
     const workDir = join(ctx.dataDir, "agent-workdir");
     mkdirSync(workDir, { recursive: true });
-    opencode.prepare!(ctx, workDir, {});
-    const content = JSON.parse(readFileSync(join(workDir, "opencode.json"), "utf8"));
+    claude.prepare!(ctx, workDir, {});
+    const path = join(workDir, "claude-mcp.json");
+    const args = claude.args!(ctx);
+    expect(args.join(" ")).not.toContain(ctx.bearerToken);
+    expect(args[args.indexOf("--mcp-config") + 1]).toBe(path);
+    const content = JSON.parse(readFileSync(path, "utf8"));
     expect(content).toEqual({
-      $schema: "https://opencode.ai/config.json",
-      model: "opencode/big-pickle",
-      mcp: {
+      mcpServers: {
         boxaide: {
-          type: "remote",
+          type: "http",
           url: ctx.mcpUrl,
-          enabled: true,
-          oauth: false,
-          timeout: 120_000,
           headers: {
             Authorization: `Bearer ${ctx.bearerToken}`,
           },
         },
       },
     });
-  });
-
-  it("launches OpenCode pinned to the empty workdir with an isolated config", () => {
-    const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
-    const ctx = {
-      mcpUrl: "http://127.0.0.1:8787/mcp",
-      bearerToken: "secret-token-xyz",
-      dataDir: tempDir(),
-    };
-    const workDir = join(ctx.dataDir, "agent-workdir");
-    // Chat runs the server; the driver holds the loop and passes --dir's job
-    // as ?directory= per call.
-    const args = opencode.args!(ctx);
-    expect(args[0]).toBe("--pure");
-    expect(args).toContain("serve");
-    expect(args[args.indexOf("--port") + 1]).toBe("0");
-    expect(args[args.indexOf("--hostname") + 1]).toBe("127.0.0.1");
-    expect(opencode.drive).toBeTypeOf("function");
-    expect(opencode.readEvent).toBeTypeOf("function");
-
-    mkdirSync(workDir, { recursive: true });
-    opencode.prepare!(ctx, workDir, {});
-    const env = opencode.childEnv!(ctx, workDir);
-    expect(env.XDG_CONFIG_HOME).toBe(join(ctx.dataDir, "agent-homes", "opencode", "config"));
-    expect(env.OPENCODE_CONFIG).toBe(join(workDir, "opencode.json"));
-    // A fresh server password per launch, readable by the driver.
-    expect(env.OPENCODE_SERVER_PASSWORD).toBeTruthy();
-    expect(opencode.childEnv!(ctx, workDir).OPENCODE_SERVER_PASSWORD).not.toBe(
-      env.OPENCODE_SERVER_PASSWORD,
-    );
-    // The automation path is unchanged: still a one-shot `run`.
-    expect(opencode.runArgs!(ctx, "do the thing")).toContain("run");
-    expect(opencode.runArgs!(ctx, "do the thing")[
-      opencode.runArgs!(ctx, "do the thing").indexOf("--dir") + 1
-    ]).toBe(workDir);
-    expect(opencode.runArgs!(ctx, "do the thing")).toContain("--dir");
-    expect(opencode.runArgs!(ctx, "do the thing")).not.toContain("--format");
+    const mode = statSync(path).mode & 0o777;
+    expect(mode).toBe(0o600);
   });
 
   it("pre-approves read and draft tools and never message_send", () => {
@@ -657,10 +607,10 @@ describe("launcher routes", () => {
     expect(body.agents.map((a: { id: string }) => a.id)).toContain("opencode");
     expect(body.agents.map((a: { id: string }) => a.id)).not.toContain("gemini");
     expect(body.agents.find((a: { id: string }) => a.id === "antigravity")?.supported).toBe(
-      true,
+      false,
     );
     expect(body.agents.find((a: { id: string }) => a.id === "opencode")?.supported).toBe(
-      true,
+      false,
     );
     expect(body.agents.find((a: { id: string }) => a.id === "grok")?.supported).toBe(
       true,

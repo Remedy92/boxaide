@@ -2,7 +2,12 @@ import { ImapFlow } from "imapflow";
 import type { ExpungeEvent, MessageStructureObject } from "imapflow";
 import nodemailer from "nodemailer";
 import type { SendMailOptions } from "nodemailer";
-import { parseRfc822, formatAddress, stripHtml } from "./mime.js";
+import {
+  MAX_RFC822_SOURCE_BYTES,
+  parseRfc822,
+  formatAddress,
+  stripHtml,
+} from "./mime.js";
 import type {
   AccountCredentials,
   ConnectionTestResult,
@@ -483,6 +488,8 @@ function envelopeToSummary(
 
 type FetchedHead = {
   uid: number;
+  /** RFC822.SIZE, fetched before source so oversized messages stay on server. */
+  size?: number;
   envelope?: {
     messageId?: string;
     from?: unknown;
@@ -495,6 +502,23 @@ type FetchedHead = {
   flags?: Set<string>;
   bodyStructure?: MessageStructureObject;
 };
+
+function isSafeImapSourceSize(size: number | undefined): boolean {
+  return (
+    typeof size === "number" &&
+    Number.isFinite(size) &&
+    size >= 0 &&
+    size <= MAX_RFC822_SOURCE_BYTES
+  );
+}
+
+function assertSafeImapSourceSize(size: number | undefined): void {
+  if (!isSafeImapSourceSize(size)) {
+    throw new Error(
+      `message source exceeds the ${MAX_RFC822_SOURCE_BYTES}-byte safety limit or has no trustworthy size`,
+    );
+  }
+}
 
 /** Rejects blanks and unparseable input rather than filtering on NaN. */
 export function parseSince(since: string | undefined): Date | null {
@@ -1180,7 +1204,7 @@ export class ImapSmtpProvider implements MailProvider {
     return withImap(accountId, account.creds, async (client) => {
       const lock = await client.getMailboxLock(folder, { readOnly: true });
       try {
-        let found: MailMessage | null = null;
+        let head: FetchedHead | null = null;
         for await (const msg of client.fetch(
           String(uid),
           {
@@ -1188,19 +1212,28 @@ export class ImapSmtpProvider implements MailProvider {
             envelope: true,
             flags: true,
             bodyStructure: true,
-            source: true,
+            size: true,
           },
           { uid: true },
         )) {
-          found = await messageFromImapSource(
+          head = msg;
+        }
+        if (!head) return null;
+        assertSafeImapSourceSize(head.size);
+        for await (const msg of client.fetch(
+          String(uid),
+          { uid: true, source: true },
+          { uid: true },
+        )) {
+          return await messageFromImapSource(
             accountId,
             folder,
             msg.uid,
             msg.source ?? Buffer.from(""),
-            msg,
+            head,
           );
         }
-        return found;
+        return null;
       } finally {
         lock.release();
       }
@@ -1378,21 +1411,34 @@ export class ImapSmtpProvider implements MailProvider {
         if (!mb) return [];
         const window = uidWindow(mb.exists, limit);
         if (!window) return [];
-        const drafts: MailDraft[] = [];
+        const heads: FetchedHead[] = [];
         for await (const msg of client.fetch(`${window.start}:${window.end}`, {
           uid: true,
           envelope: true,
-          source: true,
+          size: true,
         })) {
-          drafts.push(
-            await draftFromImapSource(
-              account.id,
-              path,
-              msg.uid,
-              msg.source ?? Buffer.from(""),
-              msg,
-            ),
-          );
+          heads.push(msg);
+        }
+        const drafts: MailDraft[] = [];
+        for (const head of heads) {
+          // One giant attachment must not make a drafts listing allocate it or
+          // hide every other draft. It remains available in the mail client.
+          if (!isSafeImapSourceSize(head.size)) continue;
+          for await (const msg of client.fetch(
+            String(head.uid),
+            { uid: true, source: true },
+            { uid: true },
+          )) {
+            drafts.push(
+              await draftFromImapSource(
+                account.id,
+                path,
+                msg.uid,
+                msg.source ?? Buffer.from(""),
+                head,
+              ),
+            );
+          }
         }
         return drafts.reverse();
       } finally {
