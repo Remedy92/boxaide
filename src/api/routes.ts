@@ -678,16 +678,79 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
   app.get("/api/agent/state", (c) => {
     const after = c.req.query("after");
     const afterSeq = after !== undefined && /^\d+$/.test(after) ? Number(after) : undefined;
+    // `chat` is the pane telling the server which conversation it is showing.
+    // Without it the answer is the active one, which is what a fresh client
+    // wants and what every caller before chats existed asked for.
+    const asked = c.req.query("chat") ?? undefined;
+    const shown = asked
+      ? channel.chats({ includeArchived: true }).find((row) => row.id === asked)
+      : channel.activeChat();
+    if (!shown) return c.json({ error: "no such chat" }, 404);
     return c.json({
-      turns: channel.history(afterSeq),
+      turns: channel.history(afterSeq, shown.id),
       presence: channel.presence(),
+      chat: shown,
     });
   });
 
-  app.post("/api/agent/messages", async (c) => {
-    let body: { text?: unknown };
+  /* ---- chats -------------------------------------------------------------
+     The rail shows the newest few and the dialog shows the rest, so the list
+     is returned whole: it is one small row per conversation, and paginating it
+     would buy nothing but a second round trip for the search box.
+     --------------------------------------------------------------------- */
+
+  app.get("/api/agent/chats", (c) => {
+    const archived = c.req.query("archived") === "1";
+    return c.json({
+      chats: channel.chats({ includeArchived: archived }),
+      storage: channel.storage(),
+    });
+  });
+
+  app.post("/api/agent/chats", (c) =>
+    c.json({ chat: channel.createChat(), storage: channel.storage() }, 201),
+  );
+
+  app.post("/api/agent/chats/:id/select", (c) => {
+    if (!channel.selectChat(c.req.param("id"))) {
+      return c.json({ error: "no such chat" }, 404);
+    }
+    return c.json({ chat: channel.activeChat() });
+  });
+
+  app.patch("/api/agent/chats/:id", async (c) => {
+    let body: { title?: unknown };
     try {
-      body = await c.req.json<{ text?: unknown }>();
+      body = await c.req.json<{ title?: unknown }>();
+    } catch {
+      return c.json({ error: "body must be JSON" }, 400);
+    }
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    if (!title) return c.json({ error: "title is required" }, 400);
+    if (!channel.renameChat(c.req.param("id"), title)) {
+      return c.json({ error: "no such chat" }, 404);
+    }
+    return c.json({ renamed: true });
+  });
+
+  app.post("/api/agent/chats/:id/archive", (c) => {
+    if (!channel.archiveChat(c.req.param("id"))) {
+      return c.json({ error: "no such chat" }, 404);
+    }
+    return c.json({ archived: true, storage: channel.storage() });
+  });
+
+  app.delete("/api/agent/chats/:id", (c) => {
+    if (!channel.deleteChat(c.req.param("id"))) {
+      return c.json({ error: "no such chat" }, 404);
+    }
+    return c.json({ deleted: true, storage: channel.storage() });
+  });
+
+  app.post("/api/agent/messages", async (c) => {
+    let body: { text?: unknown; chat?: unknown };
+    try {
+      body = await c.req.json<{ text?: unknown; chat?: unknown }>();
     } catch {
       return c.json({ error: "body must be JSON" }, 400);
     }
@@ -696,14 +759,28 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
     if (text.length > MAX_CHAT_CHARS) {
       return c.json({ error: `text must be ${MAX_CHAT_CHARS} characters or fewer` }, 400);
     }
-    const turn = channel.post({ role: "user", text });
+    // Same rule as the state route: `chat` is the pane saying which
+    // conversation it is showing, and a client from before chats existed sends
+    // none and gets the active one.
+    const chatId = typeof body.chat === "string" ? body.chat : undefined;
+    if (chatId && !channel.writable(chatId)) {
+      return c.json({ error: "no such chat" }, 404);
+    }
+    const turn = channel.post({ role: "user", text, chatId });
     // The presence that ships with the write is what the composer uses to say
     // "no agent is listening" the moment a message lands unheard.
     return c.json({ turn, presence: channel.presence() }, 201);
   });
 
-  app.post("/api/agent/clear", (c) => {
-    channel.clear();
+  app.post("/api/agent/clear", async (c) => {
+    // A body is optional here: clear predates chats and older clients send
+    // none, so an unreadable body means "the chat on screen is the active one".
+    const body = await c.req.json<{ chat?: unknown }>().catch(() => ({}) as { chat?: unknown });
+    const chatId = typeof body.chat === "string" ? body.chat : undefined;
+    if (chatId && !channel.writable(chatId)) {
+      return c.json({ error: "no such chat" }, 404);
+    }
+    channel.clear(chatId);
     return c.json({ cleared: true });
   });
 
@@ -729,6 +806,13 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
         presenceDirty = true;
         wake?.();
       });
+      // Chats change on their own — a message renames one, the budget archives
+      // another — so the rail is told rather than left to poll for it.
+      let chatsDirty = false;
+      const unsubscribeChats = channel.subscribeChats(() => {
+        chatsDirty = true;
+        wake?.();
+      });
 
       // `onAbort` is the only close signal that fires for a client that simply
       // went away — the write below can stay pending indefinitely otherwise.
@@ -736,6 +820,7 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
       const detach = () => {
         unsubscribe();
         unsubscribePresence();
+        unsubscribeChats();
       };
       stream.onAbort(() => {
         open = false;
@@ -754,6 +839,17 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
             const turn = queue.shift() as Turn;
             await stream.writeSSE({ event: "turn", data: JSON.stringify(turn) });
             presenceDirty = true;
+          }
+          if (!open) break;
+          if (chatsDirty) {
+            chatsDirty = false;
+            await stream.writeSSE({
+              event: "chats",
+              data: JSON.stringify({
+                chats: channel.chats(),
+                storage: channel.storage(),
+              }),
+            });
           }
           if (!open) break;
           if (presenceDirty) {

@@ -32,6 +32,8 @@ export type StoredAccount = {
 export type StoredTurn = {
   seq: number;
   at: string;
+  /** The chat this turn belongs to. */
+  chatId: string;
   role: "user" | "agent" | "activity";
   text: string;
   /** MCP client name, when the caller identified itself. */
@@ -57,6 +59,33 @@ export type StoredTurn = {
   deliveryCount: number;
 };
 
+/**
+ * One conversation.
+ *
+ * The title is encrypted for the same reason the turns are: it is derived from
+ * the user's first message, and that message is as likely to name a customer as
+ * anything else in this file.
+ *
+ * `trimmed` is sticky. Once a chat has lost turns to its own limit, the pane
+ * says so for the rest of the chat's life — the alternative is a conversation
+ * that quietly starts in the middle.
+ */
+export type StoredChat = {
+  id: string;
+  title: string;
+  createdAt: string;
+  /** Last turn written. What the list sorts on. */
+  updatedAt: string;
+  /** Set when the messages were dropped and only this record was kept. */
+  archivedAt: string | null;
+  trimmed: boolean;
+  /** The one chat new turns are written to. Exactly one row has this. */
+  active: boolean;
+  turns: number;
+  /** Bytes of encrypted turn text. What the budget counts. */
+  bytes: number;
+};
+
 /** What unclaimUserTurn did. The channel decides what the UI should say. */
 export type UnclaimResult = "released" | "dead_lettered" | "acked" | "missing";
 
@@ -70,6 +99,7 @@ export const MAX_DELIVERIES = 3;
 type TurnRow = {
   seq: number;
   at: string;
+  chatId: string;
   role: StoredTurn["role"];
   textEnc: string;
   agent: string | null;
@@ -77,6 +107,21 @@ type TurnRow = {
   replyTo: number | null;
   deliveryCount: number;
 };
+
+type ChatRow = {
+  id: string;
+  titleEnc: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+  trimmed: number;
+  active: number;
+  turns: number;
+  bytes: number;
+};
+
+/** Title a chat carries until its first message renames it. */
+const UNTITLED = "New chat";
 
 export class Store {
   static readonly MAX_DELIVERIES = MAX_DELIVERIES;
@@ -171,6 +216,229 @@ export class Store {
         `ALTER TABLE agent_turns ADD COLUMN delivery_count INTEGER NOT NULL DEFAULT 0`,
       );
     }
+
+    // Chats. `seq` stays a single global sequence across all of them — it is
+    // the SSE resume cursor and the lease key, and per-chat numbering would
+    // make both ambiguous. A chat is a scope over that sequence, not its own.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_chats (
+        id TEXT PRIMARY KEY,
+        title_enc TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        archived_at TEXT,
+        trimmed INTEGER NOT NULL DEFAULT 0,
+        active INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    if (!turnCols.some((c) => c.name === "chat_id")) {
+      this.db.exec(`ALTER TABLE agent_turns ADD COLUMN chat_id TEXT`);
+    }
+    this.db.exec(
+      `CREATE INDEX IF NOT EXISTS agent_turns_chat ON agent_turns (chat_id, seq)`,
+    );
+    // Everything written before chats existed was one conversation, so that is
+    // what it becomes. Named for what it was rather than given a made-up title:
+    // there is no first message to derive one from that is not also the middle
+    // of somebody's history.
+    const loose = this.db
+      .prepare(`SELECT COUNT(*) as n FROM agent_turns WHERE chat_id IS NULL`)
+      .get() as { n: number };
+    if (loose.n > 0) {
+      const id = this.newChatId();
+      const at = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO agent_chats (id, title_enc, created_at, updated_at, active)
+           VALUES (?, ?, ?, ?, 1)`,
+        )
+        .run(id, encryptSecret(this.masterKey, "Conversation"), at, at);
+      this.db
+        .prepare(`UPDATE agent_turns SET chat_id = ? WHERE chat_id IS NULL`)
+        .run(id);
+    }
+  }
+
+  /* ---- chats -------------------------------------------------------------
+     A chat owns its turns and nothing else. Which one is active, when one is
+     archived, and what the budget is are all decisions AgentChannel makes.
+     --------------------------------------------------------------------- */
+
+  private newChatId(): string {
+    return `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  listChats(options: { includeArchived?: boolean } = {}): StoredChat[] {
+    const rows = this.db
+      .prepare(
+        `SELECT c.id, c.title_enc as titleEnc, c.created_at as createdAt,
+                c.updated_at as updatedAt, c.archived_at as archivedAt,
+                c.trimmed, c.active,
+                COUNT(t.seq) as turns,
+                COALESCE(SUM(LENGTH(t.text_enc)), 0) as bytes
+         FROM agent_chats c
+         LEFT JOIN agent_turns t ON t.chat_id = c.id
+         ${options.includeArchived ? "" : "WHERE c.archived_at IS NULL"}
+         GROUP BY c.id
+         ORDER BY c.updated_at DESC`,
+      )
+      .all() as ChatRow[];
+    return rows.map((row) => this.toChat(row));
+  }
+
+  getChat(id: string): StoredChat | null {
+    const row = this.db
+      .prepare(
+        `SELECT c.id, c.title_enc as titleEnc, c.created_at as createdAt,
+                c.updated_at as updatedAt, c.archived_at as archivedAt,
+                c.trimmed, c.active,
+                COUNT(t.seq) as turns,
+                COALESCE(SUM(LENGTH(t.text_enc)), 0) as bytes
+         FROM agent_chats c
+         LEFT JOIN agent_turns t ON t.chat_id = c.id
+         WHERE c.id = ?
+         GROUP BY c.id`,
+      )
+      .get(id) as ChatRow | undefined;
+    return row ? this.toChat(row) : null;
+  }
+
+  createChat(title = UNTITLED): StoredChat {
+    const id = this.newChatId();
+    const at = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE agent_chats SET active = 0`).run();
+      this.db
+        .prepare(
+          `INSERT INTO agent_chats (id, title_enc, created_at, updated_at, active)
+           VALUES (?, ?, ?, ?, 1)`,
+        )
+        .run(id, encryptSecret(this.masterKey, title), at, at);
+    })();
+    return this.getChat(id) as StoredChat;
+  }
+
+  /**
+   * The chat new turns go to, creating one when there is none.
+   *
+   * Both `boxaide serve` and `boxaide mcp` call this, which is why the answer
+   * is a column and not a field on the channel: the two are separate processes
+   * and must agree on where a message lands.
+   */
+  ensureActiveChat(): StoredChat {
+    const row = this.db
+      .prepare(
+        `SELECT id FROM agent_chats WHERE active = 1 AND archived_at IS NULL LIMIT 1`,
+      )
+      .get() as { id: string } | undefined;
+    if (row) return this.getChat(row.id) as StoredChat;
+    // An archived or deleted active chat leaves none. Fall back to the most
+    // recent live one before making a new one, so Archive does not strand the
+    // user in an empty conversation with their history one click away.
+    const recent = this.db
+      .prepare(
+        `SELECT id FROM agent_chats WHERE archived_at IS NULL
+         ORDER BY updated_at DESC LIMIT 1`,
+      )
+      .get() as { id: string } | undefined;
+    if (recent) {
+      this.selectChat(recent.id);
+      return this.getChat(recent.id) as StoredChat;
+    }
+    return this.createChat();
+  }
+
+  selectChat(id: string): boolean {
+    const exists = this.db
+      .prepare(`SELECT 1 as hit FROM agent_chats WHERE id = ? AND archived_at IS NULL`)
+      .get(id) as { hit: number } | undefined;
+    if (!exists) return false;
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE agent_chats SET active = 0`).run();
+      this.db.prepare(`UPDATE agent_chats SET active = 1 WHERE id = ?`).run(id);
+    })();
+    return true;
+  }
+
+  renameChat(id: string, title: string): boolean {
+    const res = this.db
+      .prepare(`UPDATE agent_chats SET title_enc = ? WHERE id = ?`)
+      .run(encryptSecret(this.masterKey, title), id);
+    return res.changes > 0;
+  }
+
+  /** True while the chat still carries the title it was created with. */
+  isUntitled(id: string): boolean {
+    const chat = this.getChat(id);
+    return chat?.title === UNTITLED;
+  }
+
+  /**
+   * Drops a chat's messages and keeps the record: title, dates, and the fact
+   * that it existed. This is the step the budget takes on its own, so it is
+   * deliberately not deletion — the user's own list does not lose rows to a
+   * housekeeping rule they did not run.
+   */
+  archiveChat(id: string): boolean {
+    return this.db.transaction((): boolean => {
+      const res = this.db
+        .prepare(
+          `UPDATE agent_chats SET archived_at = ?, active = 0
+           WHERE id = ? AND archived_at IS NULL`,
+        )
+        .run(new Date().toISOString(), id);
+      if (res.changes === 0) return false;
+      this.db.prepare(`DELETE FROM agent_turns WHERE chat_id = ?`).run(id);
+      return true;
+    })();
+  }
+
+  deleteChat(id: string): boolean {
+    return this.db.transaction((): boolean => {
+      this.db.prepare(`DELETE FROM agent_turns WHERE chat_id = ?`).run(id);
+      const res = this.db.prepare(`DELETE FROM agent_chats WHERE id = ?`).run(id);
+      return res.changes > 0;
+    })();
+  }
+
+  /** Bytes of encrypted turn text across every chat. What the budget counts. */
+  chatBytes(): number {
+    const row = this.db
+      .prepare(`SELECT COALESCE(SUM(LENGTH(text_enc)), 0) as bytes FROM agent_turns`)
+      .get() as { bytes: number };
+    return row.bytes;
+  }
+
+  /**
+   * Live chats holding messages, oldest first. The order the budget archives in.
+   * The active chat is never returned: the budget must not empty the
+   * conversation somebody is in the middle of.
+   */
+  archiveCandidates(): Array<{ id: string; bytes: number }> {
+    return this.db
+      .prepare(
+        `SELECT c.id, COALESCE(SUM(LENGTH(t.text_enc)), 0) as bytes
+         FROM agent_chats c
+         JOIN agent_turns t ON t.chat_id = c.id
+         WHERE c.archived_at IS NULL AND c.active = 0
+         GROUP BY c.id
+         ORDER BY c.updated_at ASC`,
+      )
+      .all() as Array<{ id: string; bytes: number }>;
+  }
+
+  private toChat(row: ChatRow): StoredChat {
+    return {
+      id: row.id,
+      title: decryptSecret(this.masterKey, row.titleEnc),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      archivedAt: row.archivedAt,
+      trimmed: row.trimmed === 1,
+      active: row.active === 1,
+      turns: row.turns,
+      bytes: row.bytes,
+    };
   }
 
   /* ---- agent conversation ------------------------------------------------
@@ -180,6 +448,7 @@ export class Store {
 
   appendTurn(input: {
     at: string;
+    chatId: string;
     role: StoredTurn["role"];
     text: string;
     agent: string | null;
@@ -188,19 +457,26 @@ export class Store {
     const replyTo = input.replyTo ?? null;
     const res = this.db
       .prepare(
-        `INSERT INTO agent_turns (at, role, text_enc, agent, delivered, reply_to)
-         VALUES (@at, @role, @textEnc, @agent, 0, @replyTo)`,
+        `INSERT INTO agent_turns (at, chat_id, role, text_enc, agent, delivered, reply_to)
+         VALUES (@at, @chatId, @role, @textEnc, @agent, 0, @replyTo)`,
       )
       .run({
         at: input.at,
+        chatId: input.chatId,
         role: input.role,
         textEnc: encryptSecret(this.masterKey, input.text),
         agent: input.agent,
         replyTo,
       });
+    // The list sorts on this, so it tracks the last message rather than the
+    // last time somebody clicked the chat.
+    this.db
+      .prepare(`UPDATE agent_chats SET updated_at = ? WHERE id = ?`)
+      .run(input.at, input.chatId);
     return {
       seq: Number(res.lastInsertRowid),
       at: input.at,
+      chatId: input.chatId,
       role: input.role,
       text: input.text,
       agent: input.agent,
@@ -210,29 +486,27 @@ export class Store {
     };
   }
 
-  listTurns(options: { afterSeq?: number; limit?: number } = {}): StoredTurn[] {
+  listTurns(
+    options: { afterSeq?: number; limit?: number; chatId?: string } = {},
+  ): StoredTurn[] {
     const limit = Math.min(Math.max(options.limit ?? 200, 1), 1000);
     // Newest `limit` rows, then flipped: asking for "the last 200" and getting
     // the FIRST 200 is the classic version of this bug.
     const rows = this.db
       .prepare(
-        `SELECT seq, at, role, text_enc as textEnc, agent, delivered, reply_to as replyTo,
-                COALESCE(delivery_count, 0) as deliveryCount
+        `SELECT seq, at, chat_id as chatId, role, text_enc as textEnc, agent, delivered,
+                reply_to as replyTo, COALESCE(delivery_count, 0) as deliveryCount
          FROM agent_turns
-         WHERE seq > ?
+         WHERE seq > ? AND (? IS NULL OR chat_id = ?)
          ORDER BY seq DESC
          LIMIT ?`,
       )
-      .all(options.afterSeq ?? 0, limit) as Array<{
-      seq: number;
-      at: string;
-      role: StoredTurn["role"];
-      textEnc: string;
-      agent: string | null;
-      delivered: number;
-      replyTo: number | null;
-      deliveryCount: number;
-    }>;
+      .all(
+        options.afterSeq ?? 0,
+        options.chatId ?? null,
+        options.chatId ?? null,
+        limit,
+      ) as TurnRow[];
     return rows.reverse().map((row) => this.toTurn(row));
   }
 
@@ -268,8 +542,8 @@ export class Store {
     const claim = this.db.transaction((): StoredTurn | null => {
       const row = this.db
         .prepare(
-          `SELECT seq, at, role, text_enc as textEnc, agent, reply_to as replyTo,
-                  COALESCE(delivery_count, 0) as deliveryCount
+          `SELECT seq, at, chat_id as chatId, role, text_enc as textEnc, agent,
+                  reply_to as replyTo, COALESCE(delivery_count, 0) as deliveryCount
            FROM agent_turns
            WHERE role = 'user' AND delivered = 0
            ORDER BY seq ASC
@@ -354,21 +628,32 @@ export class Store {
     return res.changes;
   }
 
-  clearTurns(): void {
-    this.db.exec(`DELETE FROM agent_turns`);
+  /** Empties one chat and keeps it. The trash can in the pane header. */
+  clearTurns(chatId: string): void {
+    this.db.prepare(`DELETE FROM agent_turns WHERE chat_id = ?`).run(chatId);
+    // A cleared chat is not a trimmed one: the user asked for this, and the
+    // banner explaining an automatic loss would be a lie about their own click.
+    this.db.prepare(`UPDATE agent_chats SET trimmed = 0 WHERE id = ?`).run(chatId);
   }
 
-  /** Drops everything but the newest `keep` turns. */
-  trimTurns(keep: number): void {
-    this.db
+  /**
+   * Drops everything but the newest `keep` turns of one chat. Returns true when
+   * something went, which is what makes the chat say so from then on.
+   */
+  trimTurns(chatId: string, keep: number): boolean {
+    const res = this.db
       .prepare(
-        `DELETE FROM agent_turns WHERE seq <= (
+        `DELETE FROM agent_turns WHERE chat_id = @chatId AND seq <= (
            SELECT COALESCE(MIN(seq), 0) - 1 FROM (
-             SELECT seq FROM agent_turns ORDER BY seq DESC LIMIT ?
+             SELECT seq FROM agent_turns WHERE chat_id = @chatId
+             ORDER BY seq DESC LIMIT @keep
            )
          )`,
       )
-      .run(Math.max(keep, 1));
+      .run({ chatId, keep: Math.max(keep, 1) });
+    if (res.changes === 0) return false;
+    this.db.prepare(`UPDATE agent_chats SET trimmed = 1 WHERE id = ?`).run(chatId);
+    return true;
   }
 
   listAccounts(): Array<{
@@ -488,6 +773,7 @@ export class Store {
     return {
       seq: row.seq,
       at: row.at,
+      chatId: row.chatId,
       role: row.role,
       text: decryptSecret(this.masterKey, row.textEnc),
       agent: row.agent,

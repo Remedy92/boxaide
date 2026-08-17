@@ -39,13 +39,61 @@
  * drain immediately, so the common case costs nothing in latency and the
  * interval is only there for the cross-process one.
  */
-import { MAX_DELIVERIES, type Store, type StoredTurn } from "../db/store.js";
+import {
+  MAX_DELIVERIES,
+  type Store,
+  type StoredChat,
+  type StoredTurn,
+} from "../db/store.js";
 
 export type Turn = StoredTurn;
+export type Chat = StoredChat;
 export { MAX_DELIVERIES };
 
-/** Turns kept on disk. Older ones are dropped as new ones arrive. */
+/** Turns kept on disk PER CHAT. Older ones are dropped as new ones arrive. */
 const HISTORY_LIMIT = 500;
+
+/**
+ * Bytes of conversation text kept before old chats are archived.
+ *
+ * Chat text is small — this is tens of thousands of messages, not a disk
+ * pressure valve. It is here so the store cannot grow without a number the
+ * user can see, and so archiving is a rule rather than a surprise.
+ */
+const DEFAULT_BUDGET_BYTES = 50 * 1024 * 1024;
+
+function budgetBytes(): number {
+  const raw = process.env.BOXAIDE_CHAT_BUDGET_MB;
+  const mb = raw === undefined ? NaN : Number(raw);
+  if (!Number.isFinite(mb) || mb <= 0) return DEFAULT_BUDGET_BYTES;
+  return Math.round(mb * 1024 * 1024);
+}
+
+/** Longest a title derived from a first message may be. */
+const TITLE_CHARS = 60;
+
+/**
+ * A chat's name, taken from its first message.
+ *
+ * First line only, and cut on a word. The alternative is asking the user to
+ * name a conversation before they have had it.
+ */
+function titleFrom(text: string): string {
+  const line = text.split("\n").find((part) => part.trim().length > 0) ?? text;
+  const clean = line.trim().replace(/\s+/g, " ");
+  if (clean.length <= TITLE_CHARS) return clean;
+  const cut = clean.slice(0, TITLE_CHARS);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > 20 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
+/** What the storage line in the rail reads from. */
+export type ChatStorage = {
+  bytes: number;
+  budget: number;
+  chats: number;
+  archived: number;
+};
 
 /** Default long-poll, in ms. Under the 60s tool timeout common in MCP clients. */
 export const DEFAULT_WAIT_MS = 25_000;
@@ -111,6 +159,12 @@ const ACTIVITY_EMIT_MS = 5_000;
 export type Work = {
   /** The user turn that was claimed. */
   seq: number;
+  /**
+   * The chat that turn came from. The answer goes back here, not to whatever
+   * the user has since clicked on: a question asked in one conversation must
+   * not be answered in another.
+   */
+  chatId: string;
   /** When it was handed over. */
   since: string;
   /** The claiming agent's client name, when it gave one. */
@@ -147,6 +201,8 @@ export type Presence = {
    * Absent on a server built before the field existed — treat as none.
    */
   dropped: number[];
+  /** The chat the composer writes to. */
+  activeChatId: string;
 };
 
 type Waiter = {
@@ -163,6 +219,7 @@ type Waiter = {
 export class AgentChannel {
   private listeners = new Set<(turn: Turn) => void>();
   private presenceListeners = new Set<() => void>();
+  private chatListeners = new Set<() => void>();
   private waiters: Waiter[] = [];
   private lastSeen: number | null = null;
   /** When a launched agent's stream last pushed presence. See ACTIVITY_EMIT_MS. */
@@ -207,41 +264,183 @@ export class AgentChannel {
    * A user turn is offered to one waiting agent; if none is waiting it stays
    * unclaimed on disk until one asks, which is what makes "type first, start
    * the agent second" work.
+   *
+   * `chatId` is the pane naming the conversation it is showing. Two windows can
+   * have different chats open, and the active chat is one server-wide row, so a
+   * send that trusted it would land in whichever chat was selected last and
+   * vanish from the pane that typed it. The named chat also becomes the active
+   * one: the hand-off and every later default follow the user's latest send.
+   * Callers must check `writable` first — this refuses an unknown or archived
+   * chat rather than quietly writing somewhere else.
    */
-  post(input: { role: Turn["role"]; text: string; agent?: string | null }): Turn {
+  post(input: {
+    role: Turn["role"];
+    text: string;
+    agent?: string | null;
+    chatId?: string;
+  }): Turn {
     const text = input.text.trim();
     if (!text) throw new Error("text is required");
+    if (input.role === "user" && input.chatId) {
+      if (!this.selectChat(input.chatId)) throw new Error("no such chat");
+    }
     if (input.role !== "user") this.touch(input.agent ?? null);
     // Stamp before clearing: the claimed seq is the owner, even if another
     // user turn arrived while this work was open.
-    const replyTo =
-      (input.role === "agent" || input.role === "activity") && this.work
-        ? this.work.seq
-        : null;
+    const answering = input.role === "agent" || input.role === "activity";
+    const replyTo = answering && this.work ? this.work.seq : null;
+    // An answer belongs to the chat the question was asked in. Only a turn
+    // that answers nothing lands wherever the user is now.
+    const chatId =
+      answering && this.work
+        ? this.work.chatId
+        : this.store.ensureActiveChat().id;
     // The answer is what ends the work. An activity line does not: the agent
     // is narrating mid-task and is still holding the message.
     if (input.role === "agent") this.work = null;
 
     const turn = this.store.appendTurn({
       at: new Date().toISOString(),
+      chatId,
       role: input.role,
       text,
       agent: input.agent ?? null,
       replyTo,
     });
-    this.store.trimTurns(HISTORY_LIMIT);
+    // The first thing said in a chat names it. Later messages do not rename it:
+    // a list whose rows change under the reader is not a list.
+    if (input.role === "user" && this.store.isUntitled(chatId)) {
+      this.store.renameChat(chatId, titleFrom(text));
+    }
+    this.store.trimTurns(chatId, HISTORY_LIMIT);
+    this.enforceBudget();
 
     // Listeners first: the UI should paint the message before it is handed to
     // an agent, not after.
     this.drain();
+    this.emitChats();
     if (input.role === "user") this.handOff();
     return turn;
   }
 
+  /**
+   * Archives the oldest chats until the store is back inside its budget.
+   *
+   * Oldest first, active chat never, and the record always kept. The user is
+   * told after the fact rather than asked beforehand: a prompt that appears
+   * because of a byte count is a prompt somebody dismisses without reading.
+   */
+  private enforceBudget(): void {
+    const budget = budgetBytes();
+    let bytes = this.store.chatBytes();
+    if (bytes <= budget) return;
+    for (const candidate of this.store.archiveCandidates()) {
+      if (bytes <= budget) break;
+      if (this.store.archiveChat(candidate.id)) bytes -= candidate.bytes;
+    }
+  }
+
   /* ---- reading ---------------------------------------------------------- */
 
-  history(afterSeq?: number): Turn[] {
-    return this.store.listTurns({ afterSeq, limit: HISTORY_LIMIT });
+  /** Turns of one chat, or of the active one when no id is given. */
+  history(afterSeq?: number, chatId?: string): Turn[] {
+    const id = chatId ?? this.store.ensureActiveChat().id;
+    return this.store.listTurns({ afterSeq, chatId: id, limit: HISTORY_LIMIT });
+  }
+
+  /* ---- chats ------------------------------------------------------------ */
+
+  chats(options: { includeArchived?: boolean } = {}): Chat[] {
+    // Reading the list is also the moment to guarantee there is one to read.
+    this.store.ensureActiveChat();
+    return this.store.listChats(options);
+  }
+
+  storage(): ChatStorage {
+    const all = this.store.listChats({ includeArchived: true });
+    return {
+      bytes: this.store.chatBytes(),
+      budget: budgetBytes(),
+      chats: all.filter((chat) => chat.archivedAt === null).length,
+      archived: all.filter((chat) => chat.archivedAt !== null).length,
+    };
+  }
+
+  activeChat(): Chat {
+    return this.store.ensureActiveChat();
+  }
+
+  /**
+   * Whether a chat may be written to. An archived chat is a record, not a
+   * conversation, so it is not one. Routes ask this to answer 404 before they
+   * hand an id to `post` or `clear`.
+   */
+  writable(id: string): boolean {
+    const chat = this.store.getChat(id);
+    return chat !== null && chat.archivedAt === null;
+  }
+
+  createChat(): Chat {
+    const chat = this.store.createChat();
+    this.emitChats();
+    this.emitPresence();
+    return chat;
+  }
+
+  selectChat(id: string): boolean {
+    const ok = this.store.selectChat(id);
+    if (ok) {
+      this.emitChats();
+      this.emitPresence();
+    }
+    return ok;
+  }
+
+  renameChat(id: string, title: string): boolean {
+    const ok = this.store.renameChat(id, title.trim().slice(0, TITLE_CHARS));
+    if (ok) this.emitChats();
+    return ok;
+  }
+
+  archiveChat(id: string): boolean {
+    const ok = this.store.archiveChat(id);
+    if (ok) this.afterChatRemoved(id);
+    return ok;
+  }
+
+  deleteChat(id: string): boolean {
+    const ok = this.store.deleteChat(id);
+    if (ok) this.afterChatRemoved(id);
+    return ok;
+  }
+
+  /**
+   * A chat just lost its messages. If an agent was answering one of them,
+   * that lease is over — the question it was holding no longer exists.
+   */
+  private afterChatRemoved(id: string): void {
+    if (this.work?.chatId === id) this.work = null;
+    this.store.ensureActiveChat();
+    this.emitChats();
+    this.emitPresence();
+  }
+
+  /** Chat list changes, for the SSE route. */
+  subscribeChats(listener: () => void): () => void {
+    this.chatListeners.add(listener);
+    return () => {
+      this.chatListeners.delete(listener);
+    };
+  }
+
+  private emitChats(): void {
+    for (const listener of this.chatListeners) {
+      try {
+        listener();
+      } catch {
+        // Same rule as drain: a broken SSE writer must not fail the call.
+      }
+    }
   }
 
   /** Live turns, for the SSE route. */
@@ -291,11 +490,13 @@ export class AgentChannel {
       working: this.work
         ? {
             seq: this.work.seq,
+            chatId: this.work.chatId,
             since: this.work.since,
             agent: this.work.agent,
             tool: this.work.tool,
           }
         : null,
+      activeChatId: this.store.ensureActiveChat().id,
       // The final lease looks identical on disk to a dead-lettered one — the
       // count is already at the cap the moment it is handed over. Only the
       // in-memory hold tells the two apart, so the message being worked right
@@ -533,6 +734,7 @@ export class AgentChannel {
   private beginWork(turn: Turn, agent: string | null): void {
     this.work = {
       seq: turn.seq,
+      chatId: turn.chatId,
       since: new Date().toISOString(),
       // The hand-off is itself the first proof: the agent asked, and got one.
       provenAt: Date.now(),
@@ -669,11 +871,20 @@ export class AgentChannel {
     return this.drivenFlag;
   }
 
-  clear(): void {
-    this.store.clearTurns();
-    this.broadcastSeq = 0;
+  /**
+   * Empties one chat and keeps it. Other chats are untouched.
+   *
+   * `chatId` is the pane naming what it is showing, for the same reason `post`
+   * takes one: without it a clear empties whatever chat is active server-wide.
+   * Callers must check `writable` first.
+   */
+  clear(chatId?: string): void {
+    if (chatId && !this.writable(chatId)) throw new Error("no such chat");
+    const id = chatId ?? this.store.ensureActiveChat().id;
+    this.store.clearTurns(id);
     // The claimed message went with the history; nothing is being answered.
-    this.work = null;
+    if (this.work?.chatId === id) this.work = null;
+    this.emitChats();
     this.emitPresence();
   }
 
@@ -691,6 +902,7 @@ export class AgentChannel {
       waiter.resolve(null);
     }
     this.listeners.clear();
+    this.chatListeners.clear();
     if (this.poll) {
       clearInterval(this.poll);
       this.poll = null;

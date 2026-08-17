@@ -147,6 +147,11 @@ export type AccountCredentials = {
 export type AgentTurn = {
   seq: number;
   at: string; // ISO 8601
+  /**
+   * The chat this turn belongs to. Absent on a server built before chats
+   * existed, where every turn was the one conversation.
+   */
+  chatId?: string;
   role: "user" | "agent" | "activity";
   text: string;
   /** MCP client name. Best effort — see AgentChannel.noteClient on the server. */
@@ -199,16 +204,55 @@ export type AgentPresence = {
 export type AgentWork = {
   /** The `seq` of the user turn being answered. */
   seq: number;
+  /** The chat that question was asked in. Absent on an older server. */
+  chatId?: string;
   since: string; // ISO 8601
   agent: string | null;
   /** The last mail tool called since the hand-off. */
   tool: { name: string; at: string } | null;
 };
 
+/**
+ * One conversation.
+ *
+ * `archivedAt` is set on a chat whose messages were dropped to keep the store
+ * inside its budget. The row survives so the list does not silently lose
+ * entries; the messages do not.
+ */
+export type AgentChat = {
+  id: string;
+  title: string;
+  createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
+  archivedAt: string | null;
+  /** True once this chat has lost old turns to its own limit. */
+  trimmed: boolean;
+  /** The chat the composer writes to. Exactly one is active. */
+  active: boolean;
+  turns: number;
+  bytes: number;
+};
+
+/** What the storage line reads from. Bytes of conversation text, not disk. */
+export type AgentChatStorage = {
+  bytes: number;
+  budget: number;
+  chats: number;
+  archived: number;
+};
+
+/** GET /api/agent/chats */
+export type AgentChatsResponse = {
+  chats: AgentChat[];
+  storage: AgentChatStorage;
+};
+
 /** GET /api/agent/state */
 export type AgentStateResponse = {
   turns: AgentTurn[];
   presence: AgentPresence;
+  /** The chat those turns came from. Absent on an older server. */
+  chat?: AgentChat;
 };
 
 /* -------------------------------------------------------------------------- */

@@ -18,6 +18,8 @@ import { DEFAULT_LIMIT } from "@/lib/constants";
 import type {
   AccountCredentials,
   AgentPresence,
+  AgentChat,
+  AgentChatsResponse,
   AgentStateResponse,
   AgentTurn,
   ApiHealthResponse,
@@ -442,9 +444,77 @@ export async function listFolders(
 /* the agent conversation                                                     */
 /* -------------------------------------------------------------------------- */
 
-/** History plus presence. `after` asks for turns newer than a sequence number. */
-export function getAgentState(ctx: Ctx, after?: number): Promise<AgentStateResponse> {
-  return request<AgentStateResponse>(`/api/agent/state${query({ after })}`, {
+/**
+ * History plus presence. `after` asks for turns newer than a sequence number,
+ * `chat` for a conversation other than the active one.
+ */
+export function getAgentState(
+  ctx: Ctx,
+  after?: number,
+  chat?: string,
+): Promise<AgentStateResponse> {
+  return request<AgentStateResponse>(`/api/agent/state${query({ after, chat })}`, {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/* ---- chats ----------------------------------------------------------------
+   Whole list, no paging. One small row per conversation, and the rail's search
+   box would otherwise need a round trip per keystroke.
+   ------------------------------------------------------------------------ */
+
+export function listAgentChats(
+  ctx: Ctx,
+  includeArchived = false,
+): Promise<AgentChatsResponse> {
+  return request<AgentChatsResponse>(
+    `/api/agent/chats${query({ archived: includeArchived ? 1 : undefined })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+export function createAgentChat(ctx: Ctx): Promise<{ chat: AgentChat }> {
+  return request<{ chat: AgentChat }>("/api/agent/chats", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+export function selectAgentChat(id: string, ctx: Ctx): Promise<{ chat: AgentChat }> {
+  return request<{ chat: AgentChat }>(
+    `/api/agent/chats/${encodeURIComponent(id)}/select`,
+    { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+export function renameAgentChat(
+  id: string,
+  title: string,
+  ctx: Ctx,
+): Promise<{ renamed: boolean }> {
+  return request<{ renamed: boolean }>(`/api/agent/chats/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: { title },
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+export function archiveAgentChat(id: string, ctx: Ctx): Promise<{ archived: boolean }> {
+  return request<{ archived: boolean }>(
+    `/api/agent/chats/${encodeURIComponent(id)}/archive`,
+    { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+export function deleteAgentChat(id: string, ctx: Ctx): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>(`/api/agent/chats/${encodeURIComponent(id)}`, {
+    method: "DELETE",
     baseUrl: ctx.baseUrl,
     token: ctx.token,
     signal: ctx.signal,
@@ -457,23 +527,32 @@ export function getAgentState(ctx: Ctx, after?: number): Promise<AgentStateRespo
  * The response carries presence as it was at the moment of the write, which is
  * what lets the composer say "no agent is listening" about THIS message rather
  * than about whatever the last stream frame happened to report.
+ *
+ * `chat` names the conversation the pane is showing. Without it the server
+ * writes to whatever chat is active, which is one row shared by every window.
  */
 export function sendAgentMessage(
   text: string,
   ctx: Ctx,
+  chat?: string,
 ): Promise<{ turn: AgentTurn; presence: AgentPresence }> {
   return request<{ turn: AgentTurn; presence: AgentPresence }>("/api/agent/messages", {
     method: "POST",
-    body: { text },
+    body: chat ? { text, chat } : { text },
     baseUrl: ctx.baseUrl,
     token: ctx.token,
     signal: ctx.signal,
   });
 }
 
-export function clearAgentConversation(ctx: Ctx): Promise<{ cleared: boolean }> {
+/** Same `chat` rule as sendAgentMessage: clear the pane's chat, not the active one. */
+export function clearAgentConversation(
+  ctx: Ctx,
+  chat?: string,
+): Promise<{ cleared: boolean }> {
   return request<{ cleared: boolean }>("/api/agent/clear", {
     method: "POST",
+    body: chat ? { chat } : undefined,
     baseUrl: ctx.baseUrl,
     token: ctx.token,
     signal: ctx.signal,
@@ -486,7 +565,11 @@ export function clearAgentConversation(ctx: Ctx): Promise<{ cleared: boolean }> 
  */
 export function streamAgent(
   ctx: Ctx,
-  on: { turn: (turn: AgentTurn) => void; presence: (presence: AgentPresence) => void },
+  on: {
+    turn: (turn: AgentTurn) => void;
+    presence: (presence: AgentPresence) => void;
+    chats?: (chats: AgentChatsResponse) => void;
+  },
 ): Promise<void> {
   return stream("/api/agent/stream", {
     baseUrl: ctx.baseUrl,
@@ -496,6 +579,7 @@ export function streamAgent(
       try {
         if (event === "turn") on.turn(JSON.parse(data) as AgentTurn);
         else if (event === "presence") on.presence(JSON.parse(data) as AgentPresence);
+        else if (event === "chats") on.chats?.(JSON.parse(data) as AgentChatsResponse);
       } catch {
         // A frame we cannot parse is dropped rather than tearing down a live
         // conversation. The next one re-states presence anyway.
