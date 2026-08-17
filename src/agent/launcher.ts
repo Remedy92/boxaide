@@ -3,12 +3,19 @@
  *
  * MCP is client-driven, so the Agent view is silent until some client enters
  * the chat_await_message loop. For GUI clients (Claude Desktop) nothing can
- * automate that. For CLI agents there is no such wall: `claude -p` and
- * `grok -p` run headless, take their MCP servers (Claude on the command
- * line, Grok via an isolated GROK_HOME), and keep looping for as long as
- * the kickoff prompt tells them to. This module detects which known
- * agent CLIs are installed, and spawns exactly one of them wired to this
- * server.
+ * automate that. For CLI agents there is no such wall: they run headless and
+ * take their MCP servers from the command line or an isolated config home. This
+ * module detects which known agent CLIs are installed, and starts exactly one
+ * of them wired to this server.
+ *
+ * Two launch shapes, and the difference is who owns the loop:
+ *  - A KICKOFF launch (Grok, Antigravity) is one long-lived child, and the loop
+ *    exists because the prompt tells the model to keep calling
+ *    chat_await_message. That loop is a suggestion, and it ends when the model
+ *    decides it has finished.
+ *  - A driven launch (Claude Code) hands the loop to a driver in this process —
+ *    see driver.ts. `spec.drive` builds it. There is no long-lived child: the
+ *    driver spawns one process per turn.
  *
  * Security posture, decided by the user and enforced here:
  *  - Only binaries from the fixed registry below are ever spawned, resolved
@@ -37,16 +44,13 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import {
   lineSplitter,
-  readClaudeEvent,
   readGrokEvent,
   renderClaudeRunLine,
   type ReadEvent,
   type RenderRunLine,
 } from "./agent-stream.js";
-import {
-  type AgentDriver,
-  type DriverChannel,
-} from "./opencode-driver.js";
+import { ClaudeDriver, type ClaudeTurnRequest } from "./claude-driver.js";
+import type { AgentDriver, DriverChannel } from "./driver.js";
 import {
   fetchModels,
   parseBulletModels,
@@ -124,13 +128,24 @@ const PREAPPROVED_TOOL_NAMES = [
 ];
 
 
-/** The chat loop's own tools. A scheduled run has nobody to talk to. */
-const CHAT_TOOL_NAMES = new Set([
-  "chat_await_message",
-  "chat_say",
-  "chat_activity",
-  "chat_history",
-]);
+/**
+ * The chat loop's own tools: taking a message, answering it, narrating it.
+ *
+ * A driven session must not have these — the driver holds the lease, and a
+ * second asker on one channel answers twice. A scheduled run must not either:
+ * it has nobody to talk to.
+ */
+const LOOP_TOOL_NAMES = new Set(["chat_await_message", "chat_say", "chat_activity"]);
+
+/**
+ * Reading the conversation back. Not a loop tool: it takes no lease and posts
+ * nothing, and it is the only way a driven session that lost its own transcript
+ * can recover what was already said. A scheduled run still does not get it —
+ * the chat is the user's, and a run has no part in it.
+ */
+const HISTORY_TOOL_NAME = "chat_history";
+
+const CHAT_TOOL_NAMES = new Set([...LOOP_TOOL_NAMES, HISTORY_TOOL_NAME]);
 
 /**
  * Prepended verbatim to every automation prompt (spec: Scheduler / Run
@@ -160,14 +175,20 @@ const RUN_AUTOMATION_READ_TOOLS = ["automations_list", "automation_runs_list"];
  * any future addition to any of these sets.
  */
 function preapprovedToolNames(opts: {
-  /** The chat loop's tools. Only an interactive agent has a user to talk to. */
-  chat: boolean;
+  /**
+   * How much of the conversation this agent may touch: the whole loop (its own
+   * model runs it), reading it back only (a driver runs it), or none of it (a
+   * scheduled run has no user).
+   */
+  chat: "loop" | "history" | "none";
   /** A run may read the schedule; only the chat agent may edit it. */
   automation: "all" | "read";
 }): string[] {
   const names = new Set<string>();
   for (const name of PREAPPROVED_TOOL_NAMES) {
-    if (opts.chat || !CHAT_TOOL_NAMES.has(name)) names.add(name);
+    if (!CHAT_TOOL_NAMES.has(name)) names.add(name);
+    else if (opts.chat === "loop") names.add(name);
+    else if (opts.chat === "history" && name === HISTORY_TOOL_NAME) names.add(name);
   }
   for (const name of CRM_TOOL_NAMES) names.add(name);
   for (const name of AUTOMATION_TOOL_NAMES) {
@@ -180,14 +201,33 @@ function preapprovedToolNames(opts: {
   return [...names];
 }
 
-/** Pre-approved tools for the interactive in-app agent. */
+/** Pre-approved tools for a KICKOFF launch, whose model runs the chat loop. */
 export function chatPreapprovedToolNames(): string[] {
-  return preapprovedToolNames({ chat: true, automation: "all" });
+  return preapprovedToolNames({ chat: "loop", automation: "all" });
+}
+
+/**
+ * Pre-approved tools for a driven session: everything the chat agent gets
+ * except the loop's own three.
+ *
+ * A driver already holds the lease. A model that could also call
+ * chat_await_message would be a second asker on one channel — it could take the
+ * message out from under the loop and answer it twice. `AgentChannel.setDriven`
+ * refuses those calls at the server; leaving them off the allowlist means the
+ * model never makes them.
+ *
+ * chat_history stays approved. It is lease-safe, the MCP server does not refuse
+ * it for a driven session, and it is the recovery path when a refused resume
+ * costs the session its memory: the model can read the conversation back instead
+ * of answering the next message as a stranger.
+ */
+export function drivenPreapprovedToolNames(): string[] {
+  return preapprovedToolNames({ chat: "history", automation: "all" });
 }
 
 /** Pre-approved tools for a headless automation run. */
 export function runPreapprovedToolNames(): string[] {
-  return preapprovedToolNames({ chat: false, automation: "read" });
+  return preapprovedToolNames({ chat: "none", automation: "read" });
 }
 
 export type LaunchContext = {
@@ -221,6 +261,29 @@ export type LaunchContext = {
 
 export type { ModelOption } from "./model-list.js";
 
+/** What a spec's `drive` is handed when the launcher starts it. */
+export type DriveOptions = {
+  /**
+   * The long-lived child, when the spec has `args`. Null for a spec that has
+   * none: its driver owns the child processes, and there is nothing else.
+   */
+  child: ChildProcess | null;
+  /** The resolved binary, for a driver that spawns its own children. */
+  bin: string;
+  workDir: string;
+  model?: string;
+  /** The full child environment, exactly as the launcher's own spawn built it. */
+  env: NodeJS.ProcessEnv;
+  /** The spec's own childEnv entries alone. Per-launch secrets ride here. */
+  childEnv: Record<string, string>;
+  /**
+   * Reports the loop's end. For a spec with no `args` this is the only exit
+   * there is — nothing else the launcher owns can close — so a driver that gave
+   * up passes the reason and it becomes `lastExit`. Null means it was stopped.
+   */
+  onStop: (error: string | null) => void;
+};
+
 export type AgentSpec = {
   id: string;
   label: string;
@@ -239,9 +302,11 @@ export type AgentSpec = {
    */
   models?: ModelOption[];
   /**
-   * Only specs with an args builder can be launched. The others are listed so
-   * the UI can say "found, not wired up yet" instead of pretending they do
-   * not exist.
+   * argv for one long-lived child: a KICKOFF session, or a server the spec's
+   * driver prompts. Absent with a `drive` means the driver owns its own children
+   * and the launcher spawns nothing; absent with neither means this CLI cannot
+   * be launched, and it is listed only so the UI can say "found, not wired up
+   * yet" instead of pretending it does not exist.
    */
   args?: (ctx: LaunchContext, model?: string) => string[];
   /**
@@ -268,7 +333,8 @@ export type AgentSpec = {
   /**
    * Reads one stdout line of this CLI's event stream. Set only for specs whose
    * `args` ask for that stream; without it the chat agent's stdout is drained
-   * and discarded, which is what every CLI did before.
+   * and discarded, which is what every CLI did before. A driven spec with no
+   * `args` passes its reader to its driver instead — there is no child here.
    */
   readEvent?: ReadEvent;
   /**
@@ -278,69 +344,114 @@ export type AgentSpec = {
    */
   renderRunLine?: RenderRunLine;
   /**
-   * Runs the chat loop in this process for a CLI whose `args` start a server
-   * rather than a one-shot session. Called once, straight after spawn; the
-   * launcher stops it when the child exits or is stopped. Null means the
-   * driver declined (no channel), which leaves the child running untouched.
+   * Runs the chat loop in this process, for a CLI whose model must not be asked
+   * to run it. Called once, straight after the launch; the launcher stops it
+   * when the child exits or is stopped. Null means the driver declined (no
+   * channel), which leaves a long-lived child running untouched.
    */
-  drive?: (
-    ctx: LaunchContext,
-    opts: {
-      child: ChildProcess;
-      workDir: string;
-      model?: string;
-      /** The spec's own childEnv entries, as spawned. Secrets ride here. */
-      env: Record<string, string>;
-    },
-  ) => AgentDriver | null;
+  drive?: (ctx: LaunchContext, opts: DriveOptions) => AgentDriver | null;
 };
 
 /**
- * Claude Code, headless. --strict-mcp-config keeps the user's other MCP
- * servers out of a process Boxaide is responsible for; the allowlist is the
- * read/draft boundary (send stays un-approved, which headless mode denies).
+ * One driven turn of Claude Code, as a command line.
+ *
+ * There is no server to prompt and no `claude` mode that stays up, so a turn is
+ * a process: the user's message as the prompt, and `--resume` carrying the
+ * session the last turn reported. Exported for the driver and for tests; the
+ * launcher is the only place that decides what flags Boxaide passes to a CLI.
+ *
+ * --strict-mcp-config keeps the user's other MCP servers out of a process
+ * Boxaide is responsible for; the allowlist is the read/draft boundary (send
+ * stays un-approved, which headless mode denies) minus the chat tools, which
+ * belong to the driver.
  */
-function claudeArgs(ctx: LaunchContext, model?: string): string[] {
-  return claudeArgsFor(
-    ctx,
-    KICKOFF,
-    chatPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
-    model,
-  );
+export function claudeTurnArgs(
+  ctx: LaunchContext,
+  turn: ClaudeTurnRequest,
+  model?: string,
+): string[] {
+  return [
+    ...claudeFlagsFor(
+      ctx,
+      drivenPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
+      model,
+    ),
+    // What is left of KICKOFF once Boxaide runs the loop: the reply text is the
+    // answer, and no loop tool is to be called. Appended rather than folded into
+    // the prompt so it frames every turn, including one after a fresh session.
+    "--append-system-prompt",
+    turn.system,
+    ...(turn.sessionId ? ["--resume", turn.sessionId] : []),
+    ...claudePromptArgs(turn.prompt),
+  ];
 }
 
 /**
- * One-shot form: identical wiring, different prompt and allowlist. Same
- * `-p` headless mode — the chat loop only exists because KICKOFF tells the
- * model to loop, so a plain prompt already exits after the work is done.
+ * The prompt, last and behind `--`.
  *
- * Same event stream as the chat path, for a different reason: plain `-p`
- * prints nothing until the very end, so a run that hung wrote a zero-byte log
- * and the UI could only say the run wrote nothing. `renderRunLine` turns these
- * events back into text a person reads.
+ * `-p` is a boolean flag and the prompt is a positional argument, so the user's
+ * message is parsed as options unless option parsing is closed first: verified
+ * against claude 2.1.233, `-p --version` prints the version and exits, and
+ * `-p --help hi` fails with "unknown option". A chat message beginning with a
+ * dash is ordinary text, so without this a turn would silently answer something
+ * else or not run at all. Also verified there: with `--` the same text arrives
+ * as the prompt, including alongside `--resume` and directly after the variadic
+ * `--allowedTools`.
+ */
+function claudePromptArgs(prompt: string): string[] {
+  return ["--", prompt];
+}
+
+function claudeDrive(
+  ctx: LaunchContext,
+  opts: DriveOptions,
+): AgentDriver | null {
+  // Without a channel there is nobody to drive for. `start` refuses this launch
+  // before it gets here, since a Claude Code launch is nothing but its driver.
+  if (!ctx.channel) return null;
+  return new ClaudeDriver({
+    channel: ctx.channel,
+    agent: "claude-code",
+    bin: opts.bin,
+    cwd: opts.workDir,
+    env: opts.env,
+    argsFor: (turn) => claudeTurnArgs(ctx, turn, opts.model),
+    onStop: opts.onStop,
+  }).start();
+}
+
+/**
+ * One-shot form: same `-p` and event stream as a driven turn, different prompt
+ * and allowlist, and no session to carry. A run answers once and exits.
+ * `renderRunLine` turns the stream back into text a person reads — plain `-p`
+ * printed nothing until the end, so a hung run wrote a zero-byte log.
  */
 function claudeRunArgs(
   ctx: LaunchContext,
   prompt: string,
   model?: string,
 ): string[] {
-  return claudeArgsFor(
-    ctx,
-    prompt,
-    runPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
-    model,
-  );
+  return [
+    ...claudeFlagsFor(
+      ctx,
+      runPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
+      model,
+    ),
+    // A run's prompt always opens with AUTOMATION_RUN_PREAMBLE, so it cannot
+    // lead with a dash today. Behind `--` anyway: the day something is prepended
+    // to it, that would be an automation that silently stopped running.
+    ...claudePromptArgs(prompt),
+  ];
 }
 
-function claudeArgsFor(
+/** Everything on a `claude -p` command line except the prompt itself. */
+function claudeFlagsFor(
   ctx: LaunchContext,
-  prompt: string,
   allowedTools: string[],
   model?: string,
 ): string[] {
   return [
     "-p",
-    prompt,
     ...(model ? ["--model", model] : []),
     // NDJSON of the session's own events, which agent-stream.ts reads for
     // presence. --verbose is what makes -p emit the per-event lines rather
@@ -667,16 +778,18 @@ function agentWorkDir(ctx: LaunchContext): string {
 
 export const KNOWN_AGENTS: AgentSpec[] = [
   {
+    // No `args`: there is nothing to keep running. The driver spawns one
+    // `claude -p` per user turn and resumes the session across them, so the
+    // conversation cannot end because a model decided it was done.
     id: "claude-code",
     label: "Claude Code",
     bin: "claude",
-    args: claudeArgs,
     runArgs: claudeRunArgs,
     models: CLAUDE_MODELS,
     childEnv: claudeChildEnv,
     prepare: claudePrepare,
-    readEvent: readClaudeEvent,
     renderRunLine: renderClaudeRunLine,
+    drive: claudeDrive,
   },
   {
     id: "grok",
@@ -705,6 +818,19 @@ export const KNOWN_AGENTS: AgentSpec[] = [
   { id: "codex", label: "Codex", bin: "codex" },
 ];
 
+/** A spec this build knows how to start: a child to spawn, a driver, or both. */
+function launchable(spec: AgentSpec): boolean {
+  return spec.args !== undefined || spec.drive !== undefined;
+}
+
+/**
+ * A spec whose whole launch is its driver: no argv, so nothing is spawned here
+ * and the driver's lifetime is the agent's.
+ */
+function drivenOnly(spec: AgentSpec): boolean {
+  return spec.args === undefined && spec.drive !== undefined;
+}
+
 export type ListedAgent = {
   id: string;
   label: string;
@@ -724,9 +850,28 @@ export type RunningAgent = {
   model: string | null;
 };
 
+/**
+ * Why a launch ended.
+ *
+ * The exit code cannot answer this. A driven agent has no process exit to report
+ * at all, and a long-lived child that was asked to stop exits on a signal with
+ * code null — so a UI reading the code alone painted "Stop" as a crash on one
+ * CLI and a clean stop on another. The launcher is the only place that knows
+ * which of the two happened, because it is the thing that was asked.
+ */
+export type ExitReason =
+  /** The user (or shutdown) asked for it. */
+  | "stopped"
+  /** It failed: a driver gave up, or the CLI could not be spawned. */
+  | "error"
+  /** It ended by itself. The code says whether that was clean. */
+  | "exited";
+
 export type LastExit = {
   id: string;
+  /** Null when there was no process exit to read, or it died on a signal. */
   code: number | null;
+  reason: ExitReason;
   at: string;
   /** Last few KB of stderr, for the UI to explain a crash. */
   stderrTail: string;
@@ -858,6 +1003,12 @@ export class AgentLauncher {
   private oneShot: ChildProcess | null = null;
   /** The in-process loop driving the chat agent, for specs that have one. */
   private driver: AgentDriver | null = null;
+  /**
+   * A stop was asked for on the current launch. It is the only thing that
+   * separates "the user pressed Stop" from "it died" once the exit arrives: a
+   * signalled child reports code null either way.
+   */
+  private stopRequested = false;
   /** Set while a one-shot is alive; closes over that run's kill/status flag. */
   private killOneShot: (() => void) | null = null;
   /** Per-agent model lists as their CLI last reported them. */
@@ -900,7 +1051,7 @@ export class AgentLauncher {
           id: spec.id,
           label: spec.label,
           available: bin !== null,
-          supported: spec.args !== undefined,
+          supported: launchable(spec),
           models: cached ?? (await this.firstModels(spec, bin)),
         };
       }),
@@ -1065,12 +1216,17 @@ export class AgentLauncher {
     this.assertIdle();
     const spec = this.registry.find((s) => s.id === id);
     if (!spec) throw new LaunchError(404, `unknown agent: ${id}`);
-    if (!spec.args) {
+    if (!launchable(spec)) {
       throw new LaunchError(400, `${spec.label} cannot be launched yet`);
     }
     const bin = this.resolveBin(spec.bin);
     if (!bin) {
       throw new LaunchError(400, `${spec.label} is not installed (no ${spec.bin} on PATH)`);
+    }
+    // A driven-only launch IS its driver, and a driver with no channel declines.
+    // Refuse here rather than report a running agent that does nothing.
+    if (drivenOnly(spec) && !this.ctx.channel) {
+      throw new LaunchError(400, `${spec.label} needs the Boxaide conversation`);
     }
     // The model id becomes an argv element, so it must be one the CLI itself
     // named — the same allowlist rule that protects the agent id, now sourced
@@ -1093,49 +1249,92 @@ export class AgentLauncher {
     // Built once and shared with the driver: a spec's childEnv may mint a
     // per-launch secret, and the driver must see the exact value the child got.
     const childEnv = spec.childEnv?.(this.ctx, workDir) ?? {};
-    const child = spawn(bin, spec.args(this.ctx, model), {
-      cwd: workDir,
-      env: this.baseEnvWith(childEnv),
-      // stdout is piped for the event stream, and MUST be consumed: a pipe
-      // nobody reads fills its buffer and blocks the agent mid-write. The
-      // handler below reads every chunk whether or not anything wants it.
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on(
-      "data",
-      lineSplitter((line) => {
-        // Every line is liveness; only some carry a tool name. A spec with no
-        // reader still reports the line, so its agent stays visibly alive.
-        this.ctx.onActivity?.(spec.readEvent?.(line) ?? null);
-      }),
-    );
-    child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", (chunk: string) => {
-      this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_TAIL_LIMIT);
-    });
+    const env = this.baseEnvWith(childEnv);
+    // Null for a driven-only spec: its driver spawns one child per turn, and a
+    // second long-lived process here would be an agent nobody prompts.
+    const child = spec.args
+      ? spawn(bin, spec.args(this.ctx, model), {
+          cwd: workDir,
+          env,
+          // stdout is piped for the event stream, and MUST be consumed: a pipe
+          // nobody reads fills its buffer and blocks the agent mid-write. The
+          // handler below reads every chunk whether or not anything wants it.
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+      : null;
+    if (child) {
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on(
+        "data",
+        lineSplitter((line) => {
+          // Every line is liveness; only some carry a tool name. A spec with no
+          // reader still reports the line, so its agent stays visibly alive.
+          this.ctx.onActivity?.(spec.readEvent?.(line) ?? null);
+        }),
+      );
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => {
+        this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_TAIL_LIMIT);
+      });
+      child.on("error", (err) => {
+        // Spawn failures (ENOENT, EACCES) surface as an exit, not an exception.
+        this.stderrTail = `${this.stderrTail}\n${err.message}`.trim();
+        this.noteExit(spec.id, { code: null, reason: "error" });
+      });
+      // "close", not "exit": exit fires while stderr may still hold undrained
+      // data (observed on Linux), and the tail is the whole point of capturing.
+      child.on("close", (code) =>
+        this.noteExit(spec.id, {
+          code,
+          reason: this.stopRequested ? "stopped" : "exited",
+        }),
+      );
+    }
 
     const started: RunningAgent = {
       id: spec.id,
-      pid: child.pid ?? -1,
+      // -1 for a driven-only launch. There is no one process to name: the loop
+      // is in this one, and each turn's child outlives only that turn.
+      pid: child?.pid ?? -1,
       startedAt: new Date().toISOString(),
       model: model ?? null,
     };
-    child.on("error", (err) => {
-      // Spawn failures (ENOENT, EACCES) surface as an exit, not an exception.
-      this.stderrTail = `${this.stderrTail}\n${err.message}`.trim();
-      this.noteExit(spec.id, null);
-    });
-    // "close", not "exit": exit fires while stderr may still hold undrained
-    // data (observed on Linux), and the tail is the whole point of capturing.
-    child.on("close", (code) => this.noteExit(spec.id, code));
 
     this.child = child;
     this.running = started;
+    this.stopRequested = false;
     // Before the driver: the channel has to know a launched agent exists, or
     // the loop's first awaitUserTurn is stamped against nobody.
     this.ctx.onRunningChange?.(spec.id);
-    this.driver = spec.drive?.(this.ctx, { child, workDir, model, env: childEnv }) ?? null;
+    try {
+      this.driver =
+        spec.drive?.(this.ctx, {
+          child,
+          bin,
+          workDir,
+          model,
+          env,
+          childEnv,
+          onStop: (error) => this.noteDriverStop(spec.id, error),
+        }) ?? null;
+    } catch (err) {
+      // A launch whose loop never started is not a running agent. Without this
+      // `running` would stay true with nothing driving it: every later start
+      // would 409, busy() would block the scheduler, and only restarting the app
+      // would clear it.
+      const message = err instanceof Error ? err.message : String(err);
+      this.stderrTail = `${this.stderrTail}\n${message}`.trim();
+      child?.kill("SIGTERM");
+      this.noteExit(spec.id, { code: null, reason: "error" });
+      throw new LaunchError(400, `${spec.label} could not start its loop: ${message}`);
+    }
+    // Same wedge from the other direction: a driven-only spec IS its driver, so
+    // a declined one leaves nothing running to report.
+    if (!this.driver && drivenOnly(spec)) {
+      child?.kill("SIGTERM");
+      this.noteExit(spec.id, { code: null, reason: "error" });
+      throw new LaunchError(400, `${spec.label} could not start its loop`);
+    }
     return started;
   }
 
@@ -1294,20 +1493,37 @@ export class AgentLauncher {
 
   /** Idempotent: stopping with nothing running is a no-op. */
   stop(): void {
-    this.child?.kill("SIGTERM");
+    this.stopRequested = true;
+    // The child is captured before the driver is stopped, for the same reason
+    // close() clears its state first: a driver may report the end of its loop
+    // from inside its own stop(), which reaches noteExit and nulls `this.child`
+    // — and a long-lived child read after that line would never be signalled.
+    const child = this.child;
+    // The loop first, and for a driven-only agent it is the only thing to stop:
+    // its driver kills the turn in flight and ends the loop, which is the exit.
+    // For a server-backed one it also keeps the driver from starting a turn
+    // against a server that is being killed a line later.
+    this.driver?.stop();
+    child?.kill("SIGTERM");
     // State clears in the exit handler, so status() keeps saying "running"
-    // only while the process actually exists.
+    // only while the agent actually exists.
   }
 
   close(): void {
     const had = this.running !== null;
-    // The loop first: it parks on the channel, and a wait left open would hold
-    // the process past shutdown.
-    this.driver?.stop();
-    this.driver = null;
-    this.child?.kill("SIGTERM");
-    this.child = null;
+    this.stopRequested = true;
+    // State cleared before the driver is stopped, for the same reason noteExit
+    // does it in that order: a driver may report the end of its loop from inside
+    // its own stop(), and that lands in noteDriverStop.
     this.running = null;
+    const driver = this.driver;
+    this.driver = null;
+    const child = this.child;
+    this.child = null;
+    // The loop next: it parks on the channel, and a wait left open would hold
+    // the process past shutdown.
+    driver?.stop();
+    child?.kill("SIGTERM");
     this.killRun();
     if (had) this.ctx.onRunningChange?.(null);
   }
@@ -1376,19 +1592,47 @@ export class AgentLauncher {
     return found;
   }
 
-  private noteExit(id: string, code: number | null): void {
+  /**
+   * A driver's loop has ended.
+   *
+   * For a driven-only agent this is its exit: nothing else the launcher owns can
+   * close, so without this `status().running` would stay true forever after a
+   * driver gave up. A give-up carries its reason into `lastExit.stderrTail`,
+   * which is what the pane reads to explain why the agent stopped answering.
+   */
+  private noteDriverStop(id: string, error: string | null): void {
     if (this.running?.id !== id) return;
-    // The server is gone, so the loop has nothing to prompt.
-    this.driver?.stop();
+    if (error) this.stderrTail = `${this.stderrTail}\n${error}`.trim();
+    // No code: a loop is not a process, and inventing 0 or 1 for it is what made
+    // a stopped driven agent read as clean and a stopped child-backed one read
+    // as a crash. The reason is the fact; the code stays absent because there
+    // was none.
+    this.noteExit(id, { code: null, reason: error ? "error" : "stopped" });
+  }
+
+  private noteExit(
+    id: string,
+    exit: { code: number | null; reason: ExitReason },
+  ): void {
+    if (this.running?.id !== id) return;
+    // Everything that can call back into this method is cleared FIRST. A driver
+    // is free to report the end of its loop from inside its own stop(), and that
+    // arrives here as another exit for the same agent — which would recurse
+    // until the stack ran out if `running` and `driver` still pointed at the
+    // launch being torn down.
+    this.running = null;
+    this.child = null;
+    const driver = this.driver;
     this.driver = null;
+    // Whatever the loop was prompting is gone.
+    driver?.stop();
     this.lastExit = {
       id,
-      code,
+      code: exit.code,
+      reason: exit.reason,
       at: new Date().toISOString(),
       stderrTail: this.stderrTail,
     };
-    this.running = null;
-    this.child = null;
     this.ctx.onRunningChange?.(null);
   }
 

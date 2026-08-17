@@ -233,9 +233,12 @@ agent is a local CLI you already have — Claude Code, Grok, Codex, Cursor,
 Claude Desktop — talking MCP. The four `chat_*` tools hold the conversation in
 the Boxaide window instead of in that client's terminal.
 
-**Start** / **Stop** on the rail spawn or kill the installed CLI and feed it
-the kickoff prompt (`src/agent/launcher.ts`). You can still paste the same
-loop into a client you launched yourself:
+**Start** / **Stop** on the rail run or kill the installed CLI
+(`src/agent/launcher.ts`). For Claude Code, Boxaide holds the loop itself and
+the CLI is only asked to answer one message at a time — so the conversation
+cannot end because a model decided it was finished. The others are handed the
+kickoff prompt below and run the loop themselves. Either way you can still
+paste that loop into a client you launched yourself:
 
 ```
 You are my Boxaide inbox agent. Use the Boxaide MCP tools.

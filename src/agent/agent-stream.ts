@@ -60,12 +60,61 @@ function parse(line: string): unknown {
   }
 }
 
-/** Claude Code: tool calls arrive as content blocks on an assistant message. */
-export const readClaudeEvent: ReadEvent = (line) => {
-  const event = parse(line) as
-    | { type?: string; message?: { content?: unknown } }
-    | null;
-  if (!event || event.type !== "assistant") return null;
+/** What one `claude -p` process produced, folded together line by line. */
+export type ClaudeTurnOutcome = {
+  /** The `result` event's text, when the turn succeeded. */
+  text: string | null;
+  /** The session id the CLI reported, on success or failure. */
+  sessionId: string | null;
+  /** Why it failed, in a form fit for the exit the user is shown. */
+  error: string | null;
+};
+
+/**
+ * One Claude Code stream-json line: the tool it names, and what it adds to the
+ * turn's outcome.
+ *
+ * Both readings come off one parse. They used to be two functions over the same
+ * line — a tool label here, the session id and the result there — which parsed
+ * every line twice and split ownership of this wire format across two files.
+ *
+ * Shapes verified against claude 2.1.233 with
+ * `claude -p … --output-format stream-json --verbose`:
+ *   every line          → {"session_id":"<uuid>", …}
+ *   a tool call         → {"type":"assistant","message":{"content":
+ *                          [{"type":"tool_use","name":"Bash"}]}, …}
+ *   the answer          → {"type":"result","subtype":"success","is_error":false,
+ *                          "result":"<text>", …}
+ *   a refused resume    → {"type":"result","subtype":"error_during_execution",
+ *                          "is_error":true,"errors":["No conversation found
+ *                          with session ID: …"], …}
+ * Everything else — hook records, thinking-token deltas, rate-limit events — is
+ * liveness only, which the caller has already counted. Note that lines keep
+ * arriving after the result event (a `hook_response` follows it), so a reader
+ * must not stop at the answer.
+ *
+ * Null is not "nothing happened": it only means this line does not rename what
+ * the agent is doing.
+ */
+export function readClaudeLine(line: string, into: ClaudeTurnOutcome): string | null {
+  const event = parse(line) as {
+    type?: unknown;
+    subtype?: unknown;
+    session_id?: unknown;
+    is_error?: unknown;
+    result?: unknown;
+    errors?: unknown;
+    message?: { content?: unknown };
+  } | null;
+  if (!event) return null;
+  if (typeof event.session_id === "string" && event.session_id) {
+    into.sessionId = event.session_id;
+  }
+  if (event.type === "result") {
+    foldResult(event, into);
+    return null;
+  }
+  if (event.type !== "assistant") return null;
   const content = event.message?.content;
   if (!Array.isArray(content)) return null;
   for (const block of content) {
@@ -75,7 +124,46 @@ export const readClaudeEvent: ReadEvent = (line) => {
     }
   }
   return null;
-};
+}
+
+/** The turn's own verdict: the answer, or the CLI's reason for not having one. */
+function foldResult(
+  event: {
+    subtype?: unknown;
+    is_error?: unknown;
+    result?: unknown;
+    errors?: unknown;
+  },
+  into: ClaudeTurnOutcome,
+): void {
+  if (event.is_error !== true && typeof event.result === "string") {
+    const answer = event.result.trim();
+    if (answer) into.text = answer;
+    return;
+  }
+  const errors = Array.isArray(event.errors)
+    ? event.errors.filter((e): e is string => typeof e === "string")
+    : [];
+  into.error =
+    errors.join("; ") ||
+    (typeof event.subtype === "string" ? `claude: ${event.subtype}` : null) ||
+    into.error;
+}
+
+/**
+ * The reader for one driven `claude -p` turn.
+ *
+ * `onLine` runs for every line, with the tool it named or null: the caller owns
+ * both liveness and the presence label, and this owns the wire format.
+ */
+export function claudeTurnReader(
+  outcome: ClaudeTurnOutcome,
+  onLine: (tool: string | null) => void,
+): LineFeed {
+  return lineSplitter((line) => onLine(readClaudeLine(line, outcome)), {
+    maxLine: CLAUDE_RESULT_MAX_LINE,
+  });
+}
 
 /**
  * Grok: one `tool_call` line per call, and a `tool_call_update` per state
@@ -190,10 +278,24 @@ export const renderClaudeRunLine: RenderRunLine = (line) => {
 const MAX_LINE = 256 * 1024;
 
 /**
+ * The same cap for a reader whose lines carry the turn's answer.
+ *
+ * Presence can afford to lose a line: it costs one label. A driven turn cannot —
+ * dropping the `result` event scores a finished, paid-for turn as "no answer",
+ * re-runs it, and dead-letters the message. Claude's own output ceiling is
+ * ~32k tokens, so this is orders of magnitude past any real result line and
+ * exists only to bound the buffer.
+ */
+const CLAUDE_RESULT_MAX_LINE = 8 * 1024 * 1024;
+
+/** A chunk sink with an end: `flush` reads whatever arrived without a newline. */
+export type LineFeed = ((chunk: string) => void) & { flush: () => void };
+
+/**
  * Turns a stdout chunk stream into whole lines.
  *
  * A pipe splits wherever it likes, so a JSON object routinely arrives across
- * two chunks. A line past the cap is emitted as its first MAX_LINE characters
+ * two chunks. A line past the cap is emitted as its first `maxLine` characters
  * and the rest is dropped up to the next newline: the run log keeps the head,
  * which is the part a person can read, and the readers that JSON.parse a line
  * simply return null on the truncated one, as they already do for any line
@@ -206,7 +308,9 @@ const MAX_LINE = 256 * 1024;
  */
 export function lineSplitter(
   onLine: (line: string) => void,
-): ((chunk: string) => void) & { flush(): void } {
+  options: { maxLine?: number } = {},
+): LineFeed {
+  const maxLine = options.maxLine ?? MAX_LINE;
   let buffer = "";
   let dropping = false;
   const feed = (chunk: string) => {
@@ -219,8 +323,8 @@ export function lineSplitter(
       else if (line.trim()) onLine(line);
       index = buffer.indexOf("\n");
     }
-    if (buffer.length > MAX_LINE) {
-      const head = buffer.slice(0, MAX_LINE);
+    if (buffer.length > maxLine) {
+      const head = buffer.slice(0, maxLine);
       buffer = "";
       dropping = true;
       if (head.trim()) onLine(head);
