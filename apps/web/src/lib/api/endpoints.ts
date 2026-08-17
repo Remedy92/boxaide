@@ -16,6 +16,7 @@ import { ApiError } from "@/lib/api/errors";
 import { DEFAULT_LIMIT } from "@/lib/constants";
 import type {
   AccountCredentials,
+  AgendaResponse,
   AgentPresence,
   AgentChat,
   AgentChatsResponse,
@@ -24,6 +25,8 @@ import type {
   ApiHealthResponse,
   Automation,
   AutomationRun,
+  CalendarAccount,
+  CalendarAccountsResponse,
   ConnectionTestResult,
   CreatedAccount,
   CrmContact,
@@ -33,14 +36,18 @@ import type {
   CrmNote,
   CrmOrganization,
   CrmPipelineBoard,
+  CreateMeetingResult,
   CrmSyncResult,
   DraftInput,
   DraftRef,
+  FreeSlotsResponse,
   HealthResponse,
   MailDraft,
   MailFolder,
   MailMessage,
   MailAccountMeta,
+  MeetingResult,
+  MeetingsResponse,
   MessageListResponse,
   MetaResponse,
   OutboxRow,
@@ -48,6 +55,7 @@ import type {
   OutreachBadge,
   OutreachCampaign,
   CampaignStatus,
+  RsvpRefreshResult,
   SendResult,
   SuppressionRow,
   UpdateState,
@@ -1027,6 +1035,251 @@ export function getOutreachBadge(ctx: Ctx): Promise<OutreachBadge> {
     token: ctx.token,
     signal: ctx.signal,
   });
+}
+
+/* -------------------------------------------------------------------------- */
+/* calendar — /api/calendar/*                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The whole body, not just `accounts`: it also carries `googleRedirectUri`,
+ * the URI this server hands Google. Only the server knows it — it is built from
+ * the address the server bound to, which this page cannot see — and Google
+ * rejects the sign-in unless the registered value matches it exactly.
+ */
+export function listCalendarAccounts(ctx: Ctx): Promise<CalendarAccountsResponse> {
+  return request<CalendarAccountsResponse>("/api/calendar/accounts", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/** CalDAV only. Google is an OAuth handshake — see startGoogleCalendarAuth. */
+export type CalDavAccountBody = {
+  alias: string;
+  serverUrl: string;
+  username: string;
+  password: string;
+};
+
+export async function createCalDavAccount(
+  body: CalDavAccountBody,
+  ctx: Ctx,
+): Promise<CalendarAccount> {
+  const data = await request<{ account: CalendarAccount }>(
+    "/api/calendar/accounts",
+    {
+      method: "POST",
+      body,
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.account;
+}
+
+/**
+ * A live CalDAV login, server-side, so it can take seconds. A failed test may
+ * come back as a 400 whose body is still {ok:false, error} — the same shape as
+ * /api/accounts/test — so the body is read before the failure is rethrown.
+ */
+export async function testCalDavAccount(
+  body: CalDavAccountBody,
+  ctx: Ctx,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    return await request<{ ok: boolean; error?: string }>(
+      "/api/calendar/accounts/test",
+      {
+        method: "POST",
+        body,
+        baseUrl: ctx.baseUrl,
+        token: ctx.token,
+        signal: ctx.signal,
+      },
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 400) {
+      const parsed = parseJson(err.raw);
+      if (parsed && typeof parsed === "object" && "ok" in parsed) {
+        return parsed as { ok: boolean; error?: string };
+      }
+    }
+    throw err;
+  }
+}
+
+/** A 404 means it was already gone; normalised rather than thrown. */
+export async function deleteCalendarAccount(
+  accountId: string,
+  ctx: Ctx,
+): Promise<{ deleted: boolean }> {
+  try {
+    return await request<{ deleted: boolean }>(
+      `/api/calendar/accounts/${encodeURIComponent(accountId)}`,
+      {
+        method: "DELETE",
+        baseUrl: ctx.baseUrl,
+        token: ctx.token,
+        signal: ctx.signal,
+      },
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return { deleted: false };
+    throw err;
+  }
+}
+
+export type GoogleCalendarStartBody = {
+  alias: string;
+  clientId: string;
+  clientSecret: string;
+};
+
+/**
+ * Starts the handshake and returns nothing but a URL to send the person to.
+ * Google redirects back to the SERVER, which finishes the setup — this page is
+ * never told; it finds out by refetching the account list.
+ */
+export function startGoogleCalendarAuth(
+  body: GoogleCalendarStartBody,
+  ctx: Ctx,
+): Promise<{ authUrl: string }> {
+  return request<{ authUrl: string }>("/api/calendar/google/start", {
+    method: "POST",
+    body,
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * The merged agenda across every calendar account. `start` and `end` are ISO
+ * instants, and one failing account is an entry in `errors`, not an empty list.
+ */
+export function getAgenda(
+  window: { start: string; end: string },
+  ctx: Ctx,
+): Promise<AgendaResponse> {
+  return request<AgendaResponse>(
+    `/api/calendar/agenda${query({ start: window.start, end: window.end })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+/**
+ * Times nothing is booked over, for the meeting form's suggestions.
+ *
+ * Advisory only: nothing is held, so a slot can go stale between being offered
+ * and being used. A calendar that failed to answer appears in `errors` — its
+ * busy time is missing, so the suggestions may cover it.
+ */
+export function getFreeSlots(
+  o: {
+    durationMinutes: number;
+    start: string;
+    end: string;
+    maxSlots?: number;
+    /* The working day is read as a wall clock in this zone. Sent from the
+       browser so suggestions follow the viewer's own clock; omitted, the
+       server falls back to its own, which is rarely the same one. */
+    timeZone?: string;
+  },
+  ctx: Ctx,
+): Promise<FreeSlotsResponse> {
+  return request<FreeSlotsResponse>(
+    `/api/calendar/free-slots${query({
+      durationMinutes: o.durationMinutes,
+      start: o.start,
+      end: o.end,
+      maxSlots: o.maxSlots,
+      timeZone: o.timeZone,
+    })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+/**
+ * Meetings BOXAIDE created — not everything on the calendar.
+ *
+ * The whole body, not just `meetings`: `refreshError` tells the view whether
+ * the guest responses beside each meeting are current.
+ */
+export function listMeetings(ctx: Ctx): Promise<MeetingsResponse> {
+  return request<MeetingsResponse>("/api/calendar/meetings", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * Reads guest replies now, rather than waiting for the background scan.
+ *
+ * One pass over every meeting, not one meeting — the mailboxes and calendars
+ * are scanned together — so the count comes back for the whole list. A
+ * mailbox that could not be read is a string in `errors`, never a failure.
+ */
+export function refreshMeetingResponses(ctx: Ctx): Promise<RsvpRefreshResult> {
+  return request<RsvpRefreshResult>("/api/calendar/meetings/refresh-rsvps", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+export type CreateMeetingBody = {
+  title: string;
+  start: string;
+  end: string;
+  attendees: string[];
+  description?: string;
+  location?: string;
+  calendarAccountId?: string;
+  mailAccountId?: string;
+  includeMeetingLink?: boolean;
+  /* The zone the invitation text is written in — the times the guest reads.
+     The event itself is the absolute instants in `start` and `end`, so this
+     changes the wording, never when the meeting happens. */
+  timeZone?: string;
+};
+
+/**
+ * Writes the event AND sends the invitations, so a success can still be
+ * partial: `warnings` names what did not happen. Never report this as "invites
+ * sent" without reading them.
+ */
+export function createMeeting(
+  body: CreateMeetingBody,
+  ctx: Ctx,
+): Promise<CreateMeetingResult> {
+  return request<CreateMeetingResult>("/api/calendar/meetings", {
+    method: "POST",
+    body,
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/** Same partial-success rule as createMeeting: read `warnings`. */
+export function cancelMeeting(
+  meetingId: string,
+  ctx: Ctx,
+): Promise<MeetingResult> {
+  return request<MeetingResult>(
+    `/api/calendar/meetings/${encodeURIComponent(meetingId)}/cancel`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
 }
 
 /* -------------------------------------------------------------------------- */

@@ -475,6 +475,151 @@ export type UpdateState = {
   canInstall: boolean;
 };
 
+/* -------------------------------------------------------------------------- */
+/* calendar — /api/calendar/*                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Two providers, and they are not symmetrical. A CalDAV mailbox is a URL, a
+ * username and an app password, so the UI can create one outright. Google is an
+ * OAuth handshake the server finishes after the browser has left for Google, so
+ * the UI can only start it — see startGoogleCalendarAuth.
+ */
+export type CalendarProvider = "caldav" | "google";
+
+export type CalendarAccount = {
+  id: string;
+  alias: string;
+  provider: CalendarProvider;
+  email: string;
+  createdAt: string;
+};
+
+/**
+ * GET /api/calendar/accounts.
+ *
+ * `googleRedirectUri` is the URI the SERVER hands Google, built from the
+ * address it bound to. It is here because only the server knows it: the page
+ * can be served from another origin entirely, and Google rejects the sign-in
+ * unless the registered URI matches that string character for character.
+ *
+ * Optional: a server built before this field simply omits it, and the UI
+ * reconstructs a best guess rather than showing nothing.
+ */
+export type CalendarAccountsResponse = {
+  accounts: CalendarAccount[];
+  googleRedirectUri?: string;
+};
+
+export type CalendarEventStatus = "confirmed" | "tentative" | "cancelled";
+
+/**
+ * One event as the agenda returns it. `start` and `end` are instants; the local
+ * time a person reads is this browser's, not the calendar server's.
+ */
+export type CalendarEvent = {
+  id: string;
+  accountId: string;
+  accountAlias: string;
+  calendarId: string;
+  title: string;
+  start: string;
+  end: string;
+  allDay: boolean;
+  location?: string;
+  status: CalendarEventStatus;
+  busy: boolean;
+};
+
+/**
+ * `errors` is per calendar account: one unreachable server does not empty the
+ * agenda, it appears beside the events that did load. Same contract as the
+ * message list's partial-failure array.
+ */
+export type AgendaResponse = { events: CalendarEvent[]; errors: string[] };
+
+/**
+ * GET /api/calendar/free-slots — windows nothing is booked over.
+ *
+ * A suggestion, not a hold: nothing is reserved, and the same slot can be
+ * offered to two people. `errors` follows the agenda's rule — a calendar that
+ * did not answer is named rather than silently treated as empty, which would
+ * suggest times that are in fact taken.
+ */
+export type FreeSlot = { start: string; end: string };
+
+/**
+ * `timeZone` is the zone the working hours were read in — the one this app
+ * asked for, or the server's own when it asked for none. Always echoed, so the
+ * suggestion strip can name the clock it is quoting rather than assume it.
+ */
+export type FreeSlotsResponse = {
+  slots: FreeSlot[];
+  errors: string[];
+  timeZone: string;
+};
+
+export type MeetingStatus = "scheduled" | "cancelled";
+
+/**
+ * How one invited guest answered.
+ *
+ * "needs-action" is the resting state, not a failure: it is every guest the
+ * moment the invitation goes out. The server merges two sources — a guest's
+ * reply email wins where there is one, the calendar's own attendee list fills
+ * in the rest — and `source` says which one this entry came from.
+ */
+export type RsvpStatus = "accepted" | "declined" | "tentative" | "needs-action";
+
+export type AttendeeResponse = {
+  email: string;
+  status: RsvpStatus;
+  respondedAt: string | null;
+  source: string;
+};
+
+/** A meeting BOXAIDE created — not every event on the calendar. */
+export type Meeting = {
+  id: string;
+  uid: string;
+  title: string;
+  start: string;
+  end: string;
+  attendees: string[];
+  location: string | null;
+  meetingUrl: string | null;
+  status: MeetingStatus;
+  createdAt: string;
+  /** One entry per invited guest, in `attendees` order. Never partial. */
+  attendeeStatus: AttendeeResponse[];
+};
+
+/**
+ * `refreshError` is the last background reply-scan's failure, or null. The
+ * meetings themselves come from the server's own store and are never held up
+ * by that scan, so a failure here means the responses may be behind — not that
+ * the list is wrong.
+ */
+export type MeetingsResponse = {
+  meetings: Meeting[];
+  refreshError: string | null;
+};
+
+/** What one explicit "check for replies" pass did. */
+export type RsvpRefreshResult = { updated: number; errors: string[] };
+
+/**
+ * Creating or cancelling a meeting touches a calendar AND sends invitations, so
+ * a 200 can still carry partial failure: `warnings` is what did not happen.
+ */
+export type MeetingResult = { meeting: Meeting; warnings: string[] };
+
+/**
+ * Creating adds `timeZone`: the zone the invitation text was written in.
+ * Cancelling writes no times into an email, so it echoes none.
+ */
+export type CreateMeetingResult = MeetingResult & { timeZone: string };
+
 /** Union of every error body shape the server can emit. */
 export type ErrorBody =
   | { error: string }

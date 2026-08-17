@@ -9,6 +9,10 @@ import type { Platform } from "../platform.js";
 import { registerCrmRoutes } from "../crm/routes.js";
 import { registerAutomationRoutes } from "../automation/routes.js";
 import { registerOutreachRoutes } from "../outreach/routes.js";
+import {
+  registerCalendarRoutes,
+  type CalendarRouteConfig,
+} from "../calendar/routes.js";
 import { registerUpdateRoutes } from "../update/routes.js";
 import type { UpdateService } from "../update/service.js";
 import { appVersion } from "../version.js";
@@ -352,6 +356,13 @@ export function createApi(
   launcher?: AgentLauncher,
   platform?: Platform,
   update?: UpdateService,
+  /**
+   * The address the server is actually reachable on. Only the calendar's
+   * Google OAuth flow needs it: the redirect URI it hands Google must match
+   * the one the callback later exchanges with, byte for byte. Absent, the
+   * calendar routes are registered against the loopback default.
+   */
+  address?: CalendarRouteConfig,
 ): Hono {
   const app = new Hono();
 
@@ -650,6 +661,7 @@ export function createApi(
     registerCrmRoutes(app, platform);
     registerAutomationRoutes(app, platform);
     registerOutreachRoutes(app, platform);
+    registerCalendarRoutes(app, platform, address ?? { host: "127.0.0.1", port: 8787 });
   }
   // Absent in an embedder that builds its own API (tests, `boxaide mcp`), so
   // the UI's "is there an updater here" question is answered by a 404 rather

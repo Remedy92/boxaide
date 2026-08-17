@@ -1257,6 +1257,7 @@ export class ImapSmtpProvider implements MailProvider {
       html: input.html,
       inReplyTo: input.inReplyTo,
       references: input.references,
+      icalEvent: input.icalEvent,
     };
 
     // Compose once so the bytes that go over SMTP are the exact bytes we
@@ -1624,5 +1625,6 @@ export async function messageFromImapSource(
     date: summary.date || body.date || new Date().toISOString(),
     snippet: body.bodyText.slice(0, 140) || summary.snippet,
     references: body.references,
+    calendar: body.calendar,
   };
 }
