@@ -4,6 +4,7 @@ import {
   readClaudeEvent,
   readGrokEvent,
   readOpenCodeEvent,
+  renderClaudeRunLine,
 } from "../src/agent/agent-stream.js";
 
 /**
@@ -116,6 +117,111 @@ describe("readOpenCodeEvent", () => {
   });
 });
 
+describe("renderClaudeRunLine", () => {
+  it("hands back a line it cannot read, because it is still information", () => {
+    expect(renderClaudeRunLine("Loading...")).toBe("Loading...");
+    expect(renderClaudeRunLine("{ truncated")).toBe("{ truncated");
+  });
+
+  it("announces the session, with the model when the event names one", () => {
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({
+          type: "system",
+          subtype: "init",
+          session_id: "abc",
+          model: "claude-opus-4-6",
+        }),
+      ),
+    ).toBe("[claude] session started (model claude-opus-4-6)");
+    expect(
+      renderClaudeRunLine(JSON.stringify({ type: "system", subtype: "init" })),
+    ).toBe("[claude] session started");
+  });
+
+  it("says nothing for other system lines", () => {
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({ type: "system", subtype: "hook_started", hook_name: "SessionStart" }),
+      ),
+    ).toBeNull();
+  });
+
+  it("renders assistant text and tool calls, one per line", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "Checking the inbox." },
+          { type: "tool_use", name: "Read", input: { file_path: "/etc/hosts" } },
+          { type: "tool_use", name: "mcp__boxaide__messages_list" },
+        ],
+      },
+    });
+    expect(renderClaudeRunLine(line)).toBe(
+      "Checking the inbox.\n[tool] Read\n[tool] messages_list",
+    );
+  });
+
+  it("says nothing for an assistant line with no text and no tools", () => {
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "thinking", thinking: "..." }] },
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      renderClaudeRunLine(JSON.stringify({ type: "assistant", message: {} })),
+    ).toBeNull();
+  });
+
+  it("renders the final result, and names the subtype when it is not success", () => {
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({ type: "result", subtype: "success", result: "Sent 3 replies." }),
+      ),
+    ).toBe("[claude] result: Sent 3 replies.");
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true }),
+      ),
+    ).toBe("[claude] error_max_turns");
+  });
+
+  it("says why a run failed when the result carries errors", () => {
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["MCP server boxaide failed to start", "no tools available"],
+        }),
+      ),
+    ).toBe(
+      "[claude] error_during_execution: MCP server boxaide failed to start; no tools available",
+    );
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({ type: "result", subtype: "error_during_execution", errors: [] }),
+      ),
+    ).toBe("[claude] error_during_execution");
+  });
+
+  it("says nothing for tool results and unnamed events", () => {
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({ type: "user", message: { content: [{ type: "tool_result" }] } }),
+      ),
+    ).toBeNull();
+    expect(
+      renderClaudeRunLine(JSON.stringify({ type: "stream_event", event: {} })),
+    ).toBeNull();
+  });
+});
+
 describe("lineSplitter", () => {
   it("joins a JSON object split across chunks", () => {
     const seen: string[] = [];
@@ -141,13 +247,32 @@ describe("lineSplitter", () => {
     expect(seen).toEqual(["whole", "partial"]);
   });
 
-  it("drops an oversized line instead of buffering it forever", () => {
+  it("keeps the head of an oversized line and drops the rest", () => {
     const seen: string[] = [];
     const feed = lineSplitter((line) => seen.push(line));
     feed("x".repeat(300_000));
     feed("still the same line\n");
-    expect(seen).toEqual([]);
+    expect(seen).toEqual(["x".repeat(256 * 1024)]);
     feed("next\n");
-    expect(seen).toEqual(["next"]);
+    expect(seen).toEqual(["x".repeat(256 * 1024), "next"]);
+  });
+
+  it("flushes the partial line a killed child left behind", () => {
+    const seen: string[] = [];
+    const feed = lineSplitter((line) => seen.push(line));
+    feed("whole\nhalf a li");
+    expect(seen).toEqual(["whole"]);
+    feed.flush();
+    expect(seen).toEqual(["whole", "half a li"]);
+  });
+
+  it("flushes nothing when the buffer is empty or blank, and twice is safe", () => {
+    const seen: string[] = [];
+    const feed = lineSplitter((line) => seen.push(line));
+    feed.flush();
+    feed("done\n   ");
+    feed.flush();
+    feed.flush();
+    expect(seen).toEqual(["done"]);
   });
 });

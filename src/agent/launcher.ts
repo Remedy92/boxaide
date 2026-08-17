@@ -27,6 +27,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   realpathSync,
   symlinkSync,
   unlinkSync,
@@ -38,7 +39,9 @@ import {
   lineSplitter,
   readClaudeEvent,
   readGrokEvent,
+  renderClaudeRunLine,
   type ReadEvent,
+  type RenderRunLine,
 } from "./agent-stream.js";
 import {
   type AgentDriver,
@@ -269,6 +272,12 @@ export type AgentSpec = {
    */
   readEvent?: ReadEvent;
   /**
+   * Turns one stdout line of a one-shot run into the text its log keeps. Set
+   * only for specs whose `runArgs` ask for an event stream; without it the run
+   * log is the raw bytes the CLI wrote, which is what every CLI did before.
+   */
+  renderRunLine?: RenderRunLine;
+  /**
    * Runs the chat loop in this process for a CLI whose `args` start a server
    * rather than a one-shot session. Called once, straight after spawn; the
    * launcher stops it when the child exits or is stopped. Null means the
@@ -292,27 +301,23 @@ export type AgentSpec = {
  * read/draft boundary (send stays un-approved, which headless mode denies).
  */
 function claudeArgs(ctx: LaunchContext, model?: string): string[] {
-  return [
-    ...claudeArgsFor(
-      ctx,
-      KICKOFF,
-      chatPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
-      model,
-    ),
-    // NDJSON of the session's own events, which agent-stream.ts reads for
-    // presence. --verbose is what makes -p emit the per-event lines rather
-    // than only the final result; both flags were verified against the CLI.
-    // Chat only: a scheduled run's log is read by a human, so it stays text.
-    "--output-format",
-    "stream-json",
-    "--verbose",
-  ];
+  return claudeArgsFor(
+    ctx,
+    KICKOFF,
+    chatPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
+    model,
+  );
 }
 
 /**
  * One-shot form: identical wiring, different prompt and allowlist. Same
  * `-p` headless mode — the chat loop only exists because KICKOFF tells the
  * model to loop, so a plain prompt already exits after the work is done.
+ *
+ * Same event stream as the chat path, for a different reason: plain `-p`
+ * prints nothing until the very end, so a run that hung wrote a zero-byte log
+ * and the UI could only say the run wrote nothing. `renderRunLine` turns these
+ * events back into text a person reads.
  */
 function claudeRunArgs(
   ctx: LaunchContext,
@@ -337,6 +342,12 @@ function claudeArgsFor(
     "-p",
     prompt,
     ...(model ? ["--model", model] : []),
+    // NDJSON of the session's own events, which agent-stream.ts reads for
+    // presence. --verbose is what makes -p emit the per-event lines rather
+    // than only the final result; both flags were verified against the CLI.
+    "--output-format",
+    "stream-json",
+    "--verbose",
     "--mcp-config",
     join(agentWorkDir(ctx), "claude-mcp.json"),
     "--strict-mcp-config",
@@ -345,8 +356,36 @@ function claudeArgsFor(
   ];
 }
 
-/** Keep the primary bearer out of process listings and crash-report argv. */
-function claudePrepare(ctx: LaunchContext, workDir: string): void {
+/**
+ * Claude Code's own config home, isolated the way Grok's is.
+ *
+ * --strict-mcp-config only covers MCP servers. Everything else `claude` reads
+ * out of ~/.claude — hooks, skills, output styles, subagents, settings — still
+ * loads, and a scheduled run was observed picking up the user's personal set:
+ * a run Boxaide is responsible for must not be reshaped by files the user
+ * wrote for their own terminal. CLAUDE_CONFIG_DIR moves all of it to a
+ * directory this launcher owns. Deliberately applied to the chat path too,
+ * same as Grok — the isolation is about whose config runs, not which path.
+ */
+function claudeConfigHomeFor(ctx: LaunchContext): string {
+  const root =
+    ctx.dataDir === ":memory:" ? join(tmpdir(), "boxaide-agent") : ctx.dataDir;
+  return join(root, "agent-homes", "claude");
+}
+
+function claudeChildEnv(
+  ctx: LaunchContext,
+  _workDir: string,
+): Record<string, string> {
+  return { CLAUDE_CONFIG_DIR: claudeConfigHomeFor(ctx) };
+}
+
+function claudePrepare(
+  ctx: LaunchContext,
+  workDir: string,
+  parentEnv: NodeJS.ProcessEnv,
+): void {
+  // Keep the primary bearer out of process listings and crash-report argv.
   const path = join(workDir, "claude-mcp.json");
   writeFileSync(
     path,
@@ -364,6 +403,65 @@ function claudePrepare(ctx: LaunchContext, workDir: string): void {
   // writeFile preserves an existing file's mode; force the invariant even if
   // an earlier build or local user created it more broadly.
   chmodSync(path, 0o600);
+
+  const home = claudeConfigHomeFor(ctx);
+  mkdirSync(home, { recursive: true });
+  const parentHome = parentEnv.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+  claudeCopyCredentials(parentHome, home);
+  claudeWriteAuthSettings(parentHome, home);
+}
+
+/**
+ * Auth is the one thing the isolated home must inherit.
+ *
+ * Copied per launch rather than symlinked: `claude` rewrites this file when it
+ * refreshes a token, and through a symlink that write lands in the user's own
+ * ~/.claude/.credentials.json — a process Boxaide is responsible for must not
+ * edit the user's terminal auth. prepare runs before every spawn, so the copy
+ * is at most one run stale. On macOS the credentials live in the keychain and
+ * there is no file at all; then nothing is copied and the CLI finds its own.
+ */
+function claudeCopyCredentials(parentHome: string, home: string): void {
+  try {
+    copyFileSync(
+      join(parentHome, ".credentials.json"),
+      join(home, ".credentials.json"),
+    );
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    // Unreadable credentials are not fatal: the CLI reports its own auth error,
+    // and a prepare that throws would fail the launch instead.
+  }
+}
+
+/**
+ * The only settings.json keys allowed across the isolation boundary.
+ *
+ * `env` carries ANTHROPIC_API_KEY, base URLs and the Bedrock/Vertex switches;
+ * `apiKeyHelper` names a command that prints a key. Users who authenticate that
+ * way have no credentials file, so isolation left their runs with no auth at
+ * all. Everything else in that file — hooks, statusLine, outputStyle, model
+ * overrides — is exactly what the isolated home exists to keep out.
+ */
+const CLAUDE_AUTH_SETTING_KEYS = ["env", "apiKeyHelper"] as const;
+
+function claudeWriteAuthSettings(parentHome: string, home: string): void {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(join(parentHome, "settings.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const auth: Record<string, unknown> = {};
+    for (const key of CLAUDE_AUTH_SETTING_KEYS) {
+      if (parsed?.[key] !== undefined) auth[key] = parsed[key];
+    }
+    if (Object.keys(auth).length === 0) return;
+    writeFileSync(join(home, "settings.json"), JSON.stringify(auth, null, 2), {
+      mode: 0o600,
+    });
+  } catch {
+    // No settings.json, malformed JSON, or an unwritable home. None of those
+    // are a reason to fail a launch, and the CLI has other paths to auth.
+  }
 }
 
 /**
@@ -575,8 +673,10 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     args: claudeArgs,
     runArgs: claudeRunArgs,
     models: CLAUDE_MODELS,
+    childEnv: claudeChildEnv,
     prepare: claudePrepare,
     readEvent: readClaudeEvent,
+    renderRunLine: renderClaudeRunLine,
   },
   {
     id: "grok",
@@ -667,10 +767,75 @@ export type OneShotOptions = {
   prompt: string;
   /** Overridable for tests only; production runs use ONESHOT_TIMEOUT_MS. */
   timeoutMs?: number;
+  /** Tests only; production runs use ONESHOT_FIRST_OUTPUT_TIMEOUT_MS. */
+  firstOutputTimeoutMs?: number;
+  /** Tests only; production runs use ONESHOT_CLOSE_GRACE_MS. */
+  closeGraceMs?: number;
 };
 
 /** Spec: 15-minute hard timeout, then SIGKILL and status 'killed'. */
 export const ONESHOT_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * How long a streaming run may stay silent at start before it is written off.
+ *
+ * Armed only for specs with `renderRunLine` — a spec whose runArgs asked its
+ * CLI for an event stream. A healthy Claude session prints its start line
+ * within seconds, so no stdout at all for this long is a wedged startup.
+ * First stdout disarms the timer: a run that is quiet mid-tool is healthy,
+ * and a wedge after that waits for the deadline. A non-streaming CLI prints
+ * nothing until it finishes, and the same timer would kill healthy runs;
+ * those keep only the deadline.
+ */
+export const ONESHOT_FIRST_OUTPUT_TIMEOUT_MS = 2 * 60 * 1000;
+
+/**
+ * How long a finish waits for stdio EOF after the child itself is gone.
+ *
+ * 'close' is the honest end of a run, but it waits for every pipe to close and
+ * a detached grandchild can hold one open for as long as it likes — that is
+ * what turned a 15-minute timeout into a 17-minute run.
+ */
+export const ONESHOT_CLOSE_GRACE_MS = 2_000;
+
+/**
+ * Notes appended to a run log so the log is never empty. A killed run's log is
+ * the only thing a human gets, and "wrote nothing" explains nothing.
+ * Style-matched to STALE_RUN_NOTE in src/automation/store.ts.
+ */
+export function oneShotDeadlineNote(ms: number): string {
+  return `[boxaide] killed: the run hit the ${windowAdjective(ms)} limit and was stopped.`;
+}
+
+export function oneShotSilentNote(ms: number): string {
+  return `[boxaide] stopped: the agent wrote no output for ${windowDuration(ms)}, so the run was ended early instead of held to the deadline.`;
+}
+
+/**
+ * The window a note states, in the unit that is honest for it. Whole minutes
+ * read as minutes; anything else as seconds to one decimal, so a test's 200ms
+ * override does not render as a rounded-off "0 seconds".
+ */
+function windowParts(ms: number): { amount: number; unit: "minute" | "second" } {
+  const minutes = ms / 60_000;
+  if (Number.isInteger(minutes)) return { amount: minutes, unit: "minute" };
+  return { amount: Math.round(ms / 100) / 10, unit: "second" };
+}
+
+/** Before a noun: "15-minute limit". */
+function windowAdjective(ms: number): string {
+  const { amount, unit } = windowParts(ms);
+  return `${amount}-${unit}`;
+}
+
+/** After a preposition: "for 15 minutes". */
+function windowDuration(ms: number): string {
+  const { amount, unit } = windowParts(ms);
+  return `${amount} ${unit}${amount === 1 ? "" : "s"}`;
+}
+
+export const ONESHOT_KILLED_NOTE =
+  "[boxaide] killed: the run was stopped before it finished.";
 
 /**
  * The tail is what gets kept, not the head: a run that failed says why in its
@@ -1014,31 +1179,85 @@ export class AgentLauncher {
     const capture = (chunk: string) => {
       log = (log + chunk).slice(-ONESHOT_LOG_LIMIT);
     };
+    /** A whole line of Boxaide's own, on its own row whatever came before. */
+    const note = (line: string) => {
+      capture(`${log && !log.endsWith("\n") ? "\n" : ""}${line}\n`);
+    };
+    // Which status a kill produces. A deadline or a manual kill is 'killed';
+    // the watchdog is 'error', because a run that never spoke did not start.
+    let forced: "killed" | "error" | null = null;
+
+    // A spec that asks its CLI for an event stream must render it: the raw
+    // NDJSON is unreadable, and the run log's only audience is a person. The
+    // splitter is kept so finish() can flush a killed run's partial last line.
+    const render = spec.renderRunLine;
+    const split = render
+      ? lineSplitter((line) => {
+          const rendered = render(line);
+          if (rendered !== null) capture(`${rendered}\n`);
+        })
+      : null;
+
+    // First-output watchdog, armed only for a spec that narrates itself. See
+    // ONESHOT_FIRST_OUTPUT_TIMEOUT_MS: a non-streaming CLI is silent by design,
+    // so the same timer would kill a healthy grok run.
+    const startWindow = opts.firstOutputTimeoutMs ?? ONESHOT_FIRST_OUTPUT_TIMEOUT_MS;
+    let waiting: ReturnType<typeof setTimeout> | null = null;
+    if (render) {
+      waiting = setTimeout(() => {
+        note(oneShotSilentNote(startWindow));
+        forced = "error";
+        child.kill("SIGKILL");
+      }, startWindow);
+      waiting.unref?.();
+    }
+
     child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", capture);
     child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      // stdout only. stderr carries startup noise from things that are not the
+      // session — a CLI's update check can feed a timer the agent never did.
+      // First chunk is enough: mid-tool silence is healthy, so do not re-arm.
+      if (waiting) {
+        clearTimeout(waiting);
+        waiting = null;
+      }
+      if (split) split(chunk);
+      else capture(chunk);
+    });
+    // stderr stays raw whatever the spec does: a crash writes plain text here.
     child.stderr?.on("data", capture);
 
-    let killed = false;
     const timer = setTimeout(() => {
-      killed = true;
+      note(oneShotDeadlineNote(opts.timeoutMs ?? ONESHOT_TIMEOUT_MS));
+      forced = "killed";
       // SIGKILL, not SIGTERM: the deadline has already passed, and a CLI that
       // ignores a polite signal would hold the single run slot indefinitely.
       child.kill("SIGKILL");
     }, opts.timeoutMs ?? ONESHOT_TIMEOUT_MS);
     timer.unref?.();
     this.killOneShot = () => {
-      killed = true;
+      note(ONESHOT_KILLED_NOTE);
+      forced = "killed";
       child.kill("SIGKILL");
     };
 
     return await new Promise<OneShotResult>((resolve) => {
+      let done = false;
+      let grace: ReturnType<typeof setTimeout> | null = null;
       const finish = (code: number | null) => {
+        if (done) return;
+        done = true;
         clearTimeout(timer);
+        if (waiting) clearTimeout(waiting);
+        if (grace) clearTimeout(grace);
+        // A killed child's last line has no newline on it. It is still the
+        // best evidence of what the run was doing when it died.
+        split?.flush();
         this.oneShot = null;
         this.killOneShot = null;
         resolve({
-          status: killed ? "killed" : code === 0 ? "ok" : "error",
+          status: forced ?? (code === 0 ? "ok" : "error"),
           exitCode: code,
           log,
         });
@@ -1048,9 +1267,23 @@ export class AgentLauncher {
         capture(`\n${err.message}`);
         finish(null);
       });
-      // "close", not "exit": exit can fire while stdout/stderr still hold
-      // undrained data, and the log is the whole point of capturing.
+      // "close" is the normal finish: it waits for stdout/stderr to drain, and
+      // the log is the whole point of capturing.
       child.on("close", (code) => finish(code));
+      // But "close" waits for every holder of those pipes, and a detached
+      // grandchild can hold one open long after the agent is gone — that is
+      // what reported a 15-minute timeout as a 17-minute run. Past the grace
+      // the process is dead and its duration is the honest answer.
+      child.on("exit", (code) => {
+        // A spawn failure finishes on "error" and still fires "exit"; without
+        // this the grace timer is scheduled against an already-settled run.
+        if (done) return;
+        grace = setTimeout(
+          () => finish(code),
+          opts.closeGraceMs ?? ONESHOT_CLOSE_GRACE_MS,
+        );
+        grace.unref?.();
+      });
     });
   }
 

@@ -3,7 +3,19 @@
  * scripts — never at a real agent CLI, which would burn the user's account
  * and hang the suite.
  */
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,8 +23,11 @@ import {
   AgentLauncher,
   KNOWN_AGENTS,
   LaunchError,
+  oneShotDeadlineNote,
+  oneShotSilentNote,
   type AgentSpec,
 } from "../src/agent/launcher.js";
+import { renderClaudeRunLine } from "../src/agent/agent-stream.js";
 import { parseTabbedModels } from "../src/agent/model-list.js";
 
 const cleanups: (() => void)[] = [];
@@ -24,6 +39,16 @@ function tempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "mailmux-launcher-"));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
+}
+
+/** Read a path that must be a regular file, not a symlink. */
+function readRegular(path: string): string {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** A bin directory holding one fake executable that sleeps until killed. */
@@ -501,9 +526,94 @@ sleep 60
     );
     expect(grok.readEvent).toBeTypeOf("function");
 
-    // A scheduled run has no pane to update, and its log is read by a human.
-    expect(claude.runArgs!(CTX, "do the thing")).not.toContain("--output-format");
+    // Grok's run still writes plain text; Claude's `-p` prints nothing at all
+    // until it exits, so its run asks for the stream and renders it instead.
     expect(grok.runArgs!(CTX, "do the thing")).not.toContain("--output-format");
+    expect(grok.renderRunLine).toBeUndefined();
+  });
+
+  it("streams a Claude run so its log is readable while it works", () => {
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const args = claude.runArgs!(CTX, "do the thing");
+    expect(args[args.indexOf("--output-format") + 1]).toBe("stream-json");
+    expect(args).toContain("--verbose");
+    expect(claude.renderRunLine).toBeTypeOf("function");
+    // The run wiring is otherwise untouched.
+    expect(args[0]).toBe("-p");
+    expect(args).toContain("--strict-mcp-config");
+    const allowed = args[args.indexOf("--allowedTools") + 1];
+    expect(allowed).not.toContain("chat_await_message");
+    expect(allowed).not.toContain("message_send");
+  });
+
+  it("gives Claude its own config home so a run cannot load the user's setup", () => {
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const ctx = { ...CTX, dataDir: tempDir() };
+    const workDir = join(ctx.dataDir, "agent-workdir");
+    mkdirSync(workDir, { recursive: true });
+    const home = join(ctx.dataDir, "agent-homes", "claude");
+    expect(claude.childEnv!(ctx, workDir).CLAUDE_CONFIG_DIR).toBe(home);
+
+    // No credentials file (macOS keychain auth): the home exists, empty.
+    const bareParent = tempDir();
+    claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: bareParent });
+    expect(existsSync(home)).toBe(true);
+    expect(existsSync(join(home, ".credentials.json"))).toBe(false);
+    expect(existsSync(join(home, "settings.json"))).toBe(false);
+
+    // With one, it is copied so the isolated home still authenticates. Never a
+    // symlink: the CLI rewrites this file on a token refresh, and through a
+    // link that write would land in the user's own ~/.claude.
+    writeFileSync(join(bareParent, ".credentials.json"), '{"token":"x"}');
+    claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: bareParent });
+    const copied = join(home, ".credentials.json");
+    // O_NOFOLLOW: a leftover symlink would throw instead of reading through.
+    expect(readRegular(copied)).toBe('{"token":"x"}');
+
+    // And it is refreshed per launch, so a rotated token is not left behind.
+    writeFileSync(join(bareParent, ".credentials.json"), '{"token":"y"}');
+    claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: bareParent });
+    expect(readRegular(copied)).toBe('{"token":"y"}');
+  });
+
+  it("carries only Claude's auth settings across the isolation boundary", () => {
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    /** Prepares a fresh isolated home against the given parent settings.json. */
+    function prepareWith(settings: string | null): string {
+      const ctx = { ...CTX, dataDir: tempDir() };
+      const workDir = join(ctx.dataDir, "agent-workdir");
+      mkdirSync(workDir, { recursive: true });
+      const parent = tempDir();
+      if (settings !== null) {
+        writeFileSync(join(parent, "settings.json"), settings);
+      }
+      claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: parent });
+      return join(ctx.dataDir, "agent-homes", "claude", "settings.json");
+    }
+
+    // Users who authenticate through settings.json have no credentials file at
+    // all, so `env` and `apiKeyHelper` must survive isolation. Nothing else
+    // does — hooks and statusLine are what the isolated home exists to exclude.
+    const written = prepareWith(
+      JSON.stringify({
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+        apiKeyHelper: "/bin/echo sk-test",
+        hooks: { PreToolUse: [{ matcher: "Bash", hooks: [] }] },
+        statusLine: { type: "command", command: "whoami" },
+        outputStyle: "ste",
+        model: "claude-opus-5",
+      }),
+    );
+    expect(JSON.parse(readFileSync(written, "utf8"))).toEqual({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      apiKeyHelper: "/bin/echo sk-test",
+    });
+
+    // Nothing to carry, no file at all: absent, auth-free, and malformed all
+    // leave the isolated home alone instead of failing the launch.
+    expect(existsSync(prepareWith(null))).toBe(false);
+    expect(existsSync(prepareWith('{"hooks":{},"outputStyle":"ste"}'))).toBe(false);
+    expect(existsSync(prepareWith("{ not json"))).toBe(false);
   });
 
   it("leaves Grok's own web tools at the CLI default on a one-shot run", () => {
@@ -573,6 +683,162 @@ sleep 60
     );
     launcher.stop();
     await until(() => launcher.status().running === null);
+  });
+});
+
+describe("one-shot automation runs", () => {
+  /**
+   * A launcher over one fake CLI that carries runs. Streaming by default —
+   * `renderRunLine` is what arms the first-output watchdog, so a spec without
+   * it stands in for the CLIs that print nothing until they are done.
+   */
+  function runner(script: string, streaming = true): AgentLauncher {
+    const bin = fakeBinDir("fake-agent", script);
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({
+        runArgs: () => [],
+        ...(streaming ? { renderRunLine: renderClaudeRunLine } : {}),
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+    return launcher;
+  }
+
+  it("renders a stream-json run into a log a person can read", async () => {
+    const launcher = runner(
+      `#!/bin/sh
+printf '{"type":"system","subtype":"init","model":"claude-opus-5"}\\n'
+printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__boxaide__messages_list"}]}}\\n'
+printf '{"type":"result","subtype":"success","result":"filed two threads"}\\n'
+`,
+    );
+    const result = await launcher.runOnce({ prompt: "do the thing" });
+    expect(result.status).toBe("ok");
+    expect(result.log).toContain("[claude] session started (model claude-opus-5)");
+    expect(result.log).toContain("[tool] messages_list");
+    expect(result.log).toContain("[claude] result: filed two threads");
+    // The raw NDJSON never reaches the log.
+    expect(result.log).not.toContain('"type":"assistant"');
+  });
+
+  it("kills a run that never writes anything, and says so", async () => {
+    const launcher = runner("#!/bin/sh\nexec /bin/sleep 30\n");
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      firstOutputTimeoutMs: 200,
+    });
+    // 'error', not 'killed': a run that never spoke did not start.
+    expect(result.status).toBe("error");
+    expect(result.log).toContain(oneShotSilentNote(200));
+  });
+
+  it("lets a run that already spoke wait for the deadline", async () => {
+    // First stdout disarms the watchdog. A quiet stretch after that is a long
+    // tool, not a hang; only the deadline may stop it.
+    const launcher = runner("#!/bin/sh\necho working\nexec /bin/sleep 30\n");
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      firstOutputTimeoutMs: 400,
+      timeoutMs: 900,
+    });
+    expect(result.status).toBe("killed");
+    expect(result.log).toContain("working");
+    expect(result.log).toContain(oneShotDeadlineNote(900));
+    expect(result.log).not.toContain(oneShotSilentNote(400));
+  });
+
+  it("leaves a run that spoke once alone, even when it then goes quiet", async () => {
+    const launcher = runner(
+      "#!/bin/sh\necho working\n/bin/sleep 0.8\necho done\n",
+    );
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      firstOutputTimeoutMs: 400,
+    });
+    expect(result.status).toBe("ok");
+    expect(result.log).toContain("working");
+    expect(result.log).toContain("done");
+    expect(result.log).not.toContain("[boxaide] stopped");
+  });
+
+  it("does not watch a run whose CLI never narrates itself", async () => {
+    // Antigravity, OpenCode and Grok runs print nothing until they finish.
+    // Silence is their healthy state, and killing them for it killed real runs.
+    const launcher = runner("#!/bin/sh\n/bin/sleep 1\necho done\n", false);
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      firstOutputTimeoutMs: 200,
+    });
+    expect(result.status).toBe("ok");
+    expect(result.log).toContain("done");
+    expect(result.log).not.toContain("[boxaide] stopped");
+  });
+
+  it("does not let stderr noise stand in for the agent speaking", async () => {
+    // Update checks and deprecation warnings arrive on stderr from a process
+    // whose session never started. Only stdout is the agent working.
+    const launcher = runner(
+      `#!/bin/sh
+i=0
+while [ $i -lt 25 ]; do echo noise >&2; /bin/sleep 0.1; i=$((i+1)); done
+exec /bin/sleep 30
+`,
+    );
+    const started = Date.now();
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      firstOutputTimeoutMs: 300,
+      closeGraceMs: 300,
+    });
+    expect(result.status).toBe("error");
+    expect(result.log).toContain(oneShotSilentNote(300));
+    // The kill lands while the noise is still flowing. Elapsed is the whole
+    // assertion: a timer fed by stderr would instead run out the 2.5s of it.
+    expect(Date.now() - started).toBeLessThan(1_500);
+  });
+
+  it("keeps a killed run's unfinished last line in the log", async () => {
+    // No trailing newline, so the splitter is still holding it when the kill
+    // lands. It is the best evidence of what the run was doing when it died.
+    const launcher = runner(
+      "#!/bin/sh\nprintf 'halfway through a thought'\nexec /bin/sleep 30\n",
+    );
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      timeoutMs: 400,
+      firstOutputTimeoutMs: 10_000,
+    });
+    expect(result.status).toBe("killed");
+    expect(result.log).toContain("halfway through a thought");
+  });
+
+  it("explains a deadline kill in the log with the deadline it actually used", async () => {
+    const launcher = runner("#!/bin/sh\nexec /bin/sleep 30\n");
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      timeoutMs: 200,
+      firstOutputTimeoutMs: 10_000,
+    });
+    expect(result.status).toBe("killed");
+    expect(result.log).toContain(oneShotDeadlineNote(200));
+    // The note states the real window, not a hardcoded 15 minutes.
+    expect(result.log).toContain("0.2-second");
+    expect(oneShotDeadlineNote(15 * 60 * 1000)).toContain("15-minute");
+  });
+
+  it("finishes when the agent exits, not when the last pipe holder does", async () => {
+    // A detached grandchild inherits stdout and keeps it open long after the
+    // agent is gone. Waiting for "close" reported that wait as run duration.
+    const launcher = runner("#!/bin/sh\n/bin/sleep 3 &\necho done\nexit 0\n");
+    const started = Date.now();
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      closeGraceMs: 200,
+    });
+    expect(result.status).toBe("ok");
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 });
 
