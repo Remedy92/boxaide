@@ -1,6 +1,6 @@
 {
   "name": "boxaide-desktop",
-  "version": "0.2.16",
+  "version": "0.2.17",
   "private": true,
   "description": "Desktop shell for Boxaide — runs the Boxaide server in-process and opens the UI in a window",
   "author": "Boxaide contributors",
@@ -36,5 +36,8 @@
   "allowScripts": {
     "better-sqlite3@13.0.3": true,
     "electron@43.3.0": true
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.1"
   }
 }

@@ -36,12 +36,16 @@ export type DriverChannel = {
     timeoutMs?: number;
     agent?: string | null;
     signal?: AbortSignal;
-  }): Promise<{ seq: number; text: string } | null>;
+  }): Promise<{ seq: number; text: string; chatId: string } | null>;
   post(input: { role: "agent" | "activity"; text: string; agent?: string | null }): unknown;
   releaseLease(seq: number, options?: { revertAttempt?: boolean }): void;
   noteAgentActivity(tool: string | null): void;
   /** Gates the MCP chat tools while this loop owns the conversation. */
   setDriven(on: boolean): void;
+  /** True while the chat is still carrying the user's first line as its name. */
+  needsTitle(chatId: string): boolean;
+  /** Offers the model's name for the chat. Refused if the user named it. */
+  nameChat(chatId: string, title: string): boolean;
 };
 
 /** A running driver, from the launcher's side. Stopping is idempotent. */
@@ -98,6 +102,19 @@ Each message you receive is from me, typed in the Boxaide window. Reply with the
 answer itself — your reply text is what I read. Do not call any chat_ tool; the
 conversation is handled for you. Draft rather than send unless I ask you to send.`;
 
+/**
+ * The one question asked purely to name a chat.
+ *
+ * Written for a model that has just answered a person and is inclined to keep
+ * talking: it says what the answer is for, bans the decorations models put
+ * around a title anyway, and gives an example of the difference between a name
+ * and a category.
+ */
+const TITLE_PROMPT = `Name this conversation for a list I will read a week from now.
+Four words or fewer, describing what it is actually about — "Refund for the Acme
+invoice", not "Email question". Reply with the name alone: no quotes, no
+punctuation at the end, no explanation. This is not a message to me.`;
+
 export type OpenCodeDriverOptions = {
   channel: DriverChannel;
   /** Client name every turn is stamped with. The registry id, "opencode". */
@@ -140,6 +157,8 @@ export class OpenCodeDriver implements AgentDriver {
   private promptAbort: AbortController | null = null;
   /** When this session last showed a sign of life. Only the watchdog reads it. */
   private lastSessionEvent = 0;
+  /** The naming call for the last answered turn, while it is still running. */
+  private naming: Promise<void> | null = null;
   /** Resolves when the loop has left `run`. Tests await it; production does not. */
   readonly done: Promise<void>;
   private release!: () => void;
@@ -195,6 +214,12 @@ export class OpenCodeDriver implements AgentDriver {
       }
       try {
         this.opts.channel.noteAgentActivity("prompt");
+        // A naming call from the previous turn may still be running. Waiting
+        // for it here rather than before taking the message is the difference
+        // between an answer the user can see coming — the message is claimed,
+        // the pane shows the agent working — and one that sits in the queue
+        // with nothing on screen.
+        await this.naming;
         const reply = await this.prompt(base, turn.text);
         this.opts.channel.post({
           role: "agent",
@@ -202,6 +227,11 @@ export class OpenCodeDriver implements AgentDriver {
           agent: this.opts.agent,
         });
         failures = 0;
+        // Started, not awaited: the loop goes back to the channel so the next
+        // message is claimed while this runs.
+        this.naming = this.maybeName(base, turn.chatId).finally(() => {
+          this.naming = null;
+        });
       } catch {
         if (this.stopped) {
           this.opts.channel.releaseLease(turn.seq, { revertAttempt: true });
@@ -217,8 +247,49 @@ export class OpenCodeDriver implements AgentDriver {
     }
   }
 
-  /** One prompt, blocking until the turn completes. Throws on any failure. */
-  private async prompt(base: string, text: string): Promise<string> {
+  /**
+   * Names the chat, once, from the exchange that just happened.
+   *
+   * The MCP tier gets this for free — the agent passes a title to `chat_say`
+   * — and a driven session has no chat tools to pass it through, so the name is
+   * asked for directly. It runs on the same session, so the model is naming a
+   * conversation it has just had rather than being handed one to read.
+   *
+   * Everything here is best effort. The answer is already posted and the lease
+   * is already closed, so a failed or refused title costs the user nothing and
+   * must never reach the loop's retry path: the chat keeps the name its first
+   * message gave it.
+   */
+  private async maybeName(base: string, chatId: string): Promise<void> {
+    try {
+      if (this.stopped) return;
+      if (!this.opts.channel.needsTitle(chatId)) return;
+      const raw = await this.prompt(base, TITLE_PROMPT, { background: true });
+      this.opts.channel.nameChat(chatId, raw);
+    } catch {
+      // No name is a fine outcome. See the note above. The whole body is
+      // guarded, not just the prompt: this promise is awaited by the loop, and
+      // a throw from it would be read as a failed answer.
+    }
+  }
+
+  /**
+   * One prompt, blocking until the turn completes. Throws on any failure.
+   *
+   * `background` marks a prompt that is not the user's turn. A failed turn
+   * takes the session down with it, which is right when the message is going
+   * back on the queue to be asked again — and wrong for a naming call, where
+   * the cost of that would land on the conversation instead: the next thing
+   * the user asked would be answered by a model that had forgotten the last
+   * one, with nothing on screen to explain it. A background failure leaves the
+   * session alone. If it really did wedge the session, the next user turn
+   * fails once and resets it on the visible path, message and all.
+   */
+  private async prompt(
+    base: string,
+    text: string,
+    options: { background?: boolean } = {},
+  ): Promise<string> {
     const session = await this.ensureSession(base);
     // Armed across the body read too, not just the headers: a server that
     // flushes headers early and streams the body would otherwise spend the
@@ -244,8 +315,10 @@ export class OpenCodeDriver implements AgentDriver {
       // server may still be running the turn on this session, and the next
       // attempt on the same session would 409 into it. Tell it to stop, take a
       // fresh session next time, and let the caller re-queue the message.
-      this.sessionId = null;
-      void this.call(base, `/session/${session}/abort`, {}).catch(() => {});
+      if (!options.background) {
+        this.sessionId = null;
+        void this.call(base, `/session/${session}/abort`, {}).catch(() => {});
+      }
       throw err;
     } finally {
       guard.end();

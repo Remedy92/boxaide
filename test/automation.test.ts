@@ -23,7 +23,12 @@ import {
   type OneShotResult,
 } from "../src/agent/launcher.js";
 import { AutomationScheduler, type OneShotLauncher } from "../src/automation/scheduler.js";
-import { AutomationStore, nextRunAfter, RUN_STALE_MS } from "../src/automation/store.js";
+import {
+  AutomationStore,
+  MAX_AUTOMATION_PROMPT_BYTES,
+  nextRunAfter,
+  RUN_STALE_MS,
+} from "../src/automation/store.js";
 import { AUTOMATION_TOOLS, dispatchAutomationTool } from "../src/automation/tools.js";
 import type { Platform } from "../src/platform.js";
 
@@ -101,6 +106,18 @@ describe("AutomationStore", () => {
     expect(() =>
       store.create({ name: "Daily", cron: "0 9 * * *", prompt: "p" }),
     ).toThrowError(/already exists/);
+  });
+
+  it("rejects oversized persistent inputs from REST or MCP callers", () => {
+    const store = newStore();
+    expect(() =>
+      store.create({
+        name: "large",
+        cron: "0 8 * * *",
+        prompt: "x".repeat(MAX_AUTOMATION_PROMPT_BYTES + 1),
+      }),
+    ).toThrow(/prompt must be at most/);
+    expect(store.list()).toEqual([]);
   });
 
   it("validates cron on create and on update", () => {

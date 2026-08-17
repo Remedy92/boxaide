@@ -59,6 +59,11 @@ export type AppConfig = {
   bearerToken: string;
   fixtureMode: boolean;
   /**
+   * One-time secret supplied only by the desktop shell. It is never read from
+   * the environment or written to disk.
+   */
+  bootstrapCapability?: string;
+  /**
    * Extra browser origins allowed to call the authenticated API, from
    * BOXAIDE_ALLOWED_ORIGINS (MAILMUX_ALLOWED_ORIGINS if unset). Empty by
    * default: loopback only.
@@ -217,6 +222,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     bearerToken,
     fixtureMode:
       overrides.fixtureMode ?? (fixture === "1" || fixture === "true"),
+    bootstrapCapability: overrides.bootstrapCapability,
     allowedOrigins:
       overrides.allowedOrigins ??
       parseAllowedOrigins(envNamed("ALLOWED_ORIGINS")),

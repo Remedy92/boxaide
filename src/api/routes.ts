@@ -14,9 +14,10 @@ import type { UpdateService } from "../update/service.js";
 import { appVersion } from "../version.js";
 import type { AccountCredentials, DraftInput } from "../provider/types.js";
 import { passwordCredentials } from "../provider/types.js";
+import { MAX_LIST_LIMIT, parseListLimit } from "../input-limits.js";
 
 /** Highest `limit` any list endpoint will accept. */
-export const MAX_LIMIT = 200;
+export const MAX_LIMIT = MAX_LIST_LIMIT;
 
 /** REST body fields for connect/test — still flat username/password for the UI. */
 type ConnectCredentialFields = {
@@ -146,10 +147,10 @@ export function isLocalHostHeader(host: string | undefined): boolean {
 /**
  * True only when the server's own bind address is loopback.
  *
- * The Host and Origin guards on /api/local-bootstrap are browser guards, and
- * a browser is not the threat here: a remote client on a `0.0.0.0` bind can
- * send `Host: localhost` and no Origin at all, and both guards pass. So the
- * bind address itself decides whether the token endpoint exists.
+ * The Host and Origin checks on /api/local-bootstrap are network guards, not
+ * identity. A remote client on a `0.0.0.0` bind can send `Host: localhost`
+ * and no Origin, so the bind address itself still decides whether the
+ * desktop-capability endpoint exists.
  *
  * Any 127.0.0.0/8 address counts, not just 127.0.0.1 — the whole block is
  * loopback-only. An empty or `*` host means "every interface" and fails.
@@ -199,8 +200,8 @@ const CORS_MAX_AGE = "600";
  * origin match from the allowlist. Requests with no Origin (curl, MCP
  * clients, stdio) pass, exactly as before.
  *
- * NOT used by /api/local-bootstrap: that route hands out the bearer token
- * and must stay loopback-only via isAllowedOrigin.
+ * NOT used by /api/local-bootstrap: that route has a narrower loopback plus
+ * one-time desktop-capability policy.
  */
 export function isApiOriginAllowed(
   origin: string | undefined,
@@ -335,11 +336,7 @@ export function authFailure(
 
 /** Returns the limit, or null when the raw value is not a usable number. */
 function parseLimit(raw: string | undefined): number | null {
-  if (raw === undefined || raw === "") return 50;
-  if (!/^\d+$/.test(raw)) return null;
-  const limit = Number(raw);
-  if (limit < 1 || limit > MAX_LIMIT) return null;
-  return limit;
+  return parseListLimit(raw, 50);
 }
 
 /**

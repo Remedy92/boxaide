@@ -74,6 +74,39 @@ export type OutboxRow = {
 
 export type SuppressionRow = { email: string; reason: string; at: string };
 
+export const MAX_CAMPAIGN_NAME_CHARS = 200;
+export const MAX_CAMPAIGN_STEPS = 50;
+export const MAX_OUTREACH_SUBJECT_BYTES = 4 * 1024;
+export const MAX_OUTREACH_BODY_BYTES = 128 * 1024;
+export const MAX_CAMPAIGN_CONTACTS_PER_REQUEST = 1_000;
+const MAX_IDENTIFIER_CHARS = 200;
+const MAX_EMAIL_CHARS = 320;
+const MAX_SUPPRESSION_REASON_CHARS = 1_000;
+
+function assertOutreachText(label: string, value: string, maxBytes: number): void {
+  if (Buffer.byteLength(value, "utf8") > maxBytes) {
+    throw new Error(`${label} must be at most ${maxBytes} bytes`);
+  }
+}
+
+function assertSteps(steps: StepInput[]): void {
+  if (steps.length > MAX_CAMPAIGN_STEPS) {
+    throw new Error(`steps must contain at most ${MAX_CAMPAIGN_STEPS} entries`);
+  }
+  for (const step of steps) {
+    assertOutreachText(
+      "step subject",
+      String(step.subject ?? ""),
+      MAX_OUTREACH_SUBJECT_BYTES,
+    );
+    assertOutreachText(
+      "step body",
+      String(step.body ?? ""),
+      MAX_OUTREACH_BODY_BYTES,
+    );
+  }
+}
+
 const CAMPAIGN_STATUSES: ReadonlySet<string> = new Set([
   "draft",
   "active",
@@ -258,6 +291,12 @@ export class OutreachStore {
       at: new Date().toISOString(),
     };
     if (!row.email.includes("@")) throw new Error("valid email is required");
+    if (row.email.length > MAX_EMAIL_CHARS) throw new Error("email is too long");
+    if (row.reason.length > MAX_SUPPRESSION_REASON_CHARS) {
+      throw new Error(
+        `reason must be at most ${MAX_SUPPRESSION_REASON_CHARS} characters`,
+      );
+    }
     this.db
       .prepare(
         `INSERT INTO suppression (email, reason, at) VALUES (?, ?, ?)
@@ -289,8 +328,17 @@ export class OutreachStore {
   }): Campaign {
     const name = input.name.trim();
     if (!name) throw new Error("name is required");
+    if (name.length > MAX_CAMPAIGN_NAME_CHARS) {
+      throw new Error(
+        `name must be at most ${MAX_CAMPAIGN_NAME_CHARS} characters`,
+      );
+    }
     if (!input.accountId.trim()) throw new Error("account is required");
+    if (input.accountId.trim().length > MAX_IDENTIFIER_CHARS) {
+      throw new Error("account is too long");
+    }
     if (!input.steps.length) throw new Error("at least one step is required");
+    assertSteps(input.steps);
     const campaign: Campaign = {
       id: randomUUID(),
       name,
@@ -407,11 +455,20 @@ export class OutreachStore {
     if (patch.name !== undefined && !patch.name.trim()) {
       throw new Error("name is required");
     }
+    if (
+      patch.name !== undefined &&
+      patch.name.trim().length > MAX_CAMPAIGN_NAME_CHARS
+    ) {
+      throw new Error(
+        `name must be at most ${MAX_CAMPAIGN_NAME_CHARS} characters`,
+      );
+    }
     if (patch.steps) {
       if (current.status !== "draft") {
         throw new Error("steps can only be replaced while the campaign is draft");
       }
       if (!patch.steps.length) throw new Error("at least one step is required");
+      assertSteps(patch.steps);
     }
     const write = this.db.transaction(() => {
       if (patch.name !== undefined) {
@@ -455,6 +512,14 @@ export class OutreachStore {
   /* ---- campaign contacts ---------------------------------------------- */
 
   addCampaignContacts(campaignId: string, contactIds: string[]): number {
+    if (contactIds.length > MAX_CAMPAIGN_CONTACTS_PER_REQUEST) {
+      throw new Error(
+        `contactIds must contain at most ${MAX_CAMPAIGN_CONTACTS_PER_REQUEST} entries`,
+      );
+    }
+    if (contactIds.some((id) => id.length > MAX_IDENTIFIER_CHARS)) {
+      throw new Error("contactId is too long");
+    }
     const insert = this.db.prepare(
       `INSERT INTO campaign_contacts
          (campaign_id, contact_id, state, current_step)
@@ -614,6 +679,12 @@ export class OutreachStore {
     createdAt?: string;
   }): OutboxRow {
     if (!input.to.trim()) throw new Error("to is required");
+    if (input.to.length > MAX_EMAIL_CHARS) throw new Error("to is too long");
+    if (input.accountId.length > MAX_IDENTIFIER_CHARS) {
+      throw new Error("accountId is too long");
+    }
+    assertOutreachText("subject", input.subject, MAX_OUTREACH_SUBJECT_BYTES);
+    assertOutreachText("body", input.body, MAX_OUTREACH_BODY_BYTES);
     const row: OutboxRow = {
       id: randomUUID(),
       accountId: input.accountId,
