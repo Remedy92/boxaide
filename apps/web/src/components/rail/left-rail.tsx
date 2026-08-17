@@ -16,12 +16,14 @@ import { WorkingMark } from "@/components/agent/agent-run";
 import { AccountRow, type AccountHealth } from "@/components/rail/account-row";
 import { AgentsSection } from "@/components/rail/agents-section";
 import { BrandMark } from "@/components/rail/brand-mark";
+import { ChatsSection, NewChatButton } from "@/components/rail/chats-section";
 import { ComposeButton } from "@/components/rail/compose-button";
 import { FolderList } from "@/components/rail/folder-list";
 import { NavItem } from "@/components/rail/nav-item";
 import { RailFooter } from "@/components/rail/rail-footer";
+import { RailSection } from "@/components/rail/rail-section";
 import { UpdateCard } from "@/components/rail/update-card";
-import { SectionLabel, StatusDot } from "@/components/atoms";
+import { StatusDot } from "@/components/atoms";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,6 +39,7 @@ import { useConnection } from "@/lib/hooks/use-connection";
 import { useHealth } from "@/lib/hooks/use-health";
 import { useMessages } from "@/lib/hooks/use-messages";
 import { useOutreachBadge } from "@/lib/hooks/use-outreach";
+import { useRailSections } from "@/lib/hooks/use-rail-sections";
 import type { MailAccountMeta } from "@/lib/types";
 
 /**
@@ -94,6 +97,33 @@ export function LeftRail({
 
   const inMail = app.view === "mail";
   const pending = badge.data?.pending ?? 0;
+  const sections = useRailSections();
+  const chatCount = agent.storage.chats + agent.storage.archived;
+
+  /* Which sections start open.
+     Chats and Mail, because those are the two things somebody opens this app
+     to do. Mailboxes and Agents start folded: they are set up once and then
+     read as provenance, and they are also the two that grow — an install with
+     six mailboxes and four agent CLIs used to push everything else off the
+     bottom of the rail. Folding is what buys the room the chat list needs, and
+     it is why this is one sidebar and not two. */
+  const OPEN_BY_DEFAULT: Record<string, boolean> = {
+    chats: true,
+    mail: true,
+    crm: true,
+    mailboxes: false,
+    agents: false,
+  };
+  const isOpen = (id: string) => sections.isOpen(id, OPEN_BY_DEFAULT[id] ?? true);
+  const toggle = (id: string) => sections.toggle(id, OPEN_BY_DEFAULT[id] ?? true);
+
+  /** The count a folded header keeps showing. Folding never hides a signal. */
+  const foldedCount = (n: number) =>
+    n > 0 ? (
+      <span className="pr-1 text-[11px] leading-4 text-fg-tertiary tabular-nums">
+        {n}
+      </span>
+    ) : undefined;
 
   /* Three groups, not one stack of eight rows. Nothing in a flat list said
      that Inbox and Unread are the same kind of thing and Pipeline is not, and
@@ -129,11 +159,29 @@ export function LeftRail({
         />
       </div>
 
-      <div className="space-y-px">
-        {/* Not gated on `collapsed`: this block only ever renders at full
-            width — inline in the expanded rail, or inside the popover the
-            collapsed rail opens, which is 224px wide. */}
-        <SectionLabel>Mail</SectionLabel>
+      {/* The conversation list, directly under the row that opens it. Five
+          rows and a fixed footer, whatever the history holds — see
+          ChatsSection. */}
+      <RailSection
+        id="chats"
+        label="Chats"
+        open={isOpen("chats")}
+        onToggle={() => toggle("chats")}
+        summary={foldedCount(chatCount)}
+        action={<NewChatButton />}
+      >
+        <ChatsSection onOpenAll={() => app.openDialog("chats")} />
+      </RailSection>
+
+      {/* Not gated on `collapsed`: this block only ever renders at full
+          width — inline in the expanded rail, or inside the popover the
+          collapsed rail opens, which is 224px wide. */}
+      <RailSection
+        id="mail"
+        label="Mail"
+        open={isOpen("mail")}
+        onToggle={() => toggle("mail")}
+      >
         <NavItem
           icon={Inbox}
           label="Inbox"
@@ -188,15 +236,28 @@ export function LeftRail({
             }}
           />
         )}
-      </div>
+      </RailSection>
 
       {/* The CRM, and only for somebody who asked for one. Off, these three
           rows are not rendered — not greyed, not behind a switch — because the
           setting is a claim about what this app is, not a filter over a list.
           The server keeps its contacts and deals either way. */}
       {app.crm && (
-        <div className="space-y-px">
-          <SectionLabel>CRM</SectionLabel>
+        <RailSection
+          id="crm"
+          label="CRM"
+          open={isOpen("crm")}
+          onToggle={() => toggle("crm")}
+          /* Folded, the approval queue still has to be visible. A count that
+             disappears when a section closes is a count nobody can trust. */
+          summary={
+            pending > 0 ? (
+              <Badge variant="accent" className="tnum mr-1 px-1.5">
+                {pending}
+              </Badge>
+            ) : undefined
+          }
+        >
           {/* People is a list and a detail pane, the same shape as mail;
               Pipeline is a board and takes the whole width. Neither carries a
               count: the endpoints return rows, not totals, and counting the
@@ -237,7 +298,7 @@ export function LeftRail({
               ) : undefined
             }
           />
-        </div>
+        </RailSection>
       )}
     </>
   );
@@ -307,55 +368,24 @@ export function LeftRail({
           viewsAndFolders
         )}
 
-        <div className="space-y-px">
-          {!collapsed && (
-            <SectionLabel
-              action={
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label="Connect a mailbox"
-                      onClick={() => app.openDialog("connect")}
-                    >
-                      <Plus className="size-3.5" strokeWidth={1.5} />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Connect a mailbox</TooltipContent>
-                </Tooltip>
-              }
-            >
-              Mailboxes
-            </SectionLabel>
-          )}
-
-          {accounts.isPending && !collapsed && (
-            <p className="px-2 py-1 text-[12px] text-fg-tertiary">Loading…</p>
-          )}
-
-          {!accounts.isPending && list.length === 0 && !collapsed && (
-            <p className="px-2 py-1 text-[12px] leading-4 text-fg-tertiary">
-              No mailboxes yet.
-            </p>
-          )}
-
-          {list.map((account) => (
-            <AccountRow
-              key={account.id}
-              account={account}
-              health={healthFor(account)}
-              selected={app.account === account.alias}
-              compact={app.density === "compact"}
-              collapsed={collapsed}
-              onSelect={(alias) =>
-                app.setAccount(app.account === alias ? "all" : alias)
-              }
-            />
-          ))}
-
-          {collapsed && (
+        {/* Folded by default at full width: mailboxes are set up once and then
+            read as provenance. The icon rail has no headers to fold, so there
+            the rows are simply the section. */}
+        {collapsed ? (
+          <div className="space-y-px">
+            {list.map((account) => (
+              <AccountRow
+                key={account.id}
+                account={account}
+                health={healthFor(account)}
+                selected={app.account === account.alias}
+                compact={app.density === "compact"}
+                collapsed
+                onSelect={(alias) =>
+                  app.setAccount(app.account === alias ? "all" : alias)
+                }
+              />
+            ))}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -371,14 +401,81 @@ export function LeftRail({
               </TooltipTrigger>
               <TooltipContent side="right">Connect a mailbox</TooltipContent>
             </Tooltip>
-          )}
-        </div>
+          </div>
+        ) : (
+          <RailSection
+            id="mailboxes"
+            label="Mailboxes"
+            open={isOpen("mailboxes")}
+            onToggle={() => toggle("mailboxes")}
+            summary={foldedCount(list.length)}
+            action={
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="Connect a mailbox"
+                    onClick={() => app.openDialog("connect")}
+                  >
+                    <Plus className="size-3.5" strokeWidth={1.5} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Connect a mailbox</TooltipContent>
+              </Tooltip>
+            }
+          >
+            {accounts.isPending && (
+              <p className="px-2 py-1 text-[12px] text-fg-tertiary">Loading…</p>
+            )}
 
-        <AgentsSection
-          collapsed={collapsed}
-          onOpenAgentConnect={() => app.openDialog("agent")}
-          onOpenCapabilities={() => app.openDialog("capabilities")}
-        />
+            {!accounts.isPending && list.length === 0 && (
+              <p className="px-2 py-1 text-[12px] leading-4 text-fg-tertiary">
+                No mailboxes yet.
+              </p>
+            )}
+
+            {list.map((account) => (
+              <AccountRow
+                key={account.id}
+                account={account}
+                health={healthFor(account)}
+                selected={app.account === account.alias}
+                compact={app.density === "compact"}
+                onSelect={(alias) =>
+                  app.setAccount(app.account === alias ? "all" : alias)
+                }
+              />
+            ))}
+          </RailSection>
+        )}
+
+        {collapsed ? (
+          <AgentsSection
+            collapsed
+            onOpenAgentConnect={() => app.openDialog("agent")}
+            onOpenCapabilities={() => app.openDialog("capabilities")}
+          />
+        ) : (
+          <RailSection
+            id="agents"
+            label="Agents"
+            open={isOpen("agents")}
+            onToggle={() => toggle("agents")}
+            summary={
+              agent.presence.launchedAgent ? (
+                <StatusDot tone="accent" className="mr-1.5" />
+              ) : undefined
+            }
+          >
+            <AgentsSection
+              hideLabel
+              onOpenAgentConnect={() => app.openDialog("agent")}
+              onOpenCapabilities={() => app.openDialog("capabilities")}
+            />
+          </RailSection>
+        )}
       </div>
 
       {/* Outside the scroll area, above the footer: an update is worth seeing

@@ -57,6 +57,7 @@ export type DialogName =
   | "shortcuts"
   | "palette"
   | "capabilities"
+  | "chats"
   | "agent";
 
 export type SettingsFocus = "baseUrl" | "token" | null;

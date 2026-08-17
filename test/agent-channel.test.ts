@@ -960,4 +960,51 @@ describe("agent HTTP routes", () => {
     expect(((await state.json()) as { turns: unknown[] }).turns).toEqual([]);
     rt.channel.close();
   });
+
+  it("sends and clears the chat the pane named, not the active one", async () => {
+    const rt = build();
+    await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "in the first chat" }),
+    });
+    const first = rt.channel.chats()[0];
+    // Another window opens a chat, so the server-wide active row moves.
+    const second = rt.channel.createChat();
+
+    const posted = await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "still the first", chat: first.id }),
+    });
+    expect(posted.status).toBe(201);
+    expect(((await posted.json()) as { turn: { chatId: string } }).turn.chatId).toBe(first.id);
+    expect(rt.channel.history(undefined, second.id)).toHaveLength(0);
+
+    const cleared = await rt.app.request("/api/agent/clear", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ chat: first.id }),
+    });
+    expect(cleared.status).toBe(200);
+    expect(rt.channel.history(undefined, first.id)).toHaveLength(0);
+    rt.channel.close();
+  });
+
+  it("answers 404 for a send or clear aimed at a chat that is not there", async () => {
+    const rt = build();
+    const posted = await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "hello", chat: "c_nope" }),
+    });
+    expect(posted.status).toBe(404);
+    const cleared = await rt.app.request("/api/agent/clear", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ chat: "c_nope" }),
+    });
+    expect(cleared.status).toBe(404);
+    rt.channel.close();
+  });
 });
