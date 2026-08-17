@@ -26,8 +26,7 @@ import type {
 
 /** Idle time before a pooled IMAP connection is logged out. */
 const IDLE_MS = 60_000;
-/** Accounts whose INBOX we keep selected instead of logging out. */
-const keepAlive = new Set<string>();
+/** Live mailbox watches. One dedicated connection each, outside the pool. */
 const watchers = new Map<
   string,
   {
@@ -154,11 +153,8 @@ function clearIdle(entry: Pooled): void {
 function scheduleIdle(key: string, entry: Pooled): void {
   clearIdle(entry);
   if (entry.busy > 0 || pool.get(key) !== entry) return;
-  // Indexed inboxes stay selected so ImapFlow can IDLE instead of logging out.
-  if (keepAlive.has(key)) return;
   entry.timer = setTimeout(() => {
     if (entry.busy > 0 || pool.get(key) !== entry) return;
-    if (keepAlive.has(key)) return;
     pool.delete(key);
     entry.client.logout().catch(() => entry.client.close());
   }, IDLE_MS);
@@ -296,15 +292,17 @@ async function withTempImap<T>(
   }
 }
 
-/** Close every pooled connection. Call on shutdown. */
+/** Close every connection, pooled and watching. Call on shutdown. */
 export async function closeAll(): Promise<void> {
-  keepAlive.clear();
+  // Watch connections live outside the pool, so clearing the map is not
+  // enough — each one holds an open socket that would outlive the process.
+  const watching = [...watchers.values()];
   watchers.clear();
   const entries = [...pool.entries()];
   pool.clear();
   connecting.clear();
-  await Promise.all(
-    entries.map(async ([, entry]) => {
+  await Promise.all([
+    ...entries.map(async ([, entry]) => {
       clearIdle(entry);
       try {
         await entry.client.logout();
@@ -312,7 +310,14 @@ export async function closeAll(): Promise<void> {
         entry.client.close();
       }
     }),
-  );
+    ...watching.map(async (watch) => {
+      try {
+        await watch.client.logout();
+      } catch {
+        watch.client.close();
+      }
+    }),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,7 +1027,6 @@ export class ImapSmtpProvider implements MailProvider {
     onChange: () => void,
   ): () => void {
     const key = account.id;
-    keepAlive.add(key);
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
@@ -1032,7 +1036,7 @@ export class ImapSmtpProvider implements MailProvider {
       timer = setTimeout(onChange, 250);
       timer.unref?.();
     };
-    const detach = () => {
+    const detach = (close: boolean) => {
       const prev = watchers.get(key);
       if (!prev) return;
       prev.client.off("exists", prev.onExists);
@@ -1040,16 +1044,35 @@ export class ImapSmtpProvider implements MailProvider {
       prev.client.off("flags", prev.onFlags);
       prev.client.off("close", prev.onClose);
       watchers.delete(key);
+      if (close) prev.client.logout().catch(() => prev.client.close());
     };
-    const attach = (client: ImapFlow) => {
-      detach();
+
+    /**
+     * A connection of its own, not the pooled one. IDLE watches whichever
+     * mailbox is selected, and the pool is shared: a CRM pass walking Sent, or
+     * a send appending to it, would move the selection and take the inbox
+     * watch with it. The second connection is the price of a watch that stays
+     * put.
+     */
+    const select = async (reconnect: boolean) => {
+      detach(true);
+      const client = newClient(account.creds);
+      // Before connect: a handshake timeout must not crash Node.
+      client.on("error", () => {
+        /* surfaced by the close handler below */
+      });
+      await client.connect();
+      if (stopped) {
+        await client.logout().catch(() => client.close());
+        return;
+      }
       const onExists = () => fire();
       const onFlags = () => fire();
-      // The connection is the subscription. When it drops, the listeners go
+      // The connection is the subscription. When it drops the listeners go
       // with it, so reconnect — otherwise this account silently stops
       // reporting new mail for the life of the process.
       const onClose = () => {
-        detach();
+        detach(false);
         schedule();
       };
       client.on("exists", onExists);
@@ -1057,14 +1080,7 @@ export class ImapSmtpProvider implements MailProvider {
       client.on("flags", onFlags);
       client.on("close", onClose);
       watchers.set(key, { client, onExists, onFlags, onClose });
-    };
-
-    const select = async (reconnect: boolean) => {
-      await withImap(key, account.creds, async (client) => {
-        attach(client);
-        const lock = await client.getMailboxLock(folder, { readOnly: true });
-        lock.release();
-      });
+      await client.mailboxOpen(folder, { readOnly: true });
       backoff = WATCH_RETRY_MIN_MS;
       // The gap is invisible from here: anything that arrived while the
       // connection was down produced no event, so ask for a sync outright.
@@ -1101,10 +1117,7 @@ export class ImapSmtpProvider implements MailProvider {
       stopped = true;
       if (timer) clearTimeout(timer);
       if (retry) clearTimeout(retry);
-      detach();
-      keepAlive.delete(key);
-      const entry = pool.get(key);
-      if (entry) scheduleIdle(key, entry);
+      detach(true);
     };
   }
 
