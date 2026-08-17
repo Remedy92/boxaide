@@ -133,6 +133,7 @@ export const renderClaudeRunLine: RenderRunLine = (line) => {
         subtype?: string;
         model?: unknown;
         result?: unknown;
+        errors?: unknown;
         message?: { content?: unknown };
       }
     | null;
@@ -164,7 +165,15 @@ export const renderClaudeRunLine: RenderRunLine = (line) => {
     if (event.subtype === "success" && typeof event.result === "string") {
       return `[claude] result: ${event.result}`;
     }
-    return `[claude] ${event.subtype ?? "result"}`;
+    // A failed run carries its explanation on `errors` (and, rarely, `result`).
+    // Dropping it would leave the log saying only that something went wrong.
+    const label = `[claude] ${event.subtype ?? "result"}`;
+    const errors = Array.isArray(event.errors)
+      ? event.errors.filter((e): e is string => typeof e === "string" && e.trim() !== "")
+      : [];
+    if (errors.length) return `${label}: ${errors.join("; ")}`;
+    if (typeof event.result === "string" && event.result) return `${label}: ${event.result}`;
+    return label;
   }
 
   // `user` lines are tool results, and everything else is bookkeeping.
@@ -172,7 +181,7 @@ export const renderClaudeRunLine: RenderRunLine = (line) => {
 };
 
 /**
- * Longest line either CLI may produce before we give up on it.
+ * Longest line either CLI may produce before we cut it short.
  *
  * Grok restates its whole command and tool registry periodically, which runs
  * to about 10KB. The cap is well past that and exists only so a child that
@@ -184,14 +193,23 @@ const MAX_LINE = 256 * 1024;
  * Turns a stdout chunk stream into whole lines.
  *
  * A pipe splits wherever it likes, so a JSON object routinely arrives across
- * two chunks. Anything past the cap is dropped up to the next newline rather
- * than buffered — losing one oversized line costs a label, and the line that
- * arrived is still counted as liveness by the caller.
+ * two chunks. A line past the cap is emitted as its first MAX_LINE characters
+ * and the rest is dropped up to the next newline: the run log keeps the head,
+ * which is the part a person can read, and the readers that JSON.parse a line
+ * simply return null on the truncated one, as they already do for any line
+ * they cannot read.
+ *
+ * `flush()` emits whatever partial line is still buffered — a child killed
+ * mid-line has already said something, and the run log is the only record of
+ * it. It is safe to call more than once, and callers that never call it behave
+ * exactly as before.
  */
-export function lineSplitter(onLine: (line: string) => void): (chunk: string) => void {
+export function lineSplitter(
+  onLine: (line: string) => void,
+): ((chunk: string) => void) & { flush(): void } {
   let buffer = "";
   let dropping = false;
-  return (chunk: string) => {
+  const feed = (chunk: string) => {
     buffer += chunk;
     let index = buffer.indexOf("\n");
     while (index >= 0) {
@@ -202,8 +220,19 @@ export function lineSplitter(onLine: (line: string) => void): (chunk: string) =>
       index = buffer.indexOf("\n");
     }
     if (buffer.length > MAX_LINE) {
+      const head = buffer.slice(0, MAX_LINE);
       buffer = "";
       dropping = true;
+      if (head.trim()) onLine(head);
     }
   };
+  feed.flush = () => {
+    const line = buffer;
+    buffer = "";
+    // While dropping, what is buffered is the tail of a line whose head has
+    // already been emitted. Emitting it now would be the discard arriving late.
+    if (dropping) return;
+    if (line.trim()) onLine(line);
+  };
+  return feed;
 }

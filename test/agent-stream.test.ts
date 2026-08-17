@@ -190,6 +190,26 @@ describe("renderClaudeRunLine", () => {
     ).toBe("[claude] error_max_turns");
   });
 
+  it("says why a run failed when the result carries errors", () => {
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["MCP server boxaide failed to start", "no tools available"],
+        }),
+      ),
+    ).toBe(
+      "[claude] error_during_execution: MCP server boxaide failed to start; no tools available",
+    );
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({ type: "result", subtype: "error_during_execution", errors: [] }),
+      ),
+    ).toBe("[claude] error_during_execution");
+  });
+
   it("says nothing for tool results and unnamed events", () => {
     expect(
       renderClaudeRunLine(
@@ -227,13 +247,32 @@ describe("lineSplitter", () => {
     expect(seen).toEqual(["whole", "partial"]);
   });
 
-  it("drops an oversized line instead of buffering it forever", () => {
+  it("keeps the head of an oversized line and drops the rest", () => {
     const seen: string[] = [];
     const feed = lineSplitter((line) => seen.push(line));
     feed("x".repeat(300_000));
     feed("still the same line\n");
-    expect(seen).toEqual([]);
+    expect(seen).toEqual(["x".repeat(256 * 1024)]);
     feed("next\n");
-    expect(seen).toEqual(["next"]);
+    expect(seen).toEqual(["x".repeat(256 * 1024), "next"]);
+  });
+
+  it("flushes the partial line a killed child left behind", () => {
+    const seen: string[] = [];
+    const feed = lineSplitter((line) => seen.push(line));
+    feed("whole\nhalf a li");
+    expect(seen).toEqual(["whole"]);
+    feed.flush();
+    expect(seen).toEqual(["whole", "half a li"]);
+  });
+
+  it("flushes nothing when the buffer is empty or blank, and twice is safe", () => {
+    const seen: string[] = [];
+    const feed = lineSplitter((line) => seen.push(line));
+    feed.flush();
+    feed("done\n   ");
+    feed.flush();
+    feed.flush();
+    expect(seen).toEqual(["done"]);
   });
 });
