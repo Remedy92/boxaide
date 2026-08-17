@@ -5,10 +5,12 @@
  */
 import {
   chmodSync,
+  closeSync,
+  constants,
   existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   statSync,
@@ -37,6 +39,16 @@ function tempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "mailmux-launcher-"));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
+}
+
+/** Read a path that must be a regular file, not a symlink. */
+function readRegular(path: string): string {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** A bin directory holding one fake executable that sleeps until killed. */
@@ -555,13 +567,13 @@ sleep 60
     writeFileSync(join(bareParent, ".credentials.json"), '{"token":"x"}');
     claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: bareParent });
     const copied = join(home, ".credentials.json");
-    expect(lstatSync(copied).isSymbolicLink()).toBe(false);
-    expect(readFileSync(copied, "utf8")).toBe('{"token":"x"}');
+    // O_NOFOLLOW: a leftover symlink would throw instead of reading through.
+    expect(readRegular(copied)).toBe('{"token":"x"}');
 
     // And it is refreshed per launch, so a rotated token is not left behind.
     writeFileSync(join(bareParent, ".credentials.json"), '{"token":"y"}');
     claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: bareParent });
-    expect(readFileSync(copied, "utf8")).toBe('{"token":"y"}');
+    expect(readRegular(copied)).toBe('{"token":"y"}');
   });
 
   it("carries only Claude's auth settings across the isolation boundary", () => {

@@ -422,11 +422,13 @@ function claudePrepare(
  * there is no file at all; then nothing is copied and the CLI finds its own.
  */
 function claudeCopyCredentials(parentHome: string, home: string): void {
-  const from = join(parentHome, ".credentials.json");
-  if (!existsSync(from)) return;
   try {
-    copyFileSync(from, join(home, ".credentials.json"));
-  } catch {
+    copyFileSync(
+      join(parentHome, ".credentials.json"),
+      join(home, ".credentials.json"),
+    );
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
     // Unreadable credentials are not fatal: the CLI reports its own auth error,
     // and a prepare that throws would fail the launch instead.
   }
