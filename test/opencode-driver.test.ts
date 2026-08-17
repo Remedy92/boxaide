@@ -104,6 +104,18 @@ function make(): { store: Store; channel: AgentChannel } {
   return { store, channel };
 }
 
+/**
+ * True for the extra prompt that names the chat.
+ *
+ * It rides the same endpoint as a real turn, so tests counting conversation
+ * attempts have to tell the two apart. Matched on the prompt text rather than
+ * on a count, so a test still fails if the naming prompt goes out twice.
+ */
+function isNaming(call: Call): boolean {
+  const text = call.body?.parts?.[0]?.text;
+  return typeof text === "string" && text.startsWith("Name this conversation");
+}
+
 async function until(check: () => boolean, ms = 5_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!check()) {
@@ -168,12 +180,56 @@ describe("OpenCodeDriver", () => {
     expect(message!.auth).toBe(`Basic ${Buffer.from("opencode:pw").toString("base64")}`);
   });
 
+  it("names the chat from the exchange, once, and never at the answer's expense", async () => {
+    let namings = 0;
+    const fake = await startFake((call) => {
+      if (!isNaming(call)) {
+        return { status: 200, body: { parts: [{ type: "text", text: "two invoices" }] } };
+      }
+      namings += 1;
+      // First answer is prose a model would not be asked for but writes anyway;
+      // it is refused, and the chat keeps the name its message gave it.
+      if (namings === 1) return { status: 500 };
+      return { status: 200, body: { parts: [{ type: "text", text: '"Invoices from today"' }] } };
+    });
+    cleanup.push(fake.close);
+    const { channel } = make();
+    const driver = new OpenCodeDriver({
+      channel,
+      agent: "opencode",
+      baseUrl: fake.url,
+      directory: "/tmp/boxaide-agent",
+      waitMs: 1_000,
+      retryBaseMs: 10,
+    }).start();
+    cleanup.push(() => driver.stop());
+
+    channel.post({ role: "user", text: "what came in today?" });
+    await until(() => namings === 1);
+    // A failed naming is not a failed turn: the answer stands and the message
+    // is not re-queued.
+    await until(() => channel.history().filter((t) => t.role === "agent").length === 1);
+    expect(channel.chats()[0].title).toBe("what came in today?");
+
+    channel.post({ role: "user", text: "and yesterday?" });
+    await until(() => channel.chats()[0].title === "Invoices from today");
+    expect(namings).toBe(2);
+
+    // Named, so nothing asks again.
+    channel.post({ role: "user", text: "and the day before?" });
+    await until(() => channel.history().filter((t) => t.role === "agent").length === 3);
+    expect(namings).toBe(2);
+  });
+
   it("releases the lease and retries when the API fails", async () => {
     let attempts = 0;
     const fake = await startFake((call) => {
       // A failed prompt also fires a fire-and-forget session abort; only the
       // message posts are attempts.
       if (!call.path.includes("/message")) return { status: 200 };
+      if (isNaming(call)) {
+        return { status: 200, body: { parts: [{ type: "text", text: "Retry test" }] } };
+      }
       attempts += 1;
       if (attempts === 1) return { status: 500, body: { name: "UnknownError" } };
       return { status: 200, body: { parts: [{ type: "text", text: "second time lucky" }] } };
@@ -293,6 +349,9 @@ describe("OpenCodeDriver", () => {
       if (!call.path.startsWith("/session/ses_test/message")) {
         return { status: 200, body: {} };
       }
+      if (isNaming(call)) {
+        return { status: 200, body: { parts: [{ type: "text", text: "Watchdog test" }] } };
+      }
       attempts += 1;
       // The first turn is accepted and never answered: a live socket with a
       // dead turn behind it, which is exactly what the timeout cannot see.
@@ -334,6 +393,9 @@ describe("OpenCodeDriver", () => {
     const fake = await startFake((call) => {
       if (!call.path.startsWith("/session/ses_test/message")) {
         return { status: 200, body: {} };
+      }
+      if (isNaming(call)) {
+        return { status: 200, body: { parts: [{ type: "text", text: "Heartbeat test" }] } };
       }
       attempts += 1;
       if (attempts === 1) return null;

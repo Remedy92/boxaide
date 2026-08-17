@@ -705,6 +705,33 @@ describe("chat tools over MCP", () => {
     ]);
   });
 
+  it("asks for a chat name on the wait, and takes the one chat_say carries", async () => {
+    const service = mail();
+    const { channel } = make();
+
+    channel.post({ role: "user", text: "can you look at the acme thing" });
+    const awaited = payload(await call(service, channel, "chat_await_message"));
+    expect(awaited.needsTitle).toBe(true);
+    expect(awaited.hint).toContain("title");
+
+    await call(service, channel, "chat_say", {
+      text: "Their invoice is unpaid.",
+      title: "Refund for the Acme invoice",
+    });
+    expect(channel.chats()[0].title).toBe("Refund for the Acme invoice");
+
+    // Named once. The next wait does not ask again, and a title sent anyway is
+    // ignored rather than treated as a failed answer.
+    channel.post({ role: "user", text: "and the february one?" });
+    const second = payload(await call(service, channel, "chat_await_message"));
+    expect(second.needsTitle).toBe(false);
+    const said = payload(
+      await call(service, channel, "chat_say", { text: "Also unpaid.", title: "Something else" }),
+    );
+    expect(said.posted).toBe(true);
+    expect(channel.chats()[0].title).toBe("Refund for the Acme invoice");
+  });
+
   it("stamps chat_say with the launched agent, not a leftover MCP name", async () => {
     const service = mail();
     const { channel } = make();

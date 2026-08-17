@@ -36,12 +36,16 @@ export type DriverChannel = {
     timeoutMs?: number;
     agent?: string | null;
     signal?: AbortSignal;
-  }): Promise<{ seq: number; text: string } | null>;
+  }): Promise<{ seq: number; text: string; chatId: string } | null>;
   post(input: { role: "agent" | "activity"; text: string; agent?: string | null }): unknown;
   releaseLease(seq: number, options?: { revertAttempt?: boolean }): void;
   noteAgentActivity(tool: string | null): void;
   /** Gates the MCP chat tools while this loop owns the conversation. */
   setDriven(on: boolean): void;
+  /** True while the chat is still carrying the user's first line as its name. */
+  needsTitle(chatId: string): boolean;
+  /** Offers the model's name for the chat. Refused if the user named it. */
+  nameChat(chatId: string, title: string): boolean;
 };
 
 /** A running driver, from the launcher's side. Stopping is idempotent. */
@@ -97,6 +101,19 @@ const DRIVEN_SYSTEM = `You are my Boxaide inbox agent. Use the Boxaide MCP tools
 Each message you receive is from me, typed in the Boxaide window. Reply with the
 answer itself — your reply text is what I read. Do not call any chat_ tool; the
 conversation is handled for you. Draft rather than send unless I ask you to send.`;
+
+/**
+ * The one question asked purely to name a chat.
+ *
+ * Written for a model that has just answered a person and is inclined to keep
+ * talking: it says what the answer is for, bans the decorations models put
+ * around a title anyway, and gives an example of the difference between a name
+ * and a category.
+ */
+const TITLE_PROMPT = `Name this conversation for a list I will read a week from now.
+Four words or fewer, describing what it is actually about — "Refund for the Acme
+invoice", not "Email question". Reply with the name alone: no quotes, no
+punctuation at the end, no explanation. This is not a message to me.`;
 
 export type OpenCodeDriverOptions = {
   channel: DriverChannel;
@@ -202,6 +219,7 @@ export class OpenCodeDriver implements AgentDriver {
           agent: this.opts.agent,
         });
         failures = 0;
+        await this.maybeName(base, turn.chatId);
       } catch {
         if (this.stopped) {
           this.opts.channel.releaseLease(turn.seq, { revertAttempt: true });
@@ -214,6 +232,30 @@ export class OpenCodeDriver implements AgentDriver {
         failures += 1;
         await this.pause(failures);
       }
+    }
+  }
+
+  /**
+   * Names the chat, once, from the exchange that just happened.
+   *
+   * The MCP tier gets this for free — the agent passes a title to `chat_say`
+   * — and a driven session has no chat tools to pass it through, so the name is
+   * asked for directly. It runs on the same session, so the model is naming a
+   * conversation it has just had rather than being handed one to read.
+   *
+   * Everything here is best effort. The answer is already posted and the lease
+   * is already closed, so a failed or refused title costs the user nothing and
+   * must never reach the loop's retry path: the chat keeps the name its first
+   * message gave it.
+   */
+  private async maybeName(base: string, chatId: string): Promise<void> {
+    if (this.stopped) return;
+    if (!this.opts.channel.needsTitle(chatId)) return;
+    try {
+      const raw = await this.prompt(base, TITLE_PROMPT);
+      this.opts.channel.nameChat(chatId, raw);
+    } catch {
+      // No name is a fine outcome. See the note above.
     }
   }
 

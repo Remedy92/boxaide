@@ -48,6 +48,73 @@ describe("chats", () => {
     expect(channel.chats()[0].title).toBe("chase the March invoices");
   });
 
+  it("lets the agent replace the derived name once, and only once", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "can you look at the acme thing" });
+    expect(channel.needsTitle(channel.chats()[0].id)).toBe(true);
+
+    const id = channel.chats()[0].id;
+    expect(channel.nameChat(id, "Refund for the Acme invoice")).toBe(true);
+    expect(channel.chats()[0].title).toBe("Refund for the Acme invoice");
+
+    // A second offer is refused: the row must not move under a reader who has
+    // already learned where it is.
+    expect(channel.needsTitle(id)).toBe(false);
+    expect(channel.nameChat(id, "Something else entirely")).toBe(false);
+    expect(channel.chats()[0].title).toBe("Refund for the Acme invoice");
+  });
+
+  it("never lets the agent overwrite a name the user typed", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "hello" });
+    const id = channel.chats()[0].id;
+    expect(channel.renameChat(id, "My own name")).toBe(true);
+    expect(channel.needsTitle(id)).toBe(false);
+    expect(channel.nameChat(id, "The agent's idea")).toBe(false);
+    expect(channel.chats()[0].title).toBe("My own name");
+  });
+
+  it("keeps the derived name when the agent's answer is not a name", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "chase the March invoices" });
+    const id = channel.chats()[0].id;
+    for (const junk of ["", "   ", `Sure! ${"a".repeat(200)}`]) {
+      expect(channel.nameChat(id, junk)).toBe(false);
+    }
+    expect(channel.chats()[0].title).toBe("chase the March invoices");
+    // Refusing a bad answer leaves the chat open to a good one.
+    expect(channel.needsTitle(id)).toBe(true);
+  });
+
+  it("strips what a model puts around a title", () => {
+    const cases: Array<[string, string]> = [
+      ['"Refund for the Acme invoice"', "Refund for the Acme invoice"],
+      ["**Invoice chase**", "Invoice chase"],
+      ["Title: Invoice chase", "Invoice chase"],
+      ["# Invoice chase", "Invoice chase"],
+      ["Invoice chase.", "Invoice chase"],
+      ["Invoice chase\nand some prose after it", "Invoice chase"],
+    ];
+    for (const [raw, want] of cases) {
+      const { channel } = make();
+      channel.post({ role: "user", text: "hello" });
+      const id = channel.chats()[0].id;
+      expect(channel.nameChat(id, raw)).toBe(true);
+      expect(channel.chats()[0].title).toBe(want);
+    }
+  });
+
+  it("offers the migrated conversation a name instead of leaving it placeheld", () => {
+    const { store, channel } = make();
+    const chat = store.createChat("Conversation");
+    channel.selectChat(chat.id);
+    // The placeholder is not a name, so the first message still renames it and
+    // the agent may still improve on that.
+    channel.post({ role: "user", text: "what did stripe send yesterday" });
+    expect(channel.chats()[0].title).toBe("what did stripe send yesterday");
+    expect(channel.needsTitle(chat.id)).toBe(true);
+  });
+
   it("keeps a long first message to one readable line", () => {
     const { channel } = make();
     channel.post({

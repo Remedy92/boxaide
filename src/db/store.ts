@@ -84,7 +84,26 @@ export type StoredChat = {
   turns: number;
   /** Bytes of encrypted turn text. What the budget counts. */
   bytes: number;
+  /** Who the current title came from. See TitleSource. */
+  titleSource: TitleSource;
 };
+
+/**
+ * Where a chat's title came from, and therefore who may replace it.
+ *
+ * The three are ranked, and a title may only be replaced by one that ranks
+ * above it: "auto" < "agent" < "user". A guess made from the first line the
+ * user typed gives way to a name the agent wrote after reading the exchange;
+ * neither overwrites a name the user typed themselves.
+ */
+export type TitleSource = "auto" | "agent" | "user";
+
+const TITLE_RANK: Record<TitleSource, number> = { auto: 0, agent: 1, user: 2 };
+
+/** Reads the column back. Anything unrecognised is treated as the user's own. */
+function toTitleSource(raw: string | null): TitleSource {
+  return raw === "auto" || raw === "agent" ? raw : "user";
+}
 
 /** What unclaimUserTurn did. The channel decides what the UI should say. */
 export type UnclaimResult = "released" | "dead_lettered" | "acked" | "missing";
@@ -118,10 +137,14 @@ type ChatRow = {
   active: number;
   turns: number;
   bytes: number;
+  titleSource: string | null;
 };
 
 /** Title a chat carries until its first message renames it. */
 const UNTITLED = "New chat";
+
+/** What pre-chat history was called before chats had names of their own. */
+const MIGRATED = "Conversation";
 
 export class Store {
   static readonly MAX_DELIVERIES = MAX_DELIVERIES;
@@ -228,9 +251,31 @@ export class Store {
         updated_at TEXT NOT NULL,
         archived_at TEXT,
         trimmed INTEGER NOT NULL DEFAULT 0,
-        active INTEGER NOT NULL DEFAULT 0
+        active INTEGER NOT NULL DEFAULT 0,
+        title_source TEXT NOT NULL DEFAULT 'auto'
       );
     `);
+    // Chats that predate title_source. A name already on screen is left alone —
+    // the reader has been looking at it — so those settle as the user's own.
+    // The two placeholder names are the exception: nobody chose them, and they
+    // are the whole reason an agent gets to name a chat at all.
+    const chatCols = this.db
+      .prepare(`PRAGMA table_info(agent_chats)`)
+      .all() as Array<{ name: string }>;
+    if (!chatCols.some((c) => c.name === "title_source")) {
+      this.db.exec(
+        `ALTER TABLE agent_chats ADD COLUMN title_source TEXT NOT NULL DEFAULT 'user'`,
+      );
+      for (const row of this.db
+        .prepare(`SELECT id, title_enc as titleEnc FROM agent_chats`)
+        .all() as Array<{ id: string; titleEnc: string }>) {
+        const title = decryptSecret(this.masterKey, row.titleEnc);
+        if (title !== UNTITLED && title !== MIGRATED) continue;
+        this.db
+          .prepare(`UPDATE agent_chats SET title_source = 'auto' WHERE id = ?`)
+          .run(row.id);
+      }
+    }
     if (!turnCols.some((c) => c.name === "chat_id")) {
       this.db.exec(`ALTER TABLE agent_turns ADD COLUMN chat_id TEXT`);
     }
@@ -249,10 +294,11 @@ export class Store {
       const at = new Date().toISOString();
       this.db
         .prepare(
-          `INSERT INTO agent_chats (id, title_enc, created_at, updated_at, active)
-           VALUES (?, ?, ?, ?, 1)`,
+          `INSERT INTO agent_chats (id, title_enc, created_at, updated_at, active,
+                                    title_source)
+           VALUES (?, ?, ?, ?, 1, 'auto')`,
         )
-        .run(id, encryptSecret(this.masterKey, "Conversation"), at, at);
+        .run(id, encryptSecret(this.masterKey, MIGRATED), at, at);
       this.db
         .prepare(`UPDATE agent_turns SET chat_id = ? WHERE chat_id IS NULL`)
         .run(id);
@@ -273,7 +319,7 @@ export class Store {
       .prepare(
         `SELECT c.id, c.title_enc as titleEnc, c.created_at as createdAt,
                 c.updated_at as updatedAt, c.archived_at as archivedAt,
-                c.trimmed, c.active,
+                c.trimmed, c.active, c.title_source as titleSource,
                 COUNT(t.seq) as turns,
                 COALESCE(SUM(LENGTH(t.text_enc)), 0) as bytes
          FROM agent_chats c
@@ -291,7 +337,7 @@ export class Store {
       .prepare(
         `SELECT c.id, c.title_enc as titleEnc, c.created_at as createdAt,
                 c.updated_at as updatedAt, c.archived_at as archivedAt,
-                c.trimmed, c.active,
+                c.trimmed, c.active, c.title_source as titleSource,
                 COUNT(t.seq) as turns,
                 COALESCE(SUM(LENGTH(t.text_enc)), 0) as bytes
          FROM agent_chats c
@@ -308,10 +354,14 @@ export class Store {
     const at = new Date().toISOString();
     this.db.transaction(() => {
       this.db.prepare(`UPDATE agent_chats SET active = 0`).run();
+      // The source is written rather than defaulted: the column's default is
+      // 'user' on databases that gained it by ALTER, and a new chat is not
+      // named by anybody.
       this.db
         .prepare(
-          `INSERT INTO agent_chats (id, title_enc, created_at, updated_at, active)
-           VALUES (?, ?, ?, ?, 1)`,
+          `INSERT INTO agent_chats (id, title_enc, created_at, updated_at, active,
+                                    title_source)
+           VALUES (?, ?, ?, ?, 1, 'auto')`,
         )
         .run(id, encryptSecret(this.masterKey, title), at, at);
     })();
@@ -360,17 +410,47 @@ export class Store {
     return true;
   }
 
-  renameChat(id: string, title: string): boolean {
+  /**
+   * Names a chat, if the caller outranks whoever named it last.
+   *
+   * False means the title stood: either the chat is gone, or a better-ranked
+   * source already named it. Callers treat that as normal — the agent offering
+   * a name for a chat the user has already named is the expected case, not an
+   * error.
+   */
+  renameChat(id: string, title: string, source: TitleSource = "user"): boolean {
+    const current = this.titleSource(id);
+    if (current === null) return false;
+    if (TITLE_RANK[source] < TITLE_RANK[current]) return false;
+    // Equal rank is a re-name by the same kind of caller. The user may do that
+    // as often as they like, and the derived title is re-derived under a guard
+    // of its own; the agent gets one go, so the list stops moving once it has
+    // a name written from the conversation.
+    if (source === "agent" && current === "agent") return false;
     const res = this.db
-      .prepare(`UPDATE agent_chats SET title_enc = ? WHERE id = ?`)
-      .run(encryptSecret(this.masterKey, title), id);
+      .prepare(`UPDATE agent_chats SET title_enc = ?, title_source = ? WHERE id = ?`)
+      .run(encryptSecret(this.masterKey, title), source, id);
     return res.changes > 0;
   }
 
-  /** True while the chat still carries the title it was created with. */
+  /** Who named this chat, or null when there is no such chat. */
+  titleSource(id: string): TitleSource | null {
+    const row = this.db
+      .prepare(`SELECT title_source as titleSource FROM agent_chats WHERE id = ?`)
+      .get(id) as { titleSource: string | null } | undefined;
+    return row ? toTitleSource(row.titleSource) : null;
+  }
+
+  /**
+   * True while the chat carries a placeholder name rather than one of its own.
+   *
+   * "Conversation" counts. It is the name pre-chat history was migrated under,
+   * and it says as little about that history as "New chat" does.
+   */
   isUntitled(id: string): boolean {
     const chat = this.getChat(id);
-    return chat?.title === UNTITLED;
+    if (!chat) return false;
+    return chat.title === UNTITLED || chat.title === MIGRATED;
   }
 
   /**
@@ -438,6 +518,7 @@ export class Store {
       active: row.active === 1,
       turns: row.turns,
       bytes: row.bytes,
+      titleSource: toTitleSource(row.titleSource),
     };
   }
 
