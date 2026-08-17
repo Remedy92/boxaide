@@ -80,11 +80,69 @@ const TITLE_CHARS = 60;
  */
 function titleFrom(text: string): string {
   const line = text.split("\n").find((part) => part.trim().length > 0) ?? text;
-  const clean = line.trim().replace(/\s+/g, " ");
+  return shorten(line.trim().replace(/\s+/g, " "));
+}
+
+/**
+ * One line, cut to length on a word, and marked where it was cut.
+ *
+ * Every title in the rail goes through this, whoever wrote it. A cut that is
+ * not marked reads as a name somebody chose, and the reader cannot tell a
+ * short title from the front half of a long one.
+ */
+function shorten(clean: string): string {
   if (clean.length <= TITLE_CHARS) return clean;
   const cut = clean.slice(0, TITLE_CHARS);
   const space = cut.lastIndexOf(" ");
   return `${(space > 20 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
+/**
+ * Longest a model's answer may be and still be read as a title.
+ *
+ * Asked for four words, a model sometimes writes a sentence about the chat
+ * instead. Cutting that to 60 characters would put half a sentence in the rail,
+ * which reads worse than the first line the user typed. Past this it is prose,
+ * and prose is refused rather than trimmed.
+ */
+const TITLE_MAX_RAW = 120;
+
+/**
+ * A model's answer, turned into a title or into nothing.
+ *
+ * Models wrap titles in quotes, bold them, and prefix them with "Title:" no
+ * matter how the question is put, so all three come off here. What is left is
+ * one line of plain text, or nothing — and nothing keeps the title the first
+ * message gave the chat.
+ */
+/** Drops the characters that would break a single-line label. */
+function stripControl(text: string): string {
+  let out = "";
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    out += code < 0x20 || code === 0x7f ? " " : ch;
+  }
+  return out;
+}
+
+export function cleanTitle(raw: string): string | null {
+  const line = raw.split("\n").find((part) => part.trim().length > 0);
+  if (!line) return null;
+  let clean = stripControl(line)
+    .trim()
+    .replace(/^#+\s*/, "")
+    .replace(/^(?:title|chat|name)\s*[:\-\u2014]\s*/i, "")
+    .replace(/[*_`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Quotes come off in pairs only: a title that is one half of a quotation is
+  // more likely to be using the character than wrapped in it.
+  const quoted =
+    /^(["'])(.*)\1$/.exec(clean) ?? /^[\u201c\u2018](.*)[\u201d\u2019]$/.exec(clean);
+  if (quoted) clean = (quoted[2] ?? quoted[1] ?? "").trim();
+  clean = clean.replace(/[.。]+$/, "").trim();
+  if (!clean || clean.length > TITLE_MAX_RAW) return null;
+  return shorten(clean) || null;
 }
 
 /** What the storage line in the rail reads from. */
@@ -235,6 +293,14 @@ export class AgentChannel {
   private askers = new Set<string>();
   /** Highest seq handed to listeners. Advanced only by drain(). */
   private broadcastSeq: number;
+  /**
+   * What the chat list looked like when it was last emitted.
+   *
+   * A rename writes no turn, so the drain cannot see one. This is compared on
+   * the same poll, and it is how a title written by `boxaide mcp` reaches a
+   * browser attached to `boxaide serve`.
+   */
+  private chatsFingerprint: string;
   private poll: ReturnType<typeof setInterval> | null = null;
   private closed = false;
   /**
@@ -251,6 +317,7 @@ export class AgentChannel {
     // only follows. The UI fetches history separately.
     const tail = this.store.listTurns({ limit: 1 });
     this.broadcastSeq = tail.length > 0 ? tail[tail.length - 1].seq : 0;
+    this.chatsFingerprint = this.store.chatsFingerprint();
     // This process just started. Any lease in the file is held by nobody —
     // the previous process's in-memory work died with it.
     this.store.releaseOrphanLeases();
@@ -307,10 +374,12 @@ export class AgentChannel {
       agent: input.agent ?? null,
       replyTo,
     });
-    // The first thing said in a chat names it. Later messages do not rename it:
-    // a list whose rows change under the reader is not a list.
+    // The first thing said in a chat names it, so the row is never blank while
+    // the agent is still reading. The agent replaces that guess once, with a
+    // name written from the whole exchange — see nameChat. Nothing renames it
+    // after that: a list whose rows change under the reader is not a list.
     if (input.role === "user" && this.store.isUntitled(chatId)) {
-      this.store.renameChat(chatId, titleFrom(text));
+      this.store.renameChat(chatId, titleFrom(text), "auto");
     }
     this.store.trimTurns(chatId, HISTORY_LIMIT);
     this.enforceBudget();
@@ -402,6 +471,32 @@ export class AgentChannel {
     return ok;
   }
 
+  /**
+   * Whether this chat is still waiting for a name worth reading.
+   *
+   * The agent asks — through the MCP payload, or through the driver — so that a
+   * chat the user has already named costs nobody a second thought.
+   */
+  needsTitle(id: string): boolean {
+    return this.store.titleSource(id) === "auto";
+  }
+
+  /**
+   * The agent's name for a chat, from having read the exchange.
+   *
+   * Offered, not imposed: a chat the user renamed keeps the user's name, and a
+   * chat already named this way keeps the first one, so the row does not move
+   * under a reader who has learned where it is. A name that survives sanitising
+   * to nothing is no name, and the derived one stands.
+   */
+  nameChat(id: string, title: string): boolean {
+    const clean = cleanTitle(title);
+    if (!clean) return false;
+    const ok = this.store.renameChat(id, clean, "agent");
+    if (ok) this.emitChats();
+    return ok;
+  }
+
   archiveChat(id: string): boolean {
     const ok = this.store.archiveChat(id);
     if (ok) this.afterChatRemoved(id);
@@ -434,6 +529,9 @@ export class AgentChannel {
   }
 
   private emitChats(): void {
+    // Taken before notifying, so a change made in this process is not reported
+    // a second time by the poll that watches for changes made in another.
+    this.chatsFingerprint = this.store.chatsFingerprint();
     for (const listener of this.chatListeners) {
       try {
         listener();
@@ -655,6 +753,21 @@ export class AgentChannel {
     }
   }
 
+  /**
+   * Pushes the chat list when another process has changed it.
+   *
+   * The turn drain covers everything that writes a row. Renaming does not
+   * write one: a chat named through `chat_say` in the stdio MCP process would
+   * otherwise sit under its old name in the rail until the user typed again or
+   * reloaded, which is the whole feature failing quietly.
+   */
+  private drainChats(): void {
+    if (this.chatListeners.size === 0) return;
+    const now = this.store.chatsFingerprint();
+    if (now === this.chatsFingerprint) return;
+    this.emitChats();
+  }
+
   /** Hands the oldest unclaimed user turn to the longest-waiting agent. */
   private handOff(): void {
     let handed = false;
@@ -779,6 +892,7 @@ export class AgentChannel {
     if (this.poll || this.closed) return;
     this.poll = setInterval(() => {
       this.drain();
+      this.drainChats();
       this.handOff();
     }, POLL_MS);
     // Never hold the process open for a poll that exists to serve attachments.

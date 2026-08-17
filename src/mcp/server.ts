@@ -322,6 +322,11 @@ export const CHAT_TOOLS = [
           type: "string",
           description: "What to say. Markdown is rendered.",
         },
+        title: {
+          type: "string",
+          description:
+            "A name for this conversation, four words or fewer, describing what it is about — 'Refund for the Acme invoice', not 'Email question'. Send it when the wait payload said needsTitle; it is ignored otherwise, and the name is only taken once, so write it for a list the user reads a week from now.",
+        },
       },
       required: ["text"],
       additionalProperties: false,
@@ -598,12 +603,20 @@ async function dispatchChat(
         };
       }
       const redelivered = turn.deliveryCount > 1;
+      // The chat is carrying the user's first line as its name until an agent
+      // offers a better one. Asked for here rather than in the tool
+      // description, because this is the payload read just before answering.
+      const needsTitle = channel.needsTitle(turn.chatId);
+      const answer = redelivered
+        ? "You were handed this message before and did not chat_say. Answer with chat_say, then call chat_await_message again."
+        : "Answer with chat_say, then call chat_await_message again.";
       return {
         message: { seq: turn.seq, at: turn.at, text: turn.text },
         redelivered,
-        hint: redelivered
-          ? "You were handed this message before and did not chat_say. Answer with chat_say, then call chat_await_message again."
-          : "Answer with chat_say, then call chat_await_message again.",
+        needsTitle,
+        hint: needsTitle
+          ? `${answer} This conversation has no name yet: pass a short "title" to chat_say saying what it is about.`
+          : answer,
       };
     }
     case "chat_say": {
@@ -618,6 +631,11 @@ async function dispatchChat(
         text: String(args.text ?? ""),
         agent: channel.clientName,
       });
+      // Offered, and refused without complaint when the chat already has a name
+      // the user chose. A rejected title is not a failed answer.
+      if (typeof args.title === "string") {
+        channel.nameChat(turn.chatId, args.title);
+      }
       return {
         posted: true,
         seq: turn.seq,

@@ -20,6 +20,7 @@ import {
   Menu,
   nativeImage,
   Notification,
+  powerMonitor,
   screen,
   shell,
   Tray,
@@ -107,6 +108,7 @@ let stagedUpdate = null;
  * @type {{
  *   check: () => Promise<void>,
  *   checkAndDownload: () => Promise<void>,
+ *   checkIfStale: (maxAgeMs?: number) => Promise<void>,
  *   state: () => { status: string, currentVersion: string, latestVersion: string | null, error: string | null },
  * } | null}
  */
@@ -130,9 +132,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("activate", () => {
-    if (serverUrl && BrowserWindow.getAllWindows().length === 0) {
-      createWindow(serverUrl);
-    }
+    if (serverUrl) openMainWindow();
   });
 
   // Quitting is held open once, long enough to close the SQLite handle and log
@@ -216,7 +216,10 @@ async function start() {
   // The token is right here in the runtime config — the same file-backed bearer
   // token the page obtains through its one-time bootstrap capability — so the
   // main process reads it directly rather than going through the renderer.
-  if (!smoke) startBadgePoll(started.url, started.runtime.config.bearerToken);
+  if (!smoke) {
+    startBadgePoll(started.url, started.runtime.config.bearerToken);
+    watchForStaleUpdate();
+  }
 }
 
 /**
@@ -248,9 +251,10 @@ let notifiedReadyFor = null;
  * release. Both files must be on the release for any of this to work —
  * scripts/ship.sh uploads them beside the dmg.
  *
- * Downloading is never automatic. The update is tens of megabytes over
- * somebody's connection, and it lands as a restart; both are the user's call,
- * made in the sidebar.
+ * The service starts the download as soon as a check finds a newer build.
+ * `autoDownload` stays off so electron-updater does not start a second
+ * transfer on a re-check. Restart stays a button; quit still applies a
+ * staged build.
  */
 function createUpdateDriver() {
   autoUpdater.autoDownload = false;
@@ -306,7 +310,12 @@ function createUpdateDriver() {
       // Close both before the process is replaced, then quit for real:
       // `quitAndInstall` runs the Squirrel handoff that `app.exit` skips.
       void shutdownServer().finally(() => {
-        autoUpdater.quitAndInstall(false, true);
+        try {
+          autoUpdater.quitAndInstall(false, true);
+        } catch (err) {
+          console.error("quit and install failed", err);
+          app.exit(0);
+        }
       });
     },
   };
@@ -341,6 +350,16 @@ function announceReady(version) {
   notifiedReadyFor = version;
   if (!Notification.isSupported()) return;
   notify(`Boxaide ${version} is ready`, "Restart to finish updating.");
+}
+
+/**
+ * Sleep and Cmd-Tab are the moments a 15-minute poll is the wrong clock.
+ * The service drops a check that ran in the last minute.
+ */
+function watchForStaleUpdate() {
+  powerMonitor.on("resume", () => {
+    void updateService?.checkIfStale();
+  });
 }
 
 /* ---- approval badge ------------------------------------------------------ */
@@ -861,6 +880,11 @@ function createWindow(url, hash) {
   win.on("closed", () => {
     win = null;
   });
+  if (!smoke) {
+    win.on("focus", () => {
+      void updateService?.checkIfStale();
+    });
+  }
 
   // Mail contains links. Anything that is not this server opens in the user's
   // real browser; nothing else gets an Electron window.

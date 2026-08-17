@@ -25,12 +25,10 @@ export function UpdatesPanel() {
   const update = useUpdate();
   const state = update.state;
 
-  /* Opening this page asks the question — a page that showed a stale answer
-     and waited to be pressed would be the same do-nothing button this
-     replaced. It does NOT start the download: arriving here to read the
-     version number is not consent to spend somebody's connection. The button
-     below is what downloads. Once per mount, and never over a check that just
-     ran or a download in flight. */
+  /* Opening this page asks the question. It does not start the download:
+     the launch timer, the fifteen-minute timer and a focus already do.
+     Once per mount, and never over a check that just ran or a download
+     in flight. */
   const checkRef = React.useRef(update.refresh);
   React.useEffect(() => {
     checkRef.current = update.refresh;
@@ -54,8 +52,9 @@ export function UpdatesPanel() {
       <header className="space-y-1">
         <h2 className="text-[15px] leading-5 font-medium text-fg">Updates</h2>
         <p className="text-[13px] leading-[18px] text-fg-secondary">
-          Boxaide checks for a new version when it starts, and every six hours
-          after that.
+          Boxaide checks when it starts, every fifteen minutes, and when you
+          come back to the window. A new version downloads itself. Restart is
+          yours.
         </p>
       </header>
 
@@ -78,7 +77,7 @@ function Panel({
   state: UpdateState;
   update: ReturnType<typeof useUpdate>;
 }) {
-  const checking = state.status === "checking" || update.busy;
+  const checking = state.status === "checking" || update.isChecking;
 
   return (
     <>
@@ -105,7 +104,7 @@ function Panel({
           <Button
             type="button"
             variant={state.status === "ready" || state.status === "available" ? "secondary" : "default"}
-            disabled={checking}
+            disabled={checking || state.status === "downloading"}
             aria-busy={checking || undefined}
             onClick={update.check}
           >
@@ -117,15 +116,22 @@ function Panel({
             <Button
               type="button"
               disabled={update.busy}
+              aria-busy={update.isDownloading || undefined}
               onClick={update.download}
             >
+              {update.isDownloading && <Spinner />}
               Download update
             </Button>
           )}
 
           {state.canInstall && state.status === "ready" && (
-            <Button type="button" disabled={update.busy} onClick={update.install}>
-              <RotateCw className="size-3.5" strokeWidth={1.5} />
+            <Button
+              type="button"
+              disabled={update.busy}
+              aria-busy={update.isInstalling || undefined}
+              onClick={update.install}
+            >
+              {update.isInstalling ? <Spinner /> : <RotateCw className="size-3.5" strokeWidth={1.5} />}
               Restart now
             </Button>
           )}
@@ -215,6 +221,15 @@ function StatusIcon({ status }: { status: UpdateState["status"] }) {
       />
     );
   }
+  if (status === "idle") {
+    return (
+      <ArrowUpCircle
+        aria-hidden="true"
+        className="mt-0.5 size-5 shrink-0 text-fg-tertiary"
+        strokeWidth={1.5}
+      />
+    );
+  }
   return (
     <ArrowUpCircle
       aria-hidden="true"
@@ -248,16 +263,16 @@ function Progress({ value, className = "" }: { value: number | null; className?:
 }
 
 export function headline(state: UpdateState): string {
-  const version = state.latestVersion ?? "A new version";
+  const versionStr = state.latestVersion ? `Boxaide ${state.latestVersion}` : "A new version";
   switch (state.status) {
     case "checking":
       return "Checking for updates…";
     case "downloading":
-      return `Downloading Boxaide ${version}`;
+      return state.latestVersion ? `Downloading Boxaide ${state.latestVersion}` : "Downloading update";
     case "ready":
-      return `Boxaide ${version} is ready to install`;
+      return `${versionStr} is ready to install`;
     case "available":
-      return `Boxaide ${version} is available`;
+      return `${versionStr} is available`;
     case "up-to-date":
       return "Boxaide is up to date";
     case "error":
@@ -275,7 +290,7 @@ function subline(state: UpdateState): string {
       return "You can keep working. Boxaide will ask to restart when it lands.";
     case "available":
       return state.canInstall
-        ? `You are on ${state.currentVersion}. The download starts when you press Download update.`
+        ? `You are on ${state.currentVersion}. The download starts automatically, or press Download update.`
         : `You are on ${state.currentVersion}. Update with npm or git to get it.`;
     case "up-to-date":
       return `You are on ${state.currentVersion}, the newest release.`;
