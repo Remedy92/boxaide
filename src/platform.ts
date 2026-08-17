@@ -18,6 +18,8 @@ import { AutomationStore } from "./automation/store.js";
 import { AutomationScheduler } from "./automation/scheduler.js";
 import { OutreachStore } from "./outreach/store.js";
 import { OutreachEngine } from "./outreach/engine.js";
+import { CalendarStore } from "./calendar/store.js";
+import { CalendarService } from "./calendar/service.js";
 
 /**
  * Shape of one MCP tool definition, structurally identical to the entries of
@@ -41,6 +43,9 @@ export type Platform = {
   scheduler: AutomationScheduler;
   outreachStore: OutreachStore;
   engine: OutreachEngine;
+  calendarStore: CalendarStore;
+  /** Agenda, free slots, and the meeting write path. No timers of its own. */
+  calendarService: CalendarService;
   /** Start CRM sync, automation scheduler, and outreach engine timers. */
   start: () => void;
   /** Stop every timer and any in-flight automation run. */
@@ -59,6 +64,10 @@ export function createPlatform(opts: {
   const scheduler = new AutomationScheduler(automationStore, opts.launcher);
   const outreachStore = new OutreachStore(opts.db, opts.masterKey);
   const engine = new OutreachEngine(outreachStore, crmStore, opts.mail);
+  // Calendar is read-on-demand: no scheduler, no sync loop. It sends invites
+  // through the same MailService, so the suppression guard below covers it.
+  const calendarStore = new CalendarStore(opts.db, opts.masterKey);
+  const calendarService = new CalendarService(calendarStore, opts.mail);
 
   // Suppression is enforced at the send chokepoint for every caller (spec
   // invariant 2). The guard lives here, not in MailService, so mail stays
@@ -91,6 +100,8 @@ export function createPlatform(opts: {
     scheduler,
     outreachStore,
     engine,
+    calendarStore,
+    calendarService,
     start: () => {
       crmService.start();
       scheduler.start();

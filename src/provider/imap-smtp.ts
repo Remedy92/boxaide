@@ -1224,6 +1224,7 @@ export class ImapSmtpProvider implements MailProvider {
       html: input.html,
       inReplyTo: input.inReplyTo,
       references: input.references,
+      icalEvent: input.icalEvent,
     };
 
     // Compose once so the bytes that go over SMTP are the exact bytes we

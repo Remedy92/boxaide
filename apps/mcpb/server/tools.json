@@ -1070,5 +1070,163 @@
       "properties": {},
       "additionalProperties": false
     }
+  },
+  {
+    "name": "calendar_accounts_list",
+    "description": "List connected calendar accounts (id, alias, provider, email). Use the id for meeting_create's calendarAccountId when the user has more than one calendar and says which.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "agenda_view",
+    "description": "Read the user's agenda over a time range. Every connected calendar account is read and the results are merged into one timeline. An unreachable account does not fail the call — it contributes a string to `errors`, so check that field before telling the user their day is empty. Ask for the smallest range that answers the question — a week of events is a lot of text.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "type": "string",
+          "description": "ISO 8601 instant (e.g. 2026-03-04T09:00:00Z). Times are absolute instants, not wall clock. Defaults to now."
+        },
+        "end": {
+          "type": "string",
+          "description": "ISO 8601 instant (e.g. 2026-03-04T09:00:00Z). Times are absolute instants, not wall clock. Defaults to start plus `days`."
+        },
+        "days": {
+          "type": "number",
+          "description": "Length of the range when `end` is omitted. Default 7, max 62.",
+          "default": 7
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "calendar_free_slots",
+    "description": "Find open meeting times. Returns candidate START times that are free on every connected calendar — they are suggestions to offer the user, nothing is booked. Working hours are the SERVER's local time zone, 09:00-17:00 by default, and slots begin on the half hour. Every connected calendar account is read and the results are merged into one timeline. An unreachable account does not fail the call — it contributes a string to `errors`, so check that field before telling the user their day is empty.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "type": "string",
+          "description": "ISO 8601 instant (e.g. 2026-03-04T09:00:00Z). Times are absolute instants, not wall clock. Defaults to now."
+        },
+        "end": {
+          "type": "string",
+          "description": "ISO 8601 instant (e.g. 2026-03-04T09:00:00Z). Times are absolute instants, not wall clock. Defaults to a week after start."
+        },
+        "durationMinutes": {
+          "type": "number",
+          "description": "How long the meeting needs to be."
+        },
+        "dayStartHour": {
+          "type": "number",
+          "description": "First hour of the working day, server-local. Default 9.",
+          "default": 9
+        },
+        "dayEndHour": {
+          "type": "number",
+          "description": "Hour the working day ends, server-local. Default 17.",
+          "default": 17
+        },
+        "maxSlots": {
+          "type": "number",
+          "description": "How many candidates to return. Default 10."
+        }
+      },
+      "required": [
+        "durationMinutes"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "meeting_create",
+    "description": "Schedule a meeting and invite the attendees. THIS SENDS EMAIL. It mails a calendar invite to every attendee immediately, from the user's own mailbox, and writes the event to the connected calendar. There is no draft, no review step and no undo other than meeting_cancel, which mails everyone again. Call it only after the user has agreed to this exact time and this exact attendee list. To propose times, offer them in chat instead — use calendar_free_slots and say the options out loud.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Becomes the invite subject and event title."
+        },
+        "start": {
+          "type": "string",
+          "description": "ISO 8601 instant (e.g. 2026-03-04T09:00:00Z). Times are absolute instants, not wall clock."
+        },
+        "end": {
+          "type": "string",
+          "description": "ISO 8601 instant (e.g. 2026-03-04T09:00:00Z). Times are absolute instants, not wall clock. Must be after start."
+        },
+        "attendees": {
+          "type": "array",
+          "description": "Email addresses, one per attendee. Every one of them receives the invite.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": "string",
+          "description": "Agenda or notes for the invite body."
+        },
+        "location": {
+          "type": "string",
+          "description": "Physical location or a meeting URL you supply. Given, it replaces the generated video link in the event's location field."
+        },
+        "calendarAccountId": {
+          "type": "string",
+          "description": "From calendar_accounts_list. Omit to use the first connected calendar."
+        },
+        "mailAccountId": {
+          "type": "string",
+          "description": "Mail account alias or id the invite is sent from. Omit to use the first connected mailbox."
+        },
+        "includeMeetingLink": {
+          "type": "boolean",
+          "description": "A video meeting link is generated and included by default. Pass false for an in-person meeting.",
+          "default": true
+        }
+      },
+      "required": [
+        "title",
+        "start",
+        "end",
+        "attendees"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "meeting_cancel",
+    "description": "Cancel a meeting created through Boxaide. THIS SENDS EMAIL: a cancellation notice goes to every attendee and the event is removed from the connected calendar. Confirm with the user first. Get meetingId from meetings_list.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "meetingId": {
+          "type": "string",
+          "description": "Id from meetings_list."
+        }
+      },
+      "required": [
+        "meetingId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "meetings_list",
+    "description": "Meetings scheduled through Boxaide, newest first, with the ids meeting_cancel needs. This is not the agenda — meetings booked elsewhere are not here; use agenda_view for those.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "number",
+          "default": 50
+        }
+      },
+      "additionalProperties": false
+    }
   }
 ]

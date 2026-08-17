@@ -4,6 +4,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpCircle,
+  CalendarDays,
   ChevronRight,
   Columns3,
   Copy,
@@ -249,6 +250,16 @@ function Palette({
       icon: <FilePen />,
       hint: "g d",
       action: () => app.setView("drafts"),
+    },
+    /* No `hint`: Calendar has no `g` chord, and inventing one here would put a
+       key in the palette that does nothing when pressed. Same rule as People
+       and Pipeline below. */
+    {
+      id: "go-calendar",
+      group: "Go to",
+      label: "Calendar",
+      icon: <CalendarDays />,
+      action: () => app.setView("calendar"),
     },
     {
       id: "go-automations",

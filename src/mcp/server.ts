@@ -19,6 +19,11 @@ import {
   OUTREACH_TOOL_NAMES,
   dispatchOutreachTool,
 } from "../outreach/tools.js";
+import {
+  CALENDAR_TOOLS,
+  CALENDAR_TOOL_NAMES,
+  dispatchCalendarTool,
+} from "../calendar/tools.js";
 import type { DraftInput } from "../provider/types.js";
 
 /**
@@ -29,6 +34,7 @@ export const PLATFORM_TOOLS = [
   ...CRM_TOOLS,
   ...AUTOMATION_TOOLS,
   ...OUTREACH_TOOLS,
+  ...CALENDAR_TOOLS,
 ];
 
 const PROTOCOL_VERSION = "2024-11-05";
@@ -428,13 +434,17 @@ async function dispatch(
   if (
     CRM_TOOL_NAMES.has(name) ||
     AUTOMATION_TOOL_NAMES.has(name) ||
-    OUTREACH_TOOL_NAMES.has(name)
+    OUTREACH_TOOL_NAMES.has(name) ||
+    CALENDAR_TOOL_NAMES.has(name)
   ) {
     if (!platform) throw new Error(`${name} is not available on this server`);
     channel?.noteToolCall(name);
     if (CRM_TOOL_NAMES.has(name)) return dispatchCrmTool(platform, name, args);
     if (AUTOMATION_TOOL_NAMES.has(name)) {
       return dispatchAutomationTool(platform, name, args);
+    }
+    if (CALENDAR_TOOL_NAMES.has(name)) {
+      return dispatchCalendarTool(platform, name, args);
     }
     return dispatchOutreachTool(platform, name, args);
   }
@@ -700,7 +710,8 @@ export async function handleMcpJsonRpc(
       (platform !== undefined &&
         (CRM_TOOL_NAMES.has(params.name) ||
           AUTOMATION_TOOL_NAMES.has(params.name) ||
-          OUTREACH_TOOL_NAMES.has(params.name)));
+          OUTREACH_TOOL_NAMES.has(params.name) ||
+          CALENDAR_TOOL_NAMES.has(params.name)));
     if (!known) {
       return {
         jsonrpc: "2.0",

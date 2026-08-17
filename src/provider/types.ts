@@ -110,6 +110,12 @@ export type SendMessageInput = {
   bcc?: string;
   inReplyTo?: string;
   references?: string;
+  /**
+   * iMIP calendar part (RFC 6047). Nodemailer emits it as text/calendar with
+   * the method parameter, which is what makes Gmail/Outlook render the
+   * Accept/Decline bar instead of a dead .ics attachment.
+   */
+  icalEvent?: { method: "REQUEST" | "CANCEL"; content: string };
 };
 
 export type SendResult = {

@@ -316,6 +316,7 @@
 .shell[data-view="agent"],
 .shell[data-view="pipeline"],
 .shell[data-view="automations"],
+.shell[data-view="calendar"],
 .shell[data-view="settings"] {
   grid-template-columns: var(--rail-w) minmax(0, 1fr);
 }
@@ -510,5 +511,6 @@
   .shell[data-view="agent"],
   .shell[data-view="pipeline"],
   .shell[data-view="automations"],
+  .shell[data-view="calendar"],
   .shell[data-view="settings"] { grid-template-columns: minmax(0, 1fr); }
 }

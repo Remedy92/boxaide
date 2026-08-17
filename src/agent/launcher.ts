@@ -58,6 +58,10 @@ import {
 import { CRM_TOOL_NAMES } from "../crm/tools.js";
 import { AUTOMATION_TOOL_NAMES } from "../automation/tools.js";
 import { OUTREACH_TOOL_NAMES } from "../outreach/tools.js";
+import {
+  CALENDAR_READ_TOOL_NAMES,
+  CALENDAR_SEND_TOOL_NAMES,
+} from "../calendar/tools.js";
 
 /**
  * Where agent CLIs actually live, beyond PATH.
@@ -158,8 +162,9 @@ const RUN_AUTOMATION_READ_TOOLS = ["automations_list", "automation_runs_list"];
  * The mail/chat base list stays hand-written above; only the platform lists
  * are derived from their owning modules. Computed per call rather than frozen
  * at import, so the result is honest about those sets at spawn time.
- * message_send is deleted last, unconditionally — the one rule that survives
- * any future addition to any of these sets.
+ * The sending tools — message_send, meeting_create, meeting_cancel — are
+ * deleted last, unconditionally: the one rule that survives any future
+ * addition to any of these sets.
  */
 function preapprovedToolNames(opts: {
   /** The chat loop's tools. Only an interactive agent has a user to talk to. */
@@ -178,6 +183,16 @@ function preapprovedToolNames(opts: {
     }
   }
   for (const name of OUTREACH_TOOL_NAMES) names.add(name);
+  // Reads only, both paths. meeting_create and meeting_cancel mail every
+  // attendee the moment they are called, so they stay off the allowlist and
+  // hit the permission prompt — the user sees the send before it happens.
+  for (const name of CALENDAR_READ_TOOL_NAMES) names.add(name);
+  // Deleted last and unconditionally, exactly like message_send: the loop
+  // above already excludes them, and this is the line that stays true if some
+  // future edit widens it. Without it a scheduled run could be handed a tool
+  // that sends email, and AUTOMATION_RUN_PREAMBLE's "never send email" would
+  // be a request rather than a fact.
+  for (const name of CALENDAR_SEND_TOOL_NAMES) names.delete(name);
   names.delete("message_send");
   return [...names];
 }

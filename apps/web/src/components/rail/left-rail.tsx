@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  CalendarDays,
   Columns3,
   FilePen,
   Inbox,
@@ -172,6 +173,19 @@ export function LeftRail({
       >
         <ChatsSection onOpenAll={() => app.openDialog("chats")} />
       </RailSection>
+
+      {/* Unlabelled, like the Agent row above: a calendar is neither mail nor
+          CRM, and filing it under either would be a claim about where its
+          events come from. It stays in a mail-only install — the meetings this
+          view books are sent as email invitations. */}
+      <div className="space-y-px">
+        <NavItem
+          icon={CalendarDays}
+          label="Calendar"
+          active={app.view === "calendar"}
+          onClick={() => app.setView("calendar")}
+        />
+      </div>
 
       {/* Not gated on `collapsed`: this block only ever renders at full
           width — inline in the expanded rail, or inside the popover the

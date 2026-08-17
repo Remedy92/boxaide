@@ -25,6 +25,12 @@ import { handleMcpJsonRpc } from "./mcp/server.js";
 import { AgentChannel } from "./agent/channel.js";
 import { AgentLauncher } from "./agent/launcher.js";
 import { createPlatform, type Platform } from "./platform.js";
+import {
+  consumeGoogleOAuthState,
+  googleRedirectUri,
+  peekGoogleOAuthState,
+} from "./calendar/routes.js";
+import { exchangeGoogleCode } from "./calendar/google.js";
 import { UpdateService, type UpdateDriver } from "./update/service.js";
 import type { MailProvider } from "./provider/types.js";
 
@@ -183,7 +189,65 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     launcher,
     platform,
     update,
+    { host: config.host, port: config.port },
   );
+
+  // Google Calendar OAuth callback. Registered on the OUTER app, BEFORE the
+  // api mount and so outside the /api/* auth middleware, for the same reason
+  // /api/local-bootstrap above is: the browser lands here by a top-level
+  // redirect from accounts.google.com and carries no bearer token. Its
+  // authentication is the single-use random `state` minted by
+  // POST /api/calendar/google/start, which that token-gated route issued.
+  app.get("/api/calendar/google/callback", async (c) => {
+    const state = c.req.query("state") ?? "";
+    // Peek, do not spend: pressing Cancel on Google's consent screen lands
+    // here with no code, and burning the state there would make the user
+    // retype their client id and secret to try again. The entry stays alive
+    // for its TTL so the same authorization link still works.
+    const pending = state ? peekGoogleOAuthState(state) : null;
+    if (!pending) {
+      return c.text("This authorization link is unknown or has expired. Start again from Boxaide.", 400);
+    }
+    const code = c.req.query("code");
+    if (!code) {
+      const denied = c.req.query("error");
+      return c.text(
+        denied
+          ? `Google refused the authorization: ${denied}`
+          : "Google returned no authorization code.",
+        400,
+      );
+    }
+    // A code is in hand: spend the state now, before the exchange, so a leaked
+    // callback URL cannot be replayed even if the exchange fails.
+    consumeGoogleOAuthState(state);
+    try {
+      const { refreshToken, email } = await exchangeGoogleCode({
+        clientId: pending.clientId,
+        clientSecret: pending.clientSecret,
+        code,
+        redirectUri: googleRedirectUri({ host: config.host, port: config.port }),
+      });
+      platform.calendarStore.addAccount({
+        alias: pending.alias || email,
+        email,
+        config: {
+          kind: "google",
+          clientId: pending.clientId,
+          clientSecret: pending.clientSecret,
+          refreshToken,
+          email,
+        },
+      });
+      return c.html(oauthResultPage("Google Calendar connected — you can close this tab."));
+    } catch (err) {
+      return c.html(
+        oauthResultPage(err instanceof Error ? err.message : String(err)),
+        400,
+      );
+    }
+  });
+
   app.route("/", api);
 
   // MCP over HTTP (JSON-RPC POST) — same auth as API
@@ -297,6 +361,20 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
   );
 
   return { config, store, mail, provider, channel, launcher, platform, update, app };
+}
+
+/**
+ * The one page a browser sees at the end of the OAuth redirect.
+ *
+ * No stylesheet, no script, no image: the security headers deny external
+ * origins, and this tab is closed a second after it renders.
+ */
+function oauthResultPage(message: string): string {
+  const safe = message.replace(
+    /[&<>"]/g,
+    (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch] ?? ch,
+  );
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Boxaide</title></head><body style="font:16px system-ui,sans-serif;padding:3rem;max-width:34rem"><p>${safe}</p></body></html>`;
 }
 
 /**
