@@ -168,18 +168,23 @@ export class FixtureProvider implements MailProvider {
       folder,
       limit: opts.limit,
       offset: opts.offset,
+      since: opts.since,
     });
     const box = this.ensureBox(account.id, account.email).filter(
       (m) => m.folder === folder,
     );
+    // A dated read only ever adds rows: it reaches past the newest window and
+    // so cannot speak for what that window holds.
     const replaced =
-      opts.fullWindow === true ||
-      !opts.cursor ||
-      opts.cursor.uidvalidity !== uidvalidity;
+      opts.since == null &&
+      (opts.fullWindow === true ||
+        !opts.cursor ||
+        opts.cursor.uidvalidity !== uidvalidity);
     const currentUids = new Set(box.map((m) => m.uid));
-    const vanishedUids = replaced
-      ? []
-      : (opts.knownUids ?? []).filter((uid) => !currentUids.has(uid));
+    const vanishedUids =
+      replaced || opts.since != null
+        ? []
+        : (opts.knownUids ?? []).filter((uid) => !currentUids.has(uid));
     return {
       replaced,
       messages,
@@ -193,6 +198,7 @@ export class FixtureProvider implements MailProvider {
         uidnext: this.nextUid.get(account.id) ?? 1,
         exists: box.length,
       },
+      coveredSince: opts.since,
     };
   }
 

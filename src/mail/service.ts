@@ -188,7 +188,13 @@ export class MailService {
       accounts.map(async (row) => {
         try {
           const account = this.resolve(row.id);
-          await this.ensureFresh(account, folder, limit, opts.refresh === true);
+          await this.ensureFresh(
+            account,
+            folder,
+            limit,
+            opts.refresh === true,
+            opts.since,
+          );
         } catch (err) {
           this.index.setLastError(row.id, folder, errText(err));
           if (accountRef !== "all") throw err;
@@ -211,6 +217,7 @@ export class MailService {
         limit,
         offset: opts.offset,
         unreadOnly: opts.unreadOnly,
+        since: opts.since,
       }),
       errors,
     };
@@ -361,8 +368,27 @@ export class MailService {
     folder: string,
     limit: number,
     force = false,
+    since?: string,
   ): Promise<void> {
     const state = this.index.getState(account.id, folder);
+    const refreshLater = () => {
+      if (!state?.dirty && !this.index.isStale(state)) return;
+      void this.syncFolder(account, folder, limit).catch((err) => {
+        this.index.setLastError(account.id, folder, errText(err));
+      });
+    };
+    // A dated ask is not a window ask, so the window rules below do not apply
+    // to it: holding the newest `limit` rows says nothing about whether the
+    // index reaches back to the instant the caller named. Fill by date once,
+    // then answer from SQLite for as long as that coverage stands.
+    if (since) {
+      if (this.index.needsSinceFill(state, since)) {
+        await this.syncFolder(account, folder, limit, { since });
+        return;
+      }
+      refreshLater();
+      return;
+    }
     const count = this.index.count(account.id, folder);
     const exists = state?.exists ?? 0;
     const needsFill =
@@ -371,20 +397,18 @@ export class MailService {
       await this.syncFolder(account, folder, limit, { fullWindow: needsFill });
       return;
     }
-    if (state?.dirty || this.index.isStale(state)) {
-      void this.syncFolder(account, folder, limit).catch((err) => {
-        this.index.setLastError(account.id, folder, errText(err));
-      });
-    }
+    refreshLater();
   }
 
   private async syncFolder(
     account: ProviderAccount,
     folder: string,
     limit: number,
-    opts: { fullWindow?: boolean } = {},
+    opts: { fullWindow?: boolean; since?: string } = {},
   ): Promise<void> {
-    const key = `${account.id}:${folder}`;
+    // A dated read answers a different question than a window read, so the
+    // two must not collapse into one another's in-flight promise.
+    const key = `${account.id}:${folder}:${opts.since ?? ""}`;
     const existing = this.inflight.get(key);
     if (existing) {
       await existing;
@@ -397,6 +421,7 @@ export class MailService {
       const result = await this.provider.syncMailbox(account, {
         folder,
         limit,
+        since: opts.since,
         fullWindow: opts.fullWindow,
         knownUids: this.index.listUids(account.id, folder),
         cursor: state

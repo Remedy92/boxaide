@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { Store } from "../src/db/store.js";
 import { FixtureProvider } from "../src/provider/fixture.js";
 import { MailService } from "../src/mail/service.js";
+import { MailIndexStore } from "../src/mail/index-store.js";
 import type { AccountCredentials } from "../src/provider/types.js";
 
 const baseCreds: AccountCredentials = {
@@ -302,6 +303,93 @@ describe("local mail index", () => {
     );
   });
 
+  it("reaches past the newest window for a since ask, then serves it from SQLite", async () => {
+    // 30 messages an hour apart. A window of 10 cannot reach back a day.
+    const base = Date.now();
+    provider.seedAccount(
+      accountId,
+      "you@personal.test",
+      Array.from({ length: 30 }, (_, i) => ({
+        subject: `Hour ${i}`,
+        from: "n@example.com",
+        date: new Date(base - i * 3600_000).toISOString(),
+      })),
+    );
+    let syncs = 0;
+    const orig = provider.syncMailbox.bind(provider);
+    provider.syncMailbox = async (account, opts) => {
+      syncs += 1;
+      return orig(account, opts);
+    };
+
+    // A minute of slack, so the 24-hour-old message is unambiguously inside.
+    const since = new Date(base - 24 * 3600_000 - 60_000).toISOString();
+    const first = await mail.listMessages("personal", { limit: 50, since });
+    // The day holds 25 of them; the newest-10 window would have hidden 15.
+    expect(first.messages).toHaveLength(25);
+    expect(syncs).toBe(1);
+
+    const second = await mail.listMessages("personal", { limit: 50, since });
+    expect(second.messages.map((m) => m.subject)).toEqual(
+      first.messages.map((m) => m.subject),
+    );
+    expect(syncs).toBe(1);
+  });
+
+  it("fills again when the ask reaches further back than the index covers", async () => {
+    const base = Date.now();
+    provider.seedAccount(
+      accountId,
+      "you@personal.test",
+      Array.from({ length: 40 }, (_, i) => ({
+        subject: `Hour ${i}`,
+        from: "n@example.com",
+        date: new Date(base - i * 3600_000).toISOString(),
+      })),
+    );
+    const recent = new Date(base - 6 * 3600_000 - 60_000).toISOString();
+    await mail.listMessages("personal", { limit: 50, since: recent });
+    let syncs = 0;
+    const orig = provider.syncMailbox.bind(provider);
+    provider.syncMailbox = async (account, opts) => {
+      syncs += 1;
+      return orig(account, opts);
+    };
+
+    const older = new Date(base - 30 * 3600_000 - 60_000).toISOString();
+    const deeper = await mail.listMessages("personal", {
+      limit: 50,
+      since: older,
+    });
+    expect(syncs).toBe(1);
+    expect(deeper.messages).toHaveLength(31);
+  });
+
+  it("keeps mail whose sender clock is wrong but which arrived in the window", () => {
+    mail.index.upsertSummary({
+      id: `${accountId}:INBOX:900`,
+      accountId,
+      uid: 900,
+      folder: "INBOX",
+      from: "skewed@example.com",
+      to: "you@personal.test",
+      subject: "Wrong clock",
+      // The header says last year; the server received it an hour ago.
+      date: new Date(Date.now() - 365 * 24 * 3600_000).toISOString(),
+      internalDate: new Date(Date.now() - 3600_000).toISOString(),
+      snippet: "still recent",
+      seen: false,
+      hasAttachments: false,
+    });
+    const listed = mail.index.listMessages({
+      accountIds: [accountId],
+      folder: "INBOX",
+      limit: 20,
+      since: new Date(Date.now() - 24 * 3600_000).toISOString(),
+    });
+    expect(listed.map((m) => m.subject)).toContain("Wrong clock");
+  });
+
   it("rebuilds through listMessages when uidvalidity changes", async () => {
     await mail.listMessages("personal", { limit: 20 });
     provider.setUidValidity(accountId, 99);
@@ -317,5 +405,65 @@ describe("local mail index", () => {
       refresh: true,
     });
     expect(listed.messages.map((m) => m.subject)).toEqual(["After rebuild"]);
+  });
+});
+
+describe("mail index upgrade", () => {
+  it("adds the date columns to a database written before they existed", () => {
+    const store = new Store(randomBytes(32), ":memory:");
+    // The shape shipped before receive time and coverage were tracked.
+    store.db.exec(`
+      CREATE TABLE mailbox_state (
+        account_id TEXT NOT NULL,
+        folder TEXT NOT NULL,
+        uidvalidity INTEGER NOT NULL,
+        highest_modseq TEXT,
+        uidnext INTEGER,
+        exists_count INTEGER NOT NULL DEFAULT 0,
+        dirty INTEGER NOT NULL DEFAULT 0,
+        synced_at TEXT,
+        last_error TEXT,
+        PRIMARY KEY (account_id, folder)
+      );
+      CREATE TABLE message_summaries (
+        account_id TEXT NOT NULL,
+        folder TEXT NOT NULL,
+        uid INTEGER NOT NULL,
+        id TEXT NOT NULL,
+        message_id_enc TEXT,
+        from_enc TEXT NOT NULL,
+        to_enc TEXT NOT NULL,
+        subject_enc TEXT NOT NULL,
+        snippet_enc TEXT NOT NULL,
+        date TEXT NOT NULL,
+        seen INTEGER NOT NULL DEFAULT 0,
+        has_attachments INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (account_id, folder, uid)
+      );
+    `);
+
+    const index = new MailIndexStore(store.db, store.masterKey);
+    index.upsertSummary({
+      id: "acct:INBOX:1",
+      accountId: "acct",
+      uid: 1,
+      folder: "INBOX",
+      from: "a@b.c",
+      to: "you@personal.test",
+      subject: "Survived the upgrade",
+      date: new Date().toISOString(),
+      internalDate: new Date().toISOString(),
+      snippet: "still here",
+      seen: false,
+      hasAttachments: false,
+    });
+    const listed = index.listMessages({
+      accountIds: ["acct"],
+      folder: "INBOX",
+      limit: 5,
+      since: new Date(Date.now() - 3600_000).toISOString(),
+    });
+    expect(listed.map((m) => m.subject)).toEqual(["Survived the upgrade"]);
+    expect(index.needsSinceFill(null, new Date().toISOString())).toBe(true);
   });
 });

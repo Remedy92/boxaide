@@ -58,6 +58,12 @@ export type MailMessageSummary = {
   to: string;
   subject: string;
   date: string;
+  /**
+   * Server receive time, when the read asked for it. The `date` above comes
+   * from the sender's header and a wrong clock on their side would hide a
+   * message that really did arrive inside a `since` window.
+   */
+  internalDate?: string;
   snippet: string;
   seen: boolean;
   hasAttachments: boolean;
@@ -172,7 +178,7 @@ export type MailboxCursor = {
   exists: number;
 };
 
-export type SyncMailboxOpts = {
+export type SyncMailboxOpts = SinceOpt & {
   folder?: string;
   limit?: number;
   offset?: number;
@@ -190,6 +196,12 @@ export type MailboxSyncResult = {
   vanishedUids: number[];
   flagUpdates: Array<{ uid: number; seen: boolean }>;
   cursor: MailboxCursor;
+  /**
+   * Set when the read was `since`-driven: every message at or after this
+   * instant is now in `messages`, so the index can answer that window without
+   * asking IMAP again.
+   */
+  coveredSince?: string;
 };
 
 export type MailFolder = {

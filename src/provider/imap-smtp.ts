@@ -440,6 +440,7 @@ function envelopeToSummary(
       subject?: string;
       date?: Date | string;
     };
+    internalDate?: Date | string;
     flags?: Set<string>;
     bodyStructure?: { childNodes?: unknown[]; disposition?: string };
     source?: Buffer;
@@ -464,6 +465,9 @@ function envelopeToSummary(
     date: env.date
       ? new Date(env.date).toISOString()
       : new Date().toISOString(),
+    internalDate: source.internalDate
+      ? new Date(source.internalDate).toISOString()
+      : undefined,
     snippet,
     seen: source.flags?.has("\\Seen") ?? false,
     hasAttachments: structureHasAttachments(
@@ -715,7 +719,12 @@ function cursorFromMailbox(mb: {
 async function collectHeads(
   client: ImapFlow,
   range: string | number[],
-  extra: { uid?: boolean; changedSince?: bigint; cap: number },
+  extra: {
+    uid?: boolean;
+    changedSince?: bigint;
+    internalDate?: boolean;
+    cap: number;
+  },
 ): Promise<FetchedHead[] | null>;
 async function collectHeads(
   client: ImapFlow,
@@ -858,6 +867,44 @@ export class ImapSmtpProvider implements MailProvider {
           };
         }
         const cursor = cursorFromMailbox(mb);
+        // A since read is not a window read: the server picks the set by date,
+        // and the answer is additive — it reaches further back than the newest
+        // `limit` without invalidating what the index already holds.
+        const sinceAt = parseSince(opts.since);
+        if (sinceAt) {
+          const uids =
+            (await client.search({ since: sinceAt }, { uid: true })) || [];
+          const picked = uids.slice(-limit);
+          const heads = picked.length
+            ? await collectHeads(client, picked, {
+                uid: true,
+                internalDate: true,
+              })
+            : [];
+          const kept = heads.filter((msg) => withinSince(msg, sinceAt));
+          const messages = await headsToSummaries(
+            client,
+            account.id,
+            folder,
+            kept,
+          );
+          return {
+            replaced: false,
+            messages,
+            vanishedUids: [],
+            flagUpdates: messages.map((m) => ({ uid: m.uid, seen: m.seen })),
+            cursor,
+            // Only claim the window we actually read to the end of. When the
+            // search returned more than `limit`, the oldest of them is as far
+            // back as this answer reaches.
+            coveredSince:
+              uids.length > limit
+                ? (messages[messages.length - 1]?.internalDate ??
+                  messages[messages.length - 1]?.date ??
+                  opts.since)
+                : opts.since,
+          };
+        }
         const full = async (): Promise<MailboxSyncResult> => {
           const window = uidWindow(mb.exists, limit, opts.offset ?? 0);
           if (!window) {
@@ -872,6 +919,7 @@ export class ImapSmtpProvider implements MailProvider {
           const heads = await collectHeads(
             client,
             `${window.start}:${window.end}`,
+            { internalDate: true },
           );
           const messages = await headsToSummaries(
             client,
@@ -895,8 +943,8 @@ export class ImapSmtpProvider implements MailProvider {
           return full();
         }
 
-        const since = opts.cursor?.highestModseq;
-        if (since && mb.highestModseq != null) {
+        const sinceModseq = opts.cursor?.highestModseq;
+        if (sinceModseq && mb.highestModseq != null) {
           try {
             const vanishedUids: number[] = [];
             const onExpunge = (evt: ExpungeEvent) => {
@@ -913,7 +961,8 @@ export class ImapSmtpProvider implements MailProvider {
                 `${known?.lowest ?? 1}:*`,
                 {
                   uid: true,
-                  changedSince: BigInt(since),
+                  changedSince: BigInt(sinceModseq),
+                  internalDate: true,
                   cap: SYNC_FETCH_CAP,
                 },
               );

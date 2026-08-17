@@ -10,6 +10,17 @@ import type { MailboxCursor, MailboxSyncResult } from "../provider/types.js";
 /** Paint from SQLite; IMAP only if older than this or marked dirty. */
 export const MAIL_INDEX_STALE_MS = 30_000;
 
+/** The earlier of two ISO instants, ignoring nulls and unparseable input. */
+function earlier(a: string | null, b: string | null): string | null {
+  if (!a) return b;
+  if (!b) return a;
+  const at = Date.parse(a);
+  const bt = Date.parse(b);
+  if (Number.isNaN(at)) return b;
+  if (Number.isNaN(bt)) return a;
+  return at <= bt ? a : b;
+}
+
 export type MailboxState = {
   accountId: string;
   folder: string;
@@ -20,6 +31,12 @@ export type MailboxState = {
   dirty: boolean;
   syncedAt: string | null;
   lastError: string | null;
+  /**
+   * Earliest instant this folder is known complete for. A `since` list older
+   * than this has to ask IMAP; anything at or after it the index can answer
+   * on its own.
+   */
+  coveredSince: string | null;
 };
 
 type SummaryRow = {
@@ -33,6 +50,7 @@ type SummaryRow = {
   subjectEnc: string;
   snippetEnc: string;
   date: string;
+  internalDate: string | null;
   seen: number;
   hasAttachments: number;
 };
@@ -57,6 +75,7 @@ export class MailIndexStore {
         dirty INTEGER NOT NULL DEFAULT 0,
         synced_at TEXT,
         last_error TEXT,
+        covered_since TEXT,
         PRIMARY KEY (account_id, folder)
       );
       CREATE TABLE IF NOT EXISTS message_summaries (
@@ -70,6 +89,7 @@ export class MailIndexStore {
         subject_enc TEXT NOT NULL,
         snippet_enc TEXT NOT NULL,
         date TEXT NOT NULL,
+        internal_date TEXT,
         seen INTEGER NOT NULL DEFAULT 0,
         has_attachments INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (account_id, folder, uid)
@@ -78,6 +98,28 @@ export class MailIndexStore {
         ON message_summaries (account_id, folder, date DESC);
       DROP INDEX IF EXISTS message_summaries_date;
     `);
+    // Columns added after the first release. SQLite has no ADD COLUMN IF NOT
+    // EXISTS, so ask what the table already has.
+    const columns = new Set(
+      (
+        this.db.prepare(`PRAGMA table_info(message_summaries)`).all() as Array<{
+          name: string;
+        }>
+      ).map((c) => c.name),
+    );
+    if (!columns.has("internal_date")) {
+      this.db.exec(`ALTER TABLE message_summaries ADD COLUMN internal_date TEXT`);
+    }
+    const stateColumns = new Set(
+      (
+        this.db.prepare(`PRAGMA table_info(mailbox_state)`).all() as Array<{
+          name: string;
+        }>
+      ).map((c) => c.name),
+    );
+    if (!stateColumns.has("covered_since")) {
+      this.db.exec(`ALTER TABLE mailbox_state ADD COLUMN covered_since TEXT`);
+    }
   }
 
   getState(accountId: string, folder: string): MailboxState | null {
@@ -86,7 +128,7 @@ export class MailIndexStore {
         `SELECT account_id as accountId, folder, uidvalidity,
                 highest_modseq as highestModseq, uidnext,
                 exists_count as existsCount, dirty, synced_at as syncedAt,
-                last_error as lastError
+                last_error as lastError, covered_since as coveredSince
          FROM mailbox_state WHERE account_id = ? AND folder = ?`,
       )
       .get(accountId, folder) as
@@ -100,6 +142,7 @@ export class MailIndexStore {
           dirty: number;
           syncedAt: string | null;
           lastError: string | null;
+          coveredSince: string | null;
         }
       | undefined;
     if (!row) return null;
@@ -113,7 +156,20 @@ export class MailIndexStore {
       dirty: row.dirty === 1,
       syncedAt: row.syncedAt,
       lastError: row.lastError,
+      coveredSince: row.coveredSince,
     };
+  }
+
+  /**
+   * True when a `since` list has to hit IMAP first: the index has never been
+   * filled by date, or only back to a later instant than the caller asked for.
+   */
+  needsSinceFill(state: MailboxState | null, since: string): boolean {
+    if (!state?.coveredSince) return true;
+    const covered = Date.parse(state.coveredSince);
+    const asked = Date.parse(since);
+    if (Number.isNaN(covered) || Number.isNaN(asked)) return true;
+    return covered > asked;
   }
 
   count(accountId: string, folder: string): number {
@@ -153,23 +209,32 @@ export class MailIndexStore {
     limit: number;
     offset?: number;
     unreadOnly?: boolean;
+    since?: string;
   }): MailMessageSummary[] {
     if (opts.accountIds.length === 0) return [];
     const placeholders = opts.accountIds.map(() => "?").join(", ");
     const unread = opts.unreadOnly ? "AND seen = 0" : "";
+    // Receive time first, for the same reason the provider prefers it: a
+    // sender's wrong clock must not hide mail that did arrive in the window.
+    const window = opts.since
+      ? "AND COALESCE(internal_date, date) >= ?"
+      : "";
+    const bounds = opts.since ? [opts.since] : [];
     const rows = this.db
       .prepare(
         `SELECT account_id as accountId, folder, uid, id, message_id_enc as messageIdEnc,
                 from_enc as fromEnc, to_enc as toEnc, subject_enc as subjectEnc,
-                snippet_enc as snippetEnc, date, seen, has_attachments as hasAttachments
+                snippet_enc as snippetEnc, date, internal_date as internalDate,
+                seen, has_attachments as hasAttachments
          FROM message_summaries
-         WHERE account_id IN (${placeholders}) AND folder = ? ${unread}
+         WHERE account_id IN (${placeholders}) AND folder = ? ${unread} ${window}
          ORDER BY date DESC
          LIMIT ? OFFSET ?`,
       )
       .all(
         ...opts.accountIds,
         opts.folder,
+        ...bounds,
         opts.limit,
         opts.offset ?? 0,
       ) as SummaryRow[];
@@ -223,7 +288,15 @@ export class MailIndexStore {
       for (const msg of result.messages) {
         this.upsertSummary(msg);
       }
-      this.writeState(accountId, folder, result.cursor, false, null);
+      // A replaced window drops rows this folder used to hold, so whatever it
+      // was complete back to is no longer true. A since read only ever adds,
+      // and reaches back to the earlier of the two marks.
+      const previous = result.replaced
+        ? null
+        : (this.getState(accountId, folder)?.coveredSince ?? null);
+      this.writeState(accountId, folder, result.cursor, false, null, {
+        coveredSince: earlier(previous, result.coveredSince ?? null),
+      });
     });
     run();
   }
@@ -241,10 +314,10 @@ export class MailIndexStore {
       .prepare(
         `INSERT INTO message_summaries (
            account_id, folder, uid, id, message_id_enc, from_enc, to_enc,
-           subject_enc, snippet_enc, date, seen, has_attachments
+           subject_enc, snippet_enc, date, internal_date, seen, has_attachments
          ) VALUES (
            @accountId, @folder, @uid, @id, @messageIdEnc, @fromEnc, @toEnc,
-           @subjectEnc, @snippetEnc, @date, @seen, @hasAttachments
+           @subjectEnc, @snippetEnc, @date, @internalDate, @seen, @hasAttachments
          )
          ON CONFLICT(account_id, folder, uid) DO UPDATE SET
            id=excluded.id,
@@ -254,6 +327,9 @@ export class MailIndexStore {
            subject_enc=excluded.subject_enc,
            snippet_enc=excluded.snippet_enc,
            date=excluded.date,
+           -- A read that did not ask for receive time carries none; keep the
+           -- one an earlier since read already established.
+           internal_date=COALESCE(excluded.internal_date, internal_date),
            seen=excluded.seen,
            has_attachments=excluded.has_attachments`,
       )
@@ -270,6 +346,7 @@ export class MailIndexStore {
         subjectEnc: encryptSecret(this.masterKey, msg.subject),
         snippetEnc: encryptSecret(this.masterKey, msg.snippet),
         date: msg.date,
+        internalDate: msg.internalDate ?? null,
         seen: msg.seen ? 1 : 0,
         hasAttachments: msg.hasAttachments ? 1 : 0,
       });
@@ -290,15 +367,16 @@ export class MailIndexStore {
     cursor: MailboxCursor,
     dirty: boolean,
     lastError: string | null,
+    extra: { coveredSince?: string | null } = {},
   ): void {
     this.db
       .prepare(
         `INSERT INTO mailbox_state (
            account_id, folder, uidvalidity, highest_modseq, uidnext,
-           exists_count, dirty, synced_at, last_error
+           exists_count, dirty, synced_at, last_error, covered_since
          ) VALUES (
            @accountId, @folder, @uidvalidity, @highestModseq, @uidnext,
-           @exists, @dirty, @syncedAt, @lastError
+           @exists, @dirty, @syncedAt, @lastError, @coveredSince
          )
          ON CONFLICT(account_id, folder) DO UPDATE SET
            uidvalidity=excluded.uidvalidity,
@@ -307,7 +385,8 @@ export class MailIndexStore {
            exists_count=excluded.exists_count,
            dirty=excluded.dirty,
            synced_at=excluded.synced_at,
-           last_error=excluded.last_error`,
+           last_error=excluded.last_error,
+           covered_since=excluded.covered_since`,
       )
       .run({
         accountId,
@@ -319,6 +398,7 @@ export class MailIndexStore {
         dirty: dirty ? 1 : 0,
         syncedAt: new Date().toISOString(),
         lastError,
+        coveredSince: extra.coveredSince ?? null,
       });
   }
 
@@ -336,6 +416,7 @@ export class MailIndexStore {
         to: decryptSecret(this.masterKey, row.toEnc),
         subject: decryptSecret(this.masterKey, row.subjectEnc),
         date: row.date,
+        internalDate: row.internalDate ?? undefined,
         snippet: decryptSecret(this.masterKey, row.snippetEnc),
         seen: row.seen === 1,
         hasAttachments: row.hasAttachments === 1,
