@@ -12,7 +12,16 @@ export type ParsedMailBody = {
   messageId?: string;
   inReplyTo?: string;
   references?: string;
+  /**
+   * iMIP payload (RFC 6047) when the message carries one. `method` comes off
+   * the Content-Type parameter (REQUEST/REPLY/CANCEL) and is what tells an
+   * invite apart from a response; senders may omit it, hence optional.
+   */
+  calendar?: { method?: string; content: string };
 };
+
+/** Same reasoning as the bodyText cap: a runaway .ics must not blow up memory. */
+const CALENDAR_MAX_CHARS = 100_000;
 
 /**
  * Parse raw RFC822 into readable text/html.
@@ -42,7 +51,61 @@ export async function parseRfc822(raw: string | Buffer): Promise<ParsedMailBody>
     messageId: parsed.messageId || undefined,
     inReplyTo: parsed.inReplyTo || undefined,
     references: formatReferences(parsed.references),
+    calendar: extractCalendar(parsed),
   };
+}
+
+/**
+ * Find the text/calendar part. Mailparser routes every node that is not
+ * text/plain or text/html into `attachments` regardless of disposition, so
+ * one loop covers all three shapes an invite arrives in: a named .ics
+ * attachment, an inline part of an iMIP multipart/alternative, and a bare
+ * text/calendar message. Only `attachments` — `parsed.text` never holds it.
+ */
+function extractCalendar(
+  parsed: Awaited<ReturnType<typeof simpleParser>>,
+): { method?: string; content: string } | undefined {
+  for (const att of parsed.attachments ?? []) {
+    if ((att.contentType || "").toLowerCase() !== "text/calendar") continue;
+    const content = bufferToUtf8(att.content);
+    if (!content.trim()) continue;
+    return {
+      method: contentTypeParam(att.headers, "method"),
+      content: content.slice(0, CALENDAR_MAX_CHARS),
+    };
+  }
+  return undefined;
+}
+
+/** Attachment content is a Buffer; calendars are text, so decode as UTF-8. */
+function bufferToUtf8(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Buffer.isBuffer(content)) return content.toString("utf8");
+  if (content instanceof Uint8Array) return Buffer.from(content).toString("utf8");
+  return "";
+}
+
+/** A Content-Type parameter, e.g. `method=REPLY` on an iMIP part. */
+function contentTypeParam(headers: unknown, name: string): string | undefined {
+  const params = headerObject(headers)?.params;
+  if (!params || typeof params !== "object") return undefined;
+  const value = (params as Record<string, unknown>)[name];
+  return typeof value === "string" && value.trim()
+    ? value.trim().toUpperCase()
+    : undefined;
+}
+
+/** Mailparser parses Content-Type into `{ value, params }` on a header Map. */
+function headerObject(
+  headers: unknown,
+): { params?: unknown } | undefined {
+  if (!headers || typeof (headers as Map<string, unknown>).get !== "function") {
+    return undefined;
+  }
+  const ct = (headers as Map<string, unknown>).get("content-type");
+  return ct && typeof ct === "object"
+    ? (ct as { value?: unknown; params?: unknown })
+    : undefined;
 }
 
 /** Flatten the References header into a single space-separated chain. */

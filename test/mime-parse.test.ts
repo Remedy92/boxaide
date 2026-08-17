@@ -59,6 +59,70 @@ const SAMPLES = {
     "",
     "--bound123--",
   ].join("\r\n"),
+
+  // What a real Accept/Decline lands as: text/calendar inline beside the text
+  // part, method on the Content-Type, no filename and no disposition.
+  imipReply: [
+    "From: bob@example.com",
+    "To: alice@example.com",
+    "Subject: Accepted: Sync",
+    "MIME-Version: 1.0",
+    'Content-Type: multipart/alternative; boundary="imip1"',
+    "",
+    "--imip1",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "Bob has accepted the invitation.",
+    "",
+    "--imip1",
+    'Content-Type: text/calendar; charset=utf-8; method=REPLY',
+    "",
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "METHOD:REPLY",
+    "BEGIN:VEVENT",
+    "UID:evt-reply-1@example.com",
+    "ATTENDEE;PARTSTAT=ACCEPTED:mailto:bob@example.com",
+    "END:VEVENT",
+    "END:VCALENDAR",
+    "",
+    "--imip1--",
+  ].join("\r\n"),
+
+  // The other common shape: the .ics arrives base64 as a named attachment.
+  icsAttachment: [
+    "From: alice@example.com",
+    "To: bob@example.com",
+    "Subject: Invitation: Sync",
+    "MIME-Version: 1.0",
+    'Content-Type: multipart/mixed; boundary="mix1"',
+    "",
+    "--mix1",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "Please see the attached invite.",
+    "",
+    "--mix1",
+    'Content-Type: text/calendar; charset=utf-8; method=REQUEST; name="invite.ics"',
+    "Content-Transfer-Encoding: base64",
+    'Content-Disposition: attachment; filename="invite.ics"',
+    "",
+    Buffer.from(
+      [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "METHOD:REQUEST",
+        "BEGIN:VEVENT",
+        "UID:evt-request-1@example.com",
+        "SUMMARY:Sync",
+        "END:VEVENT",
+        "END:VCALENDAR",
+      ].join("\r\n"),
+      "utf8",
+    ).toString("base64"),
+    "",
+    "--mix1--",
+  ].join("\r\n"),
 };
 
 describe("parseRfc822 (shipped MIME path)", () => {
@@ -89,6 +153,67 @@ describe("parseRfc822 (shipped MIME path)", () => {
     expect(p.bodyText).toContain("Plain part says hello.");
     expect(p.bodyHtml).toMatch(/HTML part says/i);
     expect(p.bodyText).not.toMatch(/UGxhaW4/); // raw base64 of "Plain..."
+  });
+});
+
+describe("inbound calendar part (iMIP)", () => {
+  it("reads the inline text/calendar part and its method", async () => {
+    const p = await parseRfc822(SAMPLES.imipReply);
+    expect(p.calendar?.method).toBe("REPLY");
+    expect(p.calendar?.content).toContain("BEGIN:VCALENDAR");
+    expect(p.calendar?.content).toContain("UID:evt-reply-1@example.com");
+    expect(p.calendar?.content).toContain("PARTSTAT=ACCEPTED");
+    // The text part still has to survive alongside it.
+    expect(p.bodyText).toContain("Bob has accepted the invitation.");
+  });
+
+  it("decodes a base64 .ics attachment", async () => {
+    const p = await parseRfc822(SAMPLES.icsAttachment);
+    expect(p.calendar?.method).toBe("REQUEST");
+    expect(p.calendar?.content).toContain("UID:evt-request-1@example.com");
+    // Must NOT hand back the raw base64.
+    expect(p.calendar?.content).not.toMatch(/QkVHSU4/);
+    expect(p.bodyText).toContain("Please see the attached invite.");
+  });
+
+  it("leaves calendar undefined on a message without one", async () => {
+    const plain = await parseRfc822(SAMPLES.sevenBit);
+    expect(plain.calendar).toBeUndefined();
+    const alt = await parseRfc822(SAMPLES.multipartAlternative);
+    expect(alt.calendar).toBeUndefined();
+  });
+
+  it("caps stored calendar content", async () => {
+    const huge = [
+      "From: alice@example.com",
+      "To: bob@example.com",
+      "Subject: Big invite",
+      "MIME-Version: 1.0",
+      "Content-Type: text/calendar; charset=utf-8; method=REQUEST",
+      "",
+      `BEGIN:VCALENDAR\r\nX-PAD:${"a".repeat(150_000)}\r\nEND:VCALENDAR`,
+    ].join("\r\n");
+    const p = await parseRfc822(huge);
+    expect(p.calendar?.content.length).toBe(100_000);
+  });
+
+  it("surfaces the calendar on the assembled message", async () => {
+    const msg = await messageFromImapSource(
+      "acct1",
+      "INBOX",
+      11,
+      SAMPLES.imipReply,
+    );
+    expect(msg.calendar?.method).toBe("REPLY");
+    expect(msg.calendar?.content).toContain("UID:evt-reply-1@example.com");
+
+    const plain = await messageFromImapSource(
+      "acct1",
+      "INBOX",
+      12,
+      SAMPLES.sevenBit,
+    );
+    expect(plain.calendar).toBeUndefined();
   });
 });
 

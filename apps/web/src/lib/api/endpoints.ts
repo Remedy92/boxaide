@@ -37,6 +37,7 @@ import type {
   CrmNote,
   CrmOrganization,
   CrmPipelineBoard,
+  CreateMeetingResult,
   CrmSyncResult,
   DraftInput,
   DraftRef,
@@ -46,8 +47,8 @@ import type {
   MailFolder,
   MailMessage,
   MailAccountMeta,
-  Meeting,
   MeetingResult,
+  MeetingsResponse,
   MessageListResponse,
   MetaResponse,
   OutboxRow,
@@ -55,6 +56,7 @@ import type {
   OutreachBadge,
   OutreachCampaign,
   CampaignStatus,
+  RsvpRefreshResult,
   SendResult,
   SuppressionRow,
   UpdateState,
@@ -1179,6 +1181,10 @@ export function getFreeSlots(
     start: string;
     end: string;
     maxSlots?: number;
+    /* The working day is read as a wall clock in this zone. Sent from the
+       browser so suggestions follow the viewer's own clock; omitted, the
+       server falls back to its own, which is rarely the same one. */
+    timeZone?: string;
   },
   ctx: Ctx,
 ): Promise<FreeSlotsResponse> {
@@ -1188,19 +1194,40 @@ export function getFreeSlots(
       start: o.start,
       end: o.end,
       maxSlots: o.maxSlots,
+      timeZone: o.timeZone,
     })}`,
     { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
   );
 }
 
-/** Meetings BOXAIDE created — not everything on the calendar. */
-export async function listMeetings(ctx: Ctx): Promise<Meeting[]> {
-  const data = await request<{ meetings: Meeting[] }>("/api/calendar/meetings", {
+/**
+ * Meetings BOXAIDE created — not everything on the calendar.
+ *
+ * The whole body, not just `meetings`: `refreshError` tells the view whether
+ * the guest responses beside each meeting are current.
+ */
+export function listMeetings(ctx: Ctx): Promise<MeetingsResponse> {
+  return request<MeetingsResponse>("/api/calendar/meetings", {
     baseUrl: ctx.baseUrl,
     token: ctx.token,
     signal: ctx.signal,
   });
-  return data.meetings;
+}
+
+/**
+ * Reads guest replies now, rather than waiting for the background scan.
+ *
+ * One pass over every meeting, not one meeting — the mailboxes and calendars
+ * are scanned together — so the count comes back for the whole list. A
+ * mailbox that could not be read is a string in `errors`, never a failure.
+ */
+export function refreshMeetingResponses(ctx: Ctx): Promise<RsvpRefreshResult> {
+  return request<RsvpRefreshResult>("/api/calendar/meetings/refresh-rsvps", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
 }
 
 export type CreateMeetingBody = {
@@ -1213,6 +1240,10 @@ export type CreateMeetingBody = {
   calendarAccountId?: string;
   mailAccountId?: string;
   includeMeetingLink?: boolean;
+  /* The zone the invitation text is written in — the times the guest reads.
+     The event itself is the absolute instants in `start` and `end`, so this
+     changes the wording, never when the meeting happens. */
+  timeZone?: string;
 };
 
 /**
@@ -1223,8 +1254,8 @@ export type CreateMeetingBody = {
 export function createMeeting(
   body: CreateMeetingBody,
   ctx: Ctx,
-): Promise<MeetingResult> {
-  return request<MeetingResult>("/api/calendar/meetings", {
+): Promise<CreateMeetingResult> {
+  return request<CreateMeetingResult>("/api/calendar/meetings", {
     method: "POST",
     body,
     baseUrl: ctx.baseUrl,

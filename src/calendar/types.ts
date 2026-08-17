@@ -4,6 +4,7 @@
  * Both are stateless — per-account config is handed to every call, mirroring
  * how MailProvider takes ProviderAccount.
  */
+import type { RsvpStatus } from "./ics-parse.js";
 
 export type CalDavConfig = {
   kind: "caldav";
@@ -71,6 +72,15 @@ export type CreateEventInput = {
   attendees: string[];
 };
 
+/**
+ * One attendee's participation as the CALENDAR SERVER currently reports it.
+ * Deliberately the same vocabulary as the iMIP reader (RsvpStatus), because
+ * the two feed one merged view: inbound METHOD:REPLY mails are the base and
+ * this poll is the top-up for attendees who answered their organiser's copy
+ * without ever mailing us back.
+ */
+export type ProviderAttendeeStatus = { email: string; status: RsvpStatus };
+
 export interface CalendarProvider {
   testConnection(config: CalendarConfig): Promise<{ ok: boolean; error?: string }>;
   listCalendars(config: CalendarConfig): Promise<CalendarInfo[]>;
@@ -80,4 +90,22 @@ export interface CalendarProvider {
   createEvent(config: CalendarConfig, input: CreateEventInput): Promise<{ eventId: string; calendarId: string }>;
   /** Returns false when the event is already gone. */
   deleteEvent(config: CalendarConfig, calendarId: string, eventId: string): Promise<boolean>;
+  /**
+   * Attendee participation for one event, best effort.
+   *
+   * OPTIONAL because it is a top-up, never the source of truth: RSVPs are
+   * complete without it (email replies carry a timestamp and win), and not
+   * every server can answer. A CalDAV box that hides the organiser's copy, or
+   * any provider added later that only writes, omits the method rather than
+   * returning a lie; the caller checks for it and skips the top-up.
+   *
+   * Errors are NOT swallowed here — a 401 means the account needs
+   * reconnecting, and hiding it behind an empty array would read as "nobody
+   * has answered yet" forever. The caller downgrades it to a warning.
+   */
+  getAttendeeStatus?(
+    config: CalendarConfig,
+    calendarId: string,
+    eventId: string,
+  ): Promise<ProviderAttendeeStatus[]>;
 }

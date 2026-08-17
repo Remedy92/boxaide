@@ -1579,5 +1579,6 @@ export async function messageFromImapSource(
     date: summary.date || body.date || new Date().toISOString(),
     snippet: body.bodyText.slice(0, 140) || summary.snippet,
     references: body.references,
+    calendar: body.calendar,
   };
 }

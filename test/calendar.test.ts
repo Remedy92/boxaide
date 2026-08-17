@@ -475,6 +475,23 @@ describe("CalendarService", () => {
     expect(sent.icalEvent!.content).toContain(`UID:${meeting.uid}`);
   });
 
+  it("cancels in the zone the invite quoted", async () => {
+    addCalendarAccount("caldav");
+    const { meeting } = await service.createMeeting({ ...INPUT, timeZone: "Europe/Brussels" });
+    const invite = lastSent().text!;
+
+    await service.cancelMeeting(meeting.id);
+    const cancellation = lastSent().text!;
+    // Both mails are about one meeting, so both must name one wall clock. The
+    // zone was not stored, so the cancellation used to quote the server's.
+    expect(invite).toContain("(Europe/Brussels)");
+    expect(cancellation).toContain("(Europe/Brussels)");
+    const hour = new Date(INPUT.start).toLocaleString(undefined, {
+      timeZone: "Europe/Brussels",
+    });
+    expect(cancellation).toContain(hour);
+  });
+
   it("refuses to cancel twice, or to cancel an unknown id", async () => {
     addCalendarAccount("caldav");
     const { meeting } = await service.createMeeting(INPUT);

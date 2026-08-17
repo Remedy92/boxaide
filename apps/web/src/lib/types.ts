@@ -548,9 +548,35 @@ export type AgendaResponse = { events: CalendarEvent[]; errors: string[] };
  */
 export type FreeSlot = { start: string; end: string };
 
-export type FreeSlotsResponse = { slots: FreeSlot[]; errors: string[] };
+/**
+ * `timeZone` is the zone the working hours were read in — the one this app
+ * asked for, or the server's own when it asked for none. Always echoed, so the
+ * suggestion strip can name the clock it is quoting rather than assume it.
+ */
+export type FreeSlotsResponse = {
+  slots: FreeSlot[];
+  errors: string[];
+  timeZone: string;
+};
 
 export type MeetingStatus = "scheduled" | "cancelled";
+
+/**
+ * How one invited guest answered.
+ *
+ * "needs-action" is the resting state, not a failure: it is every guest the
+ * moment the invitation goes out. The server merges two sources — a guest's
+ * reply email wins where there is one, the calendar's own attendee list fills
+ * in the rest — and `source` says which one this entry came from.
+ */
+export type RsvpStatus = "accepted" | "declined" | "tentative" | "needs-action";
+
+export type AttendeeResponse = {
+  email: string;
+  status: RsvpStatus;
+  respondedAt: string | null;
+  source: string;
+};
 
 /** A meeting BOXAIDE created — not every event on the calendar. */
 export type Meeting = {
@@ -564,13 +590,35 @@ export type Meeting = {
   meetingUrl: string | null;
   status: MeetingStatus;
   createdAt: string;
+  /** One entry per invited guest, in `attendees` order. Never partial. */
+  attendeeStatus: AttendeeResponse[];
 };
+
+/**
+ * `refreshError` is the last background reply-scan's failure, or null. The
+ * meetings themselves come from the server's own store and are never held up
+ * by that scan, so a failure here means the responses may be behind — not that
+ * the list is wrong.
+ */
+export type MeetingsResponse = {
+  meetings: Meeting[];
+  refreshError: string | null;
+};
+
+/** What one explicit "check for replies" pass did. */
+export type RsvpRefreshResult = { updated: number; errors: string[] };
 
 /**
  * Creating or cancelling a meeting touches a calendar AND sends invitations, so
  * a 200 can still carry partial failure: `warnings` is what did not happen.
  */
 export type MeetingResult = { meeting: Meeting; warnings: string[] };
+
+/**
+ * Creating adds `timeZone`: the zone the invitation text was written in.
+ * Cancelling writes no times into an email, so it echoes none.
+ */
+export type CreateMeetingResult = MeetingResult & { timeZone: string };
 
 /** Union of every error body shape the server can emit. */
 export type ErrorBody =

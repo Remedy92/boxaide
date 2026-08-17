@@ -21,6 +21,10 @@ const MERGE_DESC =
  * The whole reason this tool is dangerous: it is a send, not a draft, and there
  * is no approval step between the call and the attendees' inboxes.
  */
+/** Said the same way wherever a zone is accepted, so the agent never guesses. */
+const ZONE_DESC =
+  "IANA time zone id, e.g. Europe/Brussels. Defaults to the server's own zone.";
+
 const CREATE_SAFETY =
   "THIS SENDS EMAIL. It mails a calendar invite to every attendee immediately, from the user's own mailbox, and writes the event to the connected calendar. There is no draft, no review step and no undo other than meeting_cancel, which mails everyone again. Call it only after the user has agreed to this exact time and this exact attendee list. To propose times, offer them in chat instead — use calendar_free_slots and say the options out loud.";
 
@@ -57,7 +61,7 @@ export const CALENDAR_TOOLS: ToolDef[] = [
   },
   {
     name: "calendar_free_slots",
-    description: `Find open meeting times. Returns candidate START times that are free on every connected calendar — they are suggestions to offer the user, nothing is booked. Working hours are the SERVER's local time zone, 09:00-17:00 by default, and slots begin on the half hour. ${MERGE_DESC}`,
+    description: `Find open meeting times. Returns candidate START times that are free on every connected calendar — they are suggestions to offer the user, nothing is booked. Working hours are 09:00-17:00 by default, read as a wall clock in \`timeZone\`, and slots begin on the half hour. The response echoes the \`timeZone\` it used. ${MERGE_DESC}`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -72,15 +76,19 @@ export const CALENDAR_TOOLS: ToolDef[] = [
         },
         dayStartHour: {
           type: "number",
-          description: "First hour of the working day, server-local. Default 9.",
+          description: "First hour of the working day, read in `timeZone`. Default 9.",
           default: 9,
         },
         dayEndHour: {
           type: "number",
-          description: "Hour the working day ends, server-local. Default 17.",
+          description: "Hour the working day ends, read in `timeZone`. Default 17.",
           default: 17,
         },
         maxSlots: { type: "number", description: "How many candidates to return. Default 10." },
+        timeZone: {
+          type: "string",
+          description: `Zone the working hours are a wall clock in. ${ZONE_DESC} Pass the user's own zone when you know it.`,
+        },
       },
       required: ["durationMinutes"],
       additionalProperties: false,
@@ -123,6 +131,10 @@ export const CALENDAR_TOOLS: ToolDef[] = [
             "A video meeting link is generated and included by default. Pass false for an in-person meeting.",
           default: true,
         },
+        timeZone: {
+          type: "string",
+          description: `Zone the invite text is written in — the times in the email body are spelled out in it and labelled with it. ${ZONE_DESC} The event itself is always the absolute instants in start/end.`,
+        },
       },
       required: ["title", "start", "end", "attendees"],
       additionalProperties: false,
@@ -142,10 +154,30 @@ export const CALENDAR_TOOLS: ToolDef[] = [
   {
     name: "meetings_list",
     description:
-      "Meetings scheduled through Boxaide, newest first, with the ids meeting_cancel needs. This is not the agenda — meetings booked elsewhere are not here; use agenda_view for those.",
+      "Meetings scheduled through Boxaide, newest first, with the ids meeting_cancel needs. Each meeting carries `attendeeStatus`: one entry per invited guest with their response (accepted, declined, tentative, or needs-action for anyone who has not answered). Responses are learned by a background scan, so they can lag — call meeting_responses_refresh first when the user is asking who has replied. This is not the agenda — meetings booked elsewhere are not here; use agenda_view for those.",
     inputSchema: {
       type: "object" as const,
       properties: { limit: { type: "number", default: 50 } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "meeting_responses_refresh",
+    description:
+      "Look for new guest responses now: reads the inbox for reply emails and asks each connected calendar for its attendee status, then updates the stored guest lists. Sends nothing. Returns `updated` (how many responses changed) and `errors` (one string per unreachable mailbox or calendar). Follow it with meetings_list to read the results.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        mailAccountId: {
+          type: "string",
+          description:
+            "Mail account alias or id to scan. Omit to scan every connected mailbox.",
+        },
+        limit: {
+          type: "number",
+          description: "How many inbox headers to list per mailbox. Default 200, also the max.",
+        },
+      },
       additionalProperties: false,
     },
   },
@@ -171,7 +203,12 @@ export const CALENDAR_SEND_TOOL_NAMES: ReadonlySet<string> = new Set([
   "meeting_cancel",
 ]);
 
-/** Everything that only looks: safe to pre-approve for any agent. */
+/**
+ * Everything that only looks: safe to pre-approve for any agent.
+ * meeting_responses_refresh belongs here — it reads mail and calendars and
+ * writes only the guest list already stored locally, so it is no more
+ * dangerous than meetings_list.
+ */
 export const CALENDAR_READ_TOOL_NAMES: ReadonlySet<string> = new Set(
   CALENDAR_TOOLS.map((t) => t.name).filter((n) => !CALENDAR_SEND_TOOL_NAMES.has(n)),
 );
@@ -239,6 +276,7 @@ export async function dispatchCalendarTool(
         dayStartHour: num(args, "dayStartHour"),
         dayEndHour: num(args, "dayEndHour"),
         maxSlots: num(args, "maxSlots"),
+        timeZone: str(args, "timeZone"),
       });
 
     case "meeting_create":
@@ -255,6 +293,7 @@ export async function dispatchCalendarTool(
           typeof args.includeMeetingLink === "boolean"
             ? (args.includeMeetingLink as boolean)
             : undefined,
+        timeZone: str(args, "timeZone"),
       });
 
     case "meeting_cancel":
@@ -262,6 +301,14 @@ export async function dispatchCalendarTool(
 
     case "meetings_list":
       return { meetings: store.listMeetings({ limit: num(args, "limit") }) };
+
+    // Reads only. An unknown mailAccountId throws from the service, which is
+    // the same shape as every other bad-argument error here.
+    case "meeting_responses_refresh":
+      return service.refreshRsvps({
+        mailAccountId: str(args, "mailAccountId"),
+        limit: num(args, "limit"),
+      });
 
     default:
       throw new Error(`unknown tool: ${name}`);

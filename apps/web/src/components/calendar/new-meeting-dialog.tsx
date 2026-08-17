@@ -18,7 +18,13 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { friendlyError } from "@/lib/api/errors";
 import { parseAddress, splitAddressList } from "@/lib/format/address";
-import { dayKey, formatDayHeadingShort, formatTime } from "@/lib/format/calendar";
+import {
+  dayKey,
+  formatDayHeadingShort,
+  formatTime,
+  localTimeZone,
+  timeZoneLabel,
+} from "@/lib/format/calendar";
 import { useCreateMeeting, useFreeSlots } from "@/lib/hooks/use-calendar";
 import type { FreeSlot } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -99,6 +105,10 @@ export function NewMeetingDialog({
     () => groupSlots(slots.data?.slots ?? []),
     [slots.data],
   );
+  /* The zone the SERVER answered in, not the one this browser asked for. They
+     agree in practice, and where they somehow do not, the strip must name the
+     clock the times were actually worked out on. */
+  const zone = timeZoneLabel(slots.data?.timeZone ?? "");
 
   const reset = () => {
     setForm(blankForm());
@@ -171,6 +181,10 @@ export function NewMeetingDialog({
         attendees,
         description: form.description.trim() || undefined,
         includeMeetingLink: form.includeMeetingLink,
+        /* The pickers above are this machine's clock, so the invitation has
+           to quote the same one. `start` and `end` are absolute instants
+           either way — this only decides the hours written in the email. */
+        timeZone: localTimeZone() || undefined,
       },
       {
         onSuccess: (result) => {
@@ -274,9 +288,13 @@ export function NewMeetingDialog({
                   </div>
                 ))}
               </div>
+              {/* One line, and the zone is in it: somebody booking across
+                  zones has to know which clock these times are on, and a
+                  badge on every chip would say it six times over. */}
               <p className="text-[12px] leading-4 text-fg-tertiary">
-                Free on your calendars. Nothing is held until you create the
-                meeting.
+                Free on your calendars
+                {zone ? `, shown in ${zone}` : ""}. Nothing is held until you
+                create the meeting.
               </p>
             </div>
           )}

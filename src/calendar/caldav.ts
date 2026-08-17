@@ -9,6 +9,7 @@
 import { DAVClient, type DAVCalendar } from "tsdav";
 import ICAL from "ical.js";
 import { buildIcs } from "./ics.js";
+import { parseIcs } from "./ics-parse.js";
 import type {
   CalendarConfig,
   CalendarEvent,
@@ -16,6 +17,7 @@ import type {
   CalendarProvider,
   CreateEventInput,
   EventRange,
+  ProviderAttendeeStatus,
 } from "./types.js";
 
 /** Hard stop on INSTANCES RETURNED — occurrences skipped as out-of-range do
@@ -234,5 +236,40 @@ export class CalDavProvider implements CalendarProvider {
     if (response.status === 404) return false;
     if (!response.ok) throw new Error(`calendar delete failed: HTTP ${response.status}`);
     return true;
+  }
+
+  async getAttendeeStatus(
+    config: CalendarConfig,
+    calendarId: string,
+    eventId: string,
+  ): Promise<ProviderAttendeeStatus[]> {
+    // Same idiom as listEvents: log in, list the event collections, then read
+    // through the client — but by objectUrls, since eventId IS the object url
+    // createEvent handed back. A login or REPORT failure propagates; only a
+    // missing OBJECT is soft.
+    const client = await connect(config);
+    const calendars = eventCalendars(await client.fetchCalendars());
+    // Fall back to a full scan when the stored calendar url no longer matches
+    // (iCloud rewrites collection urls on migration); the object url is still
+    // the identity, so a wrong collection just returns nothing.
+    const scoped = calendars.filter((c) => c.url === calendarId);
+    for (const calendar of scoped.length > 0 ? scoped : calendars) {
+      const objects = await client.fetchCalendarObjects({
+        calendar,
+        objectUrls: [eventId],
+      });
+      for (const object of objects) {
+        if (!object.data) continue;
+        // parseIcs never throws, so a malformed stored object reads as "no
+        // attendee status known" rather than breaking the RSVP sweep.
+        const attendees = parseIcs(String(object.data)).attendees;
+        if (attendees.length > 0) {
+          return attendees.map((a) => ({ email: a.email, status: a.status }));
+        }
+      }
+    }
+    // The server did not return the object (deleted, moved, or a collection
+    // we cannot read). Empty, not an error: there is nothing to top up.
+    return [];
   }
 }

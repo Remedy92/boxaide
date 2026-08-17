@@ -15,11 +15,19 @@ import { isLoopbackBindAddress } from "../api/routes.js";
 import type { Platform } from "../platform.js";
 import { googleAuthUrl } from "./google.js";
 import { parseAgendaRange } from "./range.js";
+import { resolveTimeZone } from "./timezone.js";
 import type { CalDavConfig } from "./types.js";
 
 export type CalendarRouteConfig = { host: string; port: number };
 
 const STATE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * How long a background RSVP refresh counts as fresh. Same shape as the mail
+ * index's staleness rule: listing meetings twice in a row must not mean two
+ * mailbox scans.
+ */
+const RSVP_FRESH_MS = 60 * 1000;
 
 type PendingGoogle = {
   alias: string;
@@ -119,6 +127,23 @@ function intParam(
   const value = Number(raw);
   return value >= min && value <= max ? value : null;
 }
+
+/**
+ * One optional IANA zone, validated here so a typo costs a 400 rather than a
+ * provider fan-out. Same three outcomes as intParam: `undefined` is absent
+ * (the service falls back to the server's own zone), `null` is present and
+ * unusable.
+ */
+function zoneParam(raw: string | undefined): string | null | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  try {
+    return resolveTimeZone(raw);
+  } catch {
+    return null;
+  }
+}
+
+const ZONE_ERROR = "timeZone must be an IANA time zone id, e.g. Europe/Brussels";
 
 /** Both the connect and the test route take the same CalDAV fields. */
 function caldavConfig(body: {
@@ -221,7 +246,63 @@ export function registerCalendarRoutes(
     });
   });
 
-  app.get("/api/calendar/meetings", (c) => c.json({ meetings: store.listMeetings() }));
+  /**
+   * Background RSVP refresh state, private to this closure.
+   *
+   * The list must answer from SQLite immediately — a scan reads mailboxes and
+   * calendars, and the guest list is already stored. So the refresh is fired
+   * and forgotten, exactly like MailService.ensureFresh's refreshLater: the
+   * rejection is swallowed into `lastRsvpError` instead of becoming an
+   * unhandled promise, and the next list call reports it. `inFlight` keeps a
+   * burst of list calls to one scan; `refreshedAt` keeps a quiet UI from
+   * scanning on every poll.
+   */
+  let rsvpInFlight = false;
+  let rsvpRefreshedAt = 0;
+  let lastRsvpError: string | null = null;
+
+  function refreshRsvpsLater(): void {
+    const now = Date.now();
+    if (rsvpInFlight || now - rsvpRefreshedAt < RSVP_FRESH_MS) return;
+    rsvpInFlight = true;
+    rsvpRefreshedAt = now;
+    void service
+      .refreshRsvps()
+      .then((result) => {
+        // Per-account failures come back in `errors`, not as a rejection, so
+        // they are surfaced the same way a thrown one is.
+        lastRsvpError = result.errors.length > 0 ? result.errors.join("; ") : null;
+      })
+      .catch((err) => {
+        lastRsvpError = errMessage(err);
+      })
+      .finally(() => {
+        rsvpInFlight = false;
+      });
+  }
+
+  // Each meeting carries its full guest list with a status per attendee, from
+  // the store. `refreshError` is the last background scan's failure, or null.
+  app.get("/api/calendar/meetings", (c) => {
+    const meetings = store.listMeetings();
+    refreshRsvpsLater();
+    return c.json({ meetings, refreshError: lastRsvpError });
+  });
+
+  /**
+   * The "check for replies" affordance: awaited, so the caller can show the
+   * result. Errors here are per-account strings in `errors`, never a 500.
+   */
+  app.post("/api/calendar/meetings/refresh-rsvps", async (c) => {
+    try {
+      const result = await service.refreshRsvps();
+      rsvpRefreshedAt = Date.now();
+      lastRsvpError = result.errors.length > 0 ? result.errors.join("; ") : null;
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: errMessage(err) }, 400);
+    }
+  });
 
   app.post("/api/calendar/meetings", async (c) => {
     const body = await readJson<{
@@ -234,11 +315,16 @@ export function registerCalendarRoutes(
       calendarAccountId?: string;
       mailAccountId?: string;
       includeMeetingLink?: boolean;
+      timeZone?: string;
     }>(c);
     if (!body) return c.json({ error: "body must be JSON" }, 400);
     if (!Array.isArray(body.attendees)) {
       return c.json({ error: "attendees must be an array of email addresses" }, 400);
     }
+    // Validated before the send: the invite body is written in this zone, and
+    // a typo must not reach an attendee's inbox with the wrong hours on it.
+    const timeZone = zoneParam(body.timeZone);
+    if (timeZone === null) return c.json({ error: ZONE_ERROR }, 400);
     try {
       const result = await service.createMeeting({
         title: body.title ?? "",
@@ -250,6 +336,7 @@ export function registerCalendarRoutes(
         calendarAccountId: body.calendarAccountId,
         mailAccountId: body.mailAccountId,
         includeMeetingLink: body.includeMeetingLink,
+        timeZone,
       });
       return c.json(result);
     } catch (err) {
@@ -303,6 +390,11 @@ export function registerCalendarRoutes(
     if (maxSlots === null) {
       return c.json({ error: "maxSlots must be an integer between 1 and 100" }, 400);
     }
+    // The working hours above are a wall clock in this zone. Checked before the
+    // fan-out so a typo costs no provider round trip; the response echoes the
+    // zone that was actually used.
+    const timeZone = zoneParam(c.req.query("timeZone"));
+    if (timeZone === null) return c.json({ error: ZONE_ERROR }, 400);
 
     return c.json(
       await service.freeSlots({
@@ -312,6 +404,7 @@ export function registerCalendarRoutes(
         dayStartHour,
         dayEndHour,
         maxSlots,
+        timeZone,
       }),
     );
   });

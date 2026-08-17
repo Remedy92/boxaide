@@ -71,6 +71,36 @@ export function formatDayHeadingShort(
   return shortDayFmt.format(date);
 }
 
+/**
+ * The zone this browser is set to, as an IANA id — "Europe/Brussels".
+ *
+ * Sent with free-slot searches and with meeting creation, because the server
+ * is the wrong clock to book against: a box in a datacentre elsewhere would
+ * otherwise decide what "the working day" means and what hours the invitation
+ * quotes. A browser that cannot say returns "", which the API layer drops and
+ * the server answers in its own zone, as before.
+ */
+export function localTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * An IANA id as words: "Europe/Brussels" reads back as "Brussels time".
+ *
+ * The last segment only, underscores opened up. Region prefixes are filing,
+ * not language — nobody says they are meeting at nine Europe/Brussels — and a
+ * two-letter id like "UTC" has no segment to drop, so it is shown as it is.
+ */
+export function timeZoneLabel(zone: string): string {
+  const name = zone.split("/").pop()?.replace(/_/g, " ").trim();
+  if (!name) return "";
+  return /^[A-Z]+$/.test(name) ? name : `${name} time`;
+}
+
 /** "09:00", local. The one time a suggestion chip carries. */
 export function formatTime(iso: string): string {
   const date = parse(iso);

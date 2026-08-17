@@ -11,13 +11,14 @@ import {
   getFreeSlots,
   listCalendarAccounts,
   listMeetings,
+  refreshMeetingResponses,
   startGoogleCalendarAuth,
   testCalDavAccount,
   type CalDavAccountBody,
   type CreateMeetingBody,
   type GoogleCalendarStartBody,
 } from "@/lib/api/endpoints";
-import { startOfDay } from "@/lib/format/calendar";
+import { localTimeZone, startOfDay } from "@/lib/format/calendar";
 import { useApiCtx } from "@/lib/hooks/use-settings";
 
 /**
@@ -102,6 +103,10 @@ const SUGGESTION_COUNT = 6;
  */
 export function useFreeSlots(durationMinutes: number, enabled = true) {
   const ctx = useApiCtx();
+  /* Read once per render rather than kept in state: it is a property of the
+     machine, and the response echoes back the zone the server actually used,
+     which is what the form quotes. */
+  const timeZone = localTimeZone();
   /* Keyed on `enabled`, which is the dialog being open — NOT on mount. This
      app runs for days in a desktop window, and a window computed once at mount
      ages into the past, at which point every suggestion is behind the clock
@@ -124,6 +129,9 @@ export function useFreeSlots(durationMinutes: number, enabled = true) {
       ctx.token,
       durationMinutes,
       window.start,
+      // In the key because it changes the answer: the same window in a
+      // different zone is a different working day.
+      timeZone,
     ],
     enabled: enabled && ctx.baseUrl.length > 0 && ctx.token.length > 0,
     queryFn: ({ signal }) =>
@@ -133,6 +141,7 @@ export function useFreeSlots(durationMinutes: number, enabled = true) {
           start: window.start,
           end: window.end,
           maxSlots: SUGGESTION_COUNT,
+          timeZone,
         },
         { ...ctx, signal },
       ),
@@ -141,6 +150,14 @@ export function useFreeSlots(durationMinutes: number, enabled = true) {
   });
 }
 
+/**
+ * The meetings Boxaide booked, and how current their guest responses are.
+ *
+ * `data` is the whole body: `meetings` comes straight out of the server's
+ * store, while `refreshError` is the last background reply-scan's failure. The
+ * two are separate on purpose — a mailbox that will not open must not empty
+ * the list, it only means the responses beside it may be behind.
+ */
 export function useMeetings(enabled = true) {
   const ctx = useApiCtx();
   return useQuery({
@@ -148,6 +165,25 @@ export function useMeetings(enabled = true) {
     enabled: enabled && ctx.baseUrl.length > 0 && ctx.token.length > 0,
     queryFn: ({ signal }) => listMeetings({ ...ctx, signal }),
     staleTime: 30_000,
+  });
+}
+
+/**
+ * "Check for replies": read the mailboxes and calendars now.
+ *
+ * One pass over every meeting, so the count it returns is for the whole list
+ * rather than the row the button sat on. The meetings are refetched afterwards
+ * because the pass writes the new answers into the server's store — this
+ * mutation's own result says how many moved, not which.
+ */
+export function useRefreshMeetingResponses() {
+  const ctx = useApiCtx();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => refreshMeetingResponses(ctx),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["calendar-meetings"] });
+    },
   });
 }
 

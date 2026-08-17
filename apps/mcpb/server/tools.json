@@ -1105,7 +1105,7 @@
   },
   {
     "name": "calendar_free_slots",
-    "description": "Find open meeting times. Returns candidate START times that are free on every connected calendar — they are suggestions to offer the user, nothing is booked. Working hours are the SERVER's local time zone, 09:00-17:00 by default, and slots begin on the half hour. Every connected calendar account is read and the results are merged into one timeline. An unreachable account does not fail the call — it contributes a string to `errors`, so check that field before telling the user their day is empty.",
+    "description": "Find open meeting times. Returns candidate START times that are free on every connected calendar — they are suggestions to offer the user, nothing is booked. Working hours are 09:00-17:00 by default, read as a wall clock in `timeZone`, and slots begin on the half hour. The response echoes the `timeZone` it used. Every connected calendar account is read and the results are merged into one timeline. An unreachable account does not fail the call — it contributes a string to `errors`, so check that field before telling the user their day is empty.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1123,17 +1123,21 @@
         },
         "dayStartHour": {
           "type": "number",
-          "description": "First hour of the working day, server-local. Default 9.",
+          "description": "First hour of the working day, read in `timeZone`. Default 9.",
           "default": 9
         },
         "dayEndHour": {
           "type": "number",
-          "description": "Hour the working day ends, server-local. Default 17.",
+          "description": "Hour the working day ends, read in `timeZone`. Default 17.",
           "default": 17
         },
         "maxSlots": {
           "type": "number",
           "description": "How many candidates to return. Default 10."
+        },
+        "timeZone": {
+          "type": "string",
+          "description": "Zone the working hours are a wall clock in. IANA time zone id, e.g. Europe/Brussels. Defaults to the server's own zone. Pass the user's own zone when you know it."
         }
       },
       "required": [
@@ -1187,6 +1191,10 @@
           "type": "boolean",
           "description": "A video meeting link is generated and included by default. Pass false for an in-person meeting.",
           "default": true
+        },
+        "timeZone": {
+          "type": "string",
+          "description": "Zone the invite text is written in — the times in the email body are spelled out in it and labelled with it. IANA time zone id, e.g. Europe/Brussels. Defaults to the server's own zone. The event itself is always the absolute instants in start/end."
         }
       },
       "required": [
@@ -1217,13 +1225,31 @@
   },
   {
     "name": "meetings_list",
-    "description": "Meetings scheduled through Boxaide, newest first, with the ids meeting_cancel needs. This is not the agenda — meetings booked elsewhere are not here; use agenda_view for those.",
+    "description": "Meetings scheduled through Boxaide, newest first, with the ids meeting_cancel needs. Each meeting carries `attendeeStatus`: one entry per invited guest with their response (accepted, declined, tentative, or needs-action for anyone who has not answered). Responses are learned by a background scan, so they can lag — call meeting_responses_refresh first when the user is asking who has replied. This is not the agenda — meetings booked elsewhere are not here; use agenda_view for those.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "limit": {
           "type": "number",
           "default": 50
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "meeting_responses_refresh",
+    "description": "Look for new guest responses now: reads the inbox for reply emails and asks each connected calendar for its attendee status, then updates the stored guest lists. Sends nothing. Returns `updated` (how many responses changed) and `errors` (one string per unreachable mailbox or calendar). Follow it with meetings_list to read the results.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mailAccountId": {
+          "type": "string",
+          "description": "Mail account alias or id to scan. Omit to scan every connected mailbox."
+        },
+        "limit": {
+          "type": "number",
+          "description": "How many inbox headers to list per mailbox. Default 200, also the max."
         }
       },
       "additionalProperties": false

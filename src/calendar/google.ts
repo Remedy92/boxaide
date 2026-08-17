@@ -11,6 +11,7 @@
  * would double-invite every attendee. iCalUID ties the two together so
  * attendee replies land on the right event.
  */
+import { normalizeRsvp } from "./ics-parse.js";
 import type {
   CalendarConfig,
   CalendarEvent,
@@ -18,6 +19,7 @@ import type {
   CalendarProvider,
   CreateEventInput,
   EventRange,
+  ProviderAttendeeStatus,
 } from "./types.js";
 
 const API = "https://www.googleapis.com/calendar/v3";
@@ -94,6 +96,9 @@ type GoogleEvent = {
   transparency?: string;
   start?: { dateTime?: string; date?: string };
   end?: { dateTime?: string; date?: string };
+  // Only populated by events.get / events.list; responseStatus is Google's
+  // spelling of PARTSTAT ("needsAction", "accepted", "declined", "tentative").
+  attendees?: { email?: string; responseStatus?: string }[];
 };
 
 type CalendarListEntry = {
@@ -235,6 +240,28 @@ export class GoogleCalendarProvider implements CalendarProvider {
       if (err instanceof Error && /HTTP (404|410)/.test(err.message)) return false;
       throw err;
     }
+  }
+
+  async getAttendeeStatus(
+    config: CalendarConfig,
+    calendarId: string,
+    eventId: string,
+  ): Promise<ProviderAttendeeStatus[]> {
+    // events.get, not events.list: we hold the exact id createEvent returned,
+    // and a list call would re-page the whole calendar to find one row.
+    // Failures ride the same api() error channel as every other call — a
+    // revoked token must surface, not read as "no replies yet".
+    const event = await api<GoogleEvent>(
+      config,
+      `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+    );
+    const out: ProviderAttendeeStatus[] = [];
+    for (const attendee of event.attendees ?? []) {
+      // Resource rows (rooms, equipment) carry no email; nothing to merge.
+      if (!attendee.email) continue;
+      out.push({ email: attendee.email, status: normalizeRsvp(attendee.responseStatus) });
+    }
+    return out;
   }
 }
 
