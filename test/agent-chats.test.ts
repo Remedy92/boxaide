@@ -97,6 +97,50 @@ describe("chats", () => {
     ]);
   });
 
+  it("writes a named send into that chat and makes it the one being written to", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "first" });
+    const first = channel.chats()[0];
+    // Another window opened a new chat, so the active row is no longer the one
+    // this sender is looking at.
+    const second = channel.createChat();
+
+    const turn = channel.post({ role: "user", text: "back in first", chatId: first.id });
+    expect(turn.chatId).toBe(first.id);
+    // The agent answers where the question was asked, so the hand-off follows
+    // the latest send rather than the last chat somebody clicked.
+    expect(channel.activeChat().id).toBe(first.id);
+    expect(channel.history(undefined, second.id)).toHaveLength(0);
+  });
+
+  it("refuses a send to a chat that is gone or archived", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "first" });
+    const first = channel.chats()[0];
+    channel.createChat();
+    expect(channel.archiveChat(first.id)).toBe(true);
+
+    expect(channel.writable(first.id)).toBe(false);
+    expect(() => channel.post({ role: "user", text: "late", chatId: first.id })).toThrow();
+    expect(channel.writable("c_nope")).toBe(false);
+    expect(() => channel.post({ role: "user", text: "late", chatId: "c_nope" })).toThrow();
+  });
+
+  it("clears the chat it was told to clear, not the active one", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "drop me" });
+    const first = channel.chats()[0];
+    const second = channel.createChat();
+    channel.post({ role: "user", text: "keep me" });
+
+    channel.clear(first.id);
+    expect(channel.history(undefined, first.id)).toHaveLength(0);
+    expect(channel.history(undefined, second.id).map((t) => t.text)).toEqual(["keep me"]);
+    // A clear names a chat; it does not move the user to it.
+    expect(channel.activeChat().id).toBe(second.id);
+    expect(() => channel.clear("c_nope")).toThrow();
+  });
+
   it("deleting the open chat leaves the user in another one, not in nothing", () => {
     const { channel } = make();
     channel.post({ role: "user", text: "older" });

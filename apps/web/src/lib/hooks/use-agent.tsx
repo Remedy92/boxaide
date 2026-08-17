@@ -352,7 +352,9 @@ function AgentSession({
       setSending(true);
       setError(null);
       try {
-        const result = await sendAgentMessage(trimmed, ctx);
+        // The chat this pane is showing, not the one the server has active:
+        // another window may have selected a different one since.
+        const result = await sendAgentMessage(trimmed, ctx, shown.current ?? undefined);
         // The stream will deliver this turn too; merge() makes the duplicate
         // free, and painting it now is what keeps the composer feeling instant.
         setTurns((prev) => merge(prev, [result.turn]));
@@ -369,7 +371,7 @@ function AgentSession({
   const clear = React.useCallback(async () => {
     setError(null);
     try {
-      await clearAgentConversation(ctx);
+      await clearAgentConversation(ctx, shown.current ?? undefined);
       setTurns([]);
     } catch (err) {
       setError(friendlyError(err instanceof Error ? err.message : String(err)));

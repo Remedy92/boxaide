@@ -264,10 +264,26 @@ export class AgentChannel {
    * A user turn is offered to one waiting agent; if none is waiting it stays
    * unclaimed on disk until one asks, which is what makes "type first, start
    * the agent second" work.
+   *
+   * `chatId` is the pane naming the conversation it is showing. Two windows can
+   * have different chats open, and the active chat is one server-wide row, so a
+   * send that trusted it would land in whichever chat was selected last and
+   * vanish from the pane that typed it. The named chat also becomes the active
+   * one: the hand-off and every later default follow the user's latest send.
+   * Callers must check `writable` first — this refuses an unknown or archived
+   * chat rather than quietly writing somewhere else.
    */
-  post(input: { role: Turn["role"]; text: string; agent?: string | null }): Turn {
+  post(input: {
+    role: Turn["role"];
+    text: string;
+    agent?: string | null;
+    chatId?: string;
+  }): Turn {
     const text = input.text.trim();
     if (!text) throw new Error("text is required");
+    if (input.role === "user" && input.chatId) {
+      if (!this.selectChat(input.chatId)) throw new Error("no such chat");
+    }
     if (input.role !== "user") this.touch(input.agent ?? null);
     // Stamp before clearing: the claimed seq is the owner, even if another
     // user turn arrived while this work was open.
@@ -352,6 +368,16 @@ export class AgentChannel {
 
   activeChat(): Chat {
     return this.store.ensureActiveChat();
+  }
+
+  /**
+   * Whether a chat may be written to. An archived chat is a record, not a
+   * conversation, so it is not one. Routes ask this to answer 404 before they
+   * hand an id to `post` or `clear`.
+   */
+  writable(id: string): boolean {
+    const chat = this.store.getChat(id);
+    return chat !== null && chat.archivedAt === null;
   }
 
   createChat(): Chat {
@@ -845,12 +871,19 @@ export class AgentChannel {
     return this.drivenFlag;
   }
 
-  /** Empties the active chat and keeps it. Other chats are untouched. */
-  clear(): void {
-    const chatId = this.store.ensureActiveChat().id;
-    this.store.clearTurns(chatId);
+  /**
+   * Empties one chat and keeps it. Other chats are untouched.
+   *
+   * `chatId` is the pane naming what it is showing, for the same reason `post`
+   * takes one: without it a clear empties whatever chat is active server-wide.
+   * Callers must check `writable` first.
+   */
+  clear(chatId?: string): void {
+    if (chatId && !this.writable(chatId)) throw new Error("no such chat");
+    const id = chatId ?? this.store.ensureActiveChat().id;
+    this.store.clearTurns(id);
     // The claimed message went with the history; nothing is being answered.
-    if (this.work?.chatId === chatId) this.work = null;
+    if (this.work?.chatId === id) this.work = null;
     this.emitChats();
     this.emitPresence();
   }

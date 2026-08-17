@@ -748,9 +748,9 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
   });
 
   app.post("/api/agent/messages", async (c) => {
-    let body: { text?: unknown };
+    let body: { text?: unknown; chat?: unknown };
     try {
-      body = await c.req.json<{ text?: unknown }>();
+      body = await c.req.json<{ text?: unknown; chat?: unknown }>();
     } catch {
       return c.json({ error: "body must be JSON" }, 400);
     }
@@ -759,14 +759,28 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
     if (text.length > MAX_CHAT_CHARS) {
       return c.json({ error: `text must be ${MAX_CHAT_CHARS} characters or fewer` }, 400);
     }
-    const turn = channel.post({ role: "user", text });
+    // Same rule as the state route: `chat` is the pane saying which
+    // conversation it is showing, and a client from before chats existed sends
+    // none and gets the active one.
+    const chatId = typeof body.chat === "string" ? body.chat : undefined;
+    if (chatId && !channel.writable(chatId)) {
+      return c.json({ error: "no such chat" }, 404);
+    }
+    const turn = channel.post({ role: "user", text, chatId });
     // The presence that ships with the write is what the composer uses to say
     // "no agent is listening" the moment a message lands unheard.
     return c.json({ turn, presence: channel.presence() }, 201);
   });
 
-  app.post("/api/agent/clear", (c) => {
-    channel.clear();
+  app.post("/api/agent/clear", async (c) => {
+    // A body is optional here: clear predates chats and older clients send
+    // none, so an unreadable body means "the chat on screen is the active one".
+    const body = await c.req.json<{ chat?: unknown }>().catch(() => ({}) as { chat?: unknown });
+    const chatId = typeof body.chat === "string" ? body.chat : undefined;
+    if (chatId && !channel.writable(chatId)) {
+      return c.json({ error: "no such chat" }, 404);
+    }
+    channel.clear(chatId);
     return c.json({ cleared: true });
   });
 

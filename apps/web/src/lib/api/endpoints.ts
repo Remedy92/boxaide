@@ -527,23 +527,32 @@ export function deleteAgentChat(id: string, ctx: Ctx): Promise<{ deleted: boolea
  * The response carries presence as it was at the moment of the write, which is
  * what lets the composer say "no agent is listening" about THIS message rather
  * than about whatever the last stream frame happened to report.
+ *
+ * `chat` names the conversation the pane is showing. Without it the server
+ * writes to whatever chat is active, which is one row shared by every window.
  */
 export function sendAgentMessage(
   text: string,
   ctx: Ctx,
+  chat?: string,
 ): Promise<{ turn: AgentTurn; presence: AgentPresence }> {
   return request<{ turn: AgentTurn; presence: AgentPresence }>("/api/agent/messages", {
     method: "POST",
-    body: { text },
+    body: chat ? { text, chat } : { text },
     baseUrl: ctx.baseUrl,
     token: ctx.token,
     signal: ctx.signal,
   });
 }
 
-export function clearAgentConversation(ctx: Ctx): Promise<{ cleared: boolean }> {
+/** Same `chat` rule as sendAgentMessage: clear the pane's chat, not the active one. */
+export function clearAgentConversation(
+  ctx: Ctx,
+  chat?: string,
+): Promise<{ cleared: boolean }> {
   return request<{ cleared: boolean }>("/api/agent/clear", {
     method: "POST",
+    body: chat ? { chat } : undefined,
     baseUrl: ctx.baseUrl,
     token: ctx.token,
     signal: ctx.signal,
