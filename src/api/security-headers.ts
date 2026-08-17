@@ -16,17 +16,27 @@ import type { Context, MiddlewareHandler } from "hono";
  * export has no server to mint a per-response nonce. The value it still buys
  * is the origin restriction: no attacker-controlled *external* script can
  * load. The defence that actually stops sender-controlled markup is upstream —
- * `bodyHtml` is never rendered and `react/no-danger` is an ESLint error.
+ * `bodyHtml` reaches the DOM only after DOMPurify, only inside a
+ * script-disabled sandboxed frame (§6.4.6), and `react/no-danger` is an
+ * ESLint error.
+ *
+ * `img-src` allows `http:`/`https:` because mail carries remote images and a
+ * srcdoc frame inherits this policy — a header that bans remote images would
+ * overrule the reader's per-message "Load images" choice. The actual gate is
+ * the frame's own `<meta>` CSP, which starts at `img-src data:` and widens
+ * only when the user asks. Tightest-policy-wins keeps this header the outer
+ * bound, not the gate.
  */
 const CSP_DIRECTIVES = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
+  "img-src 'self' data: blob: http: https:",
   "font-src 'self' data:",
   "connect-src 'self' http://127.0.0.1:* http://localhost:* http://[::1]:* https:",
-  // No mail is rendered in a frame and no plugin content is ever loaded.
-  "frame-src 'none'",
+  // Mail bodies render in a same-document srcdoc frame (§6.4.6). No frame
+  // ever loads a URL, so no scheme or host is listed.
+  "frame-src 'self'",
   "object-src 'none'",
   "media-src 'none'",
   "worker-src 'self' blob:",
