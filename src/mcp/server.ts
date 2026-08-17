@@ -20,6 +20,7 @@ import {
   dispatchOutreachTool,
 } from "../outreach/tools.js";
 import type { DraftInput } from "../provider/types.js";
+import { MAX_LIST_LIMIT, requireListLimit } from "../input-limits.js";
 
 /**
  * The platform tool surface, exported for the mcpb connector snapshot
@@ -71,7 +72,12 @@ export const TOOLS = [
           description: "Account alias, id, or 'all'",
           default: "all",
         },
-        limit: { type: "number", default: 25 },
+        limit: {
+          type: "number",
+          minimum: 1,
+          maximum: MAX_LIST_LIMIT,
+          default: 25,
+        },
         folder: {
           type: "string",
           description: "Folder path from folders_list.",
@@ -96,7 +102,12 @@ export const TOOLS = [
       properties: {
         query: { type: "string" },
         account: { type: "string", default: "all" },
-        limit: { type: "number", default: 25 },
+        limit: {
+          type: "number",
+          minimum: 1,
+          maximum: MAX_LIST_LIMIT,
+          default: 25,
+        },
         since: {
           type: "string",
           description:
@@ -224,7 +235,12 @@ export const TOOLS = [
       type: "object" as const,
       properties: {
         account: { type: "string", description: "Account alias or id." },
-        limit: { type: "number", default: 25 },
+        limit: {
+          type: "number",
+          minimum: 1,
+          maximum: MAX_LIST_LIMIT,
+          default: 25,
+        },
       },
       required: ["account"],
       additionalProperties: false,
@@ -331,7 +347,12 @@ export const CHAT_TOOLS = [
     inputSchema: {
       type: "object" as const,
       properties: {
-        limit: { type: "number", default: 50 },
+        limit: {
+          type: "number",
+          minimum: 1,
+          maximum: MAX_LIST_LIMIT,
+          default: 50,
+        },
       },
       additionalProperties: false,
     },
@@ -448,7 +469,7 @@ async function dispatch(
       const { messages, errors } = await mail.listMessages(
         String(args.account ?? "all"),
         {
-          limit: Number(args.limit ?? 25),
+          limit: requireListLimit(args.limit, 25),
           folder: args.folder ? String(args.folder) : undefined,
           unreadOnly: Boolean(args.unreadOnly),
           since: args.since ? String(args.since) : undefined,
@@ -461,7 +482,7 @@ async function dispatch(
         String(args.account ?? "all"),
         {
           query: String(args.query ?? ""),
-          limit: Number(args.limit ?? 25),
+          limit: requireListLimit(args.limit, 25),
           since: args.since ? String(args.since) : undefined,
         },
       );
@@ -511,7 +532,7 @@ async function dispatch(
     case "drafts_list":
       return {
         drafts: await mail.listDrafts(String(args.account), {
-          limit: Number(args.limit ?? 25),
+          limit: requireListLimit(args.limit, 25),
         }),
       };
     case "draft_delete":
@@ -612,7 +633,7 @@ async function dispatchChat(
       return { posted: true, seq: turn.seq };
     }
     case "chat_history": {
-      const limit = Math.min(Math.max(Number(args.limit ?? 50), 1), 200);
+      const limit = requireListLimit(args.limit, 50);
       const turns = channel.history().slice(-limit);
       return {
         turns: turns.map((t) => ({

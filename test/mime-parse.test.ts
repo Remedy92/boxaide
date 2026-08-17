@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { parseRfc822 } from "../src/provider/mime.js";
+import {
+  MAX_BODY_HTML_CHARS,
+  MAX_RFC822_SOURCE_BYTES,
+  parseRfc822,
+} from "../src/provider/mime.js";
 import { messageFromImapSource } from "../src/provider/imap-smtp.js";
 
 /** RFC822 samples — same shapes Gmail/IMAP commonly return. */
@@ -89,6 +93,27 @@ describe("parseRfc822 (shipped MIME path)", () => {
     expect(p.bodyText).toContain("Plain part says hello.");
     expect(p.bodyHtml).toMatch(/HTML part says/i);
     expect(p.bodyText).not.toMatch(/UGxhaW4/); // raw base64 of "Plain..."
+  });
+
+  it("rejects oversized sources before MIME parsing", async () => {
+    await expect(
+      parseRfc822(Buffer.alloc(MAX_RFC822_SOURCE_BYTES + 1, 0x61)),
+    ).rejects.toThrow(/safety limit/);
+  });
+
+  it("caps raw HTML retained for source viewing", async () => {
+    const html = `<p>${"x".repeat(MAX_BODY_HTML_CHARS + 100)}</p>`;
+    const raw = [
+      "From: a@example.com",
+      "To: b@example.com",
+      "Subject: large html",
+      "MIME-Version: 1.0",
+      "Content-Type: text/html; charset=utf-8",
+      "",
+      html,
+    ].join("\r\n");
+    const parsed = await parseRfc822(raw);
+    expect(parsed.bodyHtml?.length).toBe(MAX_BODY_HTML_CHARS);
   });
 });
 

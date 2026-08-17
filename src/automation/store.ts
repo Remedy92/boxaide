@@ -61,6 +61,40 @@ export const LOG_LIMIT = 64 * 1024;
 
 /** What a reader (MCP tool, REST, UI) gets back per run. */
 export const LOG_TAIL_LIMIT = 4 * 1024;
+export const MAX_AUTOMATION_NAME_CHARS = 200;
+export const MAX_AUTOMATION_CRON_CHARS = 200;
+export const MAX_AUTOMATION_PROMPT_BYTES = 64 * 1024;
+export const MAX_AUTOMATION_AGENT_ID_CHARS = 100;
+
+function assertAutomationFields(input: {
+  name: string;
+  cron: string;
+  prompt: string;
+  agentId?: string | null;
+}): void {
+  if (input.name.length > MAX_AUTOMATION_NAME_CHARS) {
+    throw new Error(
+      `name must be at most ${MAX_AUTOMATION_NAME_CHARS} characters`,
+    );
+  }
+  if (input.cron.length > MAX_AUTOMATION_CRON_CHARS) {
+    throw new Error(
+      `cron must be at most ${MAX_AUTOMATION_CRON_CHARS} characters`,
+    );
+  }
+  if (Buffer.byteLength(input.prompt, "utf8") > MAX_AUTOMATION_PROMPT_BYTES) {
+    throw new Error(`prompt must be at most ${MAX_AUTOMATION_PROMPT_BYTES} bytes`);
+  }
+  if (
+    input.agentId !== undefined &&
+    input.agentId !== null &&
+    input.agentId.length > MAX_AUTOMATION_AGENT_ID_CHARS
+  ) {
+    throw new Error(
+      `agentId must be at most ${MAX_AUTOMATION_AGENT_ID_CHARS} characters`,
+    );
+  }
+}
 
 /**
  * Mirrors ONESHOT_TIMEOUT_MS in src/agent/launcher.ts. It is duplicated, not
@@ -150,6 +184,12 @@ export class AutomationStore {
     const name = input.name.trim();
     if (!name) throw new Error("name is required");
     if (!input.prompt.trim()) throw new Error("prompt is required");
+    assertAutomationFields({
+      name,
+      cron: input.cron.trim(),
+      prompt: input.prompt,
+      agentId: input.agentId,
+    });
     const now = input.now ?? new Date();
     // Validate before the INSERT: a stored automation with an unparseable cron
     // would be a row the scheduler can never schedule and never explain.
@@ -219,6 +259,7 @@ export class AutomationStore {
       agentId: patch.agentId !== undefined ? patch.agentId : current.agentId,
       enabled: patch.enabled ?? current.enabled,
     };
+    assertAutomationFields(next);
     // Recompute on every save, not only on a cron change: re-enabling a
     // long-disabled automation must not fire on a next_run_at from last month.
     next.nextRunAt = next.enabled

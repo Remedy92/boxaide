@@ -3,7 +3,7 @@
  * Surface: docs/specs/agent-platform.md (REST surface).
  */
 import type { Hono } from "hono";
-import { MAX_LIMIT } from "../api/routes.js";
+import { MAX_LIST_LIMIT as MAX_LIMIT, parseListLimit } from "../input-limits.js";
 import type { Platform } from "../platform.js";
 
 /** Every write here can fail on a bad cron or a duplicate name: 400, not 500. */
@@ -12,11 +12,7 @@ function badRequest(err: unknown): string {
 }
 
 function parseLimit(raw: string | undefined): number | null {
-  if (raw === undefined || raw === "") return 20;
-  if (!/^\d+$/.test(raw)) return null;
-  const limit = Number(raw);
-  if (limit < 1 || limit > MAX_LIMIT) return null;
-  return limit;
+  return parseListLimit(raw, 20);
 }
 
 export function registerAutomationRoutes(app: Hono, platform: Platform): void {

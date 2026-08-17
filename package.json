@@ -68,6 +68,7 @@
     "esbuild@0.28.2": true
   },
   "overrides": {
+    "deepmerge-ts": "8.0.0",
     "tmp": "0.2.7"
   }
 }

@@ -21,6 +21,8 @@
         },
         "limit": {
           "type": "number",
+          "minimum": 1,
+          "maximum": 200,
           "default": 25
         },
         "folder": {
@@ -55,6 +57,8 @@
         },
         "limit": {
           "type": "number",
+          "minimum": 1,
+          "maximum": 200,
           "default": 25
         },
         "since": {
@@ -263,6 +267,8 @@
         },
         "limit": {
           "type": "number",
+          "minimum": 1,
+          "maximum": 200,
           "default": 25
         }
       },
@@ -368,6 +374,8 @@
       "properties": {
         "limit": {
           "type": "number",
+          "minimum": 1,
+          "maximum": 200,
           "default": 50
         }
       },
