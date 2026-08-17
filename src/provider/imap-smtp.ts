@@ -1,5 +1,5 @@
 import { ImapFlow } from "imapflow";
-import type { MessageStructureObject } from "imapflow";
+import type { ExpungeEvent, MessageStructureObject } from "imapflow";
 import nodemailer from "nodemailer";
 import type { SendMailOptions } from "nodemailer";
 import { parseRfc822, formatAddress, stripHtml } from "./mime.js";
@@ -15,18 +15,40 @@ import type {
   MailMessage,
   MailMessageSummary,
   MailProvider,
+  MailboxCursor,
+  MailboxSyncResult,
   ProviderAccount,
   SearchMessagesOpts,
   SendMessageInput,
   SendResult,
+  SyncMailboxOpts,
 } from "./types.js";
 
 /** Idle time before a pooled IMAP connection is logged out. */
 const IDLE_MS = 60_000;
+/** Live mailbox watches. One dedicated connection each, outside the pool. */
+const watchers = new Map<
+  string,
+  {
+    client: ImapFlow;
+    onExists: () => void;
+    onFlags: () => void;
+    onClose: () => void;
+  }
+>();
+/** Reconnect backoff for a dropped watch, so an offline server is not hammered. */
+const WATCH_RETRY_MIN_MS = 5_000;
+const WATCH_RETRY_MAX_MS = 5 * 60_000;
 /** Guards against a hung server holding a request open forever. */
 const CONNECT_TIMEOUT_MS = 15_000;
 const GREETING_TIMEOUT_MS = 10_000;
 const SOCKET_TIMEOUT_MS = 60_000;
+/**
+ * Ceiling on messages one incremental sync will read. A mark-all-read on a
+ * large mailbox reports every message as changed; past this it is cheaper —
+ * and bounded — to refill the window instead.
+ */
+const SYNC_FETCH_CAP = 1000;
 /** Bytes of a body part fetched per message to build a list snippet. */
 const SNIPPET_BYTES = 1024;
 /** Drafts read per listDrafts call. Each one costs a full source fetch. */
@@ -114,6 +136,7 @@ function newClient(creds: AccountCredentials): ImapFlow {
     secure: creds.imapSecure,
     auth: imapAuthOptions(creds),
     logger: false,
+    qresync: true,
     connectionTimeout: CONNECT_TIMEOUT_MS,
     greetingTimeout: GREETING_TIMEOUT_MS,
     socketTimeout: SOCKET_TIMEOUT_MS,
@@ -269,13 +292,17 @@ async function withTempImap<T>(
   }
 }
 
-/** Close every pooled connection. Call on shutdown. */
+/** Close every connection, pooled and watching. Call on shutdown. */
 export async function closeAll(): Promise<void> {
+  // Watch connections live outside the pool, so clearing the map is not
+  // enough — each one holds an open socket that would outlive the process.
+  const watching = [...watchers.values()];
+  watchers.clear();
   const entries = [...pool.entries()];
   pool.clear();
   connecting.clear();
-  await Promise.all(
-    entries.map(async ([, entry]) => {
+  await Promise.all([
+    ...entries.map(async ([, entry]) => {
       clearIdle(entry);
       try {
         await entry.client.logout();
@@ -283,7 +310,14 @@ export async function closeAll(): Promise<void> {
         entry.client.close();
       }
     }),
-  );
+    ...watching.map(async (watch) => {
+      try {
+        await watch.client.logout();
+      } catch {
+        watch.client.close();
+      }
+    }),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +445,7 @@ function envelopeToSummary(
       subject?: string;
       date?: Date | string;
     };
+    internalDate?: Date | string;
     flags?: Set<string>;
     bodyStructure?: { childNodes?: unknown[]; disposition?: string };
     source?: Buffer;
@@ -422,7 +457,7 @@ function envelopeToSummary(
   const snippet =
     snippetOverride ||
     source.source?.toString("utf8").replace(/\s+/g, " ").slice(0, 140) ||
-    subject;
+    "";
   return {
     id: makeId(accountId, folder, source.uid),
     accountId,
@@ -435,6 +470,9 @@ function envelopeToSummary(
     date: env.date
       ? new Date(env.date).toISOString()
       : new Date().toISOString(),
+    internalDate: source.internalDate
+      ? new Date(source.internalDate).toISOString()
+      : undefined,
     snippet,
     seen: source.flags?.has("\\Seen") ?? false,
     hasAttachments: structureHasAttachments(
@@ -553,6 +591,32 @@ export function uidWindow(
   return { start, end };
 }
 
+/**
+ * Span of the UIDs already indexed. Asking the server about that range keeps
+ * the command one pair of numbers long however many messages are held.
+ */
+export function indexedUidRange(
+  uids: number[] | undefined,
+): { lowest: number; highest: number } | null {
+  if (!uids || uids.length === 0) return null;
+  let lowest = uids[0];
+  let highest = uids[0];
+  for (const uid of uids) {
+    if (uid < lowest) lowest = uid;
+    if (uid > highest) highest = uid;
+  }
+  return { lowest, highest };
+}
+
+/** True when the stored uidvalidity cannot be used for CHANGEDSINCE. */
+export function mailboxNeedsFullResync(
+  stored: { uidvalidity: number } | null | undefined,
+  uidvalidity: number,
+): boolean {
+  if (!stored) return true;
+  return stored.uidvalidity !== uidvalidity;
+}
+
 function sentMailboxPath(
   boxes: { name: string; path: string; specialUse?: string }[],
 ): string | null {
@@ -641,6 +705,82 @@ async function appendedDraftUid(
   }
 }
 
+function cursorFromMailbox(mb: {
+  exists: number;
+  uidValidity?: bigint | number;
+  uidNext?: number;
+  highestModseq?: bigint;
+}): MailboxCursor {
+  return {
+    uidvalidity: Number(mb.uidValidity ?? 0),
+    highestModseq:
+      mb.highestModseq != null ? String(mb.highestModseq) : null,
+    uidnext: mb.uidNext ?? null,
+    exists: mb.exists,
+  };
+}
+
+/** With `cap`, returns null when the mailbox has more to give than that. */
+async function collectHeads(
+  client: ImapFlow,
+  range: string | number[],
+  extra: {
+    uid?: boolean;
+    changedSince?: bigint;
+    internalDate?: boolean;
+    cap: number;
+  },
+): Promise<FetchedHead[] | null>;
+async function collectHeads(
+  client: ImapFlow,
+  range: string | number[],
+  extra?: { uid?: boolean; changedSince?: bigint; internalDate?: boolean },
+): Promise<FetchedHead[]>;
+async function collectHeads(
+  client: ImapFlow,
+  range: string | number[],
+  extra?: {
+    uid?: boolean;
+    changedSince?: bigint;
+    internalDate?: boolean;
+    cap?: number;
+  },
+): Promise<FetchedHead[] | null> {
+  const query = {
+    uid: true as const,
+    envelope: true as const,
+    flags: true as const,
+    bodyStructure: true as const,
+    ...(extra?.internalDate ? { internalDate: true as const } : {}),
+  };
+  const heads: FetchedHead[] = [];
+  const opts =
+    extra?.uid || extra?.changedSince
+      ? { uid: extra.uid, changedSince: extra.changedSince }
+      : undefined;
+  for await (const msg of client.fetch(range, query, opts)) {
+    // Null, not a truncated list: a partial answer would look like the whole
+    // mailbox to the caller and quietly delete the rest of the index.
+    if (extra?.cap != null && heads.length >= extra.cap) return null;
+    heads.push(msg);
+  }
+  return heads;
+}
+
+async function headsToSummaries(
+  client: ImapFlow,
+  accountId: string,
+  folder: string,
+  heads: FetchedHead[],
+): Promise<MailMessageSummary[]> {
+  const snippets = await attachSnippets(client, heads);
+  return heads
+    .map((msg) =>
+      envelopeToSummary(accountId, folder, msg, snippets.get(msg.uid)),
+    )
+    .reverse();
+}
+
 export class ImapSmtpProvider implements MailProvider {
   async testConnection(
     creds: AccountCredentials,
@@ -662,23 +802,26 @@ export class ImapSmtpProvider implements MailProvider {
     account: ProviderAccount,
     opts: ListMessagesOpts = {},
   ): Promise<MailMessageSummary[]> {
-    const accountId = account.id;
     const folder = opts.folder ?? "INBOX";
     const limit = opts.limit ?? 50;
     const since = parseSince(opts.since);
-    return withImap(accountId, account.creds, async (client) => {
+    return withImap(account.id, account.creds, async (client) => {
       const lock = await client.getMailboxLock(folder, { readOnly: true });
       try {
         const mb = client.mailbox;
         if (!mb) return [];
-        // Two different reads share the rest of this method. Without `since`
-        // the window is the tail of the mailbox — newest N, whatever their
-        // age. With it the server picks the set by date and `limit` only caps
-        // how much of that set comes back, so a quiet week returns few rows
-        // and a busy one is capped rather than silently truncated to 25.
+        // Three reads share the rest of this method. Without `since` the
+        // window is the tail of the mailbox — newest N, whatever their age.
+        // With it the server picks the set by date and `limit` only caps how
+        // much of that set comes back, so a quiet week returns few rows and a
+        // busy one is capped rather than silently truncated to 25.
         let range: string | number[];
         if (since) {
           const uids = await client.search({ since }, { uid: true });
+          if (!uids || uids.length === 0) return [];
+          range = uids.slice(-limit);
+        } else if (opts.unreadOnly) {
+          const uids = await client.search({ seen: false }, { uid: true });
           if (!uids || uids.length === 0) return [];
           range = uids.slice(-limit);
         } else {
@@ -686,32 +829,296 @@ export class ImapSmtpProvider implements MailProvider {
           if (!window) return [];
           range = `${window.start}:${window.end}`;
         }
-        const heads: FetchedHead[] = [];
-        for await (const msg of client.fetch(
-          range,
-          {
-            uid: true,
-            envelope: true,
-            flags: true,
-            bodyStructure: true,
-            internalDate: Boolean(since),
-          },
-          { uid: Array.isArray(range) },
-        )) {
-          if (opts.unreadOnly && msg.flags?.has("\\Seen")) continue;
-          if (since && !withinSince(msg, since)) continue;
-          heads.push(msg);
-        }
-        const snippets = await attachSnippets(client, heads);
-        return heads
-          .map((msg) =>
-            envelopeToSummary(accountId, folder, msg, snippets.get(msg.uid)),
-          )
-          .reverse();
+        const heads = await collectHeads(client, range, {
+          uid: Array.isArray(range),
+          internalDate: since != null,
+        });
+        // The since search is day-granular and the unread search ran before
+        // this fetch, so both sets still need trimming against the exact ask.
+        const kept = heads.filter((msg) => {
+          if (opts.unreadOnly && msg.flags?.has("\\Seen")) return false;
+          if (since && !withinSince(msg, since)) return false;
+          return true;
+        });
+        return headsToSummaries(client, account.id, folder, kept);
       } finally {
         lock.release();
       }
     });
+  }
+
+  async syncMailbox(
+    account: ProviderAccount,
+    opts: SyncMailboxOpts = {},
+  ): Promise<MailboxSyncResult> {
+    const folder = opts.folder ?? "INBOX";
+    const limit = opts.limit ?? 50;
+    return withImap(account.id, account.creds, async (client) => {
+      const lock = await client.getMailboxLock(folder, { readOnly: true });
+      try {
+        const mb = client.mailbox;
+        if (!mb) {
+          return {
+            replaced: true,
+            messages: [],
+            vanishedUids: [],
+            flagUpdates: [],
+            cursor: {
+              uidvalidity: 0,
+              highestModseq: null,
+              uidnext: null,
+              exists: 0,
+            },
+          };
+        }
+        const cursor = cursorFromMailbox(mb);
+        // A since read is not a window read: the server picks the set by date,
+        // and the answer is additive — it reaches further back than the newest
+        // `limit` without invalidating what the index already holds.
+        const sinceAt = parseSince(opts.since);
+        if (sinceAt) {
+          const uids =
+            (await client.search({ since: sinceAt }, { uid: true })) || [];
+          const picked = uids.slice(-limit);
+          const heads = picked.length
+            ? await collectHeads(client, picked, {
+                uid: true,
+                internalDate: true,
+              })
+            : [];
+          const kept = heads.filter((msg) => withinSince(msg, sinceAt));
+          const messages = await headsToSummaries(
+            client,
+            account.id,
+            folder,
+            kept,
+          );
+          return {
+            replaced: false,
+            messages,
+            vanishedUids: [],
+            flagUpdates: messages.map((m) => ({ uid: m.uid, seen: m.seen })),
+            cursor,
+            // Only claim the window we actually read to the end of. When the
+            // search returned more than `limit`, the oldest of them is as far
+            // back as this answer reaches.
+            coveredSince:
+              uids.length > limit
+                ? (messages[messages.length - 1]?.internalDate ??
+                  messages[messages.length - 1]?.date ??
+                  opts.since)
+                : opts.since,
+          };
+        }
+        const full = async (): Promise<MailboxSyncResult> => {
+          const window = uidWindow(mb.exists, limit, opts.offset ?? 0);
+          if (!window) {
+            return {
+              replaced: true,
+              messages: [],
+              vanishedUids: [],
+              flagUpdates: [],
+              cursor,
+            };
+          }
+          const heads = await collectHeads(
+            client,
+            `${window.start}:${window.end}`,
+            { internalDate: true },
+          );
+          const messages = await headsToSummaries(
+            client,
+            account.id,
+            folder,
+            heads,
+          );
+          return {
+            replaced: true,
+            messages,
+            vanishedUids: [],
+            flagUpdates: [],
+            cursor,
+          };
+        };
+
+        if (
+          opts.fullWindow ||
+          mailboxNeedsFullResync(opts.cursor, cursor.uidvalidity)
+        ) {
+          return full();
+        }
+
+        const sinceModseq = opts.cursor?.highestModseq;
+        if (sinceModseq && mb.highestModseq != null) {
+          try {
+            const vanishedUids: number[] = [];
+            const onExpunge = (evt: ExpungeEvent) => {
+              if (evt.uid != null) vanishedUids.push(evt.uid);
+            };
+            client.on("expunge", onExpunge);
+            let heads: FetchedHead[] | null;
+            const known = indexedUidRange(opts.knownUids);
+            try {
+              // Only the indexed range can change what a list paints, and it
+              // starts at the oldest UID we hold. Anything older is not ours.
+              heads = await collectHeads(
+                client,
+                `${known?.lowest ?? 1}:*`,
+                {
+                  uid: true,
+                  changedSince: BigInt(sinceModseq),
+                  internalDate: true,
+                  cap: SYNC_FETCH_CAP,
+                },
+              );
+            } finally {
+              client.off("expunge", onExpunge);
+            }
+            // Too much changed to read one by one. A window refill is bounded
+            // and lands in the same place.
+            if (heads === null) return full();
+            if (known && opts.knownUids) {
+              const still = await client.search(
+                { uid: `${known.lowest}:${known.highest}` },
+                { uid: true },
+              );
+              const stillSet = new Set(still || []);
+              for (const uid of opts.knownUids) {
+                if (!stillSet.has(uid) && !vanishedUids.includes(uid)) {
+                  vanishedUids.push(uid);
+                }
+              }
+            }
+            const messages = await headsToSummaries(
+              client,
+              account.id,
+              folder,
+              heads,
+            );
+            return {
+              replaced: false,
+              messages,
+              vanishedUids,
+              flagUpdates: messages.map((m) => ({
+                uid: m.uid,
+                seen: m.seen,
+              })),
+              cursor,
+            };
+          } catch (err) {
+            const text = imapErrorText(err);
+            if (/not found|expired|modseq|CONDSTORE|QRESYNC/i.test(text)) {
+              return full();
+            }
+            throw err;
+          }
+        }
+
+        return full();
+      } finally {
+        lock.release();
+      }
+    });
+  }
+
+  watchMailbox(
+    account: ProviderAccount,
+    folder: string,
+    onChange: () => void,
+  ): () => void {
+    const key = account.id;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    let backoff = WATCH_RETRY_MIN_MS;
+    const fire = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(onChange, 250);
+      timer.unref?.();
+    };
+    const detach = (close: boolean) => {
+      const prev = watchers.get(key);
+      if (!prev) return;
+      prev.client.off("exists", prev.onExists);
+      prev.client.off("expunge", prev.onExists);
+      prev.client.off("flags", prev.onFlags);
+      prev.client.off("close", prev.onClose);
+      watchers.delete(key);
+      if (close) prev.client.logout().catch(() => prev.client.close());
+    };
+
+    /**
+     * A connection of its own, not the pooled one. IDLE watches whichever
+     * mailbox is selected, and the pool is shared: a CRM pass walking Sent, or
+     * a send appending to it, would move the selection and take the inbox
+     * watch with it. The second connection is the price of a watch that stays
+     * put.
+     */
+    const select = async (reconnect: boolean) => {
+      detach(true);
+      const client = newClient(account.creds);
+      // Before connect: a handshake timeout must not crash Node.
+      client.on("error", () => {
+        /* surfaced by the close handler below */
+      });
+      await client.connect();
+      if (stopped) {
+        await client.logout().catch(() => client.close());
+        return;
+      }
+      const onExists = () => fire();
+      const onFlags = () => fire();
+      // The connection is the subscription. When it drops the listeners go
+      // with it, so reconnect — otherwise this account silently stops
+      // reporting new mail for the life of the process.
+      const onClose = () => {
+        detach(false);
+        schedule();
+      };
+      client.on("exists", onExists);
+      client.on("expunge", onExists);
+      client.on("flags", onFlags);
+      client.on("close", onClose);
+      watchers.set(key, { client, onExists, onFlags, onClose });
+      await client.mailboxOpen(folder, { readOnly: true });
+      backoff = WATCH_RETRY_MIN_MS;
+      // The gap is invisible from here: anything that arrived while the
+      // connection was down produced no event, so ask for a sync outright.
+      if (reconnect) fire();
+    };
+
+    const schedule = () => {
+      if (stopped || retry) return;
+      const wait = backoff;
+      backoff = Math.min(backoff * 2, WATCH_RETRY_MAX_MS);
+      retry = setTimeout(() => {
+        retry = null;
+        if (stopped) return;
+        void select(true).catch((err) => {
+          console.warn(
+            `[imap] watch ${folder} reconnect failed for ${account.email}:`,
+            err instanceof Error ? err.message : String(err),
+          );
+          schedule();
+        });
+      }, wait);
+      retry.unref?.();
+    };
+
+    void select(false).catch((err) => {
+      console.warn(
+        `[imap] watch ${folder} failed for ${account.email}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      schedule();
+    });
+
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      if (retry) clearTimeout(retry);
+      detach(true);
+    };
   }
 
   async searchMessages(
@@ -837,7 +1244,14 @@ export class ImapSmtpProvider implements MailProvider {
 
     // Gmail copies SMTP sends into Sent by itself; Fastmail and generic IMAP
     // do not. A failed copy must never fail a delivered message.
-    await this.appendToSent(account, raw).catch((err: unknown) => {
+    let copied: MailMessageSummary | undefined;
+    let sentFolder: string | undefined;
+    await this.appendToSent(account, raw)
+      .then((result) => {
+        copied = result.summary ?? undefined;
+        sentFolder = result.folder;
+      })
+      .catch((err: unknown) => {
       console.warn(
         `[imap] Sent copy failed for ${account.email}:`,
         err instanceof Error ? err.message : String(err),
@@ -847,18 +1261,41 @@ export class ImapSmtpProvider implements MailProvider {
     return {
       messageId: info.messageId ?? composed.messageId ?? "",
       accepted: (info.accepted ?? []).map(String),
+      copied,
+      sentFolder,
     };
   }
 
+  /**
+   * The folder comes back even when the uid does not: a server that withholds
+   * APPENDUID still tells the caller which mailbox to refresh.
+   */
   private async appendToSent(
     account: ProviderAccount,
     raw: Buffer,
-  ): Promise<void> {
-    await withImap(account.id, account.creds, async (client) => {
+  ): Promise<{ folder: string; summary: MailMessageSummary | null }> {
+    return withImap(account.id, account.creds, async (client) => {
       const boxes = await client.list();
       const path = sentMailboxPath(boxes);
       if (!path) throw new Error("no Sent mailbox found");
-      await client.append(path, raw, ["\\Seen"], new Date());
+      const appended = await client.append(path, raw, ["\\Seen"], new Date());
+      if (!appended || appended.uid == null) {
+        return { folder: path, summary: null };
+      }
+      const uid = appended.uid;
+      const lock = await client.getMailboxLock(path, { readOnly: true });
+      try {
+        const heads = await collectHeads(client, [uid], { uid: true });
+        const messages = await headsToSummaries(
+          client,
+          account.id,
+          path,
+          heads,
+        );
+        return { folder: path, summary: messages[0] ?? null };
+      } finally {
+        lock.release();
+      }
     });
   }
 

@@ -102,6 +102,7 @@ export class CrmService {
           const res = await this.mail.listMessages(account.id, {
             folder,
             limit: PER_FOLDER_LIMIT,
+            refresh: true,
           });
           messages = res.messages;
         } catch {

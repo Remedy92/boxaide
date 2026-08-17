@@ -7,6 +7,8 @@ import {
   imapErrorText,
   imapAuthOptions,
   smtpAuthOptions,
+  mailboxNeedsFullResync,
+  indexedUidRange,
   draftsMailboxPath,
   draftFromImapSource,
 } from "../src/provider/imap-smtp.js";
@@ -85,6 +87,40 @@ describe("uidWindow (listMessages sequence range)", () => {
   it("returns null once the offset walks past the oldest message", () => {
     expect(uidWindow(3, 25, 10)).toBeNull();
     expect(uidWindow(3, 25, 3)).toBeNull();
+  });
+});
+
+describe("mailboxNeedsFullResync", () => {
+  it("is true with no stored cursor", () => {
+    expect(mailboxNeedsFullResync(null, 1)).toBe(true);
+  });
+
+  it("is true when uidvalidity changes", () => {
+    expect(mailboxNeedsFullResync({ uidvalidity: 1 }, 2)).toBe(true);
+  });
+
+  it("is false when uidvalidity matches", () => {
+    expect(mailboxNeedsFullResync({ uidvalidity: 7 }, 7)).toBe(false);
+  });
+});
+
+describe("indexedUidRange (expunge check stays one range)", () => {
+  it("is null with nothing indexed", () => {
+    expect(indexedUidRange([])).toBeNull();
+    expect(indexedUidRange(undefined)).toBeNull();
+  });
+
+  it("spans the lowest and highest uid, unsorted input included", () => {
+    expect(indexedUidRange([40, 7, 19])).toEqual({ lowest: 7, highest: 40 });
+  });
+
+  it("handles a single uid", () => {
+    expect(indexedUidRange([12])).toEqual({ lowest: 12, highest: 12 });
+  });
+
+  it("does not blow the stack on a large index", () => {
+    const uids = Array.from({ length: 200_000 }, (_, i) => i + 1);
+    expect(indexedUidRange(uids)).toEqual({ lowest: 1, highest: 200_000 });
   });
 });
 

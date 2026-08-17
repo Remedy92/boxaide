@@ -58,6 +58,12 @@ export type MailMessageSummary = {
   to: string;
   subject: string;
   date: string;
+  /**
+   * Server receive time, when the read asked for it. The `date` above comes
+   * from the sender's header and a wrong clock on their side would hide a
+   * message that really did arrive inside a `since` window.
+   */
+  internalDate?: string;
   snippet: string;
   seen: boolean;
   hasAttachments: boolean;
@@ -85,6 +91,8 @@ export type ListMessagesOpts = SinceOpt & {
   limit?: number;
   offset?: number;
   unreadOnly?: boolean;
+  /** Blocking IMAP fill even when the index is warm. CRM sync uses this. */
+  refresh?: boolean;
 };
 
 export type SearchMessagesOpts = SinceOpt & {
@@ -107,6 +115,13 @@ export type SendMessageInput = {
 export type SendResult = {
   messageId: string;
   accepted: string[];
+  /** Sent-folder copy, when APPEND (or the fixture) named the new uid. */
+  copied?: MailMessageSummary;
+  /**
+   * Where the copy landed. Servers name that mailbox differently — "Sent",
+   * "Sent Items", "[Gmail]/Sent Mail" — so callers must not guess it.
+   */
+  sentFolder?: string;
 };
 
 export type ConnectionTestResult = {
@@ -155,6 +170,40 @@ export type ListDraftsOpts = {
   limit?: number;
 };
 
+/** IMAP resync cursor stored in mailbox_state. */
+export type MailboxCursor = {
+  uidvalidity: number;
+  highestModseq: string | null;
+  uidnext: number | null;
+  exists: number;
+};
+
+export type SyncMailboxOpts = SinceOpt & {
+  folder?: string;
+  limit?: number;
+  offset?: number;
+  cursor?: MailboxCursor | null;
+  /** Ignore CHANGEDSINCE and refill the sequence window of `limit`. */
+  fullWindow?: boolean;
+  /** Indexed UIDs; used to detect expunges when VANISHED is missing. */
+  knownUids?: number[];
+};
+
+export type MailboxSyncResult = {
+  /** True when the indexed window was replaced (cold fill or uidvalidity). */
+  replaced: boolean;
+  messages: MailMessageSummary[];
+  vanishedUids: number[];
+  flagUpdates: Array<{ uid: number; seen: boolean }>;
+  cursor: MailboxCursor;
+  /**
+   * Set when the read was `since`-driven: every message at or after this
+   * instant is now in `messages`, so the index can answer that window without
+   * asking IMAP again.
+   */
+  coveredSince?: string;
+};
+
 export type MailFolder = {
   name: string;
   path: string;
@@ -169,6 +218,24 @@ export interface MailProvider {
     account: ProviderAccount,
     opts?: ListMessagesOpts,
   ): Promise<MailMessageSummary[]>;
+  /**
+   * Fill or incrementally update a folder window. `replaced` means the caller
+   * should drop cached rows for that folder before upserting.
+   */
+  syncMailbox(
+    account: ProviderAccount,
+    opts?: SyncMailboxOpts,
+  ): Promise<MailboxSyncResult>;
+  /**
+   * Keep the connection selected on `folder` and invoke `onChange` on EXISTS /
+   * FLAGS / EXPUNGE. Returns an unsubscribe. Optional: fixture has nothing to
+   * watch.
+   */
+  watchMailbox?(
+    account: ProviderAccount,
+    folder: string,
+    onChange: () => void,
+  ): () => void;
   searchMessages(
     account: ProviderAccount,
     opts: SearchMessagesOpts,
