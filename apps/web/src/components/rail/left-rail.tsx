@@ -6,6 +6,7 @@ import {
   FilePen,
   Inbox,
   MailOpen,
+  PenLine,
   Plus,
   Send,
   Sparkle,
@@ -17,7 +18,6 @@ import { AccountRow, type AccountHealth } from "@/components/rail/account-row";
 import { AgentsSection } from "@/components/rail/agents-section";
 import { BrandMark } from "@/components/rail/brand-mark";
 import { ChatsSection, NewChatButton } from "@/components/rail/chats-section";
-import { ComposeButton } from "@/components/rail/compose-button";
 import { FolderList } from "@/components/rail/folder-list";
 import { NavItem } from "@/components/rail/nav-item";
 import { RailFooter } from "@/components/rail/rail-footer";
@@ -168,7 +168,6 @@ export function LeftRail({
         open={isOpen("chats")}
         onToggle={() => toggle("chats")}
         summary={foldedCount(chatCount)}
-        action={<NewChatButton />}
       >
         <ChatsSection onOpenAll={() => app.openDialog("chats")} />
       </RailSection>
@@ -200,6 +199,18 @@ export function LeftRail({
             app.setView("mail");
             app.setUnreadOnly(!app.unreadOnly);
           }}
+        />
+        {/* Writing a mail by hand is a mail action, so it sits with the other
+            mail actions rather than as the loudest control in the rail.
+            Disabled without a mailbox: `POST /api/messages/send` needs an
+            account, and the server forces `from` to that account's address, so
+            a composer with nothing to send from cannot succeed. */}
+        <NavItem
+          icon={PenLine}
+          label="Compose"
+          disabled={list.length === 0}
+          disabledReason="Connect a mailbox first"
+          onClick={() => app.openCompose({ account: list[0]?.alias })}
         />
         {/* Drafts is a view, not a folder: it comes from GET /api/drafts, which
             takes one mailbox at a time and is unified here rather than by the
@@ -314,12 +325,11 @@ export function LeftRail({
           fixture={health.data?.fixture ?? false}
           collapsed={collapsed}
         />
+        {/* The one pinned action. It is a chat, not a compose window: this app
+            answers mail through a conversation, and the button that starts one
+            has to be reachable at any scroll position. */}
         <div className="pb-3">
-          <ComposeButton
-            disabled={list.length === 0}
-            collapsed={collapsed}
-            onClick={() => app.openCompose({ account: list[0]?.alias })}
-          />
+          <NewChatButton collapsed={collapsed} />
         </div>
       </div>
 

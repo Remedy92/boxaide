@@ -87,24 +87,41 @@ export function ChatsSection({ onOpenAll }: { onOpenAll: () => void }) {
   );
 }
 
-/** The header button that starts a conversation. Lives on the section label. */
-export function NewChatButton() {
+/**
+ * The one primary action in the rail, pinned above the scroll area. A
+ * conversation is what this app is for, so it is the button that never scrolls
+ * away; Compose is a row under Mail.
+ *
+ * Nothing renders when the agent bridge is unsupported — a button that cannot
+ * start a chat is worse than a rail that does not offer one.
+ */
+export function NewChatButton({ collapsed = false }: { collapsed?: boolean }) {
   const agent = useAgent();
   if (agent.connection === "unsupported") return null;
+
+  /* Secondary, not the accent fill. A full-width saturated block at the top of
+     the sidebar would be the loudest thing on screen, and the accent is spent
+     on selection, focus and the unread dot — the states that carry meaning. */
+  const button = (
+    <Button
+      type="button"
+      variant="secondary"
+      size={collapsed ? "icon" : "default"}
+      aria-label={collapsed ? "New chat" : undefined}
+      onClick={() => void agent.newChat()}
+      className={collapsed ? "" : "w-full justify-start bg-surface-2 font-medium"}
+    >
+      <Plus aria-hidden="true" className="size-4 text-fg-tertiary" strokeWidth={1.5} />
+      {!collapsed && "New chat"}
+    </Button>
+  );
+
+  if (!collapsed) return button;
+
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          aria-label="New chat"
-          onClick={() => void agent.newChat()}
-        >
-          <Plus className="size-3.5" strokeWidth={1.5} />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>New chat</TooltipContent>
+      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipContent side="right">New chat</TooltipContent>
     </Tooltip>
   );
 }
