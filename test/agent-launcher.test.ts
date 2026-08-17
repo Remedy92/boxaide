@@ -726,8 +726,8 @@ sleep 60
 describe("one-shot automation runs", () => {
   /**
    * A launcher over one fake CLI that carries runs. Streaming by default —
-   * `renderRunLine` is what arms the idle watchdog, so a spec without it stands
-   * in for the CLIs that print nothing until they are done.
+   * `renderRunLine` is what arms the first-output watchdog, so a spec without
+   * it stands in for the CLIs that print nothing until they are done.
    */
   function runner(script: string, streaming = true): AgentLauncher {
     const bin = fakeBinDir("fake-agent", script);
@@ -764,40 +764,39 @@ printf '{"type":"result","subtype":"success","result":"filed two threads"}\\n'
     const launcher = runner("#!/bin/sh\nexec /bin/sleep 30\n");
     const result = await launcher.runOnce({
       prompt: "do the thing",
-      idleTimeoutMs: 200,
+      firstOutputTimeoutMs: 200,
     });
-    // 'error', not 'killed': a run that never spoke did not run.
+    // 'error', not 'killed': a run that never spoke did not start.
     expect(result.status).toBe("error");
     expect(result.log).toContain(oneShotSilentNote(200));
   });
 
-  it("kills a run that spoke once and then wedged", async () => {
-    // The case a first-byte watchdog missed entirely: the session started, so
-    // the timer was disarmed forever, and the wedge rode out the full deadline.
+  it("lets a run that already spoke wait for the deadline", async () => {
+    // First stdout disarms the watchdog. A quiet stretch after that is a long
+    // tool, not a hang; only the deadline may stop it.
     const launcher = runner("#!/bin/sh\necho working\nexec /bin/sleep 30\n");
     const result = await launcher.runOnce({
       prompt: "do the thing",
-      idleTimeoutMs: 400,
+      firstOutputTimeoutMs: 400,
+      timeoutMs: 900,
     });
-    expect(result.status).toBe("error");
+    expect(result.status).toBe("killed");
     expect(result.log).toContain("working");
-    expect(result.log).toContain(oneShotSilentNote(400));
+    expect(result.log).toContain(oneShotDeadlineNote(900));
+    expect(result.log).not.toContain(oneShotSilentNote(400));
   });
 
-  it("leaves a run that keeps talking alone", async () => {
-    // Alive for longer than the window, never silent for it. The window has to
-    // clear enough of the spawn to survive a loaded machine.
+  it("leaves a run that spoke once alone, even when it then goes quiet", async () => {
     const launcher = runner(
-      `#!/bin/sh
-i=0
-while [ $i -lt 8 ]; do echo working; /bin/sleep 0.2; i=$((i+1)); done
-`,
+      "#!/bin/sh\necho working\n/bin/sleep 0.8\necho done\n",
     );
     const result = await launcher.runOnce({
       prompt: "do the thing",
-      idleTimeoutMs: 900,
+      firstOutputTimeoutMs: 400,
     });
     expect(result.status).toBe("ok");
+    expect(result.log).toContain("working");
+    expect(result.log).toContain("done");
     expect(result.log).not.toContain("[boxaide] stopped");
   });
 
@@ -807,7 +806,7 @@ while [ $i -lt 8 ]; do echo working; /bin/sleep 0.2; i=$((i+1)); done
     const launcher = runner("#!/bin/sh\n/bin/sleep 1\necho done\n", false);
     const result = await launcher.runOnce({
       prompt: "do the thing",
-      idleTimeoutMs: 200,
+      firstOutputTimeoutMs: 200,
     });
     expect(result.status).toBe("ok");
     expect(result.log).toContain("done");
@@ -827,7 +826,7 @@ exec /bin/sleep 30
     const started = Date.now();
     const result = await launcher.runOnce({
       prompt: "do the thing",
-      idleTimeoutMs: 300,
+      firstOutputTimeoutMs: 300,
       closeGraceMs: 300,
     });
     expect(result.status).toBe("error");
@@ -845,9 +844,10 @@ exec /bin/sleep 30
     );
     const result = await launcher.runOnce({
       prompt: "do the thing",
-      idleTimeoutMs: 300,
+      timeoutMs: 400,
+      firstOutputTimeoutMs: 10_000,
     });
-    expect(result.status).toBe("error");
+    expect(result.status).toBe("killed");
     expect(result.log).toContain("halfway through a thought");
   });
 
@@ -856,7 +856,7 @@ exec /bin/sleep 30
     const result = await launcher.runOnce({
       prompt: "do the thing",
       timeoutMs: 200,
-      idleTimeoutMs: 10_000,
+      firstOutputTimeoutMs: 10_000,
     });
     expect(result.status).toBe("killed");
     expect(result.log).toContain(oneShotDeadlineNote(200));

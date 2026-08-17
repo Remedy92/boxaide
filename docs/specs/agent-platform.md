@@ -236,10 +236,11 @@ Scheduler (`AutomationScheduler`):
   that failed says why in its last lines.
 - Three kill paths, all SIGKILL, each appending a note to the log so a killed
   run is never empty:
-  - Idle watchdog (`ONESHOT_IDLE_TIMEOUT_MS`, 2 min): a streaming run that has
-    written no stdout for the window is a hang, not slow work, so it is ended
-    early with status 'error'. The timer restarts on every stdout chunk, so it
-    catches both a session that never started and one that wedged mid-work;
+  - First-output watchdog (`ONESHOT_FIRST_OUTPUT_TIMEOUT_MS`, 2 min): a streaming run
+    that writes no stdout at all in the window never started, so it is ended
+    early with status 'error'. First stdout disarms the timer — a healthy
+    Claude session prints its start line within seconds, and a gap after that
+    is a long tool, not a hang. A wedge after startup waits for the deadline.
     stderr does not feed it, because startup noise is not the agent speaking.
     Non-streaming specs print nothing until the end and get no watchdog.
   - Hard deadline (`ONESHOT_TIMEOUT_MS`, 15 min): status 'killed'.

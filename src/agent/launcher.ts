@@ -966,8 +966,8 @@ export type OneShotOptions = {
   prompt: string;
   /** Overridable for tests only; production runs use ONESHOT_TIMEOUT_MS. */
   timeoutMs?: number;
-  /** Tests only; production runs use ONESHOT_IDLE_TIMEOUT_MS. */
-  idleTimeoutMs?: number;
+  /** Tests only; production runs use ONESHOT_FIRST_OUTPUT_TIMEOUT_MS. */
+  firstOutputTimeoutMs?: number;
   /** Tests only; production runs use ONESHOT_CLOSE_GRACE_MS. */
   closeGraceMs?: number;
 };
@@ -976,18 +976,17 @@ export type OneShotOptions = {
 export const ONESHOT_TIMEOUT_MS = 15 * 60 * 1000;
 
 /**
- * How long a streaming run may say nothing before it is written off.
+ * How long a streaming run may stay silent at start before it is written off.
  *
  * Armed only for specs with `renderRunLine` — a spec whose runArgs asked its
- * CLI for an event stream. Such a run narrates itself continuously, so a gap
- * this long is a hang: a wedged MCP handshake before the session starts, or a
- * stall mid-work. A non-streaming CLI prints nothing until it finishes, and the
- * same timer would kill healthy runs; those keep only the deadline.
- *
- * Idle, not first-byte: the timer restarts on every stdout chunk, so a run that
- * spoke once and then wedged is caught too.
+ * CLI for an event stream. A healthy Claude session prints its start line
+ * within seconds, so no stdout at all for this long is a wedged startup.
+ * First stdout disarms the timer: a run that is quiet mid-tool is healthy,
+ * and a wedge after that waits for the deadline. A non-streaming CLI prints
+ * nothing until it finishes, and the same timer would kill healthy runs;
+ * those keep only the deadline.
  */
-export const ONESHOT_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
+export const ONESHOT_FIRST_OUTPUT_TIMEOUT_MS = 2 * 60 * 1000;
 
 /**
  * How long a finish waits for stdio EOF after the child itself is gone.
@@ -1384,7 +1383,7 @@ export class AgentLauncher {
       capture(`${log && !log.endsWith("\n") ? "\n" : ""}${line}\n`);
     };
     // Which status a kill produces. A deadline or a manual kill is 'killed';
-    // the watchdog is 'error', because a run that stopped speaking did not run.
+    // the watchdog is 'error', because a run that never spoke did not start.
     let forced: "killed" | "error" | null = null;
 
     // A spec that asks its CLI for an event stream must render it: the raw
@@ -1398,29 +1397,30 @@ export class AgentLauncher {
         })
       : null;
 
-    // The idle watchdog, armed only for a spec that narrates itself. See
-    // ONESHOT_IDLE_TIMEOUT_MS: a non-streaming CLI is silent by design, so the
-    // same timer would kill healthy antigravity, opencode and grok runs.
-    const idleWindow = opts.idleTimeoutMs ?? ONESHOT_IDLE_TIMEOUT_MS;
-    let idle: ReturnType<typeof setTimeout> | null = null;
-    const armIdle = () => {
-      if (!render) return;
-      idle = setTimeout(() => {
-        note(oneShotSilentNote(idleWindow));
+    // First-output watchdog, armed only for a spec that narrates itself. See
+    // ONESHOT_FIRST_OUTPUT_TIMEOUT_MS: a non-streaming CLI is silent by design,
+    // so the same timer would kill healthy antigravity, opencode and grok runs.
+    const startWindow = opts.firstOutputTimeoutMs ?? ONESHOT_FIRST_OUTPUT_TIMEOUT_MS;
+    let waiting: ReturnType<typeof setTimeout> | null = null;
+    if (render) {
+      waiting = setTimeout(() => {
+        note(oneShotSilentNote(startWindow));
         forced = "error";
         child.kill("SIGKILL");
-      }, idleWindow);
-      idle.unref?.();
-    };
-    armIdle();
+      }, startWindow);
+      waiting.unref?.();
+    }
 
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       // stdout only. stderr carries startup noise from things that are not the
       // session — a CLI's update check can feed a timer the agent never did.
-      if (idle) clearTimeout(idle);
-      armIdle();
+      // First chunk is enough: mid-tool silence is healthy, so do not re-arm.
+      if (waiting) {
+        clearTimeout(waiting);
+        waiting = null;
+      }
       if (split) split(chunk);
       else capture(chunk);
     });
@@ -1448,7 +1448,7 @@ export class AgentLauncher {
         if (done) return;
         done = true;
         clearTimeout(timer);
-        if (idle) clearTimeout(idle);
+        if (waiting) clearTimeout(waiting);
         if (grace) clearTimeout(grace);
         // A killed child's last line has no newline on it. It is still the
         // best evidence of what the run was doing when it died.
