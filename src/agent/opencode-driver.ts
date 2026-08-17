@@ -157,6 +157,8 @@ export class OpenCodeDriver implements AgentDriver {
   private promptAbort: AbortController | null = null;
   /** When this session last showed a sign of life. Only the watchdog reads it. */
   private lastSessionEvent = 0;
+  /** The naming call for the last answered turn, while it is still running. */
+  private naming: Promise<void> | null = null;
   /** Resolves when the loop has left `run`. Tests await it; production does not. */
   readonly done: Promise<void>;
   private release!: () => void;
@@ -212,6 +214,12 @@ export class OpenCodeDriver implements AgentDriver {
       }
       try {
         this.opts.channel.noteAgentActivity("prompt");
+        // A naming call from the previous turn may still be running. Waiting
+        // for it here rather than before taking the message is the difference
+        // between an answer the user can see coming — the message is claimed,
+        // the pane shows the agent working — and one that sits in the queue
+        // with nothing on screen.
+        await this.naming;
         const reply = await this.prompt(base, turn.text);
         this.opts.channel.post({
           role: "agent",
@@ -219,7 +227,11 @@ export class OpenCodeDriver implements AgentDriver {
           agent: this.opts.agent,
         });
         failures = 0;
-        await this.maybeName(base, turn.chatId);
+        // Started, not awaited: the loop goes back to the channel so the next
+        // message is claimed while this runs.
+        this.naming = this.maybeName(base, turn.chatId).finally(() => {
+          this.naming = null;
+        });
       } catch {
         if (this.stopped) {
           this.opts.channel.releaseLease(turn.seq, { revertAttempt: true });
@@ -249,18 +261,35 @@ export class OpenCodeDriver implements AgentDriver {
    * message gave it.
    */
   private async maybeName(base: string, chatId: string): Promise<void> {
-    if (this.stopped) return;
-    if (!this.opts.channel.needsTitle(chatId)) return;
     try {
-      const raw = await this.prompt(base, TITLE_PROMPT);
+      if (this.stopped) return;
+      if (!this.opts.channel.needsTitle(chatId)) return;
+      const raw = await this.prompt(base, TITLE_PROMPT, { background: true });
       this.opts.channel.nameChat(chatId, raw);
     } catch {
-      // No name is a fine outcome. See the note above.
+      // No name is a fine outcome. See the note above. The whole body is
+      // guarded, not just the prompt: this promise is awaited by the loop, and
+      // a throw from it would be read as a failed answer.
     }
   }
 
-  /** One prompt, blocking until the turn completes. Throws on any failure. */
-  private async prompt(base: string, text: string): Promise<string> {
+  /**
+   * One prompt, blocking until the turn completes. Throws on any failure.
+   *
+   * `background` marks a prompt that is not the user's turn. A failed turn
+   * takes the session down with it, which is right when the message is going
+   * back on the queue to be asked again — and wrong for a naming call, where
+   * the cost of that would land on the conversation instead: the next thing
+   * the user asked would be answered by a model that had forgotten the last
+   * one, with nothing on screen to explain it. A background failure leaves the
+   * session alone. If it really did wedge the session, the next user turn
+   * fails once and resets it on the visible path, message and all.
+   */
+  private async prompt(
+    base: string,
+    text: string,
+    options: { background?: boolean } = {},
+  ): Promise<string> {
     const session = await this.ensureSession(base);
     // Armed across the body read too, not just the headers: a server that
     // flushes headers early and streams the body would otherwise spend the
@@ -286,8 +315,10 @@ export class OpenCodeDriver implements AgentDriver {
       // server may still be running the turn on this session, and the next
       // attempt on the same session would 409 into it. Tell it to stop, take a
       // fresh session next time, and let the caller re-queue the message.
-      this.sessionId = null;
-      void this.call(base, `/session/${session}/abort`, {}).catch(() => {});
+      if (!options.background) {
+        this.sessionId = null;
+        void this.call(base, `/session/${session}/abort`, {}).catch(() => {});
+      }
       throw err;
     } finally {
       guard.end();

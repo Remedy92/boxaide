@@ -80,7 +80,17 @@ const TITLE_CHARS = 60;
  */
 function titleFrom(text: string): string {
   const line = text.split("\n").find((part) => part.trim().length > 0) ?? text;
-  const clean = line.trim().replace(/\s+/g, " ");
+  return shorten(line.trim().replace(/\s+/g, " "));
+}
+
+/**
+ * One line, cut to length on a word, and marked where it was cut.
+ *
+ * Every title in the rail goes through this, whoever wrote it. A cut that is
+ * not marked reads as a name somebody chose, and the reader cannot tell a
+ * short title from the front half of a long one.
+ */
+function shorten(clean: string): string {
   if (clean.length <= TITLE_CHARS) return clean;
   const cut = clean.slice(0, TITLE_CHARS);
   const space = cut.lastIndexOf(" ");
@@ -132,7 +142,7 @@ export function cleanTitle(raw: string): string | null {
   if (quoted) clean = (quoted[2] ?? quoted[1] ?? "").trim();
   clean = clean.replace(/[.。]+$/, "").trim();
   if (!clean || clean.length > TITLE_MAX_RAW) return null;
-  return clean.slice(0, TITLE_CHARS).trim() || null;
+  return shorten(clean) || null;
 }
 
 /** What the storage line in the rail reads from. */
@@ -283,6 +293,14 @@ export class AgentChannel {
   private askers = new Set<string>();
   /** Highest seq handed to listeners. Advanced only by drain(). */
   private broadcastSeq: number;
+  /**
+   * What the chat list looked like when it was last emitted.
+   *
+   * A rename writes no turn, so the drain cannot see one. This is compared on
+   * the same poll, and it is how a title written by `boxaide mcp` reaches a
+   * browser attached to `boxaide serve`.
+   */
+  private chatsFingerprint: string;
   private poll: ReturnType<typeof setInterval> | null = null;
   private closed = false;
   /**
@@ -299,6 +317,7 @@ export class AgentChannel {
     // only follows. The UI fetches history separately.
     const tail = this.store.listTurns({ limit: 1 });
     this.broadcastSeq = tail.length > 0 ? tail[tail.length - 1].seq : 0;
+    this.chatsFingerprint = this.store.chatsFingerprint();
     // This process just started. Any lease in the file is held by nobody —
     // the previous process's in-memory work died with it.
     this.store.releaseOrphanLeases();
@@ -510,6 +529,9 @@ export class AgentChannel {
   }
 
   private emitChats(): void {
+    // Taken before notifying, so a change made in this process is not reported
+    // a second time by the poll that watches for changes made in another.
+    this.chatsFingerprint = this.store.chatsFingerprint();
     for (const listener of this.chatListeners) {
       try {
         listener();
@@ -731,6 +753,21 @@ export class AgentChannel {
     }
   }
 
+  /**
+   * Pushes the chat list when another process has changed it.
+   *
+   * The turn drain covers everything that writes a row. Renaming does not
+   * write one: a chat named through `chat_say` in the stdio MCP process would
+   * otherwise sit under its old name in the rail until the user typed again or
+   * reloaded, which is the whole feature failing quietly.
+   */
+  private drainChats(): void {
+    if (this.chatListeners.size === 0) return;
+    const now = this.store.chatsFingerprint();
+    if (now === this.chatsFingerprint) return;
+    this.emitChats();
+  }
+
   /** Hands the oldest unclaimed user turn to the longest-waiting agent. */
   private handOff(): void {
     let handed = false;
@@ -855,6 +892,7 @@ export class AgentChannel {
     if (this.poll || this.closed) return;
     this.poll = setInterval(() => {
       this.drain();
+      this.drainChats();
       this.handOff();
     }, POLL_MS);
     // Never hold the process open for a poll that exists to serve attachments.

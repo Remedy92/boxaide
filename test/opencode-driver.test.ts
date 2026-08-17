@@ -221,6 +221,39 @@ describe("OpenCodeDriver", () => {
     expect(namings).toBe(2);
   });
 
+  it("keeps the session when the naming call fails, so the model keeps the thread", async () => {
+    let namings = 0;
+    const fake = await startFake((call) => {
+      if (!isNaming(call)) {
+        return { status: 200, body: { parts: [{ type: "text", text: "answered" }] } };
+      }
+      namings += 1;
+      return { status: 500 };
+    });
+    cleanup.push(fake.close);
+    const { channel } = make();
+    const driver = new OpenCodeDriver({
+      channel,
+      agent: "opencode",
+      baseUrl: fake.url,
+      directory: "/tmp/boxaide-agent",
+      waitMs: 1_000,
+      retryBaseMs: 10,
+    }).start();
+    cleanup.push(() => driver.stop());
+
+    channel.post({ role: "user", text: "first question" });
+    await until(() => namings === 1);
+    channel.post({ role: "user", text: "second question" });
+    await until(() => channel.history().filter((t) => t.role === "agent").length === 2);
+
+    // One session for both turns: a failed naming must not take the model's
+    // memory of the first question with it, and must not abort the session
+    // the conversation is living in.
+    expect(fake.calls.filter((c) => c.path.startsWith("/session?")).length).toBe(1);
+    expect(fake.calls.some((c) => c.path.includes("/abort"))).toBe(false);
+  });
+
   it("releases the lease and retries when the API fails", async () => {
     let attempts = 0;
     const fake = await startFake((call) => {

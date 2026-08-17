@@ -263,18 +263,29 @@ export class Store {
       .prepare(`PRAGMA table_info(agent_chats)`)
       .all() as Array<{ name: string }>;
     if (!chatCols.some((c) => c.name === "title_source")) {
-      this.db.exec(
-        `ALTER TABLE agent_chats ADD COLUMN title_source TEXT NOT NULL DEFAULT 'user'`,
-      );
-      for (const row of this.db
-        .prepare(`SELECT id, title_enc as titleEnc FROM agent_chats`)
-        .all() as Array<{ id: string; titleEnc: string }>) {
-        const title = decryptSecret(this.masterKey, row.titleEnc);
-        if (title !== UNTITLED && title !== MIGRATED) continue;
-        this.db
-          .prepare(`UPDATE agent_chats SET title_source = 'auto' WHERE id = ?`)
-          .run(row.id);
-      }
+      this.db.transaction(() => {
+        this.db.exec(
+          `ALTER TABLE agent_chats ADD COLUMN title_source TEXT NOT NULL DEFAULT 'user'`,
+        );
+        for (const row of this.db
+          .prepare(`SELECT id, title_enc as titleEnc FROM agent_chats`)
+          .all() as Array<{ id: string; titleEnc: string }>) {
+          // A title this key cannot read is not a title anybody is reading,
+          // and a wrong key or one corrupt row must not stop the app from
+          // starting: mail does not depend on any of this. The row keeps the
+          // settled default and the migration carries on.
+          let title: string;
+          try {
+            title = decryptSecret(this.masterKey, row.titleEnc);
+          } catch {
+            continue;
+          }
+          if (title !== UNTITLED && title !== MIGRATED) continue;
+          this.db
+            .prepare(`UPDATE agent_chats SET title_source = 'auto' WHERE id = ?`)
+            .run(row.id);
+        }
+      })();
     }
     if (!turnCols.some((c) => c.name === "chat_id")) {
       this.db.exec(`ALTER TABLE agent_turns ADD COLUMN chat_id TEXT`);
@@ -431,6 +442,33 @@ export class Store {
       .prepare(`UPDATE agent_chats SET title_enc = ?, title_source = ? WHERE id = ?`)
       .run(encryptSecret(this.masterKey, title), source, id);
     return res.changes > 0;
+  }
+
+  /**
+   * A value that changes whenever the chat list would look different.
+   *
+   * The turn stream crosses processes on its own — every turn is a row with a
+   * sequence — but a rename writes no row, so `boxaide mcp` naming a chat is
+   * invisible to the browser attached to `boxaide serve`. This is what the
+   * poll compares to notice it. `title_enc` earns its place here: encryption
+   * uses a fresh nonce every time, so re-encrypting the same title still
+   * changes the string, and a rename cannot slip past unnoticed.
+   */
+  chatsFingerprint(): string {
+    const rows = this.db
+      .prepare(
+        `SELECT id, title_enc as titleEnc, archived_at as archivedAt, active
+         FROM agent_chats ORDER BY id`,
+      )
+      .all() as Array<{
+      id: string;
+      titleEnc: string;
+      archivedAt: string | null;
+      active: number;
+    }>;
+    return rows
+      .map((r) => `${r.id}:${r.titleEnc.slice(0, 16)}:${r.archivedAt ?? ""}:${r.active}`)
+      .join("|");
   }
 
   /** Who named this chat, or null when there is no such chat. */

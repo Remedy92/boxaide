@@ -293,6 +293,48 @@ describe("limits", () => {
   });
 });
 
+describe("across processes", () => {
+  /**
+   * `boxaide mcp` names a chat; the browser is attached to `boxaide serve`.
+   * The two share a file and nothing else, and a rename writes no turn, so
+   * without the fingerprint poll the rail keeps the old name until the user
+   * types again.
+   */
+  it("tells an attached browser about a rename made by another process", async () => {
+    const key = randomBytes(32);
+    const path = join(tmpdir(), `boxaide-rename-${randomBytes(6).toString("hex")}.db`);
+    const serveStore = new Store(key, path);
+    const mcpStore = new Store(key, path);
+    const serve = new AgentChannel(serveStore);
+    const mcp = new AgentChannel(mcpStore);
+    try {
+      const chat = serve.post({ role: "user", text: "chase the March invoices" }).chatId;
+      let frames = 0;
+      // The SSE route subscribes to both; turns are what starts the poll.
+      serve.subscribe(() => {});
+      serve.subscribeChats(() => {
+        frames += 1;
+      });
+
+      expect(mcp.nameChat(chat, "March invoice chase")).toBe(true);
+      const deadline = Date.now() + 5_000;
+      while (frames === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(frames).toBeGreaterThan(0);
+      expect(serve.chats()[0].title).toBe("March invoice chase");
+    } finally {
+      serve.close();
+      mcp.close();
+      serveStore.close();
+      mcpStore.close();
+      for (const suffix of ["", "-wal", "-shm"]) {
+        if (existsSync(`${path}${suffix}`)) unlinkSync(`${path}${suffix}`);
+      }
+    }
+  });
+});
+
 describe("migration", () => {
   it("adopts turns written before chats existed into one conversation", () => {
     const key = randomBytes(32);
