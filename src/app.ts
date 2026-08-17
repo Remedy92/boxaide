@@ -119,7 +119,7 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
   });
 
   // No timers yet — `startServer` starts them. A stdio `boxaide mcp` process
-  // has no UI to show an update in and must not poll GitHub every six hours.
+  // has no UI to show an update in and must not poll GitHub on a timer.
   const update = new UpdateService({
     driver: overrides.updateDriver,
     currentVersion: overrides.appVersion,
