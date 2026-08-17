@@ -25,6 +25,7 @@ export type OneShotLauncher = {
   runOnce(opts: {
     agentId?: string | null;
     prompt: string;
+    model?: string | null;
   }): Promise<OneShotResult>;
   killRun(): void;
 };
@@ -140,6 +141,7 @@ export class AutomationScheduler {
       const result = await this.launcher.runOnce({
         agentId: automation.agentId,
         prompt: automation.prompt,
+        model: automation.model,
       });
       this.store.finishRun(run.id, {
         status: result.status,

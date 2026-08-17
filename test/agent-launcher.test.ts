@@ -115,8 +115,23 @@ describe("AgentLauncher", () => {
       { PATH: bin },
     );
     expect((await launcher.list())).toEqual([
-      { id: "fake", label: "Fake Agent", available: true, supported: true, models: [] },
-      { id: "ghost", label: "Ghost", available: false, supported: false, models: [] },
+      {
+        id: "fake",
+        label: "Fake Agent",
+        available: true,
+        supported: true,
+        // No runArgs on the test spec: launchable for chat, not for a run.
+        runsAutomations: false,
+        models: [],
+      },
+      {
+        id: "ghost",
+        label: "Ghost",
+        available: false,
+        supported: false,
+        runsAutomations: false,
+        models: [],
+      },
     ]);
   });
 

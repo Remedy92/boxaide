@@ -17,6 +17,8 @@ export type Automation = {
   prompt: string;
   /** AgentSpec id from the launcher registry; null = first available. */
   agentId: string | null;
+  /** Model id for that agent's CLI; null = the CLI's own default. */
+  model: string | null;
   enabled: boolean;
   createdAt: string;
   lastRunAt: string | null;
@@ -40,6 +42,7 @@ type AutomationRow = {
   cron: string;
   prompt: string;
   agent_id: string | null;
+  model: string | null;
   enabled: number;
   created_at: string;
   last_run_at: string | null;
@@ -65,12 +68,14 @@ export const MAX_AUTOMATION_NAME_CHARS = 200;
 export const MAX_AUTOMATION_CRON_CHARS = 200;
 export const MAX_AUTOMATION_PROMPT_BYTES = 64 * 1024;
 export const MAX_AUTOMATION_AGENT_ID_CHARS = 100;
+export const MAX_AUTOMATION_MODEL_CHARS = 200;
 
 function assertAutomationFields(input: {
   name: string;
   cron: string;
   prompt: string;
   agentId?: string | null;
+  model?: string | null;
 }): void {
   if (input.name.length > MAX_AUTOMATION_NAME_CHARS) {
     throw new Error(
@@ -92,6 +97,15 @@ function assertAutomationFields(input: {
   ) {
     throw new Error(
       `agentId must be at most ${MAX_AUTOMATION_AGENT_ID_CHARS} characters`,
+    );
+  }
+  if (
+    input.model !== undefined &&
+    input.model !== null &&
+    input.model.length > MAX_AUTOMATION_MODEL_CHARS
+  ) {
+    throw new Error(
+      `model must be at most ${MAX_AUTOMATION_MODEL_CHARS} characters`,
     );
   }
 }
@@ -154,6 +168,7 @@ export class AutomationStore {
         cron TEXT NOT NULL,
         prompt TEXT NOT NULL,
         agent_id TEXT,
+        model TEXT,
         enabled INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         last_run_at TEXT,
@@ -171,6 +186,16 @@ export class AutomationStore {
       CREATE INDEX IF NOT EXISTS automation_runs_by_automation
         ON automation_runs (automation_id, started_at DESC);
     `);
+
+    // Only reached by databases created before the model column existed. Null
+    // there means what it means everywhere: run on the CLI's own default, which
+    // is exactly what those automations already did.
+    const columns = this.db
+      .prepare(`PRAGMA table_info(automations)`)
+      .all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === "model")) {
+      this.db.exec(`ALTER TABLE automations ADD COLUMN model TEXT`);
+    }
   }
 
   create(input: {
@@ -178,6 +203,7 @@ export class AutomationStore {
     cron: string;
     prompt: string;
     agentId?: string | null;
+    model?: string | null;
     enabled?: boolean;
     now?: Date;
   }): Automation {
@@ -189,6 +215,7 @@ export class AutomationStore {
       cron: input.cron.trim(),
       prompt: input.prompt,
       agentId: input.agentId,
+      model: input.model,
     });
     const now = input.now ?? new Date();
     // Validate before the INSERT: a stored automation with an unparseable cron
@@ -200,6 +227,7 @@ export class AutomationStore {
       cron: input.cron.trim(),
       prompt: input.prompt,
       agent_id: input.agentId ?? null,
+      model: input.model ?? null,
       enabled: input.enabled === false ? 0 : 1,
       created_at: now.toISOString(),
       last_run_at: null,
@@ -209,8 +237,8 @@ export class AutomationStore {
       this.db
         .prepare(
           `INSERT INTO automations
-             (id, name, cron, prompt, agent_id, enabled, created_at, last_run_at, next_run_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, name, cron, prompt, agent_id, model, enabled, created_at, last_run_at, next_run_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           row.id,
@@ -218,6 +246,7 @@ export class AutomationStore {
           row.cron,
           row.prompt,
           row.agent_id,
+          row.model,
           row.enabled,
           row.created_at,
           row.last_run_at,
@@ -241,6 +270,7 @@ export class AutomationStore {
       cron?: string;
       prompt?: string;
       agentId?: string | null;
+      model?: string | null;
       enabled?: boolean;
       now?: Date;
     },
@@ -248,6 +278,13 @@ export class AutomationStore {
     const current = this.get(id);
     if (!current) return null;
     const now = patch.now ?? new Date();
+    // A model id belongs to exactly one CLI, so switching agent without naming
+    // a model drops the old one. Keeping it would hand grok's model id to
+    // claude, and the run would fail at spawn instead of falling back.
+    const agentChanged =
+      patch.agentId !== undefined && patch.agentId !== current.agentId;
+    const model =
+      patch.model !== undefined ? patch.model : agentChanged ? null : current.model;
     const next: Automation = {
       ...current,
       name: patch.name?.trim() || current.name,
@@ -257,6 +294,7 @@ export class AutomationStore {
       // run with no prompt would spawn an agent carrying only the preamble.
       prompt: patch.prompt?.trim() ? patch.prompt : current.prompt,
       agentId: patch.agentId !== undefined ? patch.agentId : current.agentId,
+      model,
       enabled: patch.enabled ?? current.enabled,
     };
     assertAutomationFields(next);
@@ -269,7 +307,8 @@ export class AutomationStore {
       this.db
         .prepare(
           `UPDATE automations
-              SET name = ?, cron = ?, prompt = ?, agent_id = ?, enabled = ?, next_run_at = ?
+              SET name = ?, cron = ?, prompt = ?, agent_id = ?, model = ?,
+                  enabled = ?, next_run_at = ?
             WHERE id = ?`,
         )
         .run(
@@ -277,6 +316,7 @@ export class AutomationStore {
           next.cron,
           next.prompt,
           next.agentId,
+          next.model,
           next.enabled ? 1 : 0,
           next.nextRunAt,
           id,
@@ -489,6 +529,7 @@ function toAutomation(row: AutomationRow): Automation {
     cron: row.cron,
     prompt: row.prompt,
     agentId: row.agent_id,
+    model: row.model,
     enabled: row.enabled === 1,
     createdAt: row.created_at,
     lastRunAt: row.last_run_at,

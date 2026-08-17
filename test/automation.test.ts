@@ -22,6 +22,7 @@ import {
   type AgentSpec,
   type OneShotResult,
 } from "../src/agent/launcher.js";
+import { parseBulletModels } from "../src/agent/model-list.js";
 import { AutomationScheduler, type OneShotLauncher } from "../src/automation/scheduler.js";
 import {
   AutomationStore,
@@ -172,6 +173,62 @@ describe("AutomationStore", () => {
     expect(store.get(a.id)?.prompt).toBe("Triage.");
   });
 
+  it("stores an agent and a model, and drops the model when the agent changes", () => {
+    const store = newStore();
+    const a = store.create({
+      name: "n",
+      cron: "0 8 * * *",
+      prompt: "p",
+      agentId: "claude-code",
+      model: "claude-haiku-4-5-20251001",
+    });
+    expect(store.get(a.id)?.model).toBe("claude-haiku-4-5-20251001");
+
+    // Same agent, other fields: the model survives.
+    expect(store.update(a.id, { prompt: "q" })?.model).toBe(
+      "claude-haiku-4-5-20251001",
+    );
+
+    // A model id belongs to one CLI, so a bare agent switch clears it.
+    expect(store.update(a.id, { agentId: "grok" })?.model).toBeNull();
+
+    // Both at once is one decision, and both stick.
+    const both = store.update(a.id, { agentId: "claude-code", model: "claude-opus-5" });
+    expect(both?.agentId).toBe("claude-code");
+    expect(both?.model).toBe("claude-opus-5");
+
+    // Explicit null is how a caller asks for the CLI's own default.
+    expect(store.update(a.id, { model: null })?.model).toBeNull();
+  });
+
+  it("carries the model column onto a database created before it existed", () => {
+    const path = join(tempDir(), "old.db");
+    const old = new Database(path);
+    old.exec(`
+      CREATE TABLE automations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        cron TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        agent_id TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        last_run_at TEXT,
+        next_run_at TEXT
+      );
+      INSERT INTO automations (id, name, cron, prompt, agent_id, enabled, created_at)
+        VALUES ('old-1', 'Legacy', '0 8 * * *', 'p', NULL, 1, '2026-01-01T00:00:00.000Z');
+    `);
+    old.close();
+
+    const store = openStore(path);
+    // The row survives the migration and reads as "the CLI's own default".
+    expect(store.get("old-1")?.model).toBeNull();
+    expect(store.update("old-1", { model: "claude-opus-5" })?.model).toBe(
+      "claude-opus-5",
+    );
+  });
+
   it("finds only enabled, due automations", () => {
     const store = newStore();
     const past = new Date("2026-08-13T07:00:00Z");
@@ -270,7 +327,7 @@ describe("AutomationStore", () => {
 
 /** Records every run and can hold one open, so overlap is observable. */
 class FakeLauncher implements OneShotLauncher {
-  calls: { agentId?: string | null; prompt: string }[] = [];
+  calls: { agentId?: string | null; prompt: string; model?: string | null }[] = [];
   inFlight = 0;
   maxInFlight = 0;
   chatRunning = false;
@@ -297,7 +354,11 @@ class FakeLauncher implements OneShotLauncher {
     return this.chatRunning || this.inFlight > 0;
   }
 
-  async runOnce(opts: { agentId?: string | null; prompt: string }): Promise<OneShotResult> {
+  async runOnce(opts: {
+    agentId?: string | null;
+    prompt: string;
+    model?: string | null;
+  }): Promise<OneShotResult> {
     this.calls.push(opts);
     this.inFlight++;
     this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
@@ -344,7 +405,7 @@ describe("AutomationScheduler", () => {
     expect(scheduler.state()).toEqual({ active: null, queued: [] });
   });
 
-  it("passes the automation's agent id through to the launcher", async () => {
+  it("passes the automation's agent id and model through to the launcher", async () => {
     const store = newStore();
     const launcher = new FakeLauncher();
     const scheduler = new AutomationScheduler(store, launcher);
@@ -353,10 +414,12 @@ describe("AutomationScheduler", () => {
       cron: "0 * * * *",
       prompt: "p",
       agentId: "claude-code",
+      model: "claude-haiku-4-5-20251001",
       now: past,
     });
     await scheduler.tick(now);
     expect(launcher.calls[0].agentId).toBe("claude-code");
+    expect(launcher.calls[0].model).toBe("claude-haiku-4-5-20251001");
   });
 
   it("waits behind an interactive chat agent instead of dropping the run", async () => {
@@ -729,6 +792,74 @@ describe("AgentLauncher.runOnce", () => {
     await expect(
       nothing.runOnce({ agentId: "fake", prompt: "p" }),
     ).rejects.toThrowError(/not installed/);
+  });
+
+  it("passes a picked model to the CLI, and refuses one it does not offer", async () => {
+    let seen: string | undefined = "untouched";
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
+    const specs: AgentSpec[] = [
+      {
+        id: "fake",
+        label: "Fake Agent",
+        bin: "fake-agent",
+        args: () => [],
+        models: [{ id: "cheap-1", label: "Cheap 1" }],
+        runArgs: (_ctx, _prompt, model) => {
+          seen = model;
+          return [];
+        },
+      },
+    ];
+    const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
+    cleanups.push(() => launcher.close());
+
+    expect((await launcher.runOnce({ prompt: "p", model: "cheap-1" })).status).toBe("ok");
+    expect(seen).toBe("cheap-1");
+
+    // Null is how the scheduler says "no model stored", not a model id.
+    expect((await launcher.runOnce({ prompt: "p", model: null })).status).toBe("ok");
+    expect(seen).toBeUndefined();
+
+    // An id the CLI never named must never reach a command line.
+    await expect(
+      launcher.runOnce({ prompt: "p", model: "made-up" }),
+    ).rejects.toThrowError(/does not offer that model/);
+  });
+
+  it("holds the run slot while it validates a model, so a chat start cannot steal it", async () => {
+    // The scheduler has already claimed the run row before runOnce is called,
+    // so a slot lost while the CLI is being asked for its models is not a wait
+    // — it is a fire recorded as a failed run and skipped until next time.
+    // One binary, two jobs: a slow `models` listing, and an instant run. The
+    // sleep is the window this test is about.
+    const bin = fakeBinDir(
+      "fake-agent",
+      "#!/bin/sh\nif [ \"$1\" = models ]; then sleep 0.4; echo 'Available models:'; echo '- slow-1'; fi\nexit 0\n",
+    );
+    const specs: AgentSpec[] = [
+      {
+        id: "fake",
+        label: "Fake Agent",
+        bin: "fake-agent",
+        args: () => [],
+        listModels: { args: ["models"], parse: parseBulletModels },
+        runArgs: () => [],
+      },
+    ];
+    const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
+    cleanups.push(() => launcher.close());
+
+    const pending = launcher.runOnce({ prompt: "p", model: "slow-1" });
+    await until(() => launcher.busy());
+    await expect(launcher.start("fake")).rejects.toThrowError(
+      /automation run is in progress/,
+    );
+    expect((await pending).status).toBe("ok");
+    // A validation that failed frees the slot instead of wedging the launcher.
+    await expect(
+      launcher.runOnce({ prompt: "p", model: "made-up" }),
+    ).rejects.toThrowError(/does not offer that model/);
+    expect(launcher.busy()).toBe(false);
   });
 
   it("pre-approves platform tools for runs, never chat tools and never message_send", () => {

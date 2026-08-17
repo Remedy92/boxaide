@@ -4,6 +4,7 @@ import * as React from "react";
 import { ChevronDown, ChevronRight, Play } from "lucide-react";
 import { toast } from "sonner";
 import { Spinner } from "@/components/atoms";
+import { AutomationAgentSelect } from "@/components/automations/automation-agent-select";
 import { RunHistory } from "@/components/automations/run-history";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -22,8 +23,9 @@ import type { Automation } from "@/lib/types";
  * Everything about WHAT it does — its name, its schedule, its prompt — is
  * read-only here: automations are written by talking to the agent, and a form
  * that let a person half-edit one would be a second authoring surface with none
- * of the agent's context. The two controls are the two decisions a human makes
- * from the outside: whether it runs at all, and whether it runs right now.
+ * of the agent's context. What IS editable here is everything about HOW it
+ * runs, which needs no such context: whether it runs at all, whether it runs
+ * right now, and which agent and model carry it.
  */
 export function AutomationCard({ automation }: { automation: Automation }) {
   const toggle = useToggleAutomation();
@@ -133,6 +135,8 @@ export function AutomationCard({ automation }: { automation: Automation }) {
           </dd>
         </div>
       </dl>
+
+      <AutomationAgentSelect automation={automation} />
 
       <details className="mt-2">
         <summary className="cursor-pointer text-[12px] text-fg-tertiary hover:text-fg-secondary">

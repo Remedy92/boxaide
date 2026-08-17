@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS automations (
   cron TEXT NOT NULL,             -- 5-field cron, validated with cron-parser
   prompt TEXT NOT NULL,           -- agent instructions; user-authored, plaintext
   agent_id TEXT,                  -- launcher AgentSpec id; null = first available
+  model TEXT,                     -- model id that CLI offers; null = its own default
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   last_run_at TEXT,
@@ -426,9 +427,11 @@ CRM (`src/crm/tools.ts`):
 - `crm_deal_delete` { dealId }
 
 Automations (`src/automation/tools.ts`):
-- `automation_create` { name, cron, prompt, agentId? } — description must say:
+- `automation_create` { name, cron, prompt, agentId?, model? } — description must say:
   write the prompt as instructions to a future agent run; validate cron.
-- `automation_update` { automationId, name?, cron?, prompt?, agentId?, enabled? }
+- `automation_update` { automationId, name?, cron?, prompt?, agentId?, model?,
+  enabled? } — changing `agentId` alone clears the stored model: a model id
+  belongs to one CLI.
 - `automation_delete` { automationId }
 - `automations_list` {}
 - `automation_run_now` { automationId } — enqueue immediately.

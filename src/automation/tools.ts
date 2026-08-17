@@ -34,6 +34,11 @@ export const AUTOMATION_TOOLS: ToolDef[] = [
           description:
             "Agent CLI id from the Boxaide Agents list. Omit to use the first installed one.",
         },
+        model: {
+          type: "string",
+          description:
+            "Model id that agent's CLI offers. Omit to use the CLI's own default. A cheap model is usually right for a run that repeats every day.",
+        },
       },
       required: ["name", "cron", "prompt"],
       additionalProperties: false,
@@ -50,6 +55,9 @@ export const AUTOMATION_TOOLS: ToolDef[] = [
         cron: { type: "string", description: CRON_DESC },
         prompt: { type: "string" },
         agentId: { type: "string" },
+        // Changing agentId alone clears the stored model: an id belongs to one
+        // CLI. Pass both to switch agent and pick a model in one call.
+        model: { type: "string" },
         enabled: { type: "boolean" },
       },
       required: ["automationId"],
@@ -135,6 +143,7 @@ export async function dispatchAutomationTool(
           cron: required(args, "cron"),
           prompt: required(args, "prompt"),
           agentId: str(args, "agentId") ?? null,
+          model: str(args, "model") ?? null,
         }),
       };
     case "automation_update": {
@@ -144,6 +153,7 @@ export async function dispatchAutomationTool(
         cron: str(args, "cron"),
         prompt: str(args, "prompt"),
         agentId: args.agentId === undefined ? undefined : (str(args, "agentId") ?? null),
+        model: args.model === undefined ? undefined : (str(args, "model") ?? null),
         enabled:
           typeof args.enabled === "boolean" ? (args.enabled as boolean) : undefined,
       });

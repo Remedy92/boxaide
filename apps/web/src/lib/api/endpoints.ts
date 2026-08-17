@@ -854,12 +854,22 @@ export async function listAutomations(ctx: Ctx): Promise<Automation[]> {
 }
 
 /**
- * PATCH — a partial write. The UI sends only `enabled`; every other field is
- * the agent's to author. A bad cron or a duplicate name is a 400, not a 500.
+ * PATCH — a partial write. The UI sends only how a run happens (`enabled`,
+ * `agentId`, `model`); what it does — name, cron, prompt — is the agent's to
+ * author. A bad cron or a duplicate name is a 400, not a 500.
  */
 export async function updateAutomation(
   automationId: string,
-  patch: { enabled?: boolean; name?: string; cron?: string; prompt?: string },
+  // agentId and model take null to mean "back to the default", so an absent
+  // key and an explicit null are different requests — never collapse them.
+  patch: {
+    enabled?: boolean;
+    name?: string;
+    cron?: string;
+    prompt?: string;
+    agentId?: string | null;
+    model?: string | null;
+  },
   ctx: Ctx,
 ): Promise<Automation> {
   const data = await request<{ automation: Automation }>(
@@ -1393,6 +1403,8 @@ export type LocalAgent = {
   available: boolean;
   /** This Boxaide build knows how to launch it. */
   supported: boolean;
+  /** It can carry a scheduled automation run, not only the chat loop. */
+  runsAutomations: boolean;
   /** Models the server lets you pick from. Empty means no picker. */
   models: LocalAgentModel[];
 };

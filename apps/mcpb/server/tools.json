@@ -754,6 +754,10 @@
         "agentId": {
           "type": "string",
           "description": "Agent CLI id from the Boxaide Agents list. Omit to use the first installed one."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model id that agent's CLI offers. Omit to use the CLI's own default. A cheap model is usually right for a run that repeats every day."
         }
       },
       "required": [
@@ -784,6 +788,9 @@
           "type": "string"
         },
         "agentId": {
+          "type": "string"
+        },
+        "model": {
           "type": "string"
         },
         "enabled": {

@@ -853,6 +853,8 @@ export type ListedAgent = {
   available: boolean;
   /** This build knows how to launch it. */
   supported: boolean;
+  /** This build can carry a scheduled automation run on it. */
+  runsAutomations: boolean;
   /** Models the user may pick from. Empty means no picker. */
   models: ModelOption[];
 };
@@ -925,6 +927,12 @@ export type OneShotOptions = {
   agentId?: string | null;
   /** The automation prompt. The run preamble is prepended here, not by callers. */
   prompt: string;
+  /**
+   * Model id for that CLI, or null/undefined for its own default. Validated
+   * against what the CLI itself offers, exactly as `start` does: the id becomes
+   * an argv element, so nothing unvetted may reach a command line.
+   */
+  model?: string | null;
   /** Overridable for tests only; production runs use ONESHOT_TIMEOUT_MS. */
   timeoutMs?: number;
   /** Tests only; production runs use ONESHOT_FIRST_OUTPUT_TIMEOUT_MS. */
@@ -1016,6 +1024,17 @@ export class AgentLauncher {
    * that the user never pressed Start on.
    */
   private oneShot: ChildProcess | null = null;
+  /**
+   * A run that has taken the slot but has no child yet.
+   *
+   * Validating a picked model may have to ask the CLI what it offers, and that
+   * await sits between the scheduler's claim of the run row and the spawn. Let
+   * a chat launch through there and the run dies of "slot taken" — recorded as
+   * a failed run, with the schedule advanced past a fire that never happened.
+   * The slot is therefore held from the first guard, and a chat start inside
+   * the window is refused exactly as it is once the child exists.
+   */
+  private oneShotStarting = false;
   /** The in-process loop driving the chat agent, for specs that have one. */
   private driver: AgentDriver | null = null;
   /**
@@ -1067,6 +1086,7 @@ export class AgentLauncher {
           label: spec.label,
           available: bin !== null,
           supported: launchable(spec),
+          runsAutomations: spec.runArgs !== undefined,
           models: cached ?? (await this.firstModels(spec, bin)),
         };
       }),
@@ -1203,7 +1223,7 @@ export class AgentLauncher {
     if (running) {
       throw new LaunchError(409, `${running.id} is already running`);
     }
-    if (this.oneShot) {
+    if (this.oneShot || this.oneShotStarting) {
       throw new LaunchError(409, "an automation run is in progress");
     }
   }
@@ -1217,7 +1237,7 @@ export class AgentLauncher {
    * automation run. The scheduler asks before dequeuing (spec invariant 4).
    */
   busy(): boolean {
-    return this.running !== null || this.oneShot !== null;
+    return this.running !== null || this.oneShot !== null || this.oneShotStarting;
   }
 
   /**
@@ -1365,29 +1385,48 @@ export class AgentLauncher {
    * here would hold a run row open for an unbounded chat session.
    */
   async runOnce(opts: OneShotOptions): Promise<OneShotResult> {
-    if (this.running) {
-      throw new LaunchError(409, `${this.running.id} is already running`);
-    }
-    if (this.oneShot) {
-      throw new LaunchError(409, "an automation run is in progress");
-    }
-    const spec = this.resolveRunSpec(opts.agentId);
-    const bin = this.resolveBin(spec.bin);
-    if (!bin) {
-      throw new LaunchError(
-        400,
-        `${spec.label} is not installed (no ${spec.bin} on PATH)`,
-      );
-    }
-    const workDir = this.prepareWorkDir(spec);
-    const prompt = `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
+    this.assertIdle();
+    // Held from here to the spawn, because validating a model can suspend. See
+    // oneShotStarting: the scheduler has already claimed the run row by now, so
+    // losing the slot inside that window is not a wait, it is a lost fire.
+    this.oneShotStarting = true;
+    let child: ChildProcess;
+    // Read off the spec inside the try, so nothing below depends on a binding
+    // the guarded section might never have reached.
+    let render: RenderRunLine | undefined;
+    try {
+      const spec = this.resolveRunSpec(opts.agentId);
+      const bin = this.resolveBin(spec.bin);
+      if (!bin) {
+        throw new LaunchError(
+          400,
+          `${spec.label} is not installed (no ${spec.bin} on PATH)`,
+        );
+      }
+      const model = opts.model ?? undefined;
+      if (model !== undefined) {
+        // The model id becomes an argv element, so it must be one the CLI
+        // itself named — the same rule `start` applies to a chat launch.
+        const offered = await this.modelsFor(spec, bin);
+        if (!offered.some((m) => m.id === model)) {
+          throw new LaunchError(400, `${spec.label} does not offer that model`);
+        }
+      }
+      render = spec.renderRunLine;
+      const workDir = this.prepareWorkDir(spec);
+      const prompt = `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
 
-    const child = spawn(bin, spec.runArgs!(this.ctx, prompt), {
-      cwd: workDir,
-      env: this.childEnvFor(spec, workDir),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    this.oneShot = child;
+      child = spawn(bin, spec.runArgs!(this.ctx, prompt, model), {
+        cwd: workDir,
+        env: this.childEnvFor(spec, workDir),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      this.oneShot = child;
+    } finally {
+      // The child now holds the slot on its own, and a run that never got one
+      // must not hold it at all.
+      this.oneShotStarting = false;
+    }
 
     let log = "";
     const capture = (chunk: string) => {
@@ -1404,7 +1443,6 @@ export class AgentLauncher {
     // A spec that asks its CLI for an event stream must render it: the raw
     // NDJSON is unreadable, and the run log's only audience is a person. The
     // splitter is kept so finish() can flush a killed run's partial last line.
-    const render = spec.renderRunLine;
     const split = render
       ? lineSplitter((line) => {
           const rendered = render(line);

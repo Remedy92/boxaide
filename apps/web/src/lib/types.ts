@@ -358,6 +358,8 @@ export type Automation = {
   prompt: string;
   /** Launcher AgentSpec id. Null ⇒ the first available agent runs it. */
   agentId: string | null;
+  /** Model id for that agent's CLI. Null ⇒ the CLI's own default. */
+  model: string | null;
   enabled: boolean;
   createdAt: string;
   lastRunAt: string | null;
