@@ -64,7 +64,7 @@ export const CALENDAR_TOOLS: ToolDef[] = [
         start: { type: "string", description: `${RANGE_DESC} Defaults to now.` },
         end: {
           type: "string",
-          description: `${RANGE_DESC} Defaults to a week after start.`,
+          description: `${RANGE_DESC} Defaults to a week after start. At most ${MAX_AGENDA_DAYS} days after start.`,
         },
         durationMinutes: {
           type: "number",
@@ -230,9 +230,11 @@ export async function dispatchCalendarTool(
       );
 
     case "calendar_free_slots":
+      // Same cap as agenda_view and GET /api/calendar/free-slots: the slot
+      // search reads the whole window through every connected provider and
+      // walks it day by day, so an uncapped explicit end fans out for years.
       return service.freeSlots({
-        start: str(args, "start"),
-        end: str(args, "end"),
+        ...agendaRangeOrThrow({ start: str(args, "start"), end: str(args, "end") }),
         durationMinutes: requiredNum(args, "durationMinutes"),
         dayStartHour: num(args, "dayStartHour"),
         dayEndHour: num(args, "dayEndHour"),

@@ -298,6 +298,41 @@ describe("parseObjectInstances", () => {
     ]);
   });
 
+  it("keeps later instances when an override moves one past the range end", () => {
+    // The regression: expansion stopped at the first occurrence whose moved
+    // start was outside the range, so rescheduling one standup far ahead
+    // deleted every later one from the agenda and from busy time.
+    const object = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//Test//EN",
+      "BEGIN:VEVENT",
+      "UID:moved-1",
+      "DTSTART:20260817T140000Z",
+      "DTEND:20260817T150000Z",
+      "RRULE:FREQ=WEEKLY",
+      "SUMMARY:Weekly standup",
+      "END:VEVENT",
+      "BEGIN:VEVENT",
+      "UID:moved-1",
+      "RECURRENCE-ID:20260824T140000Z",
+      "DTSTART:20261201T140000Z",
+      "DTEND:20261201T150000Z",
+      "SUMMARY:Weekly standup (moved)",
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\r\n");
+    const out = parseObjectInstances(object, "cal-1", "obj", {
+      start: "2026-08-17T00:00:00Z",
+      end: "2026-09-14T00:00:00Z",
+    });
+    expect(out.map((i) => i.start)).toEqual([
+      "2026-08-17T14:00:00.000Z",
+      "2026-08-31T14:00:00.000Z",
+      "2026-09-07T14:00:00.000Z",
+    ]);
+  });
+
   it("treats TRANSP:TRANSPARENT as not busy", () => {
     const [instance] = parseObjectInstances(
       ics(

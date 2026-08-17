@@ -638,6 +638,30 @@ describe("dispatchCalendarTool", () => {
     ).rejects.toThrow(/durationMinutes is required/);
   });
 
+  it("caps an explicit calendar_free_slots end at the shared span", async () => {
+    // The slot search reads the window through every provider and walks it day
+    // by day, so the tool path must not accept a range the REST path refuses.
+    await expect(
+      dispatchCalendarTool(platform, "calendar_free_slots", {
+        start: "2026-08-17T00:00:00.000Z",
+        end: "2036-08-17T00:00:00.000Z",
+        durationMinutes: 30,
+      }),
+    ).rejects.toThrow(/range must be 62 days or less/);
+  });
+
+  it("defaults calendar_free_slots to a seven-day window", async () => {
+    calendarStore.addAccount({ alias: "work", email: "me@test.com", config: CALDAV });
+    await dispatchCalendarTool(platform, "calendar_free_slots", {
+      start: "2026-08-17T00:00:00.000Z",
+      durationMinutes: 30,
+    });
+    expect(caldav.ranges[0]).toEqual({
+      start: "2026-08-17T00:00:00.000Z",
+      end: "2026-08-24T00:00:00.000Z",
+    });
+  });
+
   it("returns meetings through meetings_list", async () => {
     calendarStore.addAccount({ alias: "work", email: "me@test.com", config: CALDAV });
     const created = (await dispatchCalendarTool(platform, "meeting_create", {

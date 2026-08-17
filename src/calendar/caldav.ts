@@ -145,7 +145,12 @@ export function parseObjectInstances(
     if (startMs >= rangeEnd) break;
     if (!hasOverrides && startMs + durationMs <= rangeStart) continue;
     const occ = event.getOccurrenceDetails(next);
-    if (occ.startDate.toJSDate().getTime() >= rangeEnd) break;
+    // Skip, never break: the iterator is ordered by the ORIGINAL recurrence
+    // ids, so an override that moved one occurrence past the range end says
+    // nothing about the occurrences after it. Breaking here dropped every
+    // later in-range instance of the series. The loop above still stops on the
+    // unmoved pattern passing rangeEnd.
+    if (occ.startDate.toJSDate().getTime() >= rangeEnd) continue;
     push(occ.item.component, occ.startDate, occ.endDate);
   }
   return out;
