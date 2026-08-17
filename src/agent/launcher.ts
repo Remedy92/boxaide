@@ -39,7 +39,9 @@ import {
   readClaudeEvent,
   readGrokEvent,
   readOpenCodeEvent,
+  renderClaudeRunLine,
   type ReadEvent,
+  type RenderRunLine,
 } from "./agent-stream.js";
 import {
   OpenCodeDriver,
@@ -274,6 +276,12 @@ export type AgentSpec = {
    */
   readEvent?: ReadEvent;
   /**
+   * Turns one stdout line of a one-shot run into the text its log keeps. Set
+   * only for specs whose `runArgs` ask for an event stream; without it the run
+   * log is the raw bytes the CLI wrote, which is what every CLI did before.
+   */
+  renderRunLine?: RenderRunLine;
+  /**
    * Runs the chat loop in this process for a CLI whose `args` start a server
    * rather than a one-shot session. Called once, straight after spawn; the
    * launcher stops it when the child exits or is stopped. Null means the
@@ -307,7 +315,6 @@ function claudeArgs(ctx: LaunchContext, model?: string): string[] {
     // NDJSON of the session's own events, which agent-stream.ts reads for
     // presence. --verbose is what makes -p emit the per-event lines rather
     // than only the final result; both flags were verified against the CLI.
-    // Chat only: a scheduled run's log is read by a human, so it stays text.
     "--output-format",
     "stream-json",
     "--verbose",
@@ -318,18 +325,28 @@ function claudeArgs(ctx: LaunchContext, model?: string): string[] {
  * One-shot form: identical wiring, different prompt and allowlist. Same
  * `-p` headless mode — the chat loop only exists because KICKOFF tells the
  * model to loop, so a plain prompt already exits after the work is done.
+ *
+ * Same event stream as the chat path, for a different reason: plain `-p`
+ * prints nothing until the very end, so a run that hung wrote a zero-byte log
+ * and the UI could only say the run wrote nothing. `renderRunLine` turns these
+ * events back into text a person reads.
  */
 function claudeRunArgs(
   ctx: LaunchContext,
   prompt: string,
   model?: string,
 ): string[] {
-  return claudeArgsFor(
-    ctx,
-    prompt,
-    runPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
-    model,
-  );
+  return [
+    ...claudeArgsFor(
+      ctx,
+      prompt,
+      runPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
+      model,
+    ),
+    "--output-format",
+    "stream-json",
+    "--verbose",
+  ];
 }
 
 function claudeArgsFor(
@@ -356,6 +373,48 @@ function claudeArgsFor(
     "--allowedTools",
     allowedTools.join(","),
   ];
+}
+
+/**
+ * Claude Code's own config home, isolated the way Grok's is.
+ *
+ * --strict-mcp-config only covers MCP servers. Everything else `claude` reads
+ * out of ~/.claude — hooks, skills, output styles, subagents, settings — still
+ * loads, and a scheduled run was observed picking up the user's personal set:
+ * a run Boxaide is responsible for must not be reshaped by files the user
+ * wrote for their own terminal. CLAUDE_CONFIG_DIR moves all of it to a
+ * directory this launcher owns. Deliberately applied to the chat path too,
+ * same as Grok — the isolation is about whose config runs, not which path.
+ */
+function claudeConfigHomeFor(ctx: LaunchContext): string {
+  const root =
+    ctx.dataDir === ":memory:" ? join(tmpdir(), "boxaide-agent") : ctx.dataDir;
+  return join(root, "agent-homes", "claude");
+}
+
+function claudeChildEnv(
+  ctx: LaunchContext,
+  _workDir: string,
+): Record<string, string> {
+  return { CLAUDE_CONFIG_DIR: claudeConfigHomeFor(ctx) };
+}
+
+function claudePrepare(
+  ctx: LaunchContext,
+  _workDir: string,
+  parentEnv: NodeJS.ProcessEnv,
+): void {
+  const home = claudeConfigHomeFor(ctx);
+  mkdirSync(home, { recursive: true });
+
+  // Auth is the one thing the isolated home must inherit. On macOS the
+  // credentials live in the keychain and there is no file to link; the link is
+  // only made when the user's home actually holds one.
+  const parentHome = parentEnv.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+  const authFrom = join(parentHome, ".credentials.json");
+  if (existsSync(authFrom)) {
+    refreshLink(authFrom, join(home, ".credentials.json"));
+  }
 }
 
 /**
@@ -764,7 +823,10 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     args: claudeArgs,
     runArgs: claudeRunArgs,
     models: CLAUDE_MODELS,
+    childEnv: claudeChildEnv,
+    prepare: claudePrepare,
     readEvent: readClaudeEvent,
+    renderRunLine: renderClaudeRunLine,
   },
   {
     id: "grok",
@@ -865,10 +927,47 @@ export type OneShotOptions = {
   prompt: string;
   /** Overridable for tests only; production runs use ONESHOT_TIMEOUT_MS. */
   timeoutMs?: number;
+  /** Tests only; production runs use ONESHOT_FIRST_OUTPUT_TIMEOUT_MS. */
+  firstOutputTimeoutMs?: number;
+  /** Tests only; production runs use ONESHOT_CLOSE_GRACE_MS. */
+  closeGraceMs?: number;
 };
 
 /** Spec: 15-minute hard timeout, then SIGKILL and status 'killed'. */
 export const ONESHOT_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * How long a run may say nothing at all before it is written off.
+ *
+ * A CLI that cannot start its session — a wedged MCP handshake, a config it is
+ * waiting on — prints nothing and holds the single run slot for the whole 15
+ * minutes. Any healthy run narrates itself within seconds of launch, so
+ * silence this long is a hang, not slow work.
+ */
+export const ONESHOT_FIRST_OUTPUT_TIMEOUT_MS = 2 * 60 * 1000;
+
+/**
+ * How long a finish waits for stdio EOF after the child itself is gone.
+ *
+ * 'close' is the honest end of a run, but it waits for every pipe to close and
+ * a detached grandchild can hold one open for as long as it likes — that is
+ * what turned a 15-minute timeout into a 17-minute run.
+ */
+export const ONESHOT_CLOSE_GRACE_MS = 2_000;
+
+/**
+ * Notes appended to a run log so the log is never empty. A killed run's log is
+ * the only thing a human gets, and "wrote nothing" explains nothing.
+ * Style-matched to STALE_RUN_NOTE in src/automation/store.ts.
+ */
+export const ONESHOT_DEADLINE_NOTE =
+  "[boxaide] killed: the run hit the 15-minute limit and was stopped.";
+
+export const ONESHOT_SILENT_NOTE =
+  "[boxaide] stopped: the agent wrote nothing at all after launch, so the run was ended early instead of held to the deadline.";
+
+export const ONESHOT_KILLED_NOTE =
+  "[boxaide] killed: the run was stopped before it finished.";
 
 /**
  * The tail is what gets kept, not the head: a run that failed says why in its
@@ -1212,31 +1311,68 @@ export class AgentLauncher {
     const capture = (chunk: string) => {
       log = (log + chunk).slice(-ONESHOT_LOG_LIMIT);
     };
+    /** A whole line of Boxaide's own, on its own row whatever came before. */
+    const note = (line: string) => {
+      capture(`${log && !log.endsWith("\n") ? "\n" : ""}${line}\n`);
+    };
     child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", capture);
     child.stderr?.setEncoding("utf8");
+    // A spec that asks its CLI for an event stream must render it: the raw
+    // NDJSON is unreadable, and the run log's only audience is a person.
+    const render = spec.renderRunLine;
+    child.stdout?.on(
+      "data",
+      render
+        ? lineSplitter((line) => {
+            const rendered = render(line);
+            if (rendered !== null) capture(`${rendered}\n`);
+          })
+        : capture,
+    );
+    // stderr stays raw whatever the spec does: a crash writes plain text here.
     child.stderr?.on("data", capture);
 
-    let killed = false;
+    // Which status a kill produces. A deadline or a manual kill is 'killed';
+    // the watchdog is 'error', because a run that never spoke did not run.
+    let forced: "killed" | "error" | null = null;
     const timer = setTimeout(() => {
-      killed = true;
+      note(ONESHOT_DEADLINE_NOTE);
+      forced = "killed";
       // SIGKILL, not SIGTERM: the deadline has already passed, and a CLI that
       // ignores a polite signal would hold the single run slot indefinitely.
       child.kill("SIGKILL");
     }, opts.timeoutMs ?? ONESHOT_TIMEOUT_MS);
     timer.unref?.();
+    const watchdog = setTimeout(() => {
+      note(ONESHOT_SILENT_NOTE);
+      forced = "error";
+      child.kill("SIGKILL");
+    }, opts.firstOutputTimeoutMs ?? ONESHOT_FIRST_OUTPUT_TIMEOUT_MS);
+    watchdog.unref?.();
+    // Any byte on either stream is a session that started. Only the first one
+    // matters, and clearing an already-cleared timer is free.
+    const sawOutput = () => clearTimeout(watchdog);
+    child.stdout?.on("data", sawOutput);
+    child.stderr?.on("data", sawOutput);
     this.killOneShot = () => {
-      killed = true;
+      note(ONESHOT_KILLED_NOTE);
+      forced = "killed";
       child.kill("SIGKILL");
     };
 
     return await new Promise<OneShotResult>((resolve) => {
+      let done = false;
+      let grace: ReturnType<typeof setTimeout> | null = null;
       const finish = (code: number | null) => {
+        if (done) return;
+        done = true;
         clearTimeout(timer);
+        clearTimeout(watchdog);
+        if (grace) clearTimeout(grace);
         this.oneShot = null;
         this.killOneShot = null;
         resolve({
-          status: killed ? "killed" : code === 0 ? "ok" : "error",
+          status: forced ?? (code === 0 ? "ok" : "error"),
           exitCode: code,
           log,
         });
@@ -1246,9 +1382,20 @@ export class AgentLauncher {
         capture(`\n${err.message}`);
         finish(null);
       });
-      // "close", not "exit": exit can fire while stdout/stderr still hold
-      // undrained data, and the log is the whole point of capturing.
+      // "close" is the normal finish: it waits for stdout/stderr to drain, and
+      // the log is the whole point of capturing.
       child.on("close", (code) => finish(code));
+      // But "close" waits for every holder of those pipes, and a detached
+      // grandchild can hold one open long after the agent is gone — that is
+      // what reported a 15-minute timeout as a 17-minute run. Past the grace
+      // the process is dead and its duration is the honest answer.
+      child.on("exit", (code) => {
+        grace = setTimeout(
+          () => finish(code),
+          opts.closeGraceMs ?? ONESHOT_CLOSE_GRACE_MS,
+        );
+        grace.unref?.();
+      });
     });
   }
 

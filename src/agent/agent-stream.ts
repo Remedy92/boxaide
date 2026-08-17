@@ -106,6 +106,72 @@ export const readOpenCodeEvent: ReadEvent = (line) => {
 };
 
 /**
+ * One stream line turned into something a person would want to read, or null
+ * when the line says nothing worth a row in the log.
+ *
+ * Null here means different things than in `ReadEvent`: the line was understood
+ * and is deliberately not shown. A line that was *not* understood is returned
+ * verbatim instead, because an unparsed line is still information and the log
+ * is the only record a human gets of a scheduled run.
+ */
+export type RenderRunLine = (line: string) => string | null;
+
+/**
+ * Claude Code under `--output-format stream-json --verbose`, rendered for the
+ * run log of a scheduled automation.
+ *
+ * The audience is a person reading after the fact, so this keeps what explains
+ * the run — session start, what the agent said, which tools it reached for, how
+ * it ended — and drops what only a machine would want: tool results, token
+ * deltas, hook records. Nothing here throws; a malformed event renders as
+ * nothing rather than losing the whole log to one bad line.
+ */
+export const renderClaudeRunLine: RenderRunLine = (line) => {
+  const event = parse(line) as
+    | {
+        type?: string;
+        subtype?: string;
+        model?: unknown;
+        result?: unknown;
+        message?: { content?: unknown };
+      }
+    | null;
+  // Not JSON we can read — hand it back as it arrived rather than swallow it.
+  if (!event || typeof event !== "object") return line;
+
+  if (event.type === "system") {
+    if (event.subtype !== "init") return null;
+    const model = typeof event.model === "string" && event.model ? event.model : null;
+    return model ? `[claude] session started (model ${model})` : "[claude] session started";
+  }
+
+  if (event.type === "assistant") {
+    const content = event.message?.content;
+    if (!Array.isArray(content)) return null;
+    const parts: string[] = [];
+    for (const block of content) {
+      const b = block as { type?: string; text?: unknown; name?: unknown };
+      if (b?.type === "text" && typeof b.text === "string" && b.text) {
+        parts.push(b.text);
+      } else if (b?.type === "tool_use" && typeof b.name === "string" && b.name) {
+        parts.push(`[tool] ${unprefix(b.name)}`);
+      }
+    }
+    return parts.length ? parts.join("\n") : null;
+  }
+
+  if (event.type === "result") {
+    if (event.subtype === "success" && typeof event.result === "string") {
+      return `[claude] result: ${event.result}`;
+    }
+    return `[claude] ${event.subtype ?? "result"}`;
+  }
+
+  // `user` lines are tool results, and everything else is bookkeeping.
+  return null;
+};
+
+/**
  * Longest line either CLI may produce before we give up on it.
  *
  * Grok restates its whole command and tool registry periodically, which runs

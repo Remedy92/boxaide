@@ -3,7 +3,15 @@
  * scripts — never at a real agent CLI, which would burn the user's account
  * and hang the suite.
  */
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,8 +19,11 @@ import {
   AgentLauncher,
   KNOWN_AGENTS,
   LaunchError,
+  ONESHOT_DEADLINE_NOTE,
+  ONESHOT_SILENT_NOTE,
   type AgentSpec,
 } from "../src/agent/launcher.js";
+import { renderClaudeRunLine } from "../src/agent/agent-stream.js";
 import { parseTabbedModels } from "../src/agent/model-list.js";
 
 const cleanups: (() => void)[] = [];
@@ -551,9 +562,46 @@ sleep 60
     );
     expect(grok.readEvent).toBeTypeOf("function");
 
-    // A scheduled run has no pane to update, and its log is read by a human.
-    expect(claude.runArgs!(CTX, "do the thing")).not.toContain("--output-format");
+    // Grok's run still writes plain text; Claude's `-p` prints nothing at all
+    // until it exits, so its run asks for the stream and renders it instead.
     expect(grok.runArgs!(CTX, "do the thing")).not.toContain("--output-format");
+    expect(grok.renderRunLine).toBeUndefined();
+  });
+
+  it("streams a Claude run so its log is readable while it works", () => {
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const args = claude.runArgs!(CTX, "do the thing");
+    expect(args[args.indexOf("--output-format") + 1]).toBe("stream-json");
+    expect(args).toContain("--verbose");
+    expect(claude.renderRunLine).toBeTypeOf("function");
+    // The run wiring is otherwise untouched.
+    expect(args[0]).toBe("-p");
+    expect(args).toContain("--strict-mcp-config");
+    const allowed = args[args.indexOf("--allowedTools") + 1];
+    expect(allowed).not.toContain("chat_await_message");
+    expect(allowed).not.toContain("message_send");
+  });
+
+  it("gives Claude its own config home so a run cannot load the user's setup", () => {
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const ctx = { ...CTX, dataDir: tempDir() };
+    const workDir = join(ctx.dataDir, "agent-workdir");
+    mkdirSync(workDir, { recursive: true });
+    const home = join(ctx.dataDir, "agent-homes", "claude");
+    expect(claude.childEnv!(ctx, workDir).CLAUDE_CONFIG_DIR).toBe(home);
+
+    // No credentials file (macOS keychain auth): the home exists, empty.
+    const bareParent = tempDir();
+    claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: bareParent });
+    expect(existsSync(home)).toBe(true);
+    expect(existsSync(join(home, ".credentials.json"))).toBe(false);
+
+    // With one, it is linked in so the isolated home still authenticates.
+    writeFileSync(join(bareParent, ".credentials.json"), '{"token":"x"}');
+    claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: bareParent });
+    expect(readFileSync(join(home, ".credentials.json"), "utf8")).toBe(
+      '{"token":"x"}',
+    );
   });
 
   it("leaves Grok's own web tools at the CLI default on a one-shot run", () => {
@@ -623,6 +671,84 @@ sleep 60
     );
     launcher.stop();
     await until(() => launcher.status().running === null);
+  });
+});
+
+describe("one-shot automation runs", () => {
+  /** A launcher over one fake CLI that carries runs. */
+  function runner(script: string): AgentLauncher {
+    const bin = fakeBinDir("fake-agent", script);
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({ runArgs: () => [], renderRunLine: renderClaudeRunLine }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+    return launcher;
+  }
+
+  it("renders a stream-json run into a log a person can read", async () => {
+    const launcher = runner(
+      `#!/bin/sh
+printf '{"type":"system","subtype":"init","model":"claude-opus-5"}\\n'
+printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__boxaide__messages_list"}]}}\\n'
+printf '{"type":"result","subtype":"success","result":"filed two threads"}\\n'
+`,
+    );
+    const result = await launcher.runOnce({ prompt: "do the thing" });
+    expect(result.status).toBe("ok");
+    expect(result.log).toContain("[claude] session started (model claude-opus-5)");
+    expect(result.log).toContain("[tool] messages_list");
+    expect(result.log).toContain("[claude] result: filed two threads");
+    // The raw NDJSON never reaches the log.
+    expect(result.log).not.toContain('"type":"assistant"');
+  });
+
+  it("kills a run that never writes anything, and says so", async () => {
+    const launcher = runner("#!/bin/sh\nexec /bin/sleep 30\n");
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      firstOutputTimeoutMs: 200,
+    });
+    // 'error', not 'killed': a run that never spoke did not run.
+    expect(result.status).toBe("error");
+    expect(result.log).toContain(ONESHOT_SILENT_NOTE);
+  });
+
+  it("leaves a run that writes early alone", async () => {
+    // Works for longer than the window, but says so first. The window has to
+    // clear enough of the spawn to survive a loaded machine.
+    const launcher = runner("#!/bin/sh\necho working\nexec /bin/sleep 2\n");
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      firstOutputTimeoutMs: 800,
+    });
+    expect(result.status).toBe("ok");
+    expect(result.log).not.toContain(ONESHOT_SILENT_NOTE);
+  });
+
+  it("explains a deadline kill in the log instead of leaving it empty", async () => {
+    const launcher = runner("#!/bin/sh\nexec /bin/sleep 30\n");
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      timeoutMs: 200,
+      firstOutputTimeoutMs: 10_000,
+    });
+    expect(result.status).toBe("killed");
+    expect(result.log).toContain(ONESHOT_DEADLINE_NOTE);
+  });
+
+  it("finishes when the agent exits, not when the last pipe holder does", async () => {
+    // A detached grandchild inherits stdout and keeps it open long after the
+    // agent is gone. Waiting for "close" reported that wait as run duration.
+    const launcher = runner("#!/bin/sh\n/bin/sleep 3 &\necho done\nexit 0\n");
+    const started = Date.now();
+    const result = await launcher.runOnce({
+      prompt: "do the thing",
+      closeGraceMs: 200,
+    });
+    expect(result.status).toBe("ok");
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 });
 

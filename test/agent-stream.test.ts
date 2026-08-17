@@ -4,6 +4,7 @@ import {
   readClaudeEvent,
   readGrokEvent,
   readOpenCodeEvent,
+  renderClaudeRunLine,
 } from "../src/agent/agent-stream.js";
 
 /**
@@ -112,6 +113,91 @@ describe("readOpenCodeEvent", () => {
       readOpenCodeEvent(
         JSON.stringify({ type: "text", part: { type: "text", text: "OK" } }),
       ),
+    ).toBeNull();
+  });
+});
+
+describe("renderClaudeRunLine", () => {
+  it("hands back a line it cannot read, because it is still information", () => {
+    expect(renderClaudeRunLine("Loading...")).toBe("Loading...");
+    expect(renderClaudeRunLine("{ truncated")).toBe("{ truncated");
+  });
+
+  it("announces the session, with the model when the event names one", () => {
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({
+          type: "system",
+          subtype: "init",
+          session_id: "abc",
+          model: "claude-opus-4-6",
+        }),
+      ),
+    ).toBe("[claude] session started (model claude-opus-4-6)");
+    expect(
+      renderClaudeRunLine(JSON.stringify({ type: "system", subtype: "init" })),
+    ).toBe("[claude] session started");
+  });
+
+  it("says nothing for other system lines", () => {
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({ type: "system", subtype: "hook_started", hook_name: "SessionStart" }),
+      ),
+    ).toBeNull();
+  });
+
+  it("renders assistant text and tool calls, one per line", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "Checking the inbox." },
+          { type: "tool_use", name: "Read", input: { file_path: "/etc/hosts" } },
+          { type: "tool_use", name: "mcp__boxaide__messages_list" },
+        ],
+      },
+    });
+    expect(renderClaudeRunLine(line)).toBe(
+      "Checking the inbox.\n[tool] Read\n[tool] messages_list",
+    );
+  });
+
+  it("says nothing for an assistant line with no text and no tools", () => {
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "thinking", thinking: "..." }] },
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      renderClaudeRunLine(JSON.stringify({ type: "assistant", message: {} })),
+    ).toBeNull();
+  });
+
+  it("renders the final result, and names the subtype when it is not success", () => {
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({ type: "result", subtype: "success", result: "Sent 3 replies." }),
+      ),
+    ).toBe("[claude] result: Sent 3 replies.");
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true }),
+      ),
+    ).toBe("[claude] error_max_turns");
+  });
+
+  it("says nothing for tool results and unnamed events", () => {
+    expect(
+      renderClaudeRunLine(
+        JSON.stringify({ type: "user", message: { content: [{ type: "tool_result" }] } }),
+      ),
+    ).toBeNull();
+    expect(
+      renderClaudeRunLine(JSON.stringify({ type: "stream_event", event: {} })),
     ).toBeNull();
   });
 });
