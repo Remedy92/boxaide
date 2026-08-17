@@ -700,6 +700,8 @@ export class OutreachStore {
       sentAt: null,
       error: null,
     };
+    const already = this.pendingDuplicate(row);
+    if (already) return already;
     this.db
       .prepare(
         `INSERT INTO outbox
@@ -720,6 +722,44 @@ export class OutreachStore {
         row.createdAt,
       );
     return row;
+  }
+
+  /**
+   * The pending row this queue request would repeat exactly, if there is one.
+   *
+   * Automation runs can overlap, so two of them can reach the same conclusion
+   * about the same person in the same minute. Returning the existing row makes
+   * queueing idempotent for that case.
+   *
+   * The match is the WHOLE message — recipient, campaign, step, subject, body.
+   * Deliberately narrow. A looser key (same person, same campaign) would also
+   * swallow a second, genuinely different draft, and a draft that silently
+   * never appears is worse than two similar ones: the reviewer can delete a
+   * duplicate they can see, but cannot recover one they never got.
+   *
+   * Subject and body are encrypted, so the comparison happens after decrypting
+   * the candidates. Only pending rows to the same address on the same account
+   * are read, which is a handful at most.
+   */
+  private pendingDuplicate(row: OutboxRow): OutboxRow | null {
+    const candidates = this.db
+      .prepare(
+        `SELECT * FROM outbox
+          WHERE status = 'pending' AND account_id = ? AND to_addr = ?`,
+      )
+      .all(row.accountId, row.to) as OutboxDbRow[];
+    for (const candidate of candidates) {
+      const existing = this.toOutbox(candidate);
+      if (
+        existing.campaignId === row.campaignId &&
+        existing.stepPosition === row.stepPosition &&
+        existing.subject === row.subject &&
+        existing.body === row.body
+      ) {
+        return existing;
+      }
+    }
+    return null;
   }
 
   private toOutbox(row: OutboxDbRow): OutboxRow {

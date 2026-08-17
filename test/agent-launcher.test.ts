@@ -201,7 +201,7 @@ describe("AgentLauncher", () => {
     // Nothing was spawned, so there is no one process to name.
     expect(running.pid).toBe(-1);
     expect(launcher.status().running?.id).toBe("fake");
-    expect(launcher.busy()).toBe(true);
+    expect(launcher.chatBusy()).toBe(true);
     // The driver spawns its own children, so it is handed the binary and the
     // full environment a launcher spawn would have used.
     expect(handed.child).toBeNull();
@@ -267,7 +267,7 @@ describe("AgentLauncher", () => {
     // scheduler until the app restarted.
     await expect(launcher.start("fake")).rejects.toThrowError(/no session store/);
     expect(launcher.status().running).toBeNull();
-    expect(launcher.busy()).toBe(false);
+    expect(launcher.chatBusy()).toBe(false);
     expect(launcher.status().lastExit).toMatchObject({
       id: "fake",
       reason: "error",
@@ -298,7 +298,7 @@ describe("AgentLauncher", () => {
       /could not start its loop/,
     );
     expect(launcher.status().running).toBeNull();
-    expect(launcher.busy()).toBe(false);
+    expect(launcher.chatBusy()).toBe(false);
   });
 
   it("refuses a driven launch in a process with no conversation", async () => {
@@ -683,7 +683,7 @@ sleep 60
     // Automations get the same treatment. Their prompt opens with the run
     // preamble today, which is the only reason this was not already breaking.
     const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
-    const run = claude.runArgs!(CTX, "--dangerously-skip-permissions");
+    const run = claude.runArgs!(CTX, "--dangerously-skip-permissions", "/tmp/run-dir");
     expect(run.slice(-2)).toEqual(["--", "--dangerously-skip-permissions"]);
   });
 
@@ -770,7 +770,7 @@ sleep 60
 
     // A scheduled run gets none of it: there is no conversation to be in.
     const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
-    const run = claude.runArgs!(CTX, "do the thing");
+    const run = claude.runArgs!(CTX, "do the thing", "/tmp/run-dir");
     expect(run[run.indexOf("--allowedTools") + 1]).not.toContain("chat_");
   });
 
@@ -803,13 +803,13 @@ sleep 60
 
     // Grok's run still writes plain text; Claude's `-p` prints nothing at all
     // until it exits, so its run asks for the stream and renders it instead.
-    expect(grok.runArgs!(CTX, "do the thing")).not.toContain("--output-format");
+    expect(grok.runArgs!(CTX, "do the thing", "/tmp/run-dir")).not.toContain("--output-format");
     expect(grok.renderRunLine).toBeUndefined();
   });
 
   it("streams a Claude run so its log is readable while it works", () => {
     const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
-    const args = claude.runArgs!(CTX, "do the thing");
+    const args = claude.runArgs!(CTX, "do the thing", "/tmp/run-dir");
     expect(args[args.indexOf("--output-format") + 1]).toBe("stream-json");
     expect(args).toContain("--verbose");
     expect(claude.renderRunLine).toBeTypeOf("function");
@@ -893,7 +893,7 @@ sleep 60
 
   it("leaves Grok's own web tools at the CLI default on a one-shot run", () => {
     const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
-    expect(grok.runArgs!(CTX, "do the thing")).not.toContain(
+    expect(grok.runArgs!(CTX, "do the thing", "/tmp/run-dir")).not.toContain(
       "--disable-web-search",
     );
     // The chat loop keeps its existing behavior.
@@ -923,7 +923,9 @@ sleep 60
     grok!.prepare!(ctx, workDir, { PATH: "/usr/bin" });
     const env = grok!.childEnv!(ctx, workDir);
     expect(env.BOXAIDE_TOKEN).toBe(ctx.bearerToken);
-    expect(env.GROK_HOME).toBe(join(ctx.dataDir, "agent-homes", "grok"));
+    // The home lives in the launch's own workdir, so overlapping runs never
+    // share one (their trusted-folder lists would fight).
+    expect(env.GROK_HOME).toBe(join(workDir, "grok-home"));
     expect(env.GROK_CLAUDE_MCPS_ENABLED).toBe("0");
     expect(env.GROK_CURSOR_MCPS_ENABLED).toBe("0");
 
@@ -952,7 +954,7 @@ sleep 60
 
     const running = await launcher.start("grok");
     expect(running.id).toBe("grok");
-    const home = join(dataDir, "agent-homes", "grok");
+    const home = join(dataDir, "agent-workdir", "grok-home");
     expect(readFileSync(join(home, "config.toml"), "utf8")).toContain(
       "http://127.0.0.1:9/mcp",
     );
@@ -989,7 +991,7 @@ printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp
 printf '{"type":"result","subtype":"success","result":"filed two threads"}\\n'
 `,
     );
-    const result = await launcher.runOnce({ prompt: "do the thing" });
+    const result = await launcher.runOnce({ runId: "r1", prompt: "do the thing" });
     expect(result.status).toBe("ok");
     expect(result.log).toContain("[claude] session started (model claude-opus-5)");
     expect(result.log).toContain("[tool] messages_list");
@@ -1001,6 +1003,7 @@ printf '{"type":"result","subtype":"success","result":"filed two threads"}\\n'
   it("kills a run that never writes anything, and says so", async () => {
     const launcher = runner("#!/bin/sh\nexec /bin/sleep 30\n");
     const result = await launcher.runOnce({
+      runId: "r1",
       prompt: "do the thing",
       firstOutputTimeoutMs: 200,
     });
@@ -1014,6 +1017,7 @@ printf '{"type":"result","subtype":"success","result":"filed two threads"}\\n'
     // tool, not a hang; only the deadline may stop it.
     const launcher = runner("#!/bin/sh\necho working\nexec /bin/sleep 30\n");
     const result = await launcher.runOnce({
+      runId: "r1",
       prompt: "do the thing",
       firstOutputTimeoutMs: 400,
       timeoutMs: 900,
@@ -1029,6 +1033,7 @@ printf '{"type":"result","subtype":"success","result":"filed two threads"}\\n'
       "#!/bin/sh\necho working\n/bin/sleep 0.8\necho done\n",
     );
     const result = await launcher.runOnce({
+      runId: "r1",
       prompt: "do the thing",
       firstOutputTimeoutMs: 400,
     });
@@ -1043,6 +1048,7 @@ printf '{"type":"result","subtype":"success","result":"filed two threads"}\\n'
     // Silence is their healthy state, and killing them for it killed real runs.
     const launcher = runner("#!/bin/sh\n/bin/sleep 1\necho done\n", false);
     const result = await launcher.runOnce({
+      runId: "r1",
       prompt: "do the thing",
       firstOutputTimeoutMs: 200,
     });
@@ -1063,6 +1069,7 @@ exec /bin/sleep 30
     );
     const started = Date.now();
     const result = await launcher.runOnce({
+      runId: "r1",
       prompt: "do the thing",
       firstOutputTimeoutMs: 300,
       closeGraceMs: 300,
@@ -1081,6 +1088,7 @@ exec /bin/sleep 30
       "#!/bin/sh\nprintf 'halfway through a thought'\nexec /bin/sleep 30\n",
     );
     const result = await launcher.runOnce({
+      runId: "r1",
       prompt: "do the thing",
       timeoutMs: 400,
       firstOutputTimeoutMs: 10_000,
@@ -1092,6 +1100,7 @@ exec /bin/sleep 30
   it("explains a deadline kill in the log with the deadline it actually used", async () => {
     const launcher = runner("#!/bin/sh\nexec /bin/sleep 30\n");
     const result = await launcher.runOnce({
+      runId: "r1",
       prompt: "do the thing",
       timeoutMs: 200,
       firstOutputTimeoutMs: 10_000,
@@ -1109,6 +1118,7 @@ exec /bin/sleep 30
     const launcher = runner("#!/bin/sh\n/bin/sleep 3 &\necho done\nexit 0\n");
     const started = Date.now();
     const result = await launcher.runOnce({
+      runId: "r1",
       prompt: "do the thing",
       closeGraceMs: 200,
     });

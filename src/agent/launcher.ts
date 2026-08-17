@@ -25,8 +25,10 @@
  *    pre-approved. `message_send` is NOT in the
  *    allowlist, so a launched agent that tries to send hits the client's own
  *    permission wall, which in headless mode is a denial.
- *  - One agent at a time. The channel hands each user message to exactly one
- *    waiter; a second launched agent would race it for every message.
+ *  - One CHAT agent at a time. The channel hands each user message to exactly
+ *    one waiter; a second launched chat agent would race it for every message.
+ *    Automation runs are separate and may overlap — see `runOnce` and
+ *    docs/specs/agent-platform.md invariant 4.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import {
@@ -35,7 +37,11 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -328,8 +334,17 @@ export type AgentSpec = {
    * Headless one-shot form used by automation runs: the same wiring as `args`
    * with the automation prompt and the run allowlist. Absent means this CLI
    * cannot carry a scheduled run, even when it can carry the chat loop.
+   *
+   * Takes `workDir` because runs may overlap and each gets its own: any path a
+   * run's command line names must be that run's, not a directory a sibling run
+   * is rewriting underneath it.
    */
-  runArgs?: (ctx: LaunchContext, prompt: string, model?: string) => string[];
+  runArgs?: (
+    ctx: LaunchContext,
+    prompt: string,
+    workDir: string,
+    model?: string,
+  ) => string[];
   /**
    * Extra child env, overlayed on the inherited env (and the widened PATH).
    * Grok has no --strict-mcp-config; GROK_HOME plus these flags keep the
@@ -387,8 +402,10 @@ export function claudeTurnArgs(
 ): string[] {
   return [
     ...claudeFlagsFor(
-      ctx,
       drivenPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
+      // The chat agent owns the shared workdir: it is the only launch that
+      // uses it, and its session outlives any single turn.
+      agentWorkDir(ctx),
       model,
     ),
     // What is left of KICKOFF once Boxaide runs the loop: the reply text is the
@@ -442,14 +459,15 @@ function claudeDrive(
  * printed nothing until the end, so a hung run wrote a zero-byte log.
  */
 function claudeRunArgs(
-  ctx: LaunchContext,
+  _ctx: LaunchContext,
   prompt: string,
+  workDir: string,
   model?: string,
 ): string[] {
   return [
     ...claudeFlagsFor(
-      ctx,
       runPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
+      workDir,
       model,
     ),
     // A run's prompt always opens with AUTOMATION_RUN_PREAMBLE, so it cannot
@@ -459,10 +477,16 @@ function claudeRunArgs(
   ];
 }
 
-/** Everything on a `claude -p` command line except the prompt itself. */
+/**
+ * Everything on a `claude -p` command line except the prompt itself.
+ *
+ * `workDir` is the launch's own directory: `claudePrepare` writes that
+ * launch's MCP config into it, and naming it here is what keeps two
+ * overlapping runs off each other's config file.
+ */
 function claudeFlagsFor(
-  ctx: LaunchContext,
   allowedTools: string[],
+  workDir: string,
   model?: string,
 ): string[] {
   return [
@@ -475,7 +499,7 @@ function claudeFlagsFor(
     "stream-json",
     "--verbose",
     "--mcp-config",
-    join(agentWorkDir(ctx), "claude-mcp.json"),
+    join(workDir, "claude-mcp.json"),
     "--strict-mcp-config",
     "--allowedTools",
     allowedTools.join(","),
@@ -490,8 +514,15 @@ function claudeFlagsFor(
  * loads, and a scheduled run was observed picking up the user's personal set:
  * a run Boxaide is responsible for must not be reshaped by files the user
  * wrote for their own terminal. CLAUDE_CONFIG_DIR moves all of it to a
- * directory this launcher owns. Deliberately applied to the chat path too,
- * same as Grok — the isolation is about whose config runs, not which path.
+ * directory this launcher owns. Deliberately applied to the chat path too —
+ * the isolation is about whose config runs, not which path.
+ *
+ * Shared across overlapping runs, unlike Grok's home, because this one
+ * accumulates state the CLI itself owns — onboarding, project records, refreshed
+ * credentials. Handing every run an empty home would make each one a first run.
+ * `claude` already supports several sessions against one config directory; what
+ * it cannot survive is a half-written file, so every write here is staged and
+ * renamed (writeSecret / copySecret).
  */
 function claudeConfigHomeFor(ctx: LaunchContext): string {
   const root =
@@ -512,9 +543,8 @@ function claudePrepare(
   parentEnv: NodeJS.ProcessEnv,
 ): void {
   // Keep the primary bearer out of process listings and crash-report argv.
-  const path = join(workDir, "claude-mcp.json");
-  writeFileSync(
-    path,
+  writeSecret(
+    join(workDir, "claude-mcp.json"),
     JSON.stringify({
       mcpServers: {
         boxaide: {
@@ -524,11 +554,7 @@ function claudePrepare(
         },
       },
     }),
-    { mode: 0o600 },
   );
-  // writeFile preserves an existing file's mode; force the invariant even if
-  // an earlier build or local user created it more broadly.
-  chmodSync(path, 0o600);
 
   const home = claudeConfigHomeFor(ctx);
   mkdirSync(home, { recursive: true });
@@ -549,7 +575,7 @@ function claudePrepare(
  */
 function claudeCopyCredentials(parentHome: string, home: string): void {
   try {
-    copyFileSync(
+    copySecret(
       join(parentHome, ".credentials.json"),
       join(home, ".credentials.json"),
     );
@@ -581,9 +607,7 @@ function claudeWriteAuthSettings(parentHome: string, home: string): void {
       if (parsed?.[key] !== undefined) auth[key] = parsed[key];
     }
     if (Object.keys(auth).length === 0) return;
-    writeFileSync(join(home, "settings.json"), JSON.stringify(auth, null, 2), {
-      mode: 0o600,
-    });
+    writeSecret(join(home, "settings.json"), JSON.stringify(auth, null, 2));
   } catch {
     // No settings.json, malformed JSON, or an unwritable home. None of those
     // are a reason to fail a launch, and the CLI has other paths to auth.
@@ -602,10 +626,21 @@ function claudeWriteAuthSettings(parentHome: string, home: string): void {
  * MCP servers Grok discovers from ~/.claude/plugins cannot be turned off
  * from here — the allowlist is the boundary that still holds.
  */
-function grokHomeFor(ctx: LaunchContext): string {
-  const root =
-    ctx.dataDir === ":memory:" ? join(tmpdir(), "boxaide-agent") : ctx.dataDir;
-  return join(root, "agent-homes", "grok");
+/**
+ * Grok's config home lives inside the launch's own working directory, so two
+ * overlapping automation runs never share one.
+ *
+ * Safe to make per-launch because nothing in this home survives a launch that
+ * mattered: `grokPrepare` rewrites config.toml and trusted_folders.toml from
+ * scratch every time, and auth.json is a link to the user's real one. Claude's
+ * home is shared for the opposite reason — see claudeConfigHomeFor.
+ *
+ * trusted_folders.toml is the reason this cannot stay shared: its content names
+ * the working directory, so a second run writing its own path would untrust the
+ * directory the first run is sitting in.
+ */
+function grokHomeFor(workDir: string): string {
+  return join(workDir, "grok-home");
 }
 
 function grokArgs(_ctx: LaunchContext, model?: string): string[] {
@@ -624,6 +659,9 @@ function grokArgs(_ctx: LaunchContext, model?: string): string[] {
 function grokRunArgs(
   _ctx: LaunchContext,
   prompt: string,
+  // Grok names no per-launch path on its command line: its MCP config and its
+  // trusted-folder list both live in GROK_HOME, which is already per-launch.
+  _workDir: string,
   model?: string,
 ): string[] {
   // Spec (Scheduler): the CLI's own web tools stay at the CLI's defaults on a
@@ -659,9 +697,9 @@ function grokArgsFor(
   return args;
 }
 
-function grokChildEnv(ctx: LaunchContext, _workDir: string): Record<string, string> {
+function grokChildEnv(ctx: LaunchContext, workDir: string): Record<string, string> {
   return {
-    GROK_HOME: grokHomeFor(ctx),
+    GROK_HOME: grokHomeFor(workDir),
     BOXAIDE_TOKEN: ctx.bearerToken,
     GROK_DISABLE_AUTOUPDATER: "1",
     GROK_CLAUDE_MCPS_ENABLED: "0",
@@ -682,7 +720,7 @@ function grokPrepare(
   workDir: string,
   parentEnv: NodeJS.ProcessEnv,
 ): void {
-  const home = grokHomeFor(ctx);
+  const home = grokHomeFor(workDir);
   mkdirSync(home, { recursive: true });
 
   let trusted = workDir;
@@ -692,19 +730,15 @@ function grokPrepare(
     // The directory was just created; the unresolved path is still the cwd.
   }
 
-  writeFileSync(join(home, "config.toml"), grokConfigToml(ctx), { mode: 0o600 });
-  writeFileSync(join(home, "trusted_folders.toml"), grokTrustToml(trusted), {
-    mode: 0o600,
-  });
+  writeSecret(join(home, "config.toml"), grokConfigToml(ctx));
+  writeSecret(join(home, "trusted_folders.toml"), grokTrustToml(trusted));
 
   // If GROK_HOME is ignored, project config in the empty workdir still
   // declares boxaide. Same name as the isolated user server, so it does
   // not stack a second copy when both are read.
   const projectGrok = join(workDir, ".grok");
   mkdirSync(projectGrok, { recursive: true });
-  writeFileSync(join(projectGrok, "config.toml"), grokProjectToml(ctx), {
-    mode: 0o600,
-  });
+  writeSecret(join(projectGrok, "config.toml"), grokProjectToml(ctx));
 
   const parentHome = parentEnv.GROK_HOME || join(homedir(), ".grok");
   const authFrom = join(parentHome, "auth.json");
@@ -757,16 +791,69 @@ function tomlString(value: string): string {
 }
 
 function refreshLink(from: string, to: string): void {
+  // Built under a temporary name and renamed over the target, never unlinked in
+  // place: rename is atomic, so a launch reading this path either sees the old
+  // link or the new one. The unlink-then-symlink it replaced left a window with
+  // no file at all, which a second launch starting in that window read as
+  // "not authenticated".
+  const temp = tempPathFor(to);
   try {
-    unlinkSync(to);
+    symlinkSync(from, temp);
   } catch {
-    // First launch, or a leftover we can overwrite.
+    try {
+      copyFileSync(from, temp);
+    } catch {
+      // Nothing was staged, so there is nothing to rename and nothing to undo.
+      // The existing target, if any, is left exactly as it was.
+      return;
+    }
   }
   try {
-    symlinkSync(from, to);
+    renameSync(temp, to);
   } catch {
-    copyFileSync(from, to);
+    // Leave the target alone rather than half-replaced, and do not strand the
+    // staged file.
+    try {
+      unlinkSync(temp);
+    } catch {
+      // Already gone.
+    }
   }
+}
+
+/**
+ * Write a 0600 file so no reader ever sees it half-written.
+ *
+ * Every config this module writes is read by a CLI that may be starting right
+ * now for a different run. writeFileSync truncates first, so a plain write has
+ * a window where the file exists and is empty or partial — rare, silent, and
+ * exactly the kind of failure that only appears once runs can overlap.
+ */
+function writeSecret(path: string, content: string): void {
+  const temp = tempPathFor(path);
+  writeFileSync(temp, content, { mode: 0o600 });
+  // writeFile preserves an existing file's mode; force the invariant even if an
+  // earlier build or local user created it more broadly.
+  chmodSync(temp, 0o600);
+  renameSync(temp, path);
+}
+
+/** The same staging, for a file whose content comes from another file. */
+function copySecret(from: string, to: string): void {
+  const temp = tempPathFor(to);
+  copyFileSync(from, temp);
+  chmodSync(temp, 0o600);
+  renameSync(temp, to);
+}
+
+/**
+ * A staging path beside the target — same directory, so the rename stays on one
+ * filesystem. The pid and counter keep two launches in one process, or two
+ * processes over one data directory, off each other's staging file.
+ */
+let tempCounter = 0;
+function tempPathFor(path: string): string {
+  return `${path}.${process.pid}.${tempCounter++}.tmp`;
 }
 
 /** `grok models` prints a bullet list under a prose header. */
@@ -785,10 +872,31 @@ const CLAUDE_MODELS: ModelOption[] = [
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
 ];
 
+/** The chat agent's working directory. One per install; it owns it alone. */
 function agentWorkDir(ctx: LaunchContext): string {
   return ctx.dataDir === ":memory:"
     ? join(tmpdir(), "boxaide-agent")
     : join(ctx.dataDir, "agent-workdir");
+}
+
+/** Where every automation run's own directory is created. */
+function runWorkDirRoot(ctx: LaunchContext): string {
+  return join(agentWorkDir(ctx), "runs");
+}
+
+/**
+ * One directory per automation run, named for the run.
+ *
+ * Runs may overlap, and an agent is free to write files where it is standing.
+ * Sharing one directory means two runs can overwrite each other's scratch
+ * files, silently and with no way to tell afterwards. It also holds each run's
+ * MCP config and, for Grok, its whole config home.
+ *
+ * Removed when the run finishes, and swept at startup for the ones a crash
+ * left behind.
+ */
+function runWorkDir(ctx: LaunchContext, runId: string): string {
+  return join(runWorkDirRoot(ctx), runId);
 }
 
 export const KNOWN_AGENTS: AgentSpec[] = [
@@ -923,6 +1031,12 @@ export type OneShotResult = {
 };
 
 export type OneShotOptions = {
+  /**
+   * The run row's id. Identifies this run among the ones alive beside it, and
+   * names the directory it works in, so it must be a plain id — letters,
+   * digits, dash, underscore.
+   */
+  runId: string;
   /** AgentSpec id, or null/undefined for the first launchable installed CLI. */
   agentId?: string | null;
   /** The automation prompt. The run preamble is prepended here, not by callers. */
@@ -945,6 +1059,39 @@ export type OneShotOptions = {
 export const ONESHOT_TIMEOUT_MS = 15 * 60 * 1000;
 
 /**
+ * How many automation runs may be alive at once (spec invariant 4). The chat
+ * agent is not one of them and never waits behind them.
+ *
+ * Two by default, not one, so a slow run stops holding up the whole schedule.
+ * Not more by default because every run is a full CLI process with a model
+ * session behind it: N runs is N times the spend in the same window and N times
+ * the pressure on the provider's own rate limit, and a 429 reaches the user as
+ * a failed run with an opaque log.
+ */
+export const DEFAULT_RUN_CONCURRENCY = 2;
+
+/**
+ * The ceiling on that, whatever the environment asks for. Above this the
+ * failure modes are untested and the first symptom would be rate-limit errors
+ * the user cannot act on.
+ */
+export const MAX_RUN_CONCURRENCY = 4;
+
+/**
+ * Reads BOXAIDE_AGENT_CONCURRENCY, clamped. Anything unparseable is the
+ * default: a typo in an environment variable must not silently serialize the
+ * schedule, nor uncap it.
+ */
+export function runConcurrencyFrom(env: NodeJS.ProcessEnv): number {
+  const raw = env.BOXAIDE_AGENT_CONCURRENCY;
+  const parsed = Number(raw);
+  if (!raw || !Number.isInteger(parsed) || parsed < 1) {
+    return DEFAULT_RUN_CONCURRENCY;
+  }
+  return Math.min(parsed, MAX_RUN_CONCURRENCY);
+}
+
+/**
  * How long a streaming run may stay silent at start before it is written off.
  *
  * Armed only for specs with `renderRunLine` — a spec whose runArgs asked its
@@ -965,6 +1112,14 @@ export const ONESHOT_FIRST_OUTPUT_TIMEOUT_MS = 2 * 60 * 1000;
  * what turned a 15-minute timeout into a 17-minute run.
  */
 export const ONESHOT_CLOSE_GRACE_MS = 2_000;
+
+/**
+ * How old a run directory must be before a starting process removes it. The
+ * deadline plus a margin, so a run still inside its own 15 minutes is never
+ * swept. Mirrors RUN_STALE_MS in src/automation/store.ts, which decides the
+ * same question about the run's database row.
+ */
+export const RUN_WORKDIR_STALE_MS = ONESHOT_TIMEOUT_MS + 5 * 60 * 1000;
 
 /**
  * Notes appended to a run log so the log is never empty. A killed run's log is
@@ -1018,23 +1173,28 @@ export class AgentLauncher {
   private lastExit: LastExit | null = null;
   private stderrTail = "";
   /**
-   * The in-flight automation run. Separate from `child`/`running`, which stay
-   * the interactive chat agent's state: the Agent pane's presence, the
-   * /api/agents status, and stop() must not start reporting on a scheduled run
-   * that the user never pressed Start on.
+   * The in-flight automation runs, keyed by run id. Separate from
+   * `child`/`running`, which stay the interactive chat agent's state: the Agent
+   * pane's presence, the /api/agents status, and stop() must not start
+   * reporting on a scheduled run that the user never pressed Start on.
+   *
+   * A map, not a single child, because runs may overlap up to `runLimit`. Each
+   * entry carries its own kill so one run can be stopped without touching its
+   * siblings.
    */
-  private oneShot: ChildProcess | null = null;
+  private oneShots = new Map<string, { child: ChildProcess; kill: () => void }>();
   /**
-   * A run that has taken the slot but has no child yet.
+   * Runs that hold a slot but have no child yet.
    *
    * Validating a picked model may have to ask the CLI what it offers, and that
-   * await sits between the scheduler's claim of the run row and the spawn. Let
-   * a chat launch through there and the run dies of "slot taken" — recorded as
-   * a failed run, with the schedule advanced past a fire that never happened.
-   * The slot is therefore held from the first guard, and a chat start inside
-   * the window is refused exactly as it is once the child exists.
+   * await sits between the scheduler's claim of the run row and the spawn. A
+   * slot counted only once the child exists would let a second run through that
+   * window and put two more runs on a launcher with room for one.
+   *
+   * Chat is no longer part of this. It has its own slot, so a chat launch in
+   * the window can no longer cost a run the fire it already claimed.
    */
-  private oneShotStarting = false;
+  private starting = new Set<string>();
   /** The in-process loop driving the chat agent, for specs that have one. */
   private driver: AgentDriver | null = null;
   /**
@@ -1043,8 +1203,6 @@ export class AgentLauncher {
    * signalled child reports code null either way.
    */
   private stopRequested = false;
-  /** Set while a one-shot is alive; closes over that run's kill/status flag. */
-  private killOneShot: (() => void) | null = null;
   /** Per-agent model lists as their CLI last reported them. */
   private modelCache = new Map<
     string,
@@ -1059,12 +1217,52 @@ export class AgentLauncher {
   /** Bumped by refreshModels(), so a fetch it invalidated cannot land. */
   private modelGeneration = 0;
 
+  /** How many automation runs may overlap. See runConcurrencyFrom. */
+  private readonly limit: number;
+
   constructor(
     private ctx: LaunchContext,
     private registry: AgentSpec[] = KNOWN_AGENTS,
     private env: NodeJS.ProcessEnv = process.env,
     private extraBinDirs: string[] = wellKnownBinDirs(),
-  ) {}
+    runLimit?: number,
+  ) {
+    this.limit = runLimit ?? runConcurrencyFrom(env);
+    // A crash mid-run leaves its directory behind, and nothing else removes
+    // one. Swept at construction, the same moment AutomationScheduler sweeps
+    // the run rows a dead process left 'running'.
+    this.sweepRunWorkDirs();
+  }
+
+  /**
+   * Removes run directories old enough that no live run can own them.
+   *
+   * Age is the test, not "this process owns none yet": a second Boxaide over
+   * the same data directory may have a run in flight right now, and deleting
+   * the directory out from under it would break a healthy run. Same reasoning,
+   * and the same window, as AutomationStore.sweepStaleRuns.
+   */
+  private sweepRunWorkDirs(now: number = Date.now()): void {
+    const root = runWorkDirRoot(this.ctx);
+    const cutoff = now - RUN_WORKDIR_STALE_MS;
+    let entries: string[];
+    try {
+      entries = readdirSync(root);
+    } catch {
+      // No runs have ever happened here.
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(root, entry);
+      try {
+        if (statSync(path).mtimeMs > cutoff) continue;
+        rmSync(path, { recursive: true, force: true });
+      } catch {
+        // Gone already, or not ours to remove. Wasted disk is not a reason to
+        // refuse to start.
+      }
+    }
+  }
 
   /**
    * The registry, with each agent's models as its own CLI reports them.
@@ -1214,18 +1412,20 @@ export class AgentLauncher {
   }
 
   /**
-   * Refuses unless this launcher owns no live process. Called before a launch
-   * and again after any await that precedes the spawn — `this.running` is
-   * only trustworthy for as long as the call does not yield.
+   * Refuses unless the chat slot is free. Called before a launch and again
+   * after any await that precedes the spawn — `this.running` is only
+   * trustworthy for as long as the call does not yield.
+   *
+   * An automation run no longer blocks this. The chat agent has its own slot:
+   * pressing Start must not fail because the schedule happens to be busy, which
+   * is the whole point of splitting the two.
    */
   private assertIdle(): void {
     const running = this.running;
     if (running) {
       throw new LaunchError(409, `${running.id} is already running`);
     }
-    if (this.oneShot || this.oneShotStarting) {
-      throw new LaunchError(409, "an automation run is in progress");
-    }
+
   }
 
   status(): { running: RunningAgent | null; lastExit: LastExit | null } {
@@ -1233,11 +1433,30 @@ export class AgentLauncher {
   }
 
   /**
-   * True while any agent process this launcher owns is alive — chat or
-   * automation run. The scheduler asks before dequeuing (spec invariant 4).
+   * How many more automation runs this launcher will accept right now. The
+   * scheduler asks before dequeuing (spec invariant 4).
+   *
+   * The chat agent is deliberately absent from this sum. It used to consume the
+   * only slot, so a chat session lasting hours stopped every scheduled run
+   * behind it.
    */
-  busy(): boolean {
-    return this.running !== null || this.oneShot !== null || this.oneShotStarting;
+  runCapacity(): number {
+    // Reservations count: a run between its claim and its spawn owns a slot
+    // just as much as one with a child.
+    return Math.max(0, this.limit - this.oneShots.size - this.starting.size);
+  }
+
+  /**
+   * The absolute cap. What the database claim compares its count of live runs
+   * against, since that count spans every process over this data directory.
+   */
+  runLimit(): number {
+    return this.limit;
+  }
+
+  /** True while a chat agent is alive. Not affected by automation runs. */
+  chatBusy(): boolean {
+    return this.running !== null;
   }
 
   /**
@@ -1380,20 +1599,37 @@ export class AgentLauncher {
    * chat path: same binary resolution, same MCP config, same widened PATH,
    * same isolated workdir and per-CLI prepare step.
    *
-   * Refuses while any agent is alive rather than queueing internally — the
-   * scheduler owns the queue and its FIFO order, and a launcher that blocked
-   * here would hold a run row open for an unbounded chat session.
+   * Refuses at capacity rather than queueing internally — the scheduler owns
+   * the queue and its FIFO order, and a launcher that blocked here would hold a
+   * run row open while it waited.
+   *
+   * A live chat agent is not a reason to refuse. The two have separate slots.
    */
   async runOnce(opts: OneShotOptions): Promise<OneShotResult> {
-    this.assertIdle();
-    // Held from here to the spawn, because validating a model can suspend. See
-    // oneShotStarting: the scheduler has already claimed the run row by now, so
-    // losing the slot inside that window is not a wait, it is a lost fire.
-    this.oneShotStarting = true;
+    if (this.runCapacity() === 0) {
+      const held = this.oneShots.size + this.starting.size;
+      throw new LaunchError(
+        409,
+        `already running ${held} automation ${held === 1 ? "run" : "runs"}`,
+      );
+    }
+    // The id names a directory. Every caller passes a UUID from the run row,
+    // and this keeps it that way rather than trusting them: the same rule the
+    // registry enforces for agent ids, applied to the one other string that
+    // reaches the filesystem from outside this file.
+    if (!/^[A-Za-z0-9_-]+$/.test(opts.runId)) {
+      throw new LaunchError(400, "invalid run id");
+    }
+    if (this.oneShots.has(opts.runId) || this.starting.has(opts.runId)) {
+      throw new LaunchError(409, `run ${opts.runId} is already in progress`);
+    }
+    // Held from here until the child is registered below, because validating a
+    // model can suspend. The scheduler has already claimed the run row by now,
+    // so a slot lost inside that window is not a wait, it is a lost fire.
+    this.starting.add(opts.runId);
     let child: ChildProcess;
-    // Read off the spec inside the try, so nothing below depends on a binding
-    // the guarded section might never have reached.
     let render: RenderRunLine | undefined;
+    let workDir: string;
     try {
       const spec = this.resolveRunSpec(opts.agentId);
       const bin = this.resolveBin(spec.bin);
@@ -1413,19 +1649,18 @@ export class AgentLauncher {
         }
       }
       render = spec.renderRunLine;
-      const workDir = this.prepareWorkDir(spec);
+      workDir = this.prepareWorkDir(spec, runWorkDir(this.ctx, opts.runId));
       const prompt = `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
 
-      child = spawn(bin, spec.runArgs!(this.ctx, prompt, model), {
+      child = spawn(bin, spec.runArgs!(this.ctx, prompt, workDir, model), {
         cwd: workDir,
         env: this.childEnvFor(spec, workDir),
         stdio: ["ignore", "pipe", "pipe"],
       });
-      this.oneShot = child;
-    } finally {
-      // The child now holds the slot on its own, and a run that never got one
-      // must not hold it at all.
-      this.oneShotStarting = false;
+    } catch (err) {
+      // No child, so nothing else will ever release this reservation.
+      this.starting.delete(opts.runId);
+      throw err;
     }
 
     let log = "";
@@ -1488,11 +1723,19 @@ export class AgentLauncher {
       child.kill("SIGKILL");
     }, opts.timeoutMs ?? ONESHOT_TIMEOUT_MS);
     timer.unref?.();
-    this.killOneShot = () => {
-      note(ONESHOT_KILLED_NOTE);
-      forced = "killed";
-      child.kill("SIGKILL");
-    };
+    // Registered only now, with its kill: everything above can still throw, and
+    // an entry left in the map would consume a slot forever. The reservation
+    // holds the slot until this line, so it is never briefly free.
+    this.oneShots.set(opts.runId, {
+      child,
+      kill: () => {
+        note(ONESHOT_KILLED_NOTE);
+        forced = "killed";
+        child.kill("SIGKILL");
+      },
+    });
+    // The child holds the slot on its own now.
+    this.starting.delete(opts.runId);
 
     return await new Promise<OneShotResult>((resolve) => {
       let done = false;
@@ -1506,8 +1749,15 @@ export class AgentLauncher {
         // A killed child's last line has no newline on it. It is still the
         // best evidence of what the run was doing when it died.
         split?.flush();
-        this.oneShot = null;
-        this.killOneShot = null;
+        // The slot is freed before the directory is removed: a failure to clean
+        // up disk must not cost this launcher a run slot for the rest of the
+        // process's life.
+        this.oneShots.delete(opts.runId);
+        try {
+          rmSync(workDir, { recursive: true, force: true });
+        } catch {
+          // Left for the sweep at the next start.
+        }
         resolve({
           status: forced ?? (code === 0 ? "ok" : "error"),
           exitCode: code,
@@ -1539,9 +1789,21 @@ export class AgentLauncher {
     });
   }
 
-  /** Kills an in-flight automation run. No-op when none is running. */
-  killRun(): void {
-    this.killOneShot?.();
+  /**
+   * Kills one in-flight automation run, or every one when given no id. No-op
+   * when there is nothing to kill.
+   *
+   * The no-argument form is what shutdown wants: each run then finishes as
+   * 'killed' with a log, instead of leaving a row that says 'running' until
+   * some later process sweeps it.
+   */
+  killRun(runId?: string): void {
+    if (runId !== undefined) {
+      this.oneShots.get(runId)?.kill();
+      return;
+    }
+    // Copied first: each kill deletes its own entry from the map on exit.
+    for (const entry of [...this.oneShots.values()]) entry.kill();
   }
 
   /** Idempotent: stopping with nothing running is a no-op. */
@@ -1584,11 +1846,13 @@ export class AgentLauncher {
   /**
    * An empty, dedicated working directory: no repository context, no
    * CLAUDE.md, nothing for the agent to read into the session by accident.
-   * Shared by the chat agent and automation runs — they never overlap.
    * OpenCode is also passed this path as --dir; spawn cwd is not enough.
+   *
+   * The chat agent uses the shared one. Each automation run passes its own,
+   * because runs overlap and an agent writes files where it stands.
    */
-  private prepareWorkDir(spec: AgentSpec): string {
-    const workDir = agentWorkDir(this.ctx);
+  private prepareWorkDir(spec: AgentSpec, dir?: string): string {
+    const workDir = dir ?? agentWorkDir(this.ctx);
     mkdirSync(workDir, { recursive: true });
     spec.prepare?.(this.ctx, workDir, this.env);
     return workDir;

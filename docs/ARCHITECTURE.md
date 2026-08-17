@@ -127,7 +127,7 @@ Boxaide grows from an agentic inbox into a local agent work platform. Three modu
 | Module | Directory | Owns |
 |---|---|---|
 | CRM | `src/crm/` | contacts, orgs, tags, notes, interactions, pipeline stages, deals |
-| Automations | `src/automation/` | cron'd prompts, serialized runs, run logs |
+| Automations | `src/automation/` | cron'd prompts, concurrent runs, run logs |
 | Outreach | `src/outreach/` | campaigns, sequence steps, outbox, suppression |
 
 Each module is a store, a service or engine, a `<MODULE>_TOOLS` + dispatcher pair, and a `register*Routes`. Nothing else in the tree changes shape.
