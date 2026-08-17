@@ -77,7 +77,7 @@ if [ -n "$(git status --porcelain)" ]; then
   die "working tree is dirty"
 fi
 
-git fetch --quiet origin --tags || die "could not fetch origin"
+git fetch --quiet origin master --tags || die "could not fetch origin"
 
 HEAD="$(git rev-parse HEAD)"
 ORIGIN="$(git rev-parse origin/master)"
@@ -85,6 +85,9 @@ ORIGIN="$(git rev-parse origin/master)"
 
 TAG="$(gh release view --json tagName --jq .tagName 2>/dev/null || true)"
 [ -n "$TAG" ] || die "no GitHub release yet — create the first one by hand"
+if ! git rev-parse -q --verify "${TAG}^{commit}" >/dev/null; then
+  die "release tag $TAG is not in this clone — fetch tags or pull origin"
+fi
 SHIPPED="$(git rev-parse "${TAG}^{commit}")"
 if [ "$SHIPPED" = "$HEAD" ]; then
   die "already shipped as $TAG"
@@ -113,8 +116,6 @@ if [ "$DRY" -eq 1 ]; then
   exit 0
 fi
 
-node scripts/lib/bump-version.mjs "$VER"
-
 restore_versions() {
   git checkout -- \
     package.json package-lock.json \
@@ -123,20 +124,27 @@ restore_versions() {
     apps/mcpb/manifest.json
 }
 
+COMMITTED=0
+cleanup() {
+  if [ "$COMMITTED" -eq 0 ]; then
+    restore_versions
+  fi
+}
+trap cleanup EXIT INT TERM
+
+node scripts/lib/bump-version.mjs "$VER"
+
 # Pack first. A failed dmg must not leave a "Cut" commit on master.
 printf 'building server and UI\n'
 if ! npm run build; then
-  restore_versions
   die "build failed; version files restored"
 fi
 printf 'packing, signing and notarising the Mac dmg\n'
 if ! ( cd apps/desktop && npm run dist:mac ); then
-  restore_versions
   die "dist:mac failed; version files restored"
 fi
 for artifact in "$DMG" "$ZIP" "$FEED"; do
   [ -f "$artifact" ] || {
-    restore_versions
     die "expected $artifact"
   }
 done
@@ -147,14 +155,12 @@ done
 # Mac. Check it here, where the fix is free.
 FEED_VER="$(sed -n 's/^version: *//p' "$FEED" | head -1 | tr -d '\r')"
 [ "$FEED_VER" = "$VER" ] || {
-  restore_versions
   die "latest-mac.yml says $FEED_VER, shipping $VER — rebuild the dmg"
 }
 
 # dist:mac notarised and stapled. Prove it before anything reaches GitHub;
 # a bad dmg on the download page is far more expensive to undo.
 if ! xcrun stapler validate "$DMG"; then
-  restore_versions
   die "$DMG has no notarisation ticket; nothing was committed or uploaded"
 fi
 
@@ -164,16 +170,27 @@ git add package.json package-lock.json \
   apps/mcpb/manifest.json
 git commit -m "Cut $VER" -m "The download is now this commit."
 git tag -a "v$VER" -m "boxaide $VER"
+COMMITTED=1
+trap - EXIT INT TERM
 
 git push origin master
 git push origin "v$VER"
 
 BODY="$(printf '%s\n\n%s\n' "## What is new" "$NOTES")"
-gh release create "v$VER" \
-  --title "Boxaide $VER" \
-  --notes "$BODY" \
-  --latest \
-  "$DMG" "$ZIP" "$FEED"
+BLOCKMAP="${ZIP}.blockmap"
+if [ -f "$BLOCKMAP" ]; then
+  gh release create "v$VER" \
+    --title "Boxaide $VER" \
+    --notes "$BODY" \
+    --latest \
+    "$DMG" "$ZIP" "$FEED" "$BLOCKMAP"
+else
+  gh release create "v$VER" \
+    --title "Boxaide $VER" \
+    --notes "$BODY" \
+    --latest \
+    "$DMG" "$ZIP" "$FEED"
+fi
 
 printf 'shipped https://github.com/Remedy92/boxaide/releases/latest/download/boxaide-mac.dmg\n'
 printf 'commit  %s\n' "$(git rev-parse --short HEAD)"

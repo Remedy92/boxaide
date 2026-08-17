@@ -3,6 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 import { compareVersions, isNewer, parseVersion } from "../src/update/semver.js";
 import { registerUpdateRoutes } from "../src/update/routes.js";
 import {
+  CHECK_INTERVAL_MS,
+  FIRST_CHECK_DELAY_MS,
+  STALE_AFTER_MS,
   UpdateService,
   type DriverEvent,
   type UpdateDriver,
@@ -44,6 +47,15 @@ describe("compareVersions", () => {
       compareVersions(parseVersion("1.0.0-1")!, parseVersion("1.0.0-alpha")!),
     ).toBe(-1);
   });
+
+  it("sorts numeric prerelease identifiers by value, not lexicographically", () => {
+    expect(
+      compareVersions(parseVersion("1.0.0-beta.2")!, parseVersion("1.0.0-beta.11")!),
+    ).toBe(-1);
+    expect(
+      compareVersions(parseVersion("1.0.0-beta.11")!, parseVersion("1.0.0-beta.2")!),
+    ).toBe(1);
+  });
 });
 
 describe("isNewer", () => {
@@ -53,6 +65,10 @@ describe("isNewer", () => {
     // The case that matters most: a dev build ahead of the last release must
     // never be told to "update" back to it.
     expect(isNewer("0.2.9", "0.3.0")).toBe(false);
+  });
+
+  it("ignores build metadata in version comparison", () => {
+    expect(isNewer("1.0.0+build.2", "1.0.0+build.1")).toBe(false);
   });
 
   it("is false when either side does not parse", () => {
@@ -296,6 +312,142 @@ describe("UpdateService, auto channel", () => {
     expect(service.state().status).toBe("up-to-date");
   });
 
+  it("polls every fifteen minutes", () => {
+    expect(CHECK_INTERVAL_MS).toBe(15 * 60 * 1000);
+    expect(STALE_AFTER_MS).toBe(60_000);
+  });
+
+  it("downloads what the first timer finds", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeDriver();
+      fake.driver.check = async () => {
+        fake.emit({ kind: "available", version: "0.3.0" });
+      };
+      const service = new UpdateService({
+        currentVersion: "0.2.9",
+        driver: fake.driver,
+      });
+      service.start();
+      expect(fake.downloads).toBe(0);
+      await vi.advanceTimersByTimeAsync(FIRST_CHECK_DELAY_MS);
+      expect(fake.downloads).toBe(1);
+      expect(service.state().status).toBe("downloading");
+      service.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("downloads on the interval after a quiet first check", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeDriver();
+      let checks = 0;
+      fake.driver.check = async () => {
+        checks += 1;
+        if (checks === 1) {
+          fake.emit({ kind: "not-available", version: "0.2.9" });
+          return;
+        }
+        fake.emit({ kind: "available", version: "0.3.0" });
+      };
+      const service = new UpdateService({
+        currentVersion: "0.2.9",
+        driver: fake.driver,
+      });
+      service.start();
+      await vi.advanceTimersByTimeAsync(FIRST_CHECK_DELAY_MS);
+      expect(checks).toBe(1);
+      expect(fake.downloads).toBe(0);
+      await vi.advanceTimersByTimeAsync(CHECK_INTERVAL_MS);
+      expect(checks).toBe(2);
+      expect(fake.downloads).toBe(1);
+      service.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips a focus check that ran in the last minute", async () => {
+    const now = { t: new Date("2026-08-17T12:00:00.000Z") };
+    const fake = fakeDriver();
+    let checks = 0;
+    fake.driver.check = async () => {
+      checks += 1;
+      fake.emit({ kind: "not-available", version: "0.2.9" });
+    };
+    const service = new UpdateService({
+      currentVersion: "0.2.9",
+      driver: fake.driver,
+      now: () => now.t,
+    });
+    await service.check();
+    expect(checks).toBe(1);
+    now.t = new Date("2026-08-17T12:00:59.999Z");
+    await service.checkIfStale();
+    expect(checks).toBe(1);
+    now.t = new Date("2026-08-17T12:01:00.000Z");
+    await service.checkIfStale();
+    expect(checks).toBe(2);
+  });
+
+  it("backs off focus check after a network failure", async () => {
+    const now = { t: new Date("2026-08-17T12:00:00.000Z") };
+    const fake = fakeDriver();
+    let checks = 0;
+    fake.driver.check = async () => {
+      checks += 1;
+      fake.emit({ kind: "error", message: "offline" });
+    };
+    const service = new UpdateService({
+      currentVersion: "0.2.9",
+      driver: fake.driver,
+      now: () => now.t,
+    });
+    await service.check();
+    expect(checks).toBe(1);
+    expect(service.state().status).toBe("error");
+    now.t = new Date("2026-08-17T12:00:30.000Z");
+    await service.checkIfStale();
+    expect(checks).toBe(1);
+    now.t = new Date("2026-08-17T12:01:01.000Z");
+    await service.checkIfStale();
+    expect(checks).toBe(2);
+  });
+
+  it("checks at once when nothing has been asked yet", async () => {
+    const fake = fakeDriver();
+    fake.driver.check = async () => {
+      fake.emit({ kind: "available", version: "0.3.0" });
+    };
+    const service = new UpdateService({
+      currentVersion: "0.2.9",
+      driver: fake.driver,
+    });
+    await service.checkIfStale();
+    expect(fake.downloads).toBe(1);
+  });
+
+  it("does not re-check a download that is already moving or staged", async () => {
+    const fake = fakeDriver();
+    let checks = 0;
+    fake.driver.check = async () => {
+      checks += 1;
+    };
+    const service = new UpdateService({
+      currentVersion: "0.2.9",
+      driver: fake.driver,
+    });
+    fake.emit({ kind: "available", version: "0.3.0" });
+    service.download();
+    await service.checkIfStale();
+    expect(checks).toBe(0);
+    fake.emit({ kind: "downloaded", version: "0.3.0" });
+    await service.checkIfStale();
+    expect(checks).toBe(0);
+  });
+
   it("refuses to install before the download lands", () => {
     const fake = fakeDriver();
     const service = new UpdateService({
@@ -306,6 +458,34 @@ describe("UpdateService, auto channel", () => {
     expect(() => service.install()).toThrow(/not downloaded/);
     expect(fake.installs).toBe(0);
   });
+
+  it("holds ready state through a subsequent driver error", () => {
+    const fake = fakeDriver();
+    const service = new UpdateService({
+      currentVersion: "0.2.9",
+      driver: fake.driver,
+    });
+    fake.emit({ kind: "available", version: "0.3.0" });
+    fake.emit({ kind: "downloaded", version: "0.3.0" });
+    expect(service.state().status).toBe("ready");
+    fake.emit({ kind: "error", message: "network dropped" });
+    const state = service.state();
+    expect(state.status).toBe("ready");
+    expect(state.latestVersion).toBe("0.3.0");
+    expect(state.error).toBe("network dropped");
+  });
+
+  it("start and stop are idempotent and do not leak timers", () => {
+    const fake = fakeDriver();
+    const service = new UpdateService({
+      currentVersion: "0.2.9",
+      driver: fake.driver,
+    });
+    service.start();
+    service.start(); // safe second call
+    service.stop();
+    service.stop(); // safe second stop
+  });
 });
 
 /* ---- a re-check must not take the offer off screen ----------------------- */
@@ -313,9 +493,9 @@ describe("UpdateService, auto channel", () => {
 /**
  * The rail draws its card from `status` alone, and hides it for anything that
  * is not available/downloading/ready. So a check that runs while an update is
- * already on offer must leave the status where it is: the six-hour timer fires
- * unprompted, and the tray's "Check for updates…" runs one at the very moment
- * it opens the window to show the answer.
+ * already on offer must leave the status where it is: the background timer
+ * fires unprompted, and the tray's "Check for updates…" runs one at the very
+ * moment it opens the window to show the answer.
  */
 describe("UpdateService, checking over a known update", () => {
   it("says checking when there is nothing on screen to keep", () => {
@@ -449,6 +629,21 @@ describe("update routes", () => {
     });
     expect(await res.json()).toMatchObject({ status: "available" });
     expect(fake.downloads).toBe(0);
+  });
+
+  it("starts the download from POST /api/update/download on auto channel", async () => {
+    const fake = fakeDriver();
+    const service = new UpdateService({
+      currentVersion: "0.2.9",
+      driver: fake.driver,
+    });
+    fake.emit({ kind: "available", version: "0.3.0" });
+    const res = await routed(service).request("/api/update/download", {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "downloading" });
+    expect(fake.downloads).toBe(1);
   });
 
   it("refuses a download on the manual channel with 409", async () => {

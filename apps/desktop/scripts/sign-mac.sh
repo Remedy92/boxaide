@@ -101,9 +101,9 @@ done
 # produced by the pass above; if either is missing the publish must not go
 # ahead with a dmg alone, because the running app would keep reporting the old
 # version forever and nobody would see a failure.
-for required in release/boxaide-mac.zip release/latest-mac.yml; do
+for required in release/boxaide-mac.dmg release/boxaide-mac.zip release/latest-mac.yml; do
   [ -f "$required" ] || {
-    echo "missing $required — the auto-updater feed was not built" >&2
+    echo "missing $required — required release artifact was not built" >&2
     exit 1
   }
 done
