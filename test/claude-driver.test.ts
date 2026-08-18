@@ -434,6 +434,9 @@ describe("ClaudeDriver", () => {
         setDriven: () => {},
         needsTitle: () => false,
         nameChat: () => false,
+        chatSession: () => null,
+        saveChatSession: () => {},
+        clearChatSession: () => {},
       },
       agent: "claude-code",
       bin: process.execPath,
@@ -496,6 +499,93 @@ describe("ClaudeDriver", () => {
     expect(answer.replyTo).toBe(user.seq);
     // Answered on the first attempt: no re-run, no burnt delivery.
     expect(userCalls(fake)).toHaveLength(1);
+    expect(store.listDroppedUserSeqs()).toEqual([]);
+
+    driver.stop();
+    await driver.done;
+  });
+
+  it("gives each chat its own session, and resumes it after a restart", async () => {
+    const fake = fakeCli([
+      { session: "ses-a", answer: "chat one" },
+      { session: "ses-b", answer: "chat two" },
+      // No session of its own: whatever this call was told to resume.
+      { answer: "back in one" },
+    ]);
+    const { channel } = make();
+    const first = channel.activeChat().id;
+    const second = channel.createChat().id;
+    // Named by the user, so nothing asks the model for a title and every call
+    // in the log is a turn.
+    channel.renameChat(first, "First");
+    channel.renameChat(second, "Second");
+    const driver = drive(channel, fake);
+
+    channel.post({ role: "user", text: "one", chatId: first });
+    await until(() => channel.history(undefined, first).some((t) => t.role === "agent"));
+    channel.post({ role: "user", text: "two", chatId: second });
+    await until(() => channel.history(undefined, second).some((t) => t.role === "agent"));
+
+    // Two chats, two fresh sessions: the second conversation does not open in
+    // the middle of the first one's transcript.
+    expect(fake.calls()[0]).not.toContain("--resume");
+    expect(fake.calls()[1]).not.toContain("--resume");
+
+    driver.stop();
+    await driver.done;
+
+    // A restart is not a new conversation. The ids are in the store and the
+    // workdir the transcripts live in is the same one.
+    const again = drive(channel, fake);
+    channel.post({ role: "user", text: "still there?", chatId: first });
+    await until(
+      () => channel.history(undefined, first).filter((t) => t.role === "agent").length === 2,
+    );
+
+    const resumed = fake.calls()[2];
+    expect(resumed[resumed.indexOf("--resume") + 1]).toBe("ses-a");
+    expect(resumed[resumed.indexOf("-p") + 1]).toBe("still there?");
+
+    again.stop();
+    await again.done;
+  });
+
+  it("drops only the refused chat's session when a resume is refused", async () => {
+    const fake = fakeCli([
+      { session: "ses-a", answer: "chat one" },
+      { session: "ses-b", answer: "chat two" },
+      { errors: ["No conversation found with session ID: $RESUME"] },
+      { session: "ses-a2", answer: "fresh start" },
+      { answer: "chat two again" },
+    ]);
+    const { store, channel } = make();
+    const first = channel.activeChat().id;
+    const second = channel.createChat().id;
+    channel.renameChat(first, "First");
+    channel.renameChat(second, "Second");
+    const driver = drive(channel, fake);
+
+    channel.post({ role: "user", text: "one", chatId: first });
+    await until(() => channel.history(undefined, first).some((t) => t.role === "agent"));
+    channel.post({ role: "user", text: "two", chatId: second });
+    await until(() => channel.history(undefined, second).some((t) => t.role === "agent"));
+
+    channel.post({ role: "user", text: "one again", chatId: first });
+    await until(
+      () => channel.history(undefined, first).filter((t) => t.role === "agent").length === 2,
+    );
+
+    // The refused chat started over; the other chat's transcript was never in
+    // question and is still what its next turn resumes.
+    expect(store.chatSession(first, "claude-code")).toBe("ses-a2");
+    expect(store.chatSession(second, "claude-code")).toBe("ses-b");
+
+    channel.post({ role: "user", text: "two again", chatId: second });
+    await until(
+      () => channel.history(undefined, second).filter((t) => t.role === "agent").length === 2,
+    );
+    const onSecond = fake.calls()[4];
+    expect(onSecond[onSecond.indexOf("--resume") + 1]).toBe("ses-b");
     expect(store.listDroppedUserSeqs()).toEqual([]);
 
     driver.stop();

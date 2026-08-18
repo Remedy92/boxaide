@@ -19,10 +19,16 @@
  * to quit early. A turn either produces a result event or it fails, and a
  * failure gives the lease back so the message is handed over again.
  *
+ * One session per chat, not per agent: a single running agent answers every
+ * chat, and one shared session would feed every conversation into the same
+ * transcript. The ids live beside the chats in the store, so an agent that is
+ * stopped and started again resumes where each conversation left off — the
+ * workdir is stable, so the transcripts are still on disk.
+ *
  * The one thing that can be lost is memory. If a resume is refused — a pruned
- * transcript, a different home directory — the driver drops the session id and
- * starts a fresh one rather than failing the turn: an amnesiac agent beats a
- * dead one, and the user's next message still gets answered.
+ * transcript, a different home directory — the driver drops that chat's session
+ * id and starts a fresh one rather than failing the turn: an amnesiac agent
+ * beats a dead one, and the user's next message still gets answered.
  *
  * The loop's own chat tools are absent from a driven session's allowlist (see
  * `drivenPreapprovedToolNames` in launcher.ts). Two askers on one channel is
@@ -117,8 +123,6 @@ export type ClaudeDriverOptions = {
 export class ClaudeDriver implements AgentDriver {
   private abort = new AbortController();
   private stopped = false;
-  /** The session the next turn resumes. Null starts a fresh one. */
-  private sessionId: string | null = null;
   /** The turn's process, so stop() and the watchdog can end it. */
   private child: ChildProcess | null = null;
   /** Why the loop gave up, reported once through onStop. */
@@ -186,7 +190,7 @@ export class ClaudeDriver implements AgentDriver {
           });
         },
       },
-      (text) => this.prompt(text),
+      (turn) => this.prompt(turn.chatId, turn.text),
     );
   }
 
@@ -201,16 +205,23 @@ export class ClaudeDriver implements AgentDriver {
     try {
       if (this.stopped) return;
       if (!this.opts.channel.needsTitle(chatId)) return;
-      const raw = await this.prompt(TITLE_PROMPT);
+      const raw = await this.prompt(chatId, TITLE_PROMPT);
       this.opts.channel.nameChat(chatId, raw);
     } catch {
       // No name is a fine outcome. The answer is already posted.
     }
   }
 
-  /** One turn: spawn, read, answer. Throws on any failure. */
-  private async prompt(text: string): Promise<string> {
-    const resuming = this.sessionId;
+  /**
+   * One turn of one chat: spawn, read, answer. Throws on any failure.
+   *
+   * The session is looked up per chat rather than held for the driver. One
+   * running agent answers every chat, and a shared session would pour every
+   * conversation into a single transcript — each chat asking the model to
+   * continue whatever some other chat was talking about.
+   */
+  private async prompt(chatId: string, text: string): Promise<string> {
+    const resuming = this.opts.channel.chatSession(chatId, this.opts.agent);
     const outcome = await this.runTurn({
       prompt: text,
       system: DRIVEN_SYSTEM,
@@ -219,12 +230,17 @@ export class ClaudeDriver implements AgentDriver {
     // The id is taken from a failed turn too: a fresh session that failed
     // mid-work still exists, and resuming it is how the retry keeps whatever
     // the model already did.
-    if (outcome.sessionId) this.sessionId = outcome.sessionId;
+    if (outcome.sessionId) {
+      this.opts.channel.saveChatSession(chatId, this.opts.agent, outcome.sessionId);
+    }
     if (outcome.text) return outcome.text;
     // A resume the CLI could not find will never be found: the transcript is
     // gone. Keeping the id would fail every later turn the same way, so drop it
     // and let the retry start a session — losing context, not the conversation.
-    if (resuming && resumeRefused(outcome.error, resuming)) this.sessionId = null;
+    // Only this chat's: every other chat's transcript is still there.
+    if (resuming && resumeRefused(outcome.error, resuming)) {
+      this.opts.channel.clearChatSession(chatId);
+    }
     // An empty answer is a failed turn. Posting nothing would end the lease with
     // a blank reply in the pane; throwing re-queues the message instead.
     throw new Error(outcome.error ?? "claude produced no answer");

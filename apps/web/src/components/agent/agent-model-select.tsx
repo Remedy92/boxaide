@@ -14,31 +14,36 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { useLocalAgents } from "@/lib/hooks/use-local-agents";
+import { useLocalAgents, usePickedAgent } from "@/lib/hooks/use-local-agents";
 import { useSettings, useUpdateSettings } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
 
 const DEFAULT_VALUE = "default";
 
 /**
- * Models for the agent in play — the one this process launched, or the one
- * that last exited. A catalog of every installed CLI is not a picker: the
- * choice only reaches the next Start, and only if that CLI offers the id.
+ * Models for the agent in play — the one picked next to this control, or the
+ * one that last exited. A catalog of every installed CLI is not a picker: the
+ * choice only reaches the next start, and only if that CLI offers the id.
+ *
+ * It follows the pick rather than the running process, or choosing an agent
+ * that has not started yet would leave this reading "Default model" with an
+ * empty list — the models are known before the launch, so show them.
  *
  * Searchable rather than a plain select, because the list is whatever the CLI
  * reports and that is not always short — OpenCode names several hundred.
  */
 export function AgentModelSelect({ disabled }: { disabled?: boolean } = {}) {
   const agents = useLocalAgents();
+  const { picked: pickedAgent } = usePickedAgent();
   const settings = useSettings();
   const update = useUpdateSettings();
   const [open, setOpen] = useState(false);
 
   const allAgents = agents.data?.agents ?? [];
-  const running = agents.data?.running ?? null;
   const lastExit = agents.data?.lastExit ?? null;
-  const focusId = running?.id ?? lastExit?.id ?? null;
-  const focus = focusId ? (allAgents.find((a) => a.id === focusId) ?? null) : null;
+  const focus =
+    pickedAgent ??
+    (lastExit ? (allAgents.find((a) => a.id === lastExit.id) ?? null) : null);
   const models = focus?.models ?? [];
 
   if (models.length === 0) return null;

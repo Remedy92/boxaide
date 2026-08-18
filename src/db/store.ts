@@ -320,7 +320,9 @@ export class Store {
         archived_at TEXT,
         trimmed INTEGER NOT NULL DEFAULT 0,
         active INTEGER NOT NULL DEFAULT 0,
-        title_source TEXT NOT NULL DEFAULT 'auto'
+        title_source TEXT NOT NULL DEFAULT 'auto',
+        session_agent TEXT,
+        session_id TEXT
       );
     `);
     // Chats that predate title_source. A name already on screen is left alone —
@@ -354,6 +356,19 @@ export class Store {
             .run(row.id);
         }
       })();
+    }
+    // The CLI session each chat resumes. Two columns rather than one, because a
+    // session id only means anything to the CLI that issued it: an id Claude
+    // Code wrote is not one OpenCode can resume, and handing it over would fail
+    // every turn of that chat until somebody cleared it.
+    //
+    // Plain text, unlike the title beside it. A session id is the CLI's own
+    // identifier for a transcript it already holds on disk; it carries no user
+    // content, and encrypting it would only make the column unreadable to the
+    // process that has to hand it back verbatim.
+    if (!chatCols.some((c) => c.name === "session_id")) {
+      this.db.exec(`ALTER TABLE agent_chats ADD COLUMN session_agent TEXT`);
+      this.db.exec(`ALTER TABLE agent_chats ADD COLUMN session_id TEXT`);
     }
     if (!turnCols.some((c) => c.name === "chat_id")) {
       this.db.exec(`ALTER TABLE agent_turns ADD COLUMN chat_id TEXT`);
@@ -585,6 +600,46 @@ export class Store {
       const res = this.db.prepare(`DELETE FROM agent_chats WHERE id = ?`).run(id);
       return res.changes > 0;
     })();
+  }
+
+  /**
+   * The CLI session this chat resumes, for the agent that is asking.
+   *
+   * Null for another agent's session: the id would be meaningless to this CLI,
+   * and a chat switched from one agent to another has to start a session rather
+   * than fail every turn on one it cannot find.
+   */
+  chatSession(chatId: string, agent: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT session_agent as sessionAgent, session_id as sessionId
+         FROM agent_chats WHERE id = ?`,
+      )
+      .get(chatId) as
+      | { sessionAgent: string | null; sessionId: string | null }
+      | undefined;
+    if (!row || row.sessionAgent !== agent) return null;
+    return row.sessionId ?? null;
+  }
+
+  /**
+   * Remembers which session a chat is living in. On disk, not in the driver:
+   * the agent workdir is stable, so the CLI's transcript outlives the process
+   * that made it, and a restarted agent that forgot the id would answer the
+   * next message as a stranger.
+   */
+  saveChatSession(chatId: string, agent: string, sessionId: string): void {
+    this.db
+      .prepare(`UPDATE agent_chats SET session_agent = ?, session_id = ? WHERE id = ?`)
+      .run(agent, sessionId, chatId);
+  }
+
+  clearChatSession(chatId: string): void {
+    this.db
+      .prepare(
+        `UPDATE agent_chats SET session_agent = NULL, session_id = NULL WHERE id = ?`,
+      )
+      .run(chatId);
   }
 
   /** Bytes of encrypted turn text across every chat. What the budget counts. */
@@ -820,7 +875,14 @@ export class Store {
     this.db.prepare(`DELETE FROM agent_turns WHERE chat_id = ?`).run(chatId);
     // A cleared chat is not a trimmed one: the user asked for this, and the
     // banner explaining an automatic loss would be a lie about their own click.
-    this.db.prepare(`UPDATE agent_chats SET trimmed = 0 WHERE id = ?`).run(chatId);
+    // The session goes with the messages: a model still resuming a transcript
+    // the pane no longer shows would answer from history the user just emptied.
+    this.db
+      .prepare(
+        `UPDATE agent_chats SET trimmed = 0, session_agent = NULL, session_id = NULL
+         WHERE id = ?`,
+      )
+      .run(chatId);
   }
 
   /**

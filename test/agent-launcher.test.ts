@@ -112,6 +112,9 @@ function fakeChannel(): DriverChannel {
     setDriven: () => {},
     needsTitle: () => false,
     nameChat: () => false,
+    chatSession: () => null,
+    saveChatSession: () => {},
+    clearChatSession: () => {},
   };
 }
 

@@ -100,7 +100,15 @@ type ServerEvent = {
 export class OpenCodeDriver implements AgentDriver {
   private abort = new AbortController();
   private stopped = false;
-  private sessionId: string | null = null;
+  /**
+   * Sessions with a prompt in flight right now.
+   *
+   * The stream carries every session the server is running, and only the ones
+   * this driver is waiting on say anything about the turn the watchdog is
+   * guarding. A set rather than a single id because a chat's naming call can
+   * still be running when the next chat's turn starts.
+   */
+  private inFlight = new Set<string>();
   /** Aborts the prompt POST alone, when the watchdog gives up on it. */
   private promptAbort: AbortController | null = null;
   /** When this session last showed a sign of life. Only the watchdog reads it. */
@@ -171,7 +179,7 @@ export class OpenCodeDriver implements AgentDriver {
           });
         },
       },
-      (text) => this.prompt(base, text),
+      (turn) => this.prompt(base, turn.chatId, turn.text),
     );
   }
 
@@ -192,7 +200,7 @@ export class OpenCodeDriver implements AgentDriver {
     try {
       if (this.stopped) return;
       if (!this.opts.channel.needsTitle(chatId)) return;
-      const raw = await this.prompt(base, TITLE_PROMPT, { background: true });
+      const raw = await this.prompt(base, chatId, TITLE_PROMPT, { background: true });
       this.opts.channel.nameChat(chatId, raw);
     } catch {
       // No name is a fine outcome. See the note above. The whole body is
@@ -215,10 +223,12 @@ export class OpenCodeDriver implements AgentDriver {
    */
   private async prompt(
     base: string,
+    chatId: string,
     text: string,
     options: { background?: boolean } = {},
   ): Promise<string> {
-    const session = await this.ensureSession(base);
+    const session = await this.ensureSession(base, chatId);
+    this.inFlight.add(session);
     // Armed across the body read too, not just the headers: a server that
     // flushes headers early and streams the body would otherwise spend the
     // whole turn outside the watchdog. Aborting the guard rejects the read.
@@ -243,12 +253,15 @@ export class OpenCodeDriver implements AgentDriver {
       // server may still be running the turn on this session, and the next
       // attempt on the same session would 409 into it. Tell it to stop, take a
       // fresh session next time, and let the caller re-queue the message.
+      // This chat's session only: the other chats' sessions are untouched by a
+      // turn that failed in this one.
       if (!options.background) {
-        this.sessionId = null;
+        this.opts.channel.clearChatSession(chatId);
         void this.call(base, `/session/${session}/abort`, {}).catch(() => {});
       }
       throw err;
     } finally {
+      this.inFlight.delete(session);
       guard.end();
     }
     const reply = (body.parts ?? [])
@@ -263,8 +276,17 @@ export class OpenCodeDriver implements AgentDriver {
     return reply;
   }
 
-  private async ensureSession(base: string): Promise<string> {
-    if (this.sessionId) return this.sessionId;
+  /**
+   * The server session this chat's turns run in, made on first use.
+   *
+   * Per chat, not per driver: one running agent answers every chat, and a
+   * shared session would put every conversation in one transcript. The id is
+   * kept in the store, so a restarted agent picks each conversation back up —
+   * the server's directory is the stable agent workdir.
+   */
+  private async ensureSession(base: string, chatId: string): Promise<string> {
+    const known = this.opts.channel.chatSession(chatId, this.opts.agent);
+    if (known) return known;
     const res = await this.call(base, "/session", {
       title: "Boxaide",
       // The old chat launch ran `--auto`; this is the same grant, per session.
@@ -279,7 +301,7 @@ export class OpenCodeDriver implements AgentDriver {
     if (typeof body.id !== "string" || !body.id) {
       throw new Error("opencode session response had no id");
     }
-    this.sessionId = body.id;
+    this.opts.channel.saveChatSession(chatId, this.opts.agent, body.id);
     return body.id;
   }
 
@@ -390,7 +412,9 @@ export class OpenCodeDriver implements AgentDriver {
     // deliberately not proof of anything here: a live server heartbeats just as
     // steadily while the turn it is holding has stopped moving. Only the
     // session's own events say the turn is still being worked.
-    if (!props || !this.sessionId || props.sessionID !== this.sessionId) return;
+    if (typeof props?.sessionID !== "string" || !this.inFlight.has(props.sessionID)) {
+      return;
+    }
     this.lastSessionEvent = Date.now();
     if (event.type === "message.part.updated" && props.part?.type === "tool") {
       const name = props.part.tool ?? props.part.name;

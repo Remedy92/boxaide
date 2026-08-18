@@ -39,6 +39,19 @@ export type DriverChannel = {
   needsTitle(chatId: string): boolean;
   /** Offers the model's name for the chat. Refused if the user named it. */
   nameChat(chatId: string, title: string): boolean;
+  /**
+   * The CLI session this chat continues in, or null to start one.
+   *
+   * A session per chat, not per agent: one running agent answers every chat,
+   * and a single shared session would feed every conversation's messages into
+   * one transcript. `agent` scopes the answer because a session id only means
+   * something to the CLI that issued it.
+   */
+  chatSession(chatId: string, agent: string): string | null;
+  /** Remembers the session a chat is living in, across agent restarts. */
+  saveChatSession(chatId: string, agent: string, sessionId: string): void;
+  /** Forgets one chat's session. The next turn there starts a fresh one. */
+  clearChatSession(chatId: string): void;
 };
 
 /** A running driver, from the launcher's side. Stopping is idempotent. */
@@ -166,7 +179,9 @@ export type DrivenLoopOptions = {
  */
 export async function runDrivenLoop(
   loop: DrivenLoopOptions,
-  takeTurn: (text: string) => Promise<string>,
+  // The whole turn, not just its text: which chat a message came from decides
+  // which session answers it.
+  takeTurn: (turn: DrivenTurn) => Promise<string>,
 ): Promise<string | null> {
   let failures = 0;
   while (!loop.stopped()) {
@@ -200,7 +215,7 @@ export async function runDrivenLoop(
         release(loop, turn.seq, { revertAttempt: true });
         return null;
       }
-      const reply = await takeTurn(turn.text);
+      const reply = await takeTurn(turn);
       loop.channel.post({ role: "agent", text: reply, agent: loop.agent });
       failures = 0;
       try {

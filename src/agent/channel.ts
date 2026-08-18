@@ -498,6 +498,26 @@ export class AgentChannel {
     return ok;
   }
 
+  /**
+   * The CLI session a chat's turns are answered in.
+   *
+   * Straight through to the store, and deliberately so: two processes launch
+   * agents, and an id kept in whichever one is running would be lost the moment
+   * that agent restarted — leaving the model to answer the next message with no
+   * memory of the conversation it is in.
+   */
+  chatSession(chatId: string, agent: string): string | null {
+    return this.store.chatSession(chatId, agent);
+  }
+
+  saveChatSession(chatId: string, agent: string, sessionId: string): void {
+    this.store.saveChatSession(chatId, agent, sessionId);
+  }
+
+  clearChatSession(chatId: string): void {
+    this.store.clearChatSession(chatId);
+  }
+
   archiveChat(id: string): boolean {
     const ok = this.store.archiveChat(id);
     if (ok) this.afterChatRemoved(id);
