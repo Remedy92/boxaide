@@ -37,8 +37,11 @@ find "$APP/Contents/Resources/app.asar.unpacked" -name "*.node" \
   -exec codesign --force --timestamp --options runtime --sign "$ID" {} \;
 
 # The EventKit helper. Hardened runtime, no entitlements: it is not V8 and
-# needs neither JIT key. Unsigned it fails --deep --strict below, and
-# notarisation after that.
+# needs neither JIT key, and the calendar entitlement belongs to the app rather
+# than here — macOS charges a bundle-less helper's request to the responsible
+# process and reads the entitlement from that. Signing the helper with it and
+# the app without was measured, and the permission dialog still never appeared.
+# Unsigned it fails --deep --strict below, and notarisation after that.
 # An `if`, not a `&&` chain: under `set -e` a false test is a failed command
 # and would abort the whole signing run whenever the helper is absent.
 HELPER="$APP/Contents/Resources/boxaide-calendar"
