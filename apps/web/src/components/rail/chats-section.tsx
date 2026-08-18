@@ -5,6 +5,7 @@ import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAgent } from "@/lib/hooks/use-agent";
+import { useApp } from "@/lib/hooks/use-app-state";
 import { cn } from "@/lib/utils";
 
 /**
@@ -25,8 +26,16 @@ export function formatBytes(bytes: number): string {
   return `${(kb / 1024).toFixed(1)} MB`;
 }
 
-export function ChatsSection({ onOpenAll }: { onOpenAll: () => void }) {
+export function ChatsSection({
+  onOpenAll,
+  onNavigate,
+}: {
+  onOpenAll: () => void;
+  /** Dismiss whatever surface the rail is being shown in — see LeftRail. */
+  onNavigate?: () => void;
+}) {
   const agent = useAgent();
+  const app = useApp();
   const recent = agent.chats.slice(0, RECENT);
   const rest = Math.max(agent.chats.length - recent.length, 0);
 
@@ -43,7 +52,14 @@ export function ChatsSection({ onOpenAll }: { onOpenAll: () => void }) {
         <button
           key={chat.id}
           type="button"
-          onClick={() => void agent.openChat(chat.id)}
+          onClick={() => {
+            /* Selecting a conversation means wanting to read it: the row also
+               brings the Agent view forward, and drops the sheet or popover the
+               rail was being shown in, so one tap does the whole job. */
+            onNavigate?.();
+            app.setView("agent");
+            void agent.openChat(chat.id);
+          }}
           aria-current={chat.id === agent.chat?.id ? "true" : undefined}
           title={chat.title}
           className={cn(
@@ -65,6 +81,9 @@ export function ChatsSection({ onOpenAll }: { onOpenAll: () => void }) {
         </button>
       ))}
 
+      {/* Not dismissed here: the dialog opens on top, and tearing the sheet
+          down in the same tick would fight it for focus. The dialog drops the
+          rail itself, on the way out, once a chat is picked. */}
       <button
         type="button"
         onClick={onOpenAll}
@@ -95,8 +114,16 @@ export function ChatsSection({ onOpenAll }: { onOpenAll: () => void }) {
  * Nothing renders when the agent bridge is unsupported — a button that cannot
  * start a chat is worse than a rail that does not offer one.
  */
-export function NewChatButton({ collapsed = false }: { collapsed?: boolean }) {
+export function NewChatButton({
+  collapsed = false,
+  onNavigate,
+}: {
+  collapsed?: boolean;
+  /** Dismiss whatever surface the rail is being shown in — see LeftRail. */
+  onNavigate?: () => void;
+}) {
   const agent = useAgent();
+  const app = useApp();
   if (agent.connection === "unsupported") return null;
 
   /* Secondary, not the accent fill. A full-width saturated block at the top of
@@ -108,7 +135,11 @@ export function NewChatButton({ collapsed = false }: { collapsed?: boolean }) {
       variant="secondary"
       size={collapsed ? "icon" : "default"}
       aria-label={collapsed ? "New chat" : undefined}
-      onClick={() => void agent.newChat()}
+      onClick={() => {
+        onNavigate?.();
+        app.setView("agent");
+        void agent.newChat();
+      }}
       className={collapsed ? "" : "w-full justify-start bg-surface-2 font-medium"}
     >
       <Plus aria-hidden="true" className="size-4 text-fg-tertiary" strokeWidth={1.5} />
