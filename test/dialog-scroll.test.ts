@@ -9,13 +9,8 @@ const COMPONENTS = join(process.cwd(), "apps", "web", "src", "components");
  * and the page cannot scroll to reach it, so the buttons at the bottom are
  * simply not clickable. <DialogContent> caps its own height for that reason,
  * which makes a scrolling <DialogBody> the only way overflowing content stays
- * reachable. These two files scroll their own middle band by hand instead.
+ * reachable. Every dialog uses it — there is no second way to do this.
  */
-const SELF_SCROLLING = new Map([
-  ["ui/command.tsx", "CommandList is the scroll region"],
-  ["dialogs/agent-connect-dialog.tsx", "hand-built pinned header and footer"],
-]);
-
 function tsxFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name);
@@ -24,14 +19,23 @@ function tsxFiles(dir: string): string[] {
   });
 }
 
-/** Every `<DialogContent …>…</DialogContent>` in a file, as raw source. */
+/**
+ * Every dialog body in a file, as raw source. A wrapper that renders `{children}`
+ * verbatim defines no body of its own, so the duty falls to whoever calls it —
+ * and that caller is scanned here too, by the tag it uses.
+ */
+const OPENERS = ["DialogContent", "CommandDialog"];
+
 function dialogBlocks(source: string): string[] {
   const blocks: string[] = [];
-  let at = source.indexOf("<DialogContent");
-  while (at !== -1) {
-    const end = source.indexOf("</DialogContent>", at);
-    blocks.push(source.slice(at, end === -1 ? source.length : end));
-    at = source.indexOf("<DialogContent", at + 1);
+  for (const tag of OPENERS) {
+    let at = source.indexOf(`<${tag}`);
+    while (at !== -1) {
+      const end = source.indexOf(`</${tag}>`, at);
+      const block = source.slice(at, end === -1 ? source.length : end);
+      if (!block.includes("{children}")) blocks.push(block);
+      at = source.indexOf(`<${tag}`, at + 1);
+    }
   }
   return blocks;
 }
@@ -42,7 +46,7 @@ describe("dialog scrolling", () => {
       id: relative(COMPONENTS, path).split(/[\\/]/).join("/"),
       source: readFileSync(path, "utf8"),
     }))
-    .filter(({ source }) => source.includes("<DialogContent"));
+    .filter(({ source }) => dialogBlocks(source).length > 0);
 
   it("finds the dialogs it is meant to guard", () => {
     expect(files.length).toBeGreaterThan(8);
@@ -50,7 +54,6 @@ describe("dialog scrolling", () => {
 
   it("gives every dialog a scroll region", () => {
     const missing = files
-      .filter(({ id }) => !SELF_SCROLLING.has(id))
       .filter(({ source }) =>
         dialogBlocks(source).some((block) => !block.includes("<DialogBody")),
       )
@@ -58,12 +61,18 @@ describe("dialog scrolling", () => {
     expect(missing).toEqual([]);
   });
 
-  it("leaves the height cap to DialogContent itself", () => {
+  /**
+   * <DialogContent> derives its cap from being centred, so a dialog that moves
+   * itself elsewhere has to restate one. Nothing else may: a second cap, or a
+   * second scroller, is the bug this whole pattern replaced.
+   */
+  it("leaves the height cap to DialogContent unless the dialog is moved", () => {
     const capped = files
       .filter(({ source }) =>
         dialogBlocks(source).some((block) => {
           const open = block.slice(0, block.indexOf(">"));
-          return /max-h-|overflow-y-auto/.test(open);
+          if (/overflow-y-auto/.test(open)) return true;
+          return /max-h-/.test(open) && !/\btop-\[/.test(open);
         }),
       )
       .map(({ id }) => id);

@@ -1,6 +1,6 @@
 import * as React from "react"
 import { XIcon } from "lucide-react"
-import { Dialog as DialogPrimitive } from "radix-ui"
+import { Dialog as DialogPrimitive, Slot } from "radix-ui"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -69,7 +69,7 @@ function DialogContent({
           // cannot scroll to reach it — the buttons at the bottom simply are
           // not reachable. Capping here and scrolling inside <DialogBody>
           // keeps the header and the footer on screen at every window size.
-          "fixed top-[50%] left-[50%] z-50 flex max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] flex-col gap-4 overflow-hidden rounded-[var(--radius-lg)] border border-border-subtle bg-surface-2 p-5 shadow-[var(--shadow-dialog)] duration-[var(--dur-enter)] outline-none [&>*]:min-w-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
+          "[--dialog-px:1.25rem] fixed top-[50%] left-[50%] z-50 flex max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] flex-col gap-4 overflow-hidden rounded-[var(--radius-lg)] border border-border-subtle bg-surface-2 p-(--dialog-px) shadow-[var(--shadow-dialog)] duration-[var(--dur-enter)] outline-none [&>*]:min-w-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
           className
         )}
         {...props}
@@ -96,12 +96,17 @@ function DialogContent({
  * The negative inline margin pulls the scrollbar out to the dialog edge and
  * gives focus rings room to draw without being clipped by the scroll box.
  */
-function DialogBody({ className, ...props }: React.ComponentProps<"div">) {
+function DialogBody({
+  className,
+  asChild = false,
+  ...props
+}: React.ComponentProps<"div"> & { asChild?: boolean }) {
+  const Comp = asChild ? Slot.Root : "div"
   return (
-    <div
+    <Comp
       data-slot="dialog-body"
       className={cn(
-        "pane-scroll -mx-5 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 [&>*]:min-w-0",
+        "pane-scroll -mx-(--dialog-px) flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-(--dialog-px) [&>*]:min-w-0",
         className
       )}
       {...props}
@@ -138,7 +143,7 @@ function DialogFooter({
         // width of the dialog, so content visibly passes beneath the buttons
         // instead of looking cut off.
         "flex shrink-0 flex-col-reverse gap-2 sm:flex-row sm:justify-end",
-        "[[data-slot=dialog-body]+&]:-mx-5 [[data-slot=dialog-body]+&]:border-t [[data-slot=dialog-body]+&]:border-border-subtle [[data-slot=dialog-body]+&]:px-5 [[data-slot=dialog-body]+&]:pt-4",
+        "[[data-slot=dialog-body]+&]:-mx-(--dialog-px) [[data-slot=dialog-body]+&]:border-t [[data-slot=dialog-body]+&]:border-border-subtle [[data-slot=dialog-body]+&]:px-(--dialog-px) [[data-slot=dialog-body]+&]:pt-4",
         className
       )}
       {...props}
