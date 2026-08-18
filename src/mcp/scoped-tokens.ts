@@ -102,6 +102,10 @@ export class ScopedTokens {
 export function secretsMatch(a: string, b: string): boolean {
   const left = Buffer.from(a, "utf8");
   const right = Buffer.from(b, "utf8");
-  if (left.length !== right.length) return false;
+  // Empty is never a match, even against an empty expectation. A bearer.token
+  // that is empty — truncated write, restored backup, a touched file — would
+  // otherwise make "no Authorization header at all" the master credential, and
+  // /mcp the one route on the app that answers an anonymous caller.
+  if (left.length === 0 || left.length !== right.length) return false;
   return timingSafeEqual(left, right);
 }

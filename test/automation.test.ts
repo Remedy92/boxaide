@@ -864,7 +864,7 @@ describe("AgentLauncher.runOnce", () => {
   it("sweeps run directories a crash left behind, and spares fresh ones", async () => {
     const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
     const dataDir = tempDir();
-    const runs = join(dataDir, "agent-workdir", "runs");
+    const runs = join(`${dataDir}-agents`, "workdir", "runs");
     mkdirSync(join(runs, "abandoned"), { recursive: true });
     mkdirSync(join(runs, "in-flight-elsewhere"), { recursive: true });
     // Older than the deadline plus its margin: nothing alive can own it.

@@ -255,7 +255,7 @@ Scheduler (`AutomationScheduler`):
 - Runs do not disturb the chat agent and are not disturbed by it. The launcher
   keeps the chat slot and the run slots apart, so Start never fails because the
   schedule is busy, and the schedule never stalls behind a chat session.
-- Each run gets `<dataDir>/agent-workdir/runs/<runId>`, removed when the run
+- Each run gets `<dataDir>-agents/workdir/runs/<runId>`, removed when the run
   ends and swept at startup past `RUN_WORKDIR_STALE_MS` for the ones a crash
   left behind. Age is the sweep's test, not ownership, because a second process
   over the same data directory may have a run in flight.
@@ -287,7 +287,7 @@ Scheduler (`AutomationScheduler`):
   `ONESHOT_CLOSE_GRACE_MS` (2 s) after process exit when a leftover grandchild
   still holds a pipe open. A 15-minute timeout reports about 15 minutes.
 - The `claude` CLI runs under an isolated config home — `CLAUDE_CONFIG_DIR`
-  set to `<dataDir>/agent-homes/claude` — mirroring grok's isolated
+  set to `<dataDir>-agents/agent-homes/claude` — mirroring grok's isolated
   `GROK_HOME`. `--strict-mcp-config` only covers MCP servers; the isolated
   home is what keeps the user's personal hooks, skills, output styles and
   subagents out of a process Boxaide is responsible for. Credentials are

@@ -461,9 +461,7 @@ function claudeFlagsFor(
  * renamed (writeSecret / copySecret).
  */
 function claudeConfigHomeFor(ctx: LaunchContext): string {
-  const root =
-    ctx.dataDir === ":memory:" ? join(tmpdir(), "boxaide-agent") : ctx.dataDir;
-  return join(root, "agent-homes", "claude");
+  return join(agentRoot(ctx), "agent-homes", "claude");
 }
 
 function claudeChildEnv(
@@ -873,10 +871,45 @@ function antigravityPrepare(ctx: LaunchContext, workDir: string): void {
 }
 
 /**
+ * True when this entry from the user's agy config reaches this Boxaide.
+ *
+ * The name is checked because Boxaide's own connect snippet uses it and
+ * because a same-named entry shadows the one a launch writes. The URL is
+ * checked because the name is the user's to choose: `/api/agent-connect` hands
+ * out a URL and an Authorization header with no server name attached, so the
+ * entry that carries the master bearer is as likely to be called "mail" as
+ * "boxaide" — and agy merges every non-colliding server rather than replacing
+ * them, so a differently-named one sits beside the scoped connection and can
+ * send mail.
+ *
+ * Matched on port and path against `ctx.mcpUrl`, with a loopback host: that is
+ * what makes it this server rather than some other MCP server the user runs.
+ */
+function reachesBoxaide(name: string, entry: unknown, mcpUrl: string): boolean {
+  if (name.toLowerCase() === "boxaide") return true;
+  const raw = (entry as { url?: unknown; serverUrl?: unknown }) ?? {};
+  const candidate = typeof raw.url === "string" ? raw.url : raw.serverUrl;
+  if (typeof candidate !== "string") return false;
+  let declared: URL;
+  let ours: URL;
+  try {
+    declared = new URL(candidate);
+    ours = new URL(mcpUrl);
+  } catch {
+    return false;
+  }
+  const local = new Set(["localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"]);
+  if (!local.has(declared.hostname.toLowerCase())) return false;
+  return declared.port === ours.port && declared.pathname === ours.pathname;
+}
+
+/**
  * agy reads MCP servers from `~/.gemini/config/mcp_config.json` as well as the
  * workspace, and on a name collision the user's file wins — verified: a
  * launch whose workspace declared `boxaide` reached the server named in the
- * user's file instead, with the credential written there.
+ * user's file instead, with the credential written there. Entries that do not
+ * collide are merged in rather than replaced, so a user entry under any other
+ * name is a second, unscoped connection to the same server.
  *
  * Boxaide's own connect dialog tells users to paste exactly such an entry, and
  * it carries the master bearer. So on a machine that followed those
@@ -889,7 +922,7 @@ function antigravityPrepare(ctx: LaunchContext, workDir: string): void {
  * started on a credential Boxaide did not issue.
  */
 function antigravityPreflight(
-  _ctx: LaunchContext,
+  ctx: LaunchContext,
   env: NodeJS.ProcessEnv,
 ): string | null {
   const path = join(env.HOME || homedir(), ".gemini", "config", "mcp_config.json");
@@ -902,10 +935,12 @@ function antigravityPreflight(
     return null;
   }
   const servers = (declared as { mcpServers?: Record<string, unknown> })?.mcpServers;
-  if (!servers || typeof servers !== "object" || !("boxaide" in servers)) {
-    return null;
-  }
-  return `Antigravity is configured with its own Boxaide server in ${path}, and that entry overrides the one Boxaide creates for a launch — the agent would run on the credential in that file instead of the limited one Boxaide issues. Remove the "boxaide" entry from that file and start again; Boxaide wires the connection itself now, so nothing else is needed.`;
+  if (!servers || typeof servers !== "object") return null;
+  const found = Object.entries(servers).find(([name, entry]) =>
+    reachesBoxaide(name, entry, ctx.mcpUrl),
+  );
+  if (!found) return null;
+  return `Antigravity is configured with its own Boxaide server in ${path}, under the name "${found[0]}" — the agent would reach Boxaide through that entry, on the credential written there, instead of the limited one Boxaide issues for a launch. Remove the "${found[0]}" entry from that file and start again; Boxaide wires the connection itself now, so nothing else is needed.`;
 }
 
 /** `agy models` prints "id<TAB>Label" for everything the account can reach. */
@@ -924,9 +959,7 @@ const ANTIGRAVITY_LISTER: ModelLister = {
  * servers. Auth stays in the default data dir so the process still has keys.
  */
 function opencodeHomeFor(ctx: LaunchContext): string {
-  const root =
-    ctx.dataDir === ":memory:" ? join(tmpdir(), "boxaide-agent") : ctx.dataDir;
-  return join(root, "agent-homes", "opencode");
+  return join(agentRoot(ctx), "agent-homes", "opencode");
 }
 
 /**
@@ -1163,11 +1196,31 @@ const CLAUDE_MODELS: ModelOption[] = [
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
 ];
 
+/**
+ * Everything an agent is pointed at lives under here, and it is deliberately
+ * NOT inside the data directory.
+ *
+ * The data directory holds `bearer.token` and `master.key`. An agent used to
+ * stand in `<dataDir>/agent-workdir`, so `cat ../bearer.token` handed it the
+ * master credential the scope exists to keep away from it, and
+ * `cat ../master.key` decrypted the mail store. Three of the CLIs launched
+ * here run shell commands with approval turned off, and a prompt-injected
+ * email is enough to ask for that read.
+ *
+ * A sibling directory, so nothing the agent is handed — its cwd, its config
+ * home, the env vars naming them — walks up into the secrets. It is not a
+ * sandbox: a CLI with unrestricted file reads can still guess an absolute path
+ * to the data directory. What it removes is the escalation that needs no
+ * guessing.
+ */
+function agentRoot(ctx: LaunchContext): string {
+  if (ctx.dataDir === ":memory:") return join(tmpdir(), "boxaide-agent");
+  return `${ctx.dataDir.replace(/[/\\]+$/, "")}-agents`;
+}
+
 /** The chat agent's working directory. One per install; it owns it alone. */
 function agentWorkDir(ctx: LaunchContext): string {
-  return ctx.dataDir === ":memory:"
-    ? join(tmpdir(), "boxaide-agent")
-    : join(ctx.dataDir, "agent-workdir");
+  return join(agentRoot(ctx), "workdir");
 }
 
 /** Where every automation run's own directory is created. */
@@ -2236,15 +2289,22 @@ export class AgentLauncher {
 
   /**
    * The workdir a listing is described against — prepared, so the config files
-   * its env points at exist. Preparing is idempotent and writes the same
-   * content a launch would, so doing it early costs nothing. A failure here is
-   * not fatal to a listing: the CLI is asked anyway, against the bare path.
+   * its env points at exist. A failure here is not fatal to a listing: the CLI
+   * is asked anyway, against the bare path.
+   *
+   * Its own directory per agent, never the shared chat workdir. A listing
+   * prepares with no credential (see `listCtx`), and the chat agent's config
+   * files live in that shared directory: preparing there would overwrite a
+   * running launch's MCP config with an empty bearer. That write used to be
+   * harmless because it wrote the same master token a launch did; since the
+   * credential is per-launch it is not.
    */
   private listWorkDir(spec: AgentSpec): string {
+    const dir = join(agentRoot(this.ctx), "model-list", spec.id);
     try {
-      return this.prepareWorkDir(spec, this.listCtx());
+      return this.prepareWorkDir(spec, this.listCtx(), dir);
     } catch {
-      return agentWorkDir(this.ctx);
+      return dir;
     }
   }
 

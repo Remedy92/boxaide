@@ -754,6 +754,40 @@ sleep 60
     launcher.close();
   });
 
+  it("keeps a model listing out of the workdir a launch writes its credential into", async () => {
+    // A listing prepares with no credential. If it prepared into the shared
+    // chat workdir it would overwrite a running launch's MCP config with an
+    // empty bearer — harmless when every launch wrote the same master token,
+    // not harmless now that the credential is per-launch.
+    const bin = fakeBinDir(
+      "fake-agent",
+      `#!/bin/sh
+if [ "$1" = "models" ]; then printf 'm1\\tM1\\n'; exit 0; fi
+exec /bin/sleep 60
+`,
+    );
+    const prepared: Array<{ dir: string; token: string }> = [];
+    const launcher = new AgentLauncher(
+      { ...CTX, dataDir: tempDir() },
+      specs({
+        listModels: { args: ["models"], parse: parseTabbedModels },
+        prepare: (ctx, workDir) =>
+          prepared.push({ dir: workDir, token: ctx.bearerToken }),
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    await launcher.list();
+    const listing = prepared.at(-1)!;
+    expect(listing.token).toBe("");
+
+    await launcher.start("fake", "m1");
+    const launch = prepared.at(-1)!;
+    expect(launch.token).not.toBe("");
+    expect(launch.dir).not.toBe(listing.dir);
+  });
+
   it("refuses to launch when a preflight says the credential would not be Boxaide's", async () => {
     const bin = fakeBinDir("fake-agent");
     const launcher = new AgentLauncher(
@@ -790,6 +824,25 @@ sleep 60
       JSON.stringify({ mcpServers: { boxaide: { serverUrl: "http://x/mcp" } } }),
     );
     expect(spec.preflight!(CTX, { HOME: home })).toContain("Remove");
+
+    // The name is the user's to choose: /api/agent-connect hands out a URL and
+    // an Authorization header with no server name, and agy merges an entry that
+    // does not collide rather than replacing it. So a differently-named entry
+    // is a second, unscoped connection sitting beside the scoped one.
+    writeFileSync(
+      path,
+      JSON.stringify({ mcpServers: { "my-mail": { url: CTX.mcpUrl } } }),
+    );
+    expect(spec.preflight!(CTX, { HOME: home })).toContain("my-mail");
+
+    // Someone else's local MCP server is not Boxaide's, whatever it is called.
+    writeFileSync(
+      path,
+      JSON.stringify({
+        mcpServers: { other: { url: "http://127.0.0.1:9999/mcp" } },
+      }),
+    );
+    expect(spec.preflight!(CTX, { HOME: home })).toBeNull();
 
     // No file at all is the normal case and must not block a launch.
     rmSync(path);
@@ -847,7 +900,7 @@ sleep 60
       bearerToken: "secret-token-xyz",
       dataDir: tempDir(),
     };
-    const workDir = join(ctx.dataDir, "agent-workdir");
+    const workDir = join(`${ctx.dataDir}-agents`, "workdir");
     mkdirSync(workDir, { recursive: true });
     claude.prepare!(ctx, workDir, {});
     const path = join(workDir, "claude-mcp.json");
@@ -958,9 +1011,9 @@ sleep 60
   it("gives Claude its own config home so a run cannot load the user's setup", () => {
     const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
     const ctx = { ...CTX, dataDir: tempDir() };
-    const workDir = join(ctx.dataDir, "agent-workdir");
+    const workDir = join(`${ctx.dataDir}-agents`, "workdir");
     mkdirSync(workDir, { recursive: true });
-    const home = join(ctx.dataDir, "agent-homes", "claude");
+    const home = join(`${ctx.dataDir}-agents`, "agent-homes", "claude");
     expect(claude.childEnv!(ctx, workDir).CLAUDE_CONFIG_DIR).toBe(home);
 
     // No credentials file (macOS keychain auth): the home exists, empty.
@@ -990,14 +1043,14 @@ sleep 60
     /** Prepares a fresh isolated home against the given parent settings.json. */
     function prepareWith(settings: string | null): string {
       const ctx = { ...CTX, dataDir: tempDir() };
-      const workDir = join(ctx.dataDir, "agent-workdir");
+      const workDir = join(`${ctx.dataDir}-agents`, "workdir");
       mkdirSync(workDir, { recursive: true });
       const parent = tempDir();
       if (settings !== null) {
         writeFileSync(join(parent, "settings.json"), settings);
       }
       claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: parent });
-      return join(ctx.dataDir, "agent-homes", "claude", "settings.json");
+      return join(`${ctx.dataDir}-agents`, "agent-homes", "claude", "settings.json");
     }
 
     // Users who authenticate through settings.json have no credentials file at
@@ -1052,7 +1105,7 @@ sleep 60
     expect(args.join("\0")).not.toContain("message_send");
     expect(args.join("\0")).not.toContain(ctx.bearerToken);
 
-    const workDir = join(ctx.dataDir, "agent-workdir");
+    const workDir = join(`${ctx.dataDir}-agents`, "workdir");
     mkdirSync(workDir, { recursive: true });
     grok!.prepare!(ctx, workDir, { PATH: "/usr/bin" });
     const env = grok!.childEnv!(ctx, workDir);
@@ -1088,7 +1141,7 @@ sleep 60
 
     const running = await launcher.start("grok");
     expect(running.id).toBe("grok");
-    const home = join(dataDir, "agent-workdir", "grok-home");
+    const home = join(`${dataDir}-agents`, "workdir", "grok-home");
     expect(readFileSync(join(home, "config.toml"), "utf8")).toContain(
       "http://127.0.0.1:9/mcp",
     );

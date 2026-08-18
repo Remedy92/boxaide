@@ -21,7 +21,7 @@ import {
   scopeToolNames,
   type ScopeProfile,
 } from "../src/mcp/scope.js";
-import { ScopedTokens } from "../src/mcp/scoped-tokens.js";
+import { ScopedTokens, secretsMatch } from "../src/mcp/scoped-tokens.js";
 import { createRuntime } from "../src/app.js";
 
 const baseCreds = {
@@ -265,6 +265,15 @@ describe("/mcp credentials", () => {
     rt.launcher.close();
     rt.channel.close();
     rt.store.close();
+  });
+
+  it("never treats an empty credential as the master bearer", () => {
+    // An empty bearer.token — truncated write, restored backup, a touched file
+    // — used to make "no Authorization header at all" the unrestricted caller
+    // on /mcp, the one route that did not go through tokensMatch.
+    expect(secretsMatch("", "")).toBe(false);
+    expect(secretsMatch("", "real-token")).toBe(false);
+    expect(secretsMatch("real-token", "real-token")).toBe(true);
   });
 
   it("rejects a revoked token, and never accepts one anywhere but /mcp", async () => {
