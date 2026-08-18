@@ -16,6 +16,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { formatBytes } from "@/components/rail/chats-section";
 import { listAgentChats } from "@/lib/api/endpoints";
 import { useAgent } from "@/lib/hooks/use-agent";
+import { useApp } from "@/lib/hooks/use-app-state";
 import { useApiCtx } from "@/lib/hooks/use-settings";
 import type { AgentChat } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -51,10 +52,29 @@ function ChatsDialogBody({
   onOpenChange: (open: boolean) => void;
 }) {
   const agent = useAgent();
+  const app = useApp();
   const ctx = useApiCtx();
   const [query, setQuery] = React.useState("");
   const [archived, setArchived] = React.useState<AgentChat[]>([]);
   const [showArchived, setShowArchived] = React.useState(false);
+
+  /* Below 760px this dialog is opened from the rail sheet, which stays mounted
+     behind it. Picking a chat has to take that down too, or closing the dialog
+     drops the reader straight back onto the rail.
+
+     A tick later, not in this commit: closing both layers at once leaves focus
+     on <body>, because the row this dialog hands focus back to goes away in the
+     same breath. One tick apart, each layer restores focus to the control that
+     opened it and the keyboard ends up on the sidebar button. A timer rather
+     than a frame — a frame never comes in a background tab. */
+  const leave = React.useCallback(() => {
+    app.setView("agent");
+    onOpenChange(false);
+    window.setTimeout(() => {
+      app.setRailSheetOpen(false);
+      app.setRailOverlay(false);
+    }, 0);
+  }, [app, onOpenChange]);
 
   /* The archived list is fetched here rather than carried in the provider: it
      is read in one dialog, it can be long, and nothing in the rail needs it. */
@@ -106,7 +126,7 @@ function ChatsDialogBody({
               size="sm"
               onClick={() => {
                 void agent.newChat();
-                onOpenChange(false);
+                leave();
               }}
             >
               <Plus className="size-3.5" strokeWidth={1.5} />
@@ -133,8 +153,10 @@ function ChatsDialogBody({
                 <button
                   type="button"
                   onClick={() => {
+                    /* Same as the rail rows: picking a conversation also
+                       brings the Agent view forward. */
                     void agent.openChat(chat.id);
-                    onOpenChange(false);
+                    leave();
                   }}
                   className="min-w-0 flex-1 text-left"
                 >
