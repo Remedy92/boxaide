@@ -54,8 +54,21 @@ function readRegular(path: string): string {
   }
 }
 
-/** A bin directory holding one fake executable that sleeps until killed. */
-function fakeBinDir(name: string, script = "#!/bin/sh\nsleep 60\n"): string {
+/**
+ * A stand-in agent binary on a PATH that holds nothing else.
+ *
+ * The default script has to outlive the test that starts it, and both halves
+ * of it are load-bearing. `/bin/sleep` by absolute path, because the launcher
+ * hands the child a PATH built from `this.env.PATH` — which is this directory
+ * and nothing else — so a bare `sleep` is not found and the shell exits 127
+ * before the test can stop it. `exec`, because otherwise the sleep is a
+ * grandchild that keeps the stdio pipes open after the shell is signalled, so
+ * "close" never fires and the launcher never reports the exit.
+ */
+function fakeBinDir(
+  name: string,
+  script = "#!/bin/sh\nexec /bin/sleep 60\n",
+): string {
   const dir = join(tempDir(), "bin");
   mkdirSync(dir, { recursive: true });
   const path = join(dir, name);
@@ -410,7 +423,7 @@ if [ "$1" = "models" ]; then
   printf 'live-a\\tLive A\\nlive-b\\tLive B\\n'
   exit 0
 fi
-sleep 60
+exec /bin/sleep 60
 `,
     );
     let seenArgs: string[] = [];
@@ -537,7 +550,7 @@ if [ "$1" = "models" ]; then
   printf 'live-a\\tLive A\\n'
   exit 0
 fi
-sleep 60
+exec /bin/sleep 60
 `,
     );
     const launcher = new AgentLauncher(
@@ -599,7 +612,7 @@ if [ "$1" = "models" ]; then
   echo 'not logged in' >&2
   exit 1
 fi
-sleep 60
+exec /bin/sleep 60
 `,
     );
     const launcher = new AgentLauncher(
