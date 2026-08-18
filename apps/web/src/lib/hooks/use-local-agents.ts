@@ -1,5 +1,6 @@
 "use client";
 
+import type { LocalAgentAccess } from "@/lib/api/endpoints";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   listLocalAgents,
@@ -30,8 +31,15 @@ export function useStartLocalAgent() {
   const ctx = useApiCtx();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, model }: { id: string; model?: string }) =>
-      startLocalAgent(id, ctx, model),
+    mutationFn: ({
+      id,
+      model,
+      access,
+    }: {
+      id: string;
+      model?: string;
+      access?: LocalAgentAccess;
+    }) => startLocalAgent(id, ctx, model, access),
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["local-agents"] });
     },

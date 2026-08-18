@@ -19,6 +19,7 @@ import { appVersion } from "../version.js";
 import type { AccountCredentials, DraftInput } from "../provider/types.js";
 import { passwordCredentials } from "../provider/types.js";
 import { MAX_LIST_LIMIT, parseListLimit } from "../input-limits.js";
+import { isAgentAccess, type AgentAccess } from "../agent/sandbox.js";
 
 /** Highest `limit` any list endpoint will accept. */
 export const MAX_LIMIT = MAX_LIST_LIMIT;
@@ -912,22 +913,33 @@ function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
   });
 
   app.post("/api/agents/:id/start", async (c) => {
-    // Body is optional: { model?: string }. The launcher validates the id
-    // against its own registry; this only rejects non-string shapes.
+    // Body is optional: { model?: string, access?: "workspace" | "full" }. The
+    // launcher validates the id against its own registry; this only rejects
+    // shapes it would not understand.
     let model: string | undefined;
+    let access: AgentAccess | undefined;
     try {
-      const body = await c.req.json<{ model?: unknown }>();
+      const body = await c.req.json<{ model?: unknown; access?: unknown }>();
       if (body && typeof body === "object" && body.model !== undefined) {
         if (typeof body.model !== "string") {
           return c.json({ error: "model must be a string" }, 400);
         }
         model = body.model;
       }
+      if (body && typeof body === "object" && body.access !== undefined) {
+        // Named explicitly rather than coerced: "full" is the level that lets
+        // an agent read the user's files, and a caller must mean it.
+        if (!isAgentAccess(body.access)) {
+          return c.json({ error: "access must be workspace or full" }, 400);
+        }
+        access = body.access;
+      }
     } catch {
-      // No body, or not JSON — start on the CLI's default model.
+      // No body, or not JSON — start on the CLI's default model and the
+      // install's own access level.
     }
     try {
-      const running = await launcher.start(c.req.param("id"), model);
+      const running = await launcher.start(c.req.param("id"), model, access);
       return c.json({ running }, 201);
     } catch (err) {
       if (err instanceof LaunchError) {

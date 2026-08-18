@@ -54,12 +54,16 @@ function readRegular(path: string): string {
   }
 }
 
-/** A bin directory holding one fake executable that sleeps until killed. */
 /**
- * `sleep` by absolute path, not by name. The launcher hands the child a PATH
- * built from the one it was given plus its well-known bin directories, and on a
- * CI runner none of those holds `sleep` — the fake agent then died instantly
- * with 127 and raced every test that expects it to stay up.
+ * A stand-in agent binary on a PATH that holds nothing else.
+ *
+ * Both halves of the default script are load-bearing. `/bin/sleep` by absolute
+ * path, because the launcher hands the child a PATH built from the one it was
+ * given plus its well-known bin directories, and on a CI runner none of those
+ * holds `sleep` — the fake agent then died instantly with 127 and raced every
+ * test that expects it to stay up. `exec`, because otherwise the sleep is a
+ * grandchild that keeps the stdio pipes open after the shell is signalled, so
+ * "close" never fires and the launcher never reports the exit.
  */
 function fakeBinDir(
   name: string,
@@ -77,6 +81,10 @@ const CTX = {
   mcpUrl: "http://127.0.0.1:0/mcp",
   bearerToken: "t",
   dataDir: ":memory:",
+  // "full" so the suite describes launching, not confining, and runs the same
+  // on every platform — a workspace launch is refused off macOS by design.
+  // Confinement has its own file: test/agent-sandbox.test.ts.
+  access: "full" as const,
 };
 
 function specs(over: Partial<AgentSpec> = {}): AgentSpec[] {
@@ -696,13 +704,200 @@ exec /bin/sleep 60
     expect(run.slice(-2)).toEqual(["--", "--dangerously-skip-permissions"]);
   });
 
-  it("does not launch agents whose CLIs cannot enforce per-tool permissions", () => {
-    const antigravity = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
-    const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
-    for (const spec of [antigravity, opencode]) {
-      expect(spec.args).toBeUndefined();
-      expect(spec.runArgs).toBeUndefined();
-      expect(spec.prepare).toBeUndefined();
+  it("hands each launch its own scoped credential and takes it back on exit", async () => {
+    const { ScopedTokens } = await import("../src/mcp/scoped-tokens.js");
+    const tokens = new ScopedTokens();
+    const bin = fakeBinDir("fake-agent");
+    // What the spec was actually given, captured off the command line.
+    let sawToken: string | null = null;
+    const launcher = new AgentLauncher(
+      { ...CTX, mintToken: (profile, label) => tokens.mint(profile, label) },
+      specs({
+        args: (ctx) => {
+          sawToken = ctx.bearerToken;
+          return [];
+        },
+      }),
+      { PATH: "" },
+      [bin],
+    );
+
+    await launcher.start("fake");
+    expect(sawToken).not.toBe(CTX.bearerToken);
+    expect(tokens.resolve(sawToken!)).toBe("chat");
+    expect(tokens.list()).toHaveLength(1);
+
+    launcher.close();
+    // Revoked the moment the launch ends, not when the process finally dies:
+    // a child that ignores SIGTERM must not keep a working credential.
+    expect(tokens.resolve(sawToken!)).toBeNull();
+    expect(tokens.list()).toHaveLength(0);
+  });
+
+  it("scopes a scheduled run to 'run' and revokes it when the run finishes", async () => {
+    const { ScopedTokens } = await import("../src/mcp/scoped-tokens.js");
+    const tokens = new ScopedTokens();
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
+    let sawToken: string | null = null;
+    const minted: string[] = [];
+    const launcher = new AgentLauncher(
+      {
+        ...CTX,
+        mintToken: (profile, label) => {
+          minted.push(profile);
+          return tokens.mint(profile, label);
+        },
+      },
+      specs({
+        runArgs: (ctx) => {
+          sawToken = ctx.bearerToken;
+          return [];
+        },
+      }),
+      { PATH: "" },
+      [bin],
+    );
+
+    const result = await launcher.runOnce({
+      runId: "r1",
+      prompt: "do the thing",
+      closeGraceMs: 200,
+    });
+    expect(result.status).toBe("ok");
+    expect(minted).toEqual(["run"]);
+    expect(sawToken).not.toBe(CTX.bearerToken);
+    expect(tokens.resolve(sawToken!)).toBeNull();
+    expect(tokens.list()).toHaveLength(0);
+    launcher.close();
+  });
+
+  it("keeps a model listing out of the workdir a launch writes its credential into", async () => {
+    // A listing prepares with no credential. If it prepared into the shared
+    // chat workdir it would overwrite a running launch's MCP config with an
+    // empty bearer — harmless when every launch wrote the same master token,
+    // not harmless now that the credential is per-launch.
+    const bin = fakeBinDir(
+      "fake-agent",
+      `#!/bin/sh
+if [ "$1" = "models" ]; then printf 'm1\\tM1\\n'; exit 0; fi
+exec /bin/sleep 60
+`,
+    );
+    const prepared: Array<{ dir: string; token: string }> = [];
+    const launcher = new AgentLauncher(
+      { ...CTX, dataDir: tempDir() },
+      specs({
+        listModels: { args: ["models"], parse: parseTabbedModels },
+        prepare: (ctx, workDir) =>
+          prepared.push({ dir: workDir, token: ctx.bearerToken }),
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    await launcher.list();
+    const listing = prepared.at(-1)!;
+    expect(listing.token).toBe("");
+
+    await launcher.start("fake", "m1");
+    const launch = prepared.at(-1)!;
+    expect(launch.token).not.toBe("");
+    expect(launch.dir).not.toBe(listing.dir);
+  });
+
+  it("refuses to launch when a preflight says the credential would not be Boxaide's", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({ runArgs: () => [], preflight: () => "remove the entry first" }),
+      { PATH: "" },
+      [bin],
+    );
+    await expect(launcher.start("fake")).rejects.toThrow("remove the entry first");
+    expect(launcher.status().running).toBeNull();
+    await expect(
+      launcher.runOnce({ runId: "r1", agentId: "fake", prompt: "x" }),
+    ).rejects.toThrow("remove the entry first");
+    // The reservation is released, or the next run would find no capacity.
+    expect(launcher.runCapacity()).toBe(launcher.runLimit());
+    launcher.close();
+  });
+
+  it("blocks Antigravity when the user's own agy config declares a boxaide server", () => {
+    // That entry wins over the one a launch writes, and it carries whatever
+    // credential the user pasted into it — so the scope Boxaide minted would
+    // not be the scope the agent runs on.
+    const spec = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
+    const home = tempDir();
+    const configDir = join(home, ".gemini", "config");
+    mkdirSync(configDir, { recursive: true });
+    const path = join(configDir, "mcp_config.json");
+
+    writeFileSync(path, JSON.stringify({ mcpServers: { supabase: {} } }));
+    expect(spec.preflight!(CTX, { HOME: home })).toBeNull();
+
+    writeFileSync(
+      path,
+      JSON.stringify({ mcpServers: { boxaide: { serverUrl: "http://x/mcp" } } }),
+    );
+    expect(spec.preflight!(CTX, { HOME: home })).toContain("Remove");
+
+    // The name is the user's to choose: /api/agent-connect hands out a URL and
+    // an Authorization header with no server name, and agy merges an entry that
+    // does not collide rather than replacing it. So a differently-named entry
+    // is a second, unscoped connection sitting beside the scoped one.
+    writeFileSync(
+      path,
+      JSON.stringify({ mcpServers: { "my-mail": { url: CTX.mcpUrl } } }),
+    );
+    expect(spec.preflight!(CTX, { HOME: home })).toContain("my-mail");
+
+    // Someone else's local MCP server is not Boxaide's, whatever it is called.
+    writeFileSync(
+      path,
+      JSON.stringify({
+        mcpServers: { other: { url: "http://127.0.0.1:9999/mcp" } },
+      }),
+    );
+    expect(spec.preflight!(CTX, { HOME: home })).toBeNull();
+
+    // No file at all is the normal case and must not block a launch.
+    rmSync(path);
+    expect(spec.preflight!(CTX, { HOME: home })).toBeNull();
+  });
+
+  it("launches every registered CLI, including the ones with no allowlist flag", () => {
+    // The boundary is the scoped token the server enforces, so a CLI no longer
+    // has to offer --allowedTools to be launchable. This is the assertion that
+    // would fail if someone re-disabled one of them for that reason.
+    for (const id of ["claude-code", "grok", "antigravity", "opencode", "codex"]) {
+      const spec = KNOWN_AGENTS.find((s) => s.id === id)!;
+      expect(spec.args !== undefined || spec.drive !== undefined).toBe(true);
+      expect(spec.runArgs).toBeDefined();
+    }
+  });
+
+  it("keeps every agent's credential off its command line", () => {
+    // A bearer in argv is readable by every process on the machine and lands
+    // in crash reports. Each spec puts it in a config file or the child env
+    // instead; this holds all of them to it at once, including the next one.
+    const dataDir = tempDir();
+    const ctx = {
+      mcpUrl: "http://127.0.0.1:8787/mcp",
+      bearerToken: "scoped-token-do-not-leak",
+      dataDir,
+    };
+    for (const spec of KNOWN_AGENTS) {
+      const workDir = join(dataDir, spec.id);
+      mkdirSync(workDir, { recursive: true });
+      spec.prepare?.(ctx, workDir, {});
+      const argv = [
+        ...(spec.args?.(ctx) ?? []),
+        ...(spec.runArgs?.(ctx, "do the thing", workDir) ?? []),
+      ];
+      for (const arg of argv) {
+        expect(arg).not.toContain(ctx.bearerToken);
+      }
     }
   });
 
@@ -722,7 +917,7 @@ exec /bin/sleep 60
       bearerToken: "secret-token-xyz",
       dataDir: tempDir(),
     };
-    const workDir = join(ctx.dataDir, "agent-workdir");
+    const workDir = join(`${ctx.dataDir}-agents`, "workdir");
     mkdirSync(workDir, { recursive: true });
     claude.prepare!(ctx, workDir, {});
     const path = join(workDir, "claude-mcp.json");
@@ -833,9 +1028,9 @@ exec /bin/sleep 60
   it("gives Claude its own config home so a run cannot load the user's setup", () => {
     const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
     const ctx = { ...CTX, dataDir: tempDir() };
-    const workDir = join(ctx.dataDir, "agent-workdir");
+    const workDir = join(`${ctx.dataDir}-agents`, "workdir");
     mkdirSync(workDir, { recursive: true });
-    const home = join(ctx.dataDir, "agent-homes", "claude");
+    const home = join(`${ctx.dataDir}-agents`, "agent-homes", "claude");
     expect(claude.childEnv!(ctx, workDir).CLAUDE_CONFIG_DIR).toBe(home);
 
     // No credentials file (macOS keychain auth): the home exists, empty.
@@ -865,14 +1060,14 @@ exec /bin/sleep 60
     /** Prepares a fresh isolated home against the given parent settings.json. */
     function prepareWith(settings: string | null): string {
       const ctx = { ...CTX, dataDir: tempDir() };
-      const workDir = join(ctx.dataDir, "agent-workdir");
+      const workDir = join(`${ctx.dataDir}-agents`, "workdir");
       mkdirSync(workDir, { recursive: true });
       const parent = tempDir();
       if (settings !== null) {
         writeFileSync(join(parent, "settings.json"), settings);
       }
       claude.prepare!(ctx, workDir, { CLAUDE_CONFIG_DIR: parent });
-      return join(ctx.dataDir, "agent-homes", "claude", "settings.json");
+      return join(`${ctx.dataDir}-agents`, "agent-homes", "claude", "settings.json");
     }
 
     // Users who authenticate through settings.json have no credentials file at
@@ -927,7 +1122,7 @@ exec /bin/sleep 60
     expect(args.join("\0")).not.toContain("message_send");
     expect(args.join("\0")).not.toContain(ctx.bearerToken);
 
-    const workDir = join(ctx.dataDir, "agent-workdir");
+    const workDir = join(`${ctx.dataDir}-agents`, "workdir");
     mkdirSync(workDir, { recursive: true });
     grok!.prepare!(ctx, workDir, { PATH: "/usr/bin" });
     const env = grok!.childEnv!(ctx, workDir);
@@ -955,7 +1150,14 @@ exec /bin/sleep 60
     const bin = fakeBinDir("grok");
     const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
     const launcher = new AgentLauncher(
-      { mcpUrl: "http://127.0.0.1:9/mcp", bearerToken: "secret-token-xyz", dataDir },
+      {
+        mcpUrl: "http://127.0.0.1:9/mcp",
+        bearerToken: "secret-token-xyz",
+        dataDir,
+        // This is about the config grok's prepare writes, not about
+        // confinement; a workspace launch is refused off macOS by design.
+        access: "full" as const,
+      },
       [grok],
       { PATH: bin },
     );
@@ -963,7 +1165,7 @@ exec /bin/sleep 60
 
     const running = await launcher.start("grok");
     expect(running.id).toBe("grok");
-    const home = join(dataDir, "agent-workdir", "grok-home");
+    const home = join(`${dataDir}-agents`, "workdir", "grok-home");
     expect(readFileSync(join(home, "config.toml"), "utf8")).toContain(
       "http://127.0.0.1:9/mcp",
     );
@@ -1166,15 +1368,11 @@ describe("launcher routes", () => {
     expect(body.agents.map((a: { id: string }) => a.id)).toContain("antigravity");
     expect(body.agents.map((a: { id: string }) => a.id)).toContain("opencode");
     expect(body.agents.map((a: { id: string }) => a.id)).not.toContain("gemini");
-    expect(body.agents.find((a: { id: string }) => a.id === "antigravity")?.supported).toBe(
-      false,
-    );
-    expect(body.agents.find((a: { id: string }) => a.id === "opencode")?.supported).toBe(
-      false,
-    );
-    expect(body.agents.find((a: { id: string }) => a.id === "grok")?.supported).toBe(
-      true,
-    );
+    for (const id of ["antigravity", "opencode", "codex", "grok"]) {
+      expect(body.agents.find((a: { id: string }) => a.id === id)?.supported).toBe(
+        true,
+      );
+    }
 
     const unknown = await runtime.app.request("/api/agents/nope/start", {
       method: "POST",
@@ -1182,13 +1380,9 @@ describe("launcher routes", () => {
     });
     expect(unknown.status).toBe(404);
 
-    // Registered but has no launch recipe — 400 regardless of what is
-    // installed on the machine running this suite.
-    const unsupported = await runtime.app.request("/api/agents/codex/start", {
-      method: "POST",
-      headers: auth,
-    });
-    expect(unsupported.status).toBe(400);
+    // Every registered agent now has a launch recipe, so there is no
+    // "registered but unlaunchable" case left to assert here. What the route
+    // still refuses is an id that is not in the registry at all, above.
 
     // A bad model is rejected before anything spawns, so these are safe to
     // hit even on a machine with the real CLI installed.

@@ -255,7 +255,7 @@ Scheduler (`AutomationScheduler`):
 - Runs do not disturb the chat agent and are not disturbed by it. The launcher
   keeps the chat slot and the run slots apart, so Start never fails because the
   schedule is busy, and the schedule never stalls behind a chat session.
-- Each run gets `<dataDir>/agent-workdir/runs/<runId>`, removed when the run
+- Each run gets `<dataDir>-agents/workdir/runs/<runId>`, removed when the run
   ends and swept at startup past `RUN_WORKDIR_STALE_MS` for the ones a crash
   left behind. Age is the sweep's test, not ownership, because a second process
   over the same data directory may have a run in flight.
@@ -287,7 +287,7 @@ Scheduler (`AutomationScheduler`):
   `ONESHOT_CLOSE_GRACE_MS` (2 s) after process exit when a leftover grandchild
   still holds a pipe open. A 15-minute timeout reports about 15 minutes.
 - The `claude` CLI runs under an isolated config home — `CLAUDE_CONFIG_DIR`
-  set to `<dataDir>/agent-homes/claude` — mirroring grok's isolated
+  set to `<dataDir>-agents/agent-homes/claude` — mirroring grok's isolated
   `GROK_HOME`. `--strict-mcp-config` only covers MCP servers; the isolated
   home is what keeps the user's personal hooks, skills, output styles and
   subagents out of a process Boxaide is responsible for. Credentials are
@@ -299,13 +299,19 @@ Scheduler (`AutomationScheduler`):
   MCP tools, then exit. You cannot talk to the user: do not call chat tools;
   write nothing to the user. Never send email: queue outreach with
   outbox_queue_draft or save with draft_create and a human will review."
-- Pre-approved tools for runs: everything in
-  `PREAPPROVED_TOOL_NAMES` (minus the four chat tools) plus all CRM tools,
-  all automation *read* tools (`automations_list`, `automation_runs_list`),
-  and outreach tools except approval (which has no tool anyway):
-  never `message_send`.
+- Tools for runs: the `run` scope in `src/mcp/scope.ts` — mail reads and
+  drafts, all CRM tools, automation *read* tools (`automations_list`,
+  `automation_runs_list`), outreach tools, calendar reads. Never
+  `message_send`, `meeting_create` or `meeting_cancel`, and no chat tool at
+  all. The scope is enforced by the MCP server against the token the run
+  carries, not by the CLI's flags; a CLI that offers an allowlist flag is
+  additionally given the same list.
 - Web access: the CLI's own web tools stay at the CLI's defaults; we do not
   grant or deny them (Claude's headless default allows read-only search).
+- File access: a run is confined to its own directory and its CLI's own
+  installation — `workspace` in `src/agent/sandbox.ts`. Nobody is watching a
+  scheduled run and the mail it reads was written by strangers, so there is no
+  per-run opt-out; `BOXAIDE_AGENT_ACCESS=full` turns it off for the install.
 
 ### OutreachStore
 

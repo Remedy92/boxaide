@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { serve, type ServerType } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -19,11 +19,14 @@ import {
   corsPreflightOrDeny,
   isAllowedOrigin,
   isLocalHostHeader,
+  isApiOriginAllowed,
   isLoopbackBindAddress,
   tokensMatch,
 } from "./api/routes.js";
 import { securityHeaders } from "./api/security-headers.js";
 import { handleMcpJsonRpc } from "./mcp/server.js";
+import { ScopedTokens, secretsMatch } from "./mcp/scoped-tokens.js";
+import type { ScopeProfile } from "./mcp/scope.js";
 import { AgentChannel } from "./agent/channel.js";
 import { AgentLauncher } from "./agent/launcher.js";
 import { createPlatform, type Platform } from "./platform.js";
@@ -68,6 +71,11 @@ export type Runtime = {
   launcher: AgentLauncher;
   platform: Platform;
   update: UpdateService;
+  /**
+   * The credentials handed to launched agents. Exposed so a shutdown can
+   * revoke them and so tests can assert what a launch was actually given.
+   */
+  scopedTokens: ScopedTokens;
   app: Hono;
 };
 
@@ -110,9 +118,17 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
   // loopback in the desktop app and CLI default; a 0.0.0.0 bind still wants
   // the agent talking to the loopback interface, not the wildcard address.
   const launcherHost = isLoopbackBindAddress(config.host) ? config.host : "127.0.0.1";
+  // Every launch takes its credential from here instead of the master bearer,
+  // and this server is what enforces the scope that credential carries. See
+  // src/mcp/scope.ts for why the boundary moved to the server.
+  const scopedTokens = new ScopedTokens();
   const launcher = new AgentLauncher({
     mcpUrl: `http://${launcherHost}:${config.port}/mcp`,
     bearerToken: config.bearerToken,
+    mintToken: (profile, label) => scopedTokens.mint(profile, label),
+    // The operating system's half of the boundary: what a launch may read off
+    // the disk, as against what it may call on this server.
+    access: config.agentAccess,
     dataDir: config.dataDir,
     // OpenCode is launched as a server and driven from here, so the launcher
     // needs the channel itself, not just its callbacks.
@@ -279,8 +295,8 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
   app.options("/mcp", (c) => corsPreflightOrDeny(c, config.allowedOrigins));
   app.post("/mcp", async (c) => {
     const origin = c.req.header("origin");
-    const failure = authFailure(c, config.bearerToken, config.allowedOrigins);
-    if (failure) return failure;
+    const auth = mcpAuth(c, config, scopedTokens);
+    if ("failure" in auth) return auth.failure;
     applyCors(c, origin);
     let body: JsonRpcMessage | JsonRpcMessage[];
     try {
@@ -314,6 +330,7 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
         channel,
         platform,
         c.req.raw.signal,
+        auth.scope,
       );
       if (c.req.raw.signal.aborted) return c.body(null);
       if (res != null) results.push(res);
@@ -337,8 +354,8 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
   // — and the spec's answer for that is 405, not the 404 an unrouted DELETE
   // would produce. Clients log the 404 as a transport error on every shutdown.
   app.delete("/mcp", (c) => {
-    const failure = authFailure(c, config.bearerToken, config.allowedOrigins);
-    if (failure) return failure;
+    const auth = mcpAuth(c, config, scopedTokens);
+    if ("failure" in auth) return auth.failure;
     applyCors(c, c.req.header("origin"));
     return c.body(null, 405);
   });
@@ -395,7 +412,48 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     }),
   );
 
-  return { config, store, mail, provider, channel, launcher, platform, update, app };
+  return {
+    config,
+    store,
+    mail,
+    provider,
+    channel,
+    launcher,
+    platform,
+    update,
+    scopedTokens,
+    app,
+  };
+}
+
+/**
+ * Who is calling /mcp, and with what.
+ *
+ * Two credentials are accepted here and nowhere else in the app: the master
+ * bearer, which is unrestricted, and a scoped token minted for one launch.
+ * The rest of the API stays master-only on purpose — a launched agent has no
+ * business reading settings, minting more credentials, or starting a second
+ * agent, and before this it could do all three.
+ *
+ * The origin guard runs first and is unchanged: a browser page is subject to
+ * the same allowlist whichever credential it presents.
+ */
+function mcpAuth(
+  c: Context,
+  config: AppConfig,
+  tokens: ScopedTokens,
+): { scope: ScopeProfile | null } | { failure: Response } {
+  const origin = c.req.header("origin");
+  if (!isApiOriginAllowed(origin, config.allowedOrigins)) {
+    return { failure: authFailure(c, config.bearerToken, config.allowedOrigins)! };
+  }
+  const header = c.req.header("authorization") ?? "";
+  const bearer = header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (secretsMatch(bearer, config.bearerToken)) return { scope: null };
+  const scope = tokens.resolve(bearer);
+  if (scope) return { scope };
+  applyCors(c, origin);
+  return { failure: c.json({ error: "unauthorized" }, 401) };
 }
 
 /**
