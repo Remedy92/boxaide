@@ -5,6 +5,8 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { AgentChannel } from "../agent/channel.js";
+import type { ApprovalQueue } from "../agent/approvals.js";
+import { needsApproval } from "../agent/approvals.js";
 import { DEFAULT_WAIT_MS, MAX_WAIT_MS } from "../agent/channel.js";
 import type { MailService } from "../mail/service.js";
 import type { Platform } from "../platform.js";
@@ -146,7 +148,7 @@ export const TOOLS = [
   {
     name: "message_send",
     description:
-      "Deliver an email from a connected account. This is the explicit escalation, not the default: it leaves the machine immediately and cannot be recalled, so use draft_create instead unless the user has asked for the mail to be sent. To reply in-thread, set inReplyTo and references from the Message-ID header of the message you answer. Requires explicit user confirmation in the agent client.",
+      "Deliver an email from a connected account. This is the explicit escalation, not the default: use draft_create instead unless the user has asked for the mail to be sent. To reply in-thread, set inReplyTo and references from the Message-ID header of the message you answer. If Boxaide launched you, this does not send: it puts the message in front of the user, who sends it or drops it — you will be told so, and you must not call it a second time for the same message.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -403,6 +405,7 @@ export function createMcpServer(
   channel?: AgentChannel,
   platform?: Platform,
   scope?: ScopeProfile | null,
+  approvals?: ApprovalQueue,
 ): Server {
   const server = new Server(
     { name: "boxaide", version: "0.1.0" },
@@ -426,6 +429,7 @@ export function createMcpServer(
         platform,
         extra?.signal,
         scope,
+        approvals,
       );
       return {
         content: [
@@ -474,12 +478,39 @@ async function dispatch(
   platform?: Platform,
   signal?: AbortSignal,
   scope?: ScopeProfile | null,
+  approvals?: ApprovalQueue,
 ): Promise<unknown> {
   // The enforcement point, ahead of every other check. Both transports and
   // every tool family reach the server through here, so a tool added to any
   // of them is refused by default for a scoped caller until scope.ts names it.
   if (scope && !scopeAllows(scope, name)) {
     throw new Error(scopeRefusal(scope, name));
+  }
+  // The second boundary, and the one that lets a launched agent have these
+  // tools at all. A scoped caller reaching message_send, meeting_create or
+  // meeting_cancel does not perform it: the call is recorded and put in front
+  // of the user, who carries it out or drops it. See src/agent/approvals.ts.
+  //
+  // Ahead of every dispatch below for the same reason the scope check is —
+  // one gate, so a tool family added later cannot route around it. An
+  // unscoped caller (the master bearer, the user's own desktop client) is the
+  // user, and still sends directly.
+  if (scope && needsApproval(name)) {
+    if (!approvals) {
+      throw new Error(
+        `${name} needs a person to approve it, and this server has nowhere to ask. Draft the work instead.`,
+      );
+    }
+    channel?.noteToolCall(name);
+    return approvals.queue({
+      tool: name,
+      args,
+      profile: scope,
+      agent: channel?.presence().lastAgent ?? null,
+      // A scheduled run has no conversation. Its request waits in the pane
+      // with the rest and names the run instead of a chat.
+      chatId: scope === "run" ? null : (channel?.activeChat().id ?? null),
+    });
   }
   if (CHAT_TOOL_NAMES.has(name)) {
     if (!channel) throw new Error(`${name} is not available on this server`);
@@ -718,6 +749,7 @@ export async function runStdioMcp(
   channel?: AgentChannel,
   platform?: Platform,
   env: NodeJS.ProcessEnv = process.env,
+  approvals?: ApprovalQueue,
 ): Promise<void> {
   const requested = env.BOXAIDE_SCOPE;
   if (requested && !isScopeProfile(requested)) {
@@ -726,7 +758,7 @@ export async function runStdioMcp(
     );
   }
   const scope = isScopeProfile(requested) ? requested : null;
-  const server = createMcpServer(mail, channel, platform, scope);
+  const server = createMcpServer(mail, channel, platform, scope, approvals);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -744,6 +776,7 @@ export async function handleMcpJsonRpc(
   platform?: Platform,
   signal?: AbortSignal,
   scope?: ScopeProfile | null,
+  approvals?: ApprovalQueue,
 ): Promise<unknown> {
   const id = message.id ?? null;
   if (message.method === "initialize") {
@@ -812,6 +845,7 @@ export async function handleMcpJsonRpc(
         platform,
         signal,
         scope,
+        approvals,
       );
       if (signal?.aborted) return null;
       return {

@@ -20,14 +20,19 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentLauncher, type AgentSpec } from "../src/agent/launcher.js";
 import {
+  AgentLauncher,
+  KNOWN_AGENTS,
+  type AgentSpec,
+} from "../src/agent/launcher.js";
+import {
+  AGENT_ACCESS_LEVELS,
   confineCommand,
   homeRootFor,
-  isAgentAccess,
   macosProfile,
   plainCommand,
   readRootsForBinary,
+  resolveAccess,
   sandboxSupported,
   sandboxUnavailable,
 } from "../src/agent/sandbox.js";
@@ -35,14 +40,8 @@ import {
 const HOME = "/Users/someone";
 
 describe("agent access levels", () => {
-  it("accepts only the two levels there are", () => {
-    expect(isAgentAccess("workspace")).toBe(true);
-    expect(isAgentAccess("full")).toBe(true);
-    // Not a level, and must never be read as one: the failure to design
-    // against is a typo that unconfines every agent on the machine.
-    expect(isAgentAccess("Full")).toBe(false);
-    expect(isAgentAccess("")).toBe(false);
-    expect(isAgentAccess(undefined)).toBe(false);
+  it("names the two levels there are", () => {
+    expect(AGENT_ACCESS_LEVELS).toEqual(["workspace", "full"]);
   });
 });
 
@@ -123,7 +122,6 @@ describe("building the command", () => {
       bin: "/usr/local/bin/grok",
       access: "full",
       write: ["/tmp/w"],
-      read: [],
       deny: ["/home/u/.boxaide"],
       platform: "linux",
     });
@@ -141,11 +139,25 @@ describe("building the command", () => {
         bin: "/usr/local/bin/grok",
         access: "workspace",
         write: ["/tmp/w"],
-        read: [],
         deny: [],
         platform: "linux",
       }),
     ).toThrow(/macOS/);
+  });
+
+  it("runs the agent where there is no sandbox, and never calls that confined", () => {
+    // The refusal above is right for `confineCommand`, which cannot deliver
+    // what it was asked for. It is the wrong answer for a launch: with the
+    // sidebar switch gone it would mean nobody outside macOS can start an
+    // agent at all. So the decision is made one level up, it runs, and it
+    // says what it is.
+    const linux = resolveAccess("workspace", "linux");
+    expect(linux.access).toBe("full");
+    expect(linux.notice).toContain("can read your files");
+
+    const chosen = resolveAccess("full", "darwin");
+    expect(chosen.access).toBe("full");
+    expect(chosen.notice).toContain("BOXAIDE_AGENT_ACCESS=full");
   });
 
   it("puts the CLI behind the sandbox so arguments still append", () => {
@@ -153,7 +165,6 @@ describe("building the command", () => {
       bin: "/usr/local/bin/grok",
       access: "workspace",
       write: ["/tmp/w"],
-      read: [],
       deny: [],
       platform: "darwin",
       home: HOME,
@@ -166,6 +177,32 @@ describe("building the command", () => {
   });
 });
 
+describe("what each CLI declares it needs", () => {
+  it("makes every CLI's own credential home writable, not merely readable", () => {
+    // The bug, at the spec level. agy is the one that surfaced it: `~/.gemini`
+    // was readable, agy could not save the session it was establishing, and it
+    // waited and exited with no error anybody saw. Read-only was wrong for all
+    // of them — a signed-in CLI refreshes its token and writes the new one.
+    const env = { HOME: HOME };
+    const ctx = {
+      mcpUrl: "http://127.0.0.1:0/mcp",
+      bearerToken: "t",
+      dataDir: "/tmp/data",
+    } as never;
+    const homes: Record<string, string> = {
+      codex: `${HOME}/.codex`,
+      grok: `${HOME}/.grok`,
+      antigravity: `${HOME}/.gemini`,
+    };
+    for (const [id, home] of Object.entries(homes)) {
+      const spec = KNOWN_AGENTS.find((s) => s.id === id);
+      expect(spec, id).toBeTruthy();
+      const declared = spec!.sandbox!(ctx, "/tmp/work", env);
+      expect(declared.write, id).toContain(home);
+    }
+  });
+});
+
 /**
  * The half only the operating system can answer. These start real processes
  * under a real profile; anywhere else there is nothing to ask.
@@ -173,7 +210,14 @@ describe("building the command", () => {
 describe.runIf(sandboxSupported() && !sandboxUnavailable())(
   "a real confined process",
   () => {
-    function run(script: string, opts: { write?: string[]; deny?: string[] } = {}) {
+    function run(
+      script: string,
+      opts: {
+        write?: string[];
+        deny?: string[];
+        env?: Record<string, string>;
+      } = {},
+    ) {
       const work = mkdtempSync(join(tmpdir(), "sb-run-"));
       const secrets = mkdtempSync(join(tmpdir(), "sb-secret-"));
       writeFileSync(join(secrets, "bearer.token"), "master-credential");
@@ -181,7 +225,6 @@ describe.runIf(sandboxSupported() && !sandboxUnavailable())(
         bin: process.execPath,
         access: "workspace",
         write: [work, ...(opts.write ?? [])],
-        read: [],
         deny: [secrets, ...(opts.deny ?? [])],
       });
       const result = spawnSync(
@@ -191,7 +234,7 @@ describe.runIf(sandboxSupported() && !sandboxUnavailable())(
           cwd: work,
           encoding: "utf8",
           timeout: 30_000,
-          env: { ...process.env, WORK: work, SECRETS: secrets },
+          env: { ...process.env, WORK: work, SECRETS: secrets, ...(opts.env ?? {}) },
         },
       );
       return `${result.stdout ?? ""}${result.stderr ?? ""}`;
@@ -228,6 +271,45 @@ describe.runIf(sandboxSupported() && !sandboxUnavailable())(
         console.log("wrote:" + fs.readFileSync(process.env.WORK + "/note.txt", "utf8"));
       `);
       expect(out).toContain("wrote:hello");
+    });
+
+    it("can save its own sign-in, which is what a confined agent could not do", () => {
+      // The bug this replaced: a CLI's credential directory was allowed to be
+      // READ and not written. Every agent CLI here signs in by writing a token
+      // down and rewriting it when it refreshes, so a confined launch started,
+      // could not save the result, waited, and exited with nothing the user
+      // ever saw — the agent simply never picked the message up.
+      const cliHome = mkdtempSync(join(tmpdir(), "sb-cli-home-"));
+      writeFileSync(join(cliHome, "auth.json"), '{"token":"old"}');
+      const out = run(
+        `
+        const fs = require("node:fs");
+        const path = process.env.CLI_HOME + "/auth.json";
+        JSON.parse(fs.readFileSync(path, "utf8"));
+        fs.writeFileSync(path, JSON.stringify({ token: "refreshed" }));
+        console.log("saved:" + JSON.parse(fs.readFileSync(path, "utf8")).token);
+      `,
+        { write: [cliHome], env: { CLI_HOME: cliHome } },
+      );
+      expect(out).toContain("saved:refreshed");
+
+      // And the allow is what does it: the same write, one directory over,
+      // still fails. Otherwise this test would pass on a sandbox that confines
+      // nothing.
+      const other = mkdtempSync(join(tmpdir(), "sb-cli-other-"));
+      writeFileSync(join(other, "auth.json"), '{"token":"old"}');
+      const blocked = run(
+        `
+        const fs = require("node:fs");
+        try {
+          fs.writeFileSync(process.env.OTHER + "/auth.json", "x");
+          console.log("WROTE");
+        } catch { console.log("write blocked"); }
+      `,
+        { deny: [other], env: { OTHER: other } },
+      );
+      expect(blocked).toContain("write blocked");
+      expect(blocked).not.toContain("WROTE");
     });
 
     it("still reaches the network, because the agent has a model to talk to", () => {
@@ -305,7 +387,7 @@ describe.runIf(sandboxSupported() && !sandboxUnavailable())(
       }
     });
 
-    it("hands full access straight through when it is asked for", async () => {
+    it("runs unconfined only when the install says so, and says which", async () => {
       const dataDir = mkdtempSync(join(tmpdir(), "sb-data-"));
       writeFileSync(join(dataDir, "bearer.token"), "master-credential");
       const binDir = mkdtempSync(join(tmpdir(), "sb-bin-"));
@@ -316,18 +398,28 @@ describe.runIf(sandboxSupported() && !sandboxUnavailable())(
       );
       spawnSync("chmod", ["755", join(binDir, "probe-agent")]);
 
+      // BOXAIDE_AGENT_ACCESS=full, as the install would set it. There is no
+      // per-launch parameter any more: nobody pressing Start is asked which of
+      // their files an agent CLI may read.
       const launcher = new AgentLauncher(
-        { mcpUrl: "http://127.0.0.1:0/mcp", bearerToken: "t", dataDir },
+        {
+          mcpUrl: "http://127.0.0.1:0/mcp",
+          bearerToken: "t",
+          dataDir,
+          access: "full",
+        },
         probeSpec(out),
         { PATH: binDir, HOME: process.env.HOME },
         [],
       );
       try {
-        const running = await launcher.start("probe", undefined, "full");
+        const running = await launcher.start("probe");
         expect(running.access).toBe("full");
+        // Unconfined and reported as such. An unconfined launch that presents
+        // as a confined one is the failure the whole module exists to prevent.
+        expect(running.accessNotice).toContain("full access");
         await new Promise((r) => setTimeout(r, 1_200));
-        // The level does what it says: this is the behaviour a user opts into,
-        // and it has to be real or the choice is theatre.
+        // The level does what it says, or the notice is theatre.
         expect(readFileSync(out, "utf8")).toContain("master-credential");
       } finally {
         launcher.close();
