@@ -82,6 +82,21 @@ export type AppConfig = {
    * present and the missing case without depending on a build artifact.
    */
   webRoot?: string;
+  /**
+   * Absolute path to the macOS calendar helper. Supplied by the desktop shell,
+   * which is the only process that knows where its own bundle is; unset means
+   * the calendar module looks for a checkout build and, failing that, reports
+   * the local path as unavailable.
+   */
+  calendarHelperPath?: string;
+  /**
+   * The app's own Google OAuth client, from BOXAIDE_GOOGLE_CLIENT_ID and
+   * BOXAIDE_GOOGLE_CLIENT_SECRET. Set, and connecting Google Calendar is one
+   * button; unset, and the user creates a client in Google Cloud and pastes
+   * the pair in, exactly as before. No credential is baked into this repo.
+   */
+  googleClientId?: string;
+  googleClientSecret?: string;
 };
 
 function expandHome(p: string): string {
@@ -239,5 +254,10 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       overrides.allowedOrigins ??
       parseAllowedOrigins(envNamed("ALLOWED_ORIGINS")),
     webRoot: overrides.webRoot ?? envNamed("WEB_ROOT"),
+    calendarHelperPath:
+      overrides.calendarHelperPath ?? envNamed("CALENDAR_HELPER"),
+    googleClientId: overrides.googleClientId ?? envNamed("GOOGLE_CLIENT_ID"),
+    googleClientSecret:
+      overrides.googleClientSecret ?? envNamed("GOOGLE_CLIENT_SECRET"),
   };
 }

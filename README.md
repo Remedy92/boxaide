@@ -414,6 +414,8 @@ Each `BOXAIDE_*` name is preferred. Then `SLEY_*`, then `MAILMUX_*`.
 | `BOXAIDE_AGENT_ACCESS` | `workspace` | `full` runs launched agents unconfined — they can read every file you can. Only set this if the sandbox is in your way. |
 | `BOXAIDE_ALLOWED_ORIGINS` | empty | Extra browser origins allowed to call the API — see below |
 | `BOXAIDE_SEND_DAILY_CAP` | `50` | Approved outreach sends per account per UTC day |
+| `BOXAIDE_GOOGLE_CLIENT_ID` | empty | OAuth client for Google Calendar — see below |
+| `BOXAIDE_GOOGLE_CLIENT_SECRET` | empty | Secret for that client |
 
 ### Bind address (`BOXAIDE_HOST`)
 
@@ -462,6 +464,14 @@ Rules:
 - It is the only remaining barrier against a DNS-rebinding page reaching your loopback service, so the list should stay as short as you can make it.
 - The token is still required on every request. `Access-Control-Allow-Credentials` is never sent — Boxaide authenticates by header, never by cookie — so no page can ride ambient credentials.
 - `/api/local-bootstrap` is **not** widened by this variable. It requires loopback plus the desktop shell's one-time capability. A browser page must have its token pasted in by a human.
+
+### Google Calendar client (`BOXAIDE_GOOGLE_CLIENT_ID`)
+
+Connecting Google Calendar needs an OAuth client. Set both variables and Boxaide uses that one for every Google connection, so the user presses a single button. Leave them unset — the default, and what this repo ships — and the connect dialog asks for a client id and secret the user creates in the [Google Cloud console](https://console.cloud.google.com/apis/credentials) themselves. Both paths store the same thing afterwards, and a client id sent with the connect request still wins over the configured pair.
+
+The redirect URI Google must accept is `http://127.0.0.1:8787/api/calendar/google/callback`, with your `BOXAIDE_HOST` and `BOXAIDE_PORT` in it. Boxaide shows the exact string in the add-calendar dialog. A client shared across installs therefore has to be a **Desktop app** client, which wildcards loopback ports; a Web client only accepts the ports you registered.
+
+No credentials are committed to this repository, and none are baked into a build.
 
 ## Architecture
 

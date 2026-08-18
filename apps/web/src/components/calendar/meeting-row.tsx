@@ -16,11 +16,12 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { friendlyError } from "@/lib/api/errors";
+import { friendlyError, serverSentence } from "@/lib/api/errors";
 import { formatMeetingWhen } from "@/lib/format/calendar";
 import { isoAttr, isoTitle } from "@/lib/format/date";
 import {
   useCancelMeeting,
+  useRemoveMeeting,
   useRefreshMeetingResponses,
 } from "@/lib/hooks/use-calendar";
 import type { AttendeeResponse, Meeting } from "@/lib/types";
@@ -64,6 +65,7 @@ function responseFor(status: string) {
  */
 export function MeetingRow({ meeting }: { meeting: Meeting }) {
   const cancel = useCancelMeeting();
+  const remove = useRemoveMeeting();
   const refresh = useRefreshMeetingResponses();
   const [confirming, setConfirming] = React.useState(false);
   const cancelled = meeting.status === "cancelled";
@@ -190,8 +192,8 @@ export function MeetingRow({ meeting }: { meeting: Meeting }) {
         )}
       </div>
 
-      {(meeting.meetingUrl || !cancelled) && (
-        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+      {/* A cancelled meeting now has a row of its own to draw: Remove. */}
+      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
           {/* First, and a real button: on the day, joining is the only thing
               anybody wants from this row. Kept on a cancelled meeting too —
               the link is dead either way, and hiding it mid-call would be
@@ -239,8 +241,35 @@ export function MeetingRow({ meeting }: { meeting: Meeting }) {
               {cancel.isPending ? "Cancelling…" : "Cancel meeting"}
             </Button>
           )}
+
+          {/* Only once it is cancelled, because this drops Boxaide's record of
+              an invite it sent. Nothing is emailed and no calendar is touched —
+              the event went when the meeting was cancelled. Left alone, the row
+              goes on its own 30 days after the cancellation, which the label
+              says so nobody has to tidy up to keep the list short. */}
+          {cancelled && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={remove.isPending}
+              aria-busy={remove.isPending || undefined}
+              title="Otherwise it goes by itself 30 days after it was cancelled."
+              onClick={() =>
+                remove.mutate(meeting.id, {
+                  onSuccess: () => toast.success(`Removed “${meeting.title}”`),
+                  onError: (error) =>
+                    toast.error("Could not remove that meeting", {
+                      description: serverSentence(error),
+                    }),
+                })
+              }
+            >
+              {remove.isPending && <Spinner />}
+              {remove.isPending ? "Removing…" : "Remove"}
+            </Button>
+          )}
         </div>
-      )}
 
       <AlertDialog
         open={confirming}

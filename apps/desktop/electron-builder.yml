@@ -83,6 +83,33 @@ publish:
 # /releases/latest/download/<name> and never be edited again. The names are
 # repeated in apps/web/src/app/install/page.tsx — change one, change the other.
 mac:
+  # The EventKit helper the local calendar provider spawns. macOS only, so it
+  # is declared here rather than in the shared extraResources above — a
+  # Windows or Linux pack must not carry a Mach-O it cannot run. A binary
+  # cannot be exec'd from inside an asar, which is why this is extraResources
+  # and not a packed file; the server finds it at
+  # process.resourcesPath/boxaide-calendar.
+  extraResources:
+    - from: server/web-next
+      to: web-next
+    - from: build/trayTemplate.png
+      to: trayTemplate.png
+    - from: build/trayTemplate@2x.png
+      to: trayTemplate@2x.png
+    - from: build/boxaide-calendar
+      to: boxaide-calendar
+  # EventKit refuses without this string, and TCC charges the prompt to the
+  # RESPONSIBLE process — this bundle — not to the helper that calls it.
+  # Embedding the key in the helper binary's own __info_plist does not work:
+  # tccd denies instantly and leaves the status notDetermined.
+  extendInfo:
+    NSCalendarsFullAccessUsageDescription: >-
+      Boxaide reads and writes the calendars already set up in Apple Calendar,
+      so your agenda and your meeting invites use the accounts you already have.
+    # macOS 13 and older read the pre-split key. Electron 43 still runs there.
+    NSCalendarsUsageDescription: >-
+      Boxaide reads and writes the calendars already set up in Apple Calendar,
+      so your agenda and your meeting invites use the accounts you already have.
   # `${ext}` rather than a literal, because two targets share this name now:
   # boxaide-mac.dmg for a person, boxaide-mac.zip for the updater.
   artifactName: boxaide-mac.${ext}

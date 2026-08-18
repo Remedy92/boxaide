@@ -147,6 +147,7 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     masterKey: config.masterKey,
     mail,
     launcher,
+    calendarHelperPath: config.calendarHelperPath,
   });
 
   // Sending mail and booking a meeting are the two things a launched agent
@@ -239,7 +240,12 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     platform,
     update,
     approvals,
-    { host: config.host, port: config.port },
+    {
+      host: config.host,
+      port: config.port,
+      googleClientId: config.googleClientId,
+      googleClientSecret: config.googleClientSecret,
+    },
   );
 
   // Google Calendar OAuth callback. Registered on the OUTER app, BEFORE the
