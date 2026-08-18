@@ -1,11 +1,14 @@
 "use client";
 
+import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   listLocalAgents,
+  signInLocalAgent,
   startLocalAgent,
   stopLocalAgent,
 } from "@/lib/api/endpoints";
+import { serverSentence } from "@/lib/api/errors";
 import { useApiCtx } from "@/lib/hooks/use-settings";
 
 /**
@@ -36,6 +39,38 @@ export function useStartLocalAgent() {
       void queryClient.invalidateQueries({ queryKey: ["local-agents"] });
     },
   });
+}
+
+/**
+ * Sign the launched CLI back in.
+ *
+ * The request only opens Terminal on the server's machine; the login happens
+ * there, and the server restarts the agent itself when it lands. So there is
+ * nothing to await — the wait ends when the existing poll reports something
+ * running again, which is also what ends it if the user starts the agent by
+ * hand instead.
+ */
+export function useAgentSignIn() {
+  const ctx = useApiCtx();
+  const agents = useLocalAgents();
+  const running = agents.data?.running ?? null;
+  // Which exit the ask was made against, so the wait ends by itself: a launch
+  // clears `running`, and a second failure writes a new exit — either way the
+  // state below stops matching, with no effect to unset it.
+  const exitAt = agents.data?.lastExit?.at ?? "";
+  const [askedFor, setAskedFor] = React.useState<string | null>(null);
+  const signIn = useMutation({
+    mutationFn: () => signInLocalAgent(ctx),
+    onSuccess: () => setAskedFor(exitAt),
+  });
+
+  return {
+    signIn: () => signIn.mutate(),
+    /** Terminal is open and nothing has come back yet. */
+    waiting: !running && (signIn.isPending || askedFor === exitAt),
+    /** The server's own sentence — 501 on a machine with no Terminal to open. */
+    error: signIn.error ? serverSentence(signIn.error) : null,
+  };
 }
 
 export function useStopLocalAgent() {

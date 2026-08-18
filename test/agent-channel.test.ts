@@ -403,6 +403,71 @@ describe("AgentChannel", () => {
     expect(channel.presence().dropped).toEqual([posted.seq]);
   });
 
+  it("offers a dropped message again to the agent that just started", async () => {
+    const { store, channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    // A CLI that cannot run at all burns every delivery without reading a word
+    // of the message. That is not a verdict on the message.
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "signed-out" });
+      channel.releaseLease(posted.seq);
+    }
+    expect(channel.presence().dropped).toEqual([posted.seq]);
+
+    channel.setLaunchedAgent("claude-code");
+
+    // The warning is gone and the message is queued again, with the full three
+    // deliveries: the ones before were spent on an agent that no longer exists.
+    expect(channel.presence().dropped).toEqual([]);
+    expect(store.listDroppedUserSeqs()).toEqual([]);
+    const handed = await channel.awaitUserTurn({ timeoutMs: 500, agent: "claude-code" });
+    expect(handed?.text).toBe("once");
+    expect(handed?.deliveryCount).toBe(1);
+  });
+
+  it("hands a requeued message straight to an agent already waiting", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "signed-out" });
+      channel.releaseLease(posted.seq);
+    }
+    const parked = channel.awaitUserTurn({ timeoutMs: 60_000, agent: "claude-code" });
+    expect(channel.presence().waiting).toBe(1);
+
+    // A requeue writes no new turn, so nothing else would wake this waiter: it
+    // would sit out its whole timeout beside a message it could have had.
+    expect(channel.requeueDropped()).toBe(1);
+    expect((await parked)?.text).toBe("once");
+  });
+
+  it("leaves an answered message alone, and reports nothing to requeue", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    const held = await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    channel.post({ role: "agent", text: "answered", replyTo: held!.seq });
+    channel.releaseLease(posted.seq);
+
+    // Requeuing an answered question would have a second agent answer it, which
+    // is the hole the lease exists to close.
+    expect(channel.requeueDropped()).toBe(0);
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "b" })).toBeNull();
+  });
+
+  it("drops a message again when the same agent keeps failing on it", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "the poison pill" });
+    channel.setLaunchedAgent("claude-code");
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "claude-code" });
+      channel.releaseLease(posted.seq);
+    }
+    // No relaunch in between, so the cap still means what it meant: a message
+    // that breaks the agent is not retried forever.
+    expect(channel.presence().dropped).toEqual([posted.seq]);
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "claude-code" })).toBeNull();
+  });
+
   it("keeps the final lease out of the dropped list while it is live", async () => {
     const { channel } = make();
     const posted = channel.post({ role: "user", text: "once" });

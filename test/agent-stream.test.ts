@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  claudeAuthFailed,
   claudeTurnReader,
   lineSplitter,
   readClaudeLine,
@@ -393,5 +394,116 @@ describe("lineSplitter", () => {
     expect(seen).toEqual(["x".repeat(100)]);
     feed.flush();
     expect(seen).toEqual(["x".repeat(100)]);
+  });
+});
+
+/**
+ * The sign-out classifier, which is only interesting at its edges: what it
+ * catches decides whether a user's question is answered, and what it catches by
+ * mistake is an answer thrown away.
+ */
+describe("claudeAuthFailed", () => {
+  it("catches the sign-out notice arriving where the answer goes", () => {
+    // The observed failure: exit 0, subtype success, and the notice in
+    // `result`. Read as an answer, this is what gets posted to the user.
+    const found = outcome();
+    readClaudeLine(
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "Not logged in · Please run /login",
+        session_id: "ses-1",
+      }),
+      found,
+    );
+    expect(found.text).toBe("Not logged in · Please run /login");
+    expect(claudeAuthFailed(found)).toBe(true);
+  });
+
+  it("catches a result event that carried nothing at all", () => {
+    const found = outcome();
+    readClaudeLine(
+      JSON.stringify({ type: "result", subtype: "success", session_id: "ses-1" }),
+      found,
+    );
+    // "claude: success" is the whole error a user was shown for this. It says
+    // nothing, and the turn produced nothing, so it counts as the same failure.
+    expect(found.error).toBe("claude: success");
+    expect(claudeAuthFailed(found)).toBe(true);
+  });
+
+  it("catches a refused key on the error side", () => {
+    const found = outcome();
+    readClaudeLine(
+      JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["Invalid API key · Please run /login"],
+      }),
+      found,
+    );
+    expect(claudeAuthFailed(found)).toBe(true);
+  });
+
+  it("leaves every other failure, and every real answer, alone", () => {
+    expect(claudeAuthFailed({ text: null, sessionId: null, error: "Overloaded" })).toBe(
+      false,
+    );
+    expect(
+      claudeAuthFailed({
+        text: null,
+        sessionId: null,
+        error: "No conversation found with session ID: abc",
+      }),
+    ).toBe(false);
+    expect(
+      claudeAuthFailed({ text: "two invoices came in", sessionId: null, error: null }),
+    ).toBe(false);
+    // A turn that failed on something else still carries a session id and no
+    // text; that alone must not read as a sign-out.
+    expect(
+      claudeAuthFailed({ text: null, sessionId: "ses-1", error: "claude exited 1" }),
+    ).toBe(false);
+  });
+
+  it("keeps a short real answer about the user's own accounts", () => {
+    // The broad signs are for the error side only. An inbox agent SAYS these
+    // things — about IMAP accounts, about API keys — and an answer must never
+    // be discarded on them. Only the CLI's own "run /login" instruction may
+    // condemn answer text.
+    expect(
+      claudeAuthFailed({
+        text: "You're not logged in to that IMAP account — reconnect it in settings.",
+        sessionId: "ses-1",
+        error: null,
+      }),
+    ).toBe(false);
+    expect(
+      claudeAuthFailed({
+        text: "The sync failed: Mailgun rejected an invalid API key.",
+        sessionId: "ses-1",
+        error: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("still reads the broad signs off the error side", () => {
+    expect(
+      claudeAuthFailed({ text: null, sessionId: null, error: "Not logged in" }),
+    ).toBe(true);
+    expect(
+      claudeAuthFailed({ text: null, sessionId: null, error: "OAuth token expired" }),
+    ).toBe(true);
+  });
+
+  it("keeps a long answer that happens to be about logging in", () => {
+    // The classifier discards what it matches, so this is the failure it could
+    // cause: the user asked about the phrase, and the answer is the answer.
+    const essay = `Here is what that message means. "Not logged in" is printed
+      by the CLI when it cannot find a credential, and "Please run /login" is
+      its suggestion. ${"It is not an error from your mail. ".repeat(10)}`;
+    expect(claudeAuthFailed({ text: essay, sessionId: null, error: null })).toBe(false);
   });
 });

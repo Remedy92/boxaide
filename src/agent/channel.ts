@@ -972,12 +972,41 @@ export class AgentChannel {
     // started may be long gone, and a name from then must not mute the stream
     // for the rest of the session.
     this.askers.clear();
+    // A new agent is the one event that makes a dropped message worth offering
+    // again: the run that dropped it is over, and this one has not failed at
+    // anything yet. See requeueDropped.
+    if (!stopped) this.requeueDropped();
     // It took a message and exited without answering. That is the case the
     // expiry was built for, and the exit proves it outright — so say it now
     // instead of leaving a spinner up for five more minutes. An agent that
     // answered first cleared this on the way out and there is nothing here.
     if (stopped && wasOurs && this.work) this.releaseWork();
     else this.emitPresence();
+  }
+
+  /**
+   * Offers every dropped message to the agent that just started.
+   *
+   * A message is dropped when three agents in a row took it and answered
+   * nothing, and the pane says so. That reads as a verdict on the message, and
+   * usually it is not one: a CLI that cannot run — signed out is the case this
+   * was built for — burns all three deliveries of every message queued behind
+   * it without ever seeing them. Leaving those marked "never answered" while a
+   * working agent sits idle beside them is the wrong end of the trade.
+   *
+   * Called on the launch, not on the exit, so the requeue and the agent that
+   * will answer arrive together: a reset with nobody running would clear the
+   * warning and change nothing else.
+   */
+  requeueDropped(): number {
+    const requeued = this.store.requeueDroppedUserTurns();
+    if (requeued === 0) return 0;
+    // A requeued row writes no turn, so nothing else would notice it: the
+    // warning has to be recalculated, and a waiter already parked would
+    // otherwise sit through its whole timeout beside a message it can have.
+    this.handOff();
+    this.emitPresence();
+    return requeued;
   }
 
   /** Who new agent turns are stamped as: the launched CLI, else last initialize. */
