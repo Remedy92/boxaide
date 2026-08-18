@@ -5,6 +5,9 @@ import { ChevronRight, TriangleAlert } from "lucide-react";
 import { Markdown } from "@/lib/format/markdown";
 import { isoAttr, isoTitle } from "@/lib/format/date";
 import { displayAgentName } from "@/components/agent/agent-presence";
+import { AgentSignIn } from "@/components/agent/agent-sign-in";
+import { signedOutExit } from "@/components/rail/agent-exit";
+import { useLocalAgents } from "@/lib/hooks/use-local-agents";
 import { cn } from "@/lib/utils";
 import type { AgentTurn, AgentWork } from "@/lib/types";
 import { groupRuns, type Run } from "./group-runs";
@@ -282,6 +285,10 @@ function Steps({
  * Dropped is not. After a few failed leases the row stays claimed — no agent
  * is offered it again — so telling somebody to wait would be telling them to
  * wait for nothing.
+ *
+ * Unless the launched CLI was simply signed out, which is the one dropped
+ * message that has a cause worth naming and a fix worth offering: signing in
+ * restarts the agent and this message is handed over again.
  */
 function Unanswered({
   waiting,
@@ -290,19 +297,29 @@ function Unanswered({
   waiting: number;
   claimed: boolean;
 }) {
+  const agents = useLocalAgents();
+  const signedOut = signedOutExit({
+    running: agents.data?.running ?? null,
+    lastExit: agents.data?.lastExit ?? null,
+  });
+
   if (claimed) {
     return (
-      <p className="flex items-start gap-2 text-[12px] leading-4 text-fg-tertiary">
-        <TriangleAlert
-          aria-hidden="true"
-          className="mt-px size-3.5 shrink-0 text-warning"
-          strokeWidth={1.5}
-        />
-        <span>
-          Your agent took this one and never answered. It will not be handed
-          over again — send it once more to try another agent.
-        </span>
-      </p>
+      <div className="space-y-2">
+        <p className="flex items-start gap-2 text-[12px] leading-4 text-fg-tertiary">
+          <TriangleAlert
+            aria-hidden="true"
+            className="mt-px size-3.5 shrink-0 text-warning"
+            strokeWidth={1.5}
+          />
+          <span>
+            {signedOut
+              ? "Your agent is signed out, so it could not answer — sign in and this message is handed over again."
+              : "Your agent took this one and never answered. It will not be handed over again — send it once more to try another agent."}
+          </span>
+        </p>
+        {signedOut && <AgentSignIn className="pl-[22px]" />}
+      </div>
     );
   }
 

@@ -151,6 +151,81 @@ function foldResult(
 }
 
 /**
+ * foldResult's rendering of a result event that carried no usable text at all:
+ * subtype "success", nothing on `result`, nothing on `errors`.
+ */
+export const CLAUDE_EMPTY_SUCCESS = "claude: success";
+
+/**
+ * Signs that a turn is the CLI reporting it has no sign-in.
+ *
+ * Kept as narrow as it can be. This is not a general error classifier and must
+ * not become one — everything it matches is discarded rather than shown, so a
+ * pattern that is too eager throws away real answers.
+ *
+ * The reason it exists at all is that a signed-out `claude -p` does not fail
+ * the way a broken one does. It exits 0, reports subtype "success", and puts
+ * "Not logged in · Please run /login" exactly where the answer goes, so the
+ * driver posts it to the user as the agent's reply — an inbox agent answering
+ * "run /login" to a question about mail, three times, and then dropping the
+ * message. The separator between those two halves is a middle dot the CLI is
+ * free to restyle, so each half stands on its own here.
+ */
+const CLAUDE_AUTH_SIGNS = [
+  /not logged in/i,
+  /please run \/login/i,
+  /\binvalid api key\b/i,
+  /\bauthentication_error\b/i,
+  /oauth token (?:has )?expired/i,
+];
+
+/**
+ * The one sign that may be read off ANSWER text.
+ *
+ * The answer side gets a stricter test than the error side, because the cost
+ * of a wrong match is inverted there. This is an inbox agent: "you're not
+ * logged in to that IMAP account" and "the sync failed on an invalid API key"
+ * are real answers to real questions, and the broad signs above would discard
+ * them as CLI sign-outs. Only the CLI's own instruction — "run /login" — is
+ * specific enough to spend an answer on; no answer about the user's accounts
+ * tells them to run a slash command.
+ */
+const CLAUDE_AUTH_TEXT_SIGN = /run \/login/i;
+
+/**
+ * How much answer text is still short enough to be the sign-out notice.
+ *
+ * The notice is one line. A real answer that happens to discuss logging in is
+ * paragraphs, and losing that answer would be this classifier causing the very
+ * failure it exists to prevent.
+ */
+const CLAUDE_AUTH_TEXT_MAX = 200;
+
+/**
+ * Whether what a turn produced is a sign-in failure rather than an answer.
+ *
+ * Both readings of the outcome are checked, because the CLI uses both: the
+ * answer text is where a signed-out session writes its notice, and the error is
+ * where a refused key arrives. The empty-success case counts too — a result
+ * event with subtype "success" and no text at all is unusable whatever caused
+ * it, and it is what was actually observed from the signed-out run this exists
+ * for. The caller spends one silent credential repair on that reading and does
+ * not try a second, so a wrong guess costs one retry and nothing else.
+ */
+export function claudeAuthFailed(outcome: ClaudeTurnOutcome): boolean {
+  if (!outcome.text && outcome.error?.trim() === CLAUDE_EMPTY_SUCCESS) return true;
+  if (
+    outcome.text &&
+    outcome.text.length <= CLAUDE_AUTH_TEXT_MAX &&
+    CLAUDE_AUTH_TEXT_SIGN.test(outcome.text)
+  ) {
+    return true;
+  }
+  const error = outcome.error ?? "";
+  return CLAUDE_AUTH_SIGNS.some((sign) => sign.test(error));
+}
+
+/**
  * The reader for one driven `claude -p` turn.
  *
  * `onLine` runs for every line, with the tool it named or null: the caller owns

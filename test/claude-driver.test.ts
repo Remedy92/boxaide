@@ -43,6 +43,11 @@ type Step = {
   noNewline?: boolean;
   /** Pad the answer to this many characters. */
   pad?: number;
+  /**
+   * Report subtype "success" with nothing on it. What a signed-out CLI was
+   * actually observed doing, and what reached the user as "claude: success".
+   */
+  empty?: boolean;
 };
 
 /**
@@ -89,6 +94,9 @@ if (step.hang) {
     JSON.stringify({ type: "result", subtype: "success", is_error: false, result: answer, session_id: session }),
     () => process.exit(0),
   );
+} else if (step.empty) {
+  say({ type: "result", subtype: "success" });
+  process.exit(0);
 } else if (step.errors) {
   say({
     type: "result",
@@ -183,7 +191,8 @@ function drive(
     watchdogMs: number;
     maxFailures: number;
     stopGraceMs: number;
-    onStop: (error: string | null) => void;
+    healAuth: () => boolean;
+    onStop: (error: string | null, cause: { authRequired: boolean }) => void;
   }> = {},
 ): ClaudeDriver {
   const driver = new ClaudeDriver({
@@ -500,6 +509,134 @@ describe("ClaudeDriver", () => {
 
     driver.stop();
     await driver.done;
+  });
+
+  it("repairs the credential once and answers the same message on the retry", async () => {
+    // The observed failure, exactly: exit 0, subtype success, and the sign-out
+    // notice sitting where the answer goes. Posted as an answer it reaches the
+    // user as their agent telling them to run a command.
+    const fake = fakeCli([
+      { answer: "Not logged in · Please run /login" },
+      { answer: "two invoices came in" },
+    ]);
+    const { store, channel } = make();
+    let heals = 0;
+    const driver = drive(channel, fake, {
+      healAuth: () => {
+        heals += 1;
+        return true;
+      },
+    });
+
+    const user = channel.post({ role: "user", text: "what came in today?" });
+    await until(() => channel.history().some((t) => t.role === "agent"));
+
+    const answer = channel.history().find((t) => t.role === "agent")!;
+    expect(answer.text).toBe("two invoices came in");
+    expect(answer.replyTo).toBe(user.seq);
+    // One repair, one extra process, and the notice never reached the pane.
+    expect(heals).toBe(1);
+    expect(userCalls(fake)).toHaveLength(2);
+    expect(channel.history().some((t) => t.text.includes("/login"))).toBe(false);
+    // And it cost no delivery: the retry happened inside the turn, so the lease
+    // was never given back.
+    expect(store.listDroppedUserSeqs()).toEqual([]);
+
+    driver.stop();
+    await driver.done;
+  });
+
+  it("treats a result event with nothing in it as the same failure", async () => {
+    // "claude: success" — a result the CLI called successful and put no text on.
+    // Unusable whatever caused it, and what the signed-out run actually emitted.
+    const fake = fakeCli([{ empty: true }, { answer: "back in business" }]);
+    const { channel } = make();
+    let heals = 0;
+    const driver = drive(channel, fake, {
+      healAuth: () => {
+        heals += 1;
+        return true;
+      },
+    });
+
+    channel.post({ role: "user", text: "anything?" });
+    await until(() => channel.history().some((t) => t.role === "agent"));
+
+    expect(heals).toBe(1);
+    expect(channel.history().find((t) => t.role === "agent")!.text).toBe(
+      "back in business",
+    );
+
+    driver.stop();
+    await driver.done;
+  });
+
+  it("repairs once per run, then reports the sign-out instead of retrying it", async () => {
+    const fake = fakeCli([{ answer: "Not logged in · Please run /login" }]);
+    const { store, channel } = make();
+    let heals = 0;
+    const stops: Array<{ error: string | null; authRequired: boolean }> = [];
+    const driver = drive(channel, fake, {
+      healAuth: () => {
+        heals += 1;
+        return true;
+      },
+      onStop: (error, cause) => stops.push({ error, ...cause }),
+    });
+
+    channel.post({ role: "user", text: "still there?" });
+    await until(() => stops.length === 1);
+
+    // Signed out after a fresh credential is a real sign-out. Repairing on
+    // every later turn would spend the delivery budget re-copying a file that
+    // is not the problem and then report the wrong reason.
+    expect(heals).toBe(1);
+    // MAX_DELIVERIES turns, and one extra process for the single repair.
+    expect(userCalls(fake)).toHaveLength(MAX_DELIVERIES + 1);
+    expect(stops[0].error).toContain("not signed in");
+    // The one thing the pane cannot get by reading that sentence.
+    expect(stops[0].authRequired).toBe(true);
+    // Nothing was posted as an answer, and the message is marked dropped.
+    expect(channel.history().some((t) => t.role === "agent")).toBe(false);
+    expect(store.listDroppedUserSeqs()).toHaveLength(1);
+    await driver.done;
+  });
+
+  it("does not spend a turn on a repair that changed nothing", async () => {
+    const fake = fakeCli([{ answer: "Invalid API key · Please run /login" }]);
+    const { channel } = make();
+    const stops: Array<{ error: string | null; authRequired: boolean }> = [];
+    // No credential file to drop and none to copy: the launcher is saying a
+    // retry would meet the identical credential.
+    const driver = drive(channel, fake, {
+      healAuth: () => false,
+      onStop: (error, cause) => stops.push({ error, ...cause }),
+    });
+
+    channel.post({ role: "user", text: "still there?" });
+    await until(() => stops.length === 1);
+
+    expect(userCalls(fake)).toHaveLength(MAX_DELIVERIES);
+    expect(stops[0].error).toContain("Invalid API key");
+    expect(stops[0].authRequired).toBe(true);
+    await driver.done;
+  });
+
+  it("reports a stop as a stop, whatever the last turn was", async () => {
+    const fake = fakeCli([{ answer: "never asked" }]);
+    const { channel } = make();
+    const stops: Array<{ error: string | null; authRequired: boolean }> = [];
+    const driver = drive(channel, fake, {
+      waitMs: 100_000,
+      onStop: (error, cause) => stops.push({ error, ...cause }),
+    });
+
+    await until(() => channel.presence().waiting === 1);
+    driver.stop();
+    await driver.done;
+    // A pane that offered a sign-in here would be offering it for an agent the
+    // user simply switched off.
+    expect(stops).toEqual([{ error: null, authRequired: false }]);
   });
 
   it("names the chat from the exchange, once, and never at the answer's expense", async () => {

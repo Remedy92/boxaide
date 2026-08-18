@@ -44,6 +44,19 @@ export type DriverChannel = {
 /** A running driver, from the launcher's side. Stopping is idempotent. */
 export type AgentDriver = { stop(): void };
 
+/**
+ * What a loop's end was, beyond the sentence explaining it.
+ *
+ * The reason string is written for a person to read in the pane. This is what
+ * the UI can act on: a run that ended because the CLI has no sign-in is the one
+ * failure the user can fix in one click, and telling it apart from a crash by
+ * grepping the reason would break the first time the CLI reworded itself.
+ */
+export type StopCause = {
+  /** The CLI is signed out. Nothing will run on it until a login lands. */
+  authRequired: boolean;
+};
+
 /** Backoff after a failed turn: doubles, capped, so a dead CLI is cheap. */
 export const RETRY_BASE_MS = 1_000;
 export const RETRY_MAX_MS = 30_000;
