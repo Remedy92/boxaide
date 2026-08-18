@@ -72,6 +72,12 @@ import {
   type ModelOption,
 } from "./model-list.js";
 import { scopeToolNames, type ScopeProfile } from "../mcp/scope.js";
+import {
+  confineCommand,
+  plainCommand,
+  type AgentAccess,
+  type LaunchCommand,
+} from "./sandbox.js";
 import type { ScopedGrant } from "../mcp/scoped-tokens.js";
 
 /**
@@ -178,6 +184,11 @@ export type LaunchContext = {
    * launcher can still be constructed standalone.
    */
   mintToken?: (profile: ScopeProfile, label: string) => ScopedGrant;
+  /**
+   * How much of the machine a launch may reach when the caller does not say.
+   * `workspace` unless this process was configured otherwise. See sandbox.ts.
+   */
+  access?: AgentAccess;
   /** Where the agent's empty working directory is created. */
   dataDir: string;
   /**
@@ -215,6 +226,13 @@ export type DriveOptions = {
   child: ChildProcess | null;
   /** The resolved binary, for a driver that spawns its own children. */
   bin: string;
+  /**
+   * The same binary, as the launcher actually spawns it: confined when this
+   * launch is confined. A driver that builds its own argument list per turn
+   * must spawn `command.bin` with `[...command.prefix, ...its own args]`, or
+   * its children are the one part of the launch outside the sandbox.
+   */
+  command: LaunchCommand;
   workDir: string;
   model?: string;
   /** The full child environment, exactly as the launcher's own spawn built it. */
@@ -298,6 +316,23 @@ export type AgentSpec = {
    */
   renderRunLine?: RenderRunLine;
   /**
+   * What this CLI needs from the user's home when a launch is confined.
+   *
+   * The sandbox allows the agent's own directories and the tree its binary is
+   * installed in; everything else under the home is denied. A CLI that keeps
+   * its credentials or its cache somewhere else has to say so here, or a
+   * confined launch starts and then cannot authenticate.
+   *
+   * Read is for credentials the CLI only consults. Write is for the state it
+   * insists on owning — OpenCode creates four directories under the user's
+   * home before it will run at all, and a denied mkdir there is fatal to it.
+   */
+  sandbox?: (
+    ctx: LaunchContext,
+    workDir: string,
+    parentEnv: NodeJS.ProcessEnv,
+  ) => { read?: string[]; write?: string[] };
+  /**
    * A precondition this CLI cannot be launched without, checked before
    * anything is spawned. Returns the reason to refuse, or null to go ahead.
    *
@@ -380,10 +415,16 @@ function claudeDrive(
   return new ClaudeDriver({
     channel: ctx.channel,
     agent: "claude-code",
-    bin: opts.bin,
+    // The launch's command, not the bare binary: Claude Code has no long-lived
+    // child, so these per-turn spawns are the whole agent. Spawning `opts.bin`
+    // here would leave every turn outside the sandbox the launch asked for.
+    bin: opts.command.bin,
     cwd: opts.workDir,
     env: opts.env,
-    argsFor: (turn) => claudeTurnArgs(ctx, turn, opts.model),
+    argsFor: (turn) => [
+      ...opts.command.prefix,
+      ...claudeTurnArgs(ctx, turn, opts.model),
+    ],
     onStop: opts.onStop,
   }).start();
 }
@@ -1046,6 +1087,34 @@ function opencodeChildEnv(
   };
 }
 
+/**
+ * OpenCode creates four directories under the user's home before it will run,
+ * and a denied mkdir there is fatal — verified: a confined `opencode --version`
+ * failed on each of config, data, cache and state in turn until all four were
+ * writable. Only config is redirected by `opencodeChildEnv`; the others hold
+ * the auth that keeps the launch signed in, which is why they are not.
+ *
+ * XDG variables are read from the parent rather than assumed, so a machine
+ * that moved them is described accurately instead of hopefully.
+ */
+function opencodeSandbox(
+  _ctx: LaunchContext,
+  _workDir: string,
+  env: NodeJS.ProcessEnv,
+): { write: string[] } {
+  const home = env.HOME || homedir();
+  const xdg = (name: string, fallback: string) =>
+    join(env[name] || join(home, fallback), "opencode");
+  return {
+    write: [
+      xdg("XDG_CONFIG_HOME", ".config"),
+      xdg("XDG_DATA_HOME", ".local/share"),
+      xdg("XDG_CACHE_HOME", ".cache"),
+      xdg("XDG_STATE_HOME", ".local/state"),
+    ],
+  };
+}
+
 function opencodePrepare(ctx: LaunchContext, workDir: string): void {
   mkdirSync(join(opencodeHomeFor(ctx), "config"), { recursive: true });
   writeSecret(
@@ -1134,6 +1203,20 @@ function codexArgsFor(prompt: string, model?: string): string[] {
   ];
 }
 
+/**
+ * The auth file `codexPrepare` links into the isolated home lives in the
+ * user's own `~/.codex`, and a symlink is only as readable as its target. The
+ * binary usually sits under that same root, but not when it was installed by a
+ * package manager — so it is named rather than assumed.
+ */
+function codexSandbox(
+  _ctx: LaunchContext,
+  _workDir: string,
+  env: NodeJS.ProcessEnv,
+): { read: string[] } {
+  return { read: [env.CODEX_HOME || join(env.HOME || homedir(), ".codex")] };
+}
+
 function codexChildEnv(
   _ctx: LaunchContext,
   workDir: string,
@@ -1180,6 +1263,27 @@ function codexConfigToml(ctx: LaunchContext, allowed: readonly string[]): string
   ].join("\n");
 }
 
+/** Same as codex: grok's linked `auth.json` points back into the user's home. */
+function grokSandbox(
+  _ctx: LaunchContext,
+  _workDir: string,
+  env: NodeJS.ProcessEnv,
+): { read: string[] } {
+  return { read: [env.GROK_HOME || join(env.HOME || homedir(), ".grok")] };
+}
+
+/**
+ * agy keeps its sign-in under `~/.gemini`, and unlike the others that home
+ * cannot be moved — which is the same reason `antigravityPreflight` exists.
+ */
+function antigravitySandbox(
+  _ctx: LaunchContext,
+  _workDir: string,
+  env: NodeJS.ProcessEnv,
+): { read: string[] } {
+  return { read: [join(env.HOME || homedir(), ".gemini")] };
+}
+
 /** `grok models` prints a bullet list under a prose header. */
 const GROK_LISTER: ModelLister = { args: ["models"], parse: parseBulletModels };
 
@@ -1208,10 +1312,11 @@ const CLAUDE_MODELS: ModelOption[] = [
  * email is enough to ask for that read.
  *
  * A sibling directory, so nothing the agent is handed — its cwd, its config
- * home, the env vars naming them — walks up into the secrets. It is not a
- * sandbox: a CLI with unrestricted file reads can still guess an absolute path
- * to the data directory. What it removes is the escalation that needs no
- * guessing.
+ * home, the env vars naming them — walks up into the secrets. On its own that
+ * only removes the escalation that needs no guessing; an absolute path still
+ * reaches the data directory. `src/agent/sandbox.ts` is what closes that, and
+ * this layout is what makes its rule expressible: one subtree the agent owns,
+ * one it must never see, and no overlap between them.
  */
 function agentRoot(ctx: LaunchContext): string {
   if (ctx.dataDir === ":memory:") return join(tmpdir(), "boxaide-agent");
@@ -1267,6 +1372,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     listModels: GROK_LISTER,
     childEnv: grokChildEnv,
     prepare: grokPrepare,
+    sandbox: grokSandbox,
     readEvent: readGrokEvent,
   },
   {
@@ -1277,6 +1383,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     runArgs: antigravityRunArgs,
     listModels: ANTIGRAVITY_LISTER,
     prepare: antigravityPrepare,
+    sandbox: antigravitySandbox,
     preflight: antigravityPreflight,
   },
   {
@@ -1288,6 +1395,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     listModels: OPENCODE_LISTER,
     childEnv: opencodeChildEnv,
     prepare: opencodePrepare,
+    sandbox: opencodeSandbox,
     readEvent: readOpenCodeEvent,
     drive: opencodeDrive,
   },
@@ -1299,6 +1407,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     runArgs: codexRunArgs,
     childEnv: codexChildEnv,
     prepare: codexPrepare,
+    sandbox: codexSandbox,
   },
 ];
 
@@ -1334,6 +1443,8 @@ export type RunningAgent = {
   startedAt: string;
   /** The picked model id, or null for the CLI's own default. */
   model: string | null;
+  /** What this launch was actually given, not what was asked for. */
+  access: AgentAccess;
 };
 
 /**
@@ -1408,6 +1519,11 @@ export type OneShotOptions = {
    * an argv element, so nothing unvetted may reach a command line.
    */
   model?: string | null;
+  /**
+   * How much of the machine this run may reach. Defaults to the launcher's
+   * own setting, which is `workspace` unless the install says otherwise.
+   */
+  access?: AgentAccess;
   /** Overridable for tests only; production runs use ONESHOT_TIMEOUT_MS. */
   timeoutMs?: number;
   /** Tests only; production runs use ONESHOT_FIRST_OUTPUT_TIMEOUT_MS. */
@@ -1844,7 +1960,11 @@ export class AgentLauncher {
    * offers; that answer is normally already cached by the list() the UI ran to
    * draw the picker.
    */
-  async start(id: string, model?: string): Promise<RunningAgent> {
+  async start(
+    id: string,
+    model?: string,
+    access?: AgentAccess,
+  ): Promise<RunningAgent> {
     this.assertClosed();
     this.assertIdle();
     const spec = this.registry.find((s) => s.id === id);
@@ -1885,6 +2005,7 @@ export class AgentLauncher {
     // difference between the two scopes, and it is decided here, from the spec,
     // rather than trusted to the CLI's own flags.
     const profile: ScopeProfile = spec.drive ? "driven" : "chat";
+    const granted = access ?? this.ctx.access ?? "workspace";
     const { ctx, grant } = this.launchCtx(profile, `chat:${spec.id}`);
     let workDir: string;
     try {
@@ -1901,10 +2022,19 @@ export class AgentLauncher {
     // per-launch secret, and the driver must see the exact value the child got.
     const childEnv = spec.childEnv?.(ctx, workDir) ?? {};
     const env = this.baseEnvWith(childEnv);
+    // Built before the spawn and before the driver, because both use it and a
+    // refused confinement must stop the launch rather than half-start it.
+    let command: LaunchCommand;
+    try {
+      command = this.confine(spec, bin, workDir, granted);
+    } catch (err) {
+      grant?.revoke();
+      throw new LaunchError(400, err instanceof Error ? err.message : String(err));
+    }
     // Null for a driven-only spec: its driver spawns one child per turn, and a
     // second long-lived process here would be an agent nobody prompts.
     const child = spec.args
-      ? spawn(bin, spec.args(ctx, model), {
+      ? spawn(command.bin, [...command.prefix, ...spec.args(ctx, model)], {
           cwd: workDir,
           env,
           // stdout is piped for the event stream, and MUST be consumed: a pipe
@@ -1949,6 +2079,7 @@ export class AgentLauncher {
       pid: child?.pid ?? -1,
       startedAt: new Date().toISOString(),
       model: model ?? null,
+      access: granted,
     };
 
     this.child = child;
@@ -1966,6 +2097,7 @@ export class AgentLauncher {
         spec.drive?.(ctx, {
           child,
           bin,
+          command,
           workDir,
           model,
           env,
@@ -2063,7 +2195,15 @@ export class AgentLauncher {
       workDir = this.prepareWorkDir(spec, ctx, runWorkDir(ctx, opts.runId));
       const prompt = `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
 
-      child = spawn(bin, spec.runArgs!(ctx, prompt, workDir, model), {
+      // A scheduled run is the case this matters most for: nobody is watching
+      // it, and the mail it reads was written by strangers.
+      const command = this.confine(
+        spec,
+        bin,
+        workDir,
+        opts.access ?? this.ctx.access ?? "workspace",
+      );
+      child = spawn(command.bin, [...command.prefix, ...spec.runArgs!(ctx, prompt, workDir, model)], {
         cwd: workDir,
         env: this.childEnvFor(spec, workDir, ctx),
         stdio: ["ignore", "pipe", "pipe"],
@@ -2336,6 +2476,37 @@ export class AgentLauncher {
     const grant = this.ctx.mintToken?.(profile, label) ?? null;
     if (!grant) return { ctx: this.ctx, grant: null };
     return { ctx: { ...this.ctx, bearerToken: grant.token }, grant };
+  }
+
+  /**
+   * The command this launch actually spawns.
+   *
+   * Every spawn goes through here — the chat child, each run's child, and (via
+   * `DriveOptions.command`) every turn a driver starts. That is the same shape
+   * as the tool scope: one place decides, and a spec cannot opt out of it.
+   *
+   * Writable: the launch's own directory and the agent root, which holds the
+   * CLI config homes that are shared across launches. Denied last: the data
+   * directory, whatever else named it.
+   */
+  private confine(
+    spec: AgentSpec,
+    bin: string,
+    workDir: string,
+    access: AgentAccess,
+  ): LaunchCommand {
+    if (access === "full") return plainCommand(bin);
+    const extra = spec.sandbox?.(this.ctx, workDir, this.env) ?? {};
+    return confineCommand({
+      bin,
+      access,
+      write: [workDir, agentRoot(this.ctx), ...(extra.write ?? [])],
+      read: extra.read ?? [],
+      // The credential and the mail store. `:memory:` names no directory, so
+      // there is nothing on disk to keep the agent out of.
+      deny: this.ctx.dataDir === ":memory:" ? [] : [this.ctx.dataDir],
+      home: this.env.HOME || undefined,
+    });
   }
 
   private childEnvFor(

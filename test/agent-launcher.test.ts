@@ -81,6 +81,10 @@ const CTX = {
   mcpUrl: "http://127.0.0.1:0/mcp",
   bearerToken: "t",
   dataDir: ":memory:",
+  // "full" so the suite describes launching, not confining, and runs the same
+  // on every platform — a workspace launch is refused off macOS by design.
+  // Confinement has its own file: test/agent-sandbox.test.ts.
+  access: "full" as const,
 };
 
 function specs(over: Partial<AgentSpec> = {}): AgentSpec[] {

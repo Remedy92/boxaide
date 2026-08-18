@@ -308,6 +308,10 @@ Scheduler (`AutomationScheduler`):
   additionally given the same list.
 - Web access: the CLI's own web tools stay at the CLI's defaults; we do not
   grant or deny them (Claude's headless default allows read-only search).
+- File access: a run is confined to its own directory and its CLI's own
+  installation — `workspace` in `src/agent/sandbox.ts`. Nobody is watching a
+  scheduled run and the mail it reads was written by strangers, so there is no
+  per-run opt-out; `BOXAIDE_AGENT_ACCESS=full` turns it off for the install.
 
 ### OutreachStore
 

@@ -126,6 +126,9 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     mcpUrl: `http://${launcherHost}:${config.port}/mcp`,
     bearerToken: config.bearerToken,
     mintToken: (profile, label) => scopedTokens.mint(profile, label),
+    // The operating system's half of the boundary: what a launch may read off
+    // the disk, as against what it may call on this server.
+    access: config.agentAccess,
     dataDir: config.dataDir,
     // OpenCode is launched as a server and driven from here, so the launcher
     // needs the channel itself, not just its callbacks.

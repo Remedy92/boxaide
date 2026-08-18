@@ -728,7 +728,14 @@ describe("automation tools", () => {
 });
 
 describe("AgentLauncher.runOnce", () => {
-  const CTX = { mcpUrl: "http://127.0.0.1:0/mcp", bearerToken: "t", dataDir: ":memory:" };
+  // See test/agent-sandbox.test.ts — confinement is covered there, and off
+  // macOS a workspace launch is refused rather than silently unconfined.
+  const CTX = {
+    mcpUrl: "http://127.0.0.1:0/mcp",
+    bearerToken: "t",
+    dataDir: ":memory:",
+    access: "full" as const,
+  };
 
   function runSpecs(script: string, onPrompt?: (p: string) => void): {
     specs: AgentSpec[];

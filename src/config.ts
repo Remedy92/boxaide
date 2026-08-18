@@ -2,6 +2,7 @@ import { randomBytes, scryptSync } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { AgentAccess } from "./agent/sandbox.js";
 
 /**
  * First non-empty environment value, in the order given.
@@ -57,6 +58,12 @@ export type AppConfig = {
   port: number;
   masterKey: Buffer;
   bearerToken: string;
+  /**
+   * How much of the machine a launched agent may reach when nothing else says.
+   * `workspace` — its own directory and its own CLI's files — unless the
+   * install sets BOXAIDE_AGENT_ACCESS=full. See src/agent/sandbox.ts.
+   */
+  agentAccess: AgentAccess;
   fixtureMode: boolean;
   /**
    * One-time secret supplied only by the desktop shell. It is never read from
@@ -220,6 +227,11 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     port: overrides.port ?? Number(envNamed("PORT") ?? 8787),
     masterKey,
     bearerToken,
+    // Anything other than an exact "full" means workspace. A typo must not be
+    // the thing that quietly unconfines every agent on this machine.
+    agentAccess:
+      overrides.agentAccess ??
+      (envNamed("AGENT_ACCESS") === "full" ? "full" : "workspace"),
     fixtureMode:
       overrides.fixtureMode ?? (fixture === "1" || fixture === "true"),
     bootstrapCapability: overrides.bootstrapCapability,

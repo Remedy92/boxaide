@@ -101,7 +101,7 @@ ends. The master bearer is never handed to a spawned process.
 | **A tool no scope names is denied** | The failure to design against is a tool added to the server and forgotten in `scope.ts`. Silence means no. |
 | **`message_send`, `meeting_create`, `meeting_cancel` are outside every scope** | They reach a person the moment they are called. Agents draft and queue; a human sends. |
 | **Scoped tokens are rejected on `/api/*`** | A launched agent has no business reading settings, minting credentials, or starting another agent. Before scopes it held the master bearer and could do all three. |
-| **Nothing an agent is pointed at lives inside the data directory** | The data directory holds `bearer.token` and `master.key`. An agent standing in `<dataDir>/agent-workdir` could `cat ../bearer.token` and hold the credential the scope exists to withhold. Workdirs, run directories and config homes all sit under `<dataDir>-agents` instead. Not a sandbox — a CLI with free file reads can still guess an absolute path — but the escalation no longer needs guessing. |
+| **Nothing an agent is pointed at lives inside the data directory** | The data directory holds `bearer.token` and `master.key`. An agent standing in `<dataDir>/agent-workdir` could `cat ../bearer.token` and hold the credential the scope exists to withhold. Workdirs, run directories and config homes all sit under `<dataDir>-agents` instead — which is also what makes the sandbox rule below expressible: one subtree the agent owns, one it must never see, no overlap. |
 | **In memory only** | A credential that outlived the process would be one nobody can see and nobody revokes. A restart has already killed every agent. |
 | **A CLI whose config Boxaide cannot control refuses to launch** | `AgentSpec.preflight`. Antigravity reads MCP servers from a file in the user's home that overrides the one a launch writes, so a stale entry there would decide the credential. It says so and stops instead. |
 
@@ -109,6 +109,28 @@ Implementation: `src/mcp/scope.ts` (policy), `src/mcp/scoped-tokens.ts` (mint,
 resolve, revoke), `mcpAuth` in `src/app.ts` (which credential), `dispatch` in
 `src/mcp/server.ts` (enforcement), `AgentLauncher.launchCtx` (per-launch
 credential). Covered by `test/mcp-scope.test.ts`.
+
+## Agent sandbox
+
+The scope decides what an agent may do with Boxaide's tools. It cannot decide
+what the agent does with the machine — and an agent that reads `bearer.token`
+off the disk stops being a scoped caller. So every spawn is wrapped in the
+operating system's own boundary. Same shape as the scope: one mechanism, one
+place, applied to every CLI rather than to the ones that offer a flag.
+
+| Decision | Why |
+| --- | --- |
+| **Two levels, `workspace` and `full`** | `workspace` is its own directory, its own CLI's installation and credentials, and nothing else of the user's. `full` is what every launch did before this existed. The default is `workspace`, including for scheduled runs — those are unattended and the mail they read was written by strangers. |
+| **The whole first path segment under `$HOME` is allowed for a binary** | Every agent CLI installs into the home and no two agree where: `~/.local/share/claude`, `~/.grok/bin`, `~/.bun/install/global`, `~/.codex/packages`, `~/.nvm/versions`. A rule tuned to those five breaks on the sixth. Coarse on purpose — `~/.ssh`, `~/Documents` and the data directory are not one directory deep under a dotted install root. |
+| **A spec declares what its CLI needs beyond that** | `AgentSpec.sandbox`. OpenCode creates four directories under the home before it will run at all; grok and codex read an `auth.json` that is linked in from the user's own. Verified per CLI, not assumed. |
+| **The driver's per-turn children are wrapped too** | Claude Code has no long-lived child — its turns *are* the agent. `DriveOptions.command` carries the wrap so a driver cannot be the one spawn site that forgets. |
+| **An unavailable sandbox refuses the launch** | macOS only today. Elsewhere `workspace` is refused with the fix in the message, rather than silently granted — a downgrade nobody notices is the failure this exists to prevent. `BOXAIDE_AGENT_ACCESS=full` is the deliberate opt-out. |
+| **The network is open at both levels** | The agent has a model provider and Boxaide to talk to. Confining reads keeps the master credential out of its hands; this is not an exfiltration boundary and does not claim to be. |
+
+Implementation: `src/agent/sandbox.ts` (profile and command), `AgentLauncher.confine`
+(every spawn), `AgentSpec.sandbox` (per-CLI needs), `config.agentAccess` (the
+install default). Covered by `test/agent-sandbox.test.ts`, which asserts the
+pure parts everywhere and runs real confined processes on macOS.
 
 ## MVP surface
 
