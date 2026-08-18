@@ -142,6 +142,16 @@ function toTitleSource(raw: string | null): TitleSource {
 export type UnclaimResult = "released" | "dead_lettered" | "acked" | "missing";
 
 /**
+ * A chat's CLI session, as the driver about to prompt sees it.
+ *
+ * `id` is null when there is no session for this agent yet. `epoch` is the
+ * chat's session generation, and it comes back either way: the driver hands it
+ * to `saveChatSession`, which refuses a write from a turn that started before
+ * somebody dropped the session it was using.
+ */
+export type ChatSession = { id: string | null; epoch: number };
+
+/**
  * Times a user turn may be leased without an answer. The next expiry after
  * this dead-letters it. One is what used to drop the message on the first
  * hiccup; this is "a few tries", then the same warning as before.
@@ -322,7 +332,8 @@ export class Store {
         active INTEGER NOT NULL DEFAULT 0,
         title_source TEXT NOT NULL DEFAULT 'auto',
         session_agent TEXT,
-        session_id TEXT
+        session_id TEXT,
+        session_epoch INTEGER NOT NULL DEFAULT 0
       );
     `);
     // Chats that predate title_source. A name already on screen is left alone —
@@ -366,9 +377,21 @@ export class Store {
     // identifier for a transcript it already holds on disk; it carries no user
     // content, and encrypting it would only make the column unreadable to the
     // process that has to hand it back verbatim.
+    //
+    // `session_epoch` is what makes a save safe to land late. A turn reads the
+    // epoch when it starts and hands it back when it saves; anything that drops
+    // the session in between bumps it, and the save is refused. Without it a
+    // chat cleared while the agent was still answering would have its old
+    // session written straight back, and the next message would resume the
+    // history the user had just emptied.
     if (!chatCols.some((c) => c.name === "session_id")) {
       this.db.exec(`ALTER TABLE agent_chats ADD COLUMN session_agent TEXT`);
       this.db.exec(`ALTER TABLE agent_chats ADD COLUMN session_id TEXT`);
+    }
+    if (!chatCols.some((c) => c.name === "session_epoch")) {
+      this.db.exec(
+        `ALTER TABLE agent_chats ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0`,
+      );
     }
     if (!turnCols.some((c) => c.name === "chat_id")) {
       this.db.exec(`ALTER TABLE agent_turns ADD COLUMN chat_id TEXT`);
@@ -603,23 +626,47 @@ export class Store {
   }
 
   /**
-   * The CLI session this chat resumes, for the agent that is asking.
+   * Whether a user turn is still there to be answered.
    *
-   * Null for another agent's session: the id would be meaningless to this CLI,
-   * and a chat switched from one agent to another has to start a session rather
-   * than fail every turn on one it cannot find.
+   * False once the chat was emptied or deleted under the agent that was working
+   * on it. A turn takes minutes, and the user is free to clear the conversation
+   * inside that window — the question the answer belongs to is simply gone.
    */
-  chatSession(chatId: string, agent: string): string | null {
+  answerable(seq: number, chatId: string): boolean {
     const row = this.db
       .prepare(
-        `SELECT session_agent as sessionAgent, session_id as sessionId
+        `SELECT 1 as hit FROM agent_turns
+         WHERE seq = ? AND chat_id = ? AND role = 'user'`,
+      )
+      .get(seq, chatId) as { hit: number } | undefined;
+    return row !== undefined;
+  }
+
+  /**
+   * The CLI session this chat resumes, for the agent that is asking, and the
+   * epoch that answer is good for.
+   *
+   * A null id for another agent's session: the id would be meaningless to this
+   * CLI, and a chat switched from one agent to another has to start a session
+   * rather than fail every turn on one it cannot find. The epoch is returned
+   * either way — the caller needs it to save whatever session it does end up
+   * using, and it belongs to the chat rather than to any one agent's id.
+   */
+  chatSession(chatId: string, agent: string): ChatSession {
+    const row = this.db
+      .prepare(
+        `SELECT session_agent as sessionAgent, session_id as sessionId,
+                session_epoch as epoch
          FROM agent_chats WHERE id = ?`,
       )
       .get(chatId) as
-      | { sessionAgent: string | null; sessionId: string | null }
+      | { sessionAgent: string | null; sessionId: string | null; epoch: number }
       | undefined;
-    if (!row || row.sessionAgent !== agent) return null;
-    return row.sessionId ?? null;
+    if (!row) return { id: null, epoch: 0 };
+    return {
+      id: row.sessionAgent === agent ? (row.sessionId ?? null) : null,
+      epoch: row.epoch,
+    };
   }
 
   /**
@@ -627,17 +674,34 @@ export class Store {
    * the agent workdir is stable, so the CLI's transcript outlives the process
    * that made it, and a restarted agent that forgot the id would answer the
    * next message as a stranger.
+   *
+   * `epoch` is the one read when the turn started. A turn can be minutes long,
+   * and anything that dropped this chat's session while it ran — the user
+   * clearing the chat, a refused resume — moved the epoch on. Saving then would
+   * undo that, so the write is refused instead. Silently: the session is gone
+   * because somebody meant it to be gone, and the next turn starts a fresh one.
    */
-  saveChatSession(chatId: string, agent: string, sessionId: string): void {
+  saveChatSession(
+    chatId: string,
+    agent: string,
+    sessionId: string,
+    epoch: number,
+  ): void {
     this.db
-      .prepare(`UPDATE agent_chats SET session_agent = ?, session_id = ? WHERE id = ?`)
-      .run(agent, sessionId, chatId);
+      .prepare(
+        `UPDATE agent_chats SET session_agent = ?, session_id = ?
+         WHERE id = ? AND session_epoch = ?`,
+      )
+      .run(agent, sessionId, chatId, epoch);
   }
 
   clearChatSession(chatId: string): void {
     this.db
       .prepare(
-        `UPDATE agent_chats SET session_agent = NULL, session_id = NULL WHERE id = ?`,
+        `UPDATE agent_chats
+         SET session_agent = NULL, session_id = NULL,
+             session_epoch = session_epoch + 1
+         WHERE id = ?`,
       )
       .run(chatId);
   }
@@ -877,9 +941,13 @@ export class Store {
     // banner explaining an automatic loss would be a lie about their own click.
     // The session goes with the messages: a model still resuming a transcript
     // the pane no longer shows would answer from history the user just emptied.
+    // The epoch moves with it, so a turn still running in this chat cannot save
+    // the session it started with once the answer lands.
     this.db
       .prepare(
-        `UPDATE agent_chats SET trimmed = 0, session_agent = NULL, session_id = NULL
+        `UPDATE agent_chats
+         SET trimmed = 0, session_agent = NULL, session_id = NULL,
+             session_epoch = session_epoch + 1
          WHERE id = ?`,
       )
       .run(chatId);

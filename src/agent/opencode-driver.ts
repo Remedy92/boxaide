@@ -285,7 +285,10 @@ export class OpenCodeDriver implements AgentDriver {
    * the server's directory is the stable agent workdir.
    */
   private async ensureSession(base: string, chatId: string): Promise<string> {
-    const known = this.opts.channel.chatSession(chatId, this.opts.agent);
+    const { id: known, epoch } = this.opts.channel.chatSession(
+      chatId,
+      this.opts.agent,
+    );
     if (known) return known;
     const res = await this.call(base, "/session", {
       title: "Boxaide",
@@ -301,7 +304,9 @@ export class OpenCodeDriver implements AgentDriver {
     if (typeof body.id !== "string" || !body.id) {
       throw new Error("opencode session response had no id");
     }
-    this.opts.channel.saveChatSession(chatId, this.opts.agent, body.id);
+    // On the epoch read before the POST above: a chat cleared while the server
+    // was making this session must not have that session saved under it.
+    this.opts.channel.saveChatSession(chatId, this.opts.agent, body.id, epoch);
     return body.id;
   }
 

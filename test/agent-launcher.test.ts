@@ -106,13 +106,13 @@ function specs(over: Partial<AgentSpec> = {}): AgentSpec[] {
 function fakeChannel(): DriverChannel {
   return {
     awaitUserTurn: () => new Promise(() => {}),
-    post: () => undefined,
+    answer: () => true,
     releaseLease: () => "released",
     noteAgentActivity: () => {},
     setDriven: () => {},
     needsTitle: () => false,
     nameChat: () => false,
-    chatSession: () => null,
+    chatSession: () => ({ id: null, epoch: 0 }),
     saveChatSession: () => {},
     clearChatSession: () => {},
   };

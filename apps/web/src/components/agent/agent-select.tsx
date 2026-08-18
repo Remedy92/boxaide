@@ -51,23 +51,38 @@ export function AgentSelect({ disabled }: { disabled?: boolean } = {}) {
 
   const busy = start.isPending || stop.isPending;
 
+  const fail = (err: unknown) =>
+    toast.error(friendlyError(err instanceof Error ? err.message : String(err)));
+
   const choose = async (agent: LocalAgent) => {
     setOpen(false);
-    update({ agentId: agent.id });
+    // Nothing running means nothing to do beyond remembering the choice: the
+    // next send starts it.
+    if (!running || running.id === agent.id) {
+      update({ agentId: agent.id });
+      return;
+    }
     // One agent runs at a time, so a swap mid-session has to put the old one
-    // down before it can ask for the new one. Nothing running means nothing to
-    // do here: the next send starts the pick.
-    if (!running || running.id === agent.id) return;
+    // down before it can ask for the new one. The pick only moves once that
+    // has happened: an agent this control could not stop is still the one
+    // answering, and naming a different one would be a lie the user cannot see
+    // through.
     try {
       await stop.mutateAsync();
+    } catch (err) {
+      fail(err);
+      return;
+    }
+    update({ agentId: agent.id });
+    try {
       await start.mutateAsync({
         id: agent.id,
         model: modelForStart(agent, agentModel),
       });
     } catch (err) {
-      toast.error(
-        friendlyError(err instanceof Error ? err.message : String(err)),
-      );
+      // The pick stands: nothing is running now, the toast said why, and the
+      // next send starts this agent rather than the one that just went down.
+      fail(err);
     }
   };
 

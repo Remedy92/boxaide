@@ -221,7 +221,10 @@ export class ClaudeDriver implements AgentDriver {
    * continue whatever some other chat was talking about.
    */
   private async prompt(chatId: string, text: string): Promise<string> {
-    const resuming = this.opts.channel.chatSession(chatId, this.opts.agent);
+    const { id: resuming, epoch } = this.opts.channel.chatSession(
+      chatId,
+      this.opts.agent,
+    );
     const outcome = await this.runTurn({
       prompt: text,
       system: DRIVEN_SYSTEM,
@@ -230,8 +233,17 @@ export class ClaudeDriver implements AgentDriver {
     // The id is taken from a failed turn too: a fresh session that failed
     // mid-work still exists, and resuming it is how the retry keeps whatever
     // the model already did.
+    //
+    // Handed back with the epoch this turn started on, so a chat the user
+    // cleared while the model was working stays cleared: the save is refused
+    // rather than resurrecting the transcript they just emptied.
     if (outcome.sessionId) {
-      this.opts.channel.saveChatSession(chatId, this.opts.agent, outcome.sessionId);
+      this.opts.channel.saveChatSession(
+        chatId,
+        this.opts.agent,
+        outcome.sessionId,
+        epoch,
+      );
     }
     if (outcome.text) return outcome.text;
     // A resume the CLI could not find will never be found: the transcript is

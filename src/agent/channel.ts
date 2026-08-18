@@ -41,6 +41,7 @@
  */
 import {
   MAX_DELIVERIES,
+  type ChatSession,
   type Store,
   type StoredChat,
   type StoredTurn,
@@ -346,6 +347,12 @@ export class AgentChannel {
     text: string;
     agent?: string | null;
     chatId?: string;
+    /**
+     * The question this answers, when the caller knows it. Set by `answer`,
+     * which has the turn in hand; left off by the MCP tier, where an agent may
+     * volunteer a line with no question open at all.
+     */
+    answerTo?: { seq: number; chatId: string };
   }): Turn {
     const text = input.text.trim();
     if (!text) throw new Error("text is required");
@@ -356,13 +363,15 @@ export class AgentChannel {
     // Stamp before clearing: the claimed seq is the owner, even if another
     // user turn arrived while this work was open.
     const answering = input.role === "agent" || input.role === "activity";
-    const replyTo = answering && this.work ? this.work.seq : null;
+    const target =
+      input.answerTo ??
+      (answering && this.work
+        ? { seq: this.work.seq, chatId: this.work.chatId }
+        : null);
+    const replyTo = target ? target.seq : null;
     // An answer belongs to the chat the question was asked in. Only a turn
     // that answers nothing lands wherever the user is now.
-    const chatId =
-      answering && this.work
-        ? this.work.chatId
-        : this.store.ensureActiveChat().id;
+    const chatId = target ? target.chatId : this.store.ensureActiveChat().id;
     // The answer is what ends the work. An activity line does not: the agent
     // is narrating mid-task and is still holding the message.
     if (input.role === "agent") this.work = null;
@@ -391,6 +400,36 @@ export class AgentChannel {
     this.emitChats();
     if (input.role === "user") this.handOff();
     return turn;
+  }
+
+  /**
+   * Posts a model's answer to the question it answers, or drops it.
+   *
+   * False means dropped, and the only way that happens is the user emptying or
+   * deleting the chat while the model was still working on it. `post` alone
+   * would land that answer wherever the user is now, under no question at all:
+   * a reply to a message nobody can see, in a conversation it was never asked
+   * in. The user removed the question; the answer goes with it.
+   */
+  answer(input: {
+    seq: number;
+    chatId: string;
+    text: string;
+    agent?: string | null;
+  }): boolean {
+    if (!this.store.answerable(input.seq, input.chatId)) {
+      // Nothing is being worked on any more either way.
+      if (this.work?.seq === input.seq) this.work = null;
+      this.emitPresence();
+      return false;
+    }
+    this.post({
+      role: "agent",
+      text: input.text,
+      agent: input.agent,
+      answerTo: { seq: input.seq, chatId: input.chatId },
+    });
+    return true;
   }
 
   /**
@@ -506,12 +545,17 @@ export class AgentChannel {
    * that agent restarted — leaving the model to answer the next message with no
    * memory of the conversation it is in.
    */
-  chatSession(chatId: string, agent: string): string | null {
+  chatSession(chatId: string, agent: string): ChatSession {
     return this.store.chatSession(chatId, agent);
   }
 
-  saveChatSession(chatId: string, agent: string, sessionId: string): void {
-    this.store.saveChatSession(chatId, agent, sessionId);
+  saveChatSession(
+    chatId: string,
+    agent: string,
+    sessionId: string,
+    epoch: number,
+  ): void {
+    this.store.saveChatSession(chatId, agent, sessionId, epoch);
   }
 
   clearChatSession(chatId: string): void {

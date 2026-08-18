@@ -95,7 +95,7 @@ export function AgentView({
   const send = React.useCallback(
     (text: string) => {
       void agent.send(text);
-      ensureAgent();
+      void ensureAgent();
     },
     [agent, ensureAgent],
   );

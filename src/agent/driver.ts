@@ -9,7 +9,7 @@
  * so the lease protocol cannot drift between them.
  */
 import { MAX_WAIT_MS } from "./channel.js";
-import type { UnclaimResult } from "../db/store.js";
+import type { ChatSession, UnclaimResult } from "../db/store.js";
 
 /**
  * What a driver needs from the conversation channel.
@@ -25,7 +25,17 @@ export type DriverChannel = {
     agent?: string | null;
     signal?: AbortSignal;
   }): Promise<DrivenTurn | null>;
-  post(input: { role: "agent" | "activity"; text: string; agent?: string | null }): unknown;
+  /**
+   * Posts the answer to the turn it answers. False means the question is gone
+   * — the user emptied or deleted the chat while the model was working — and
+   * the answer was dropped rather than left somewhere nobody asked it.
+   */
+  answer(input: {
+    seq: number;
+    chatId: string;
+    text: string;
+    agent?: string | null;
+  }): boolean;
   /**
    * Gives an unanswered lease back. The result matters: `dead_lettered` is the
    * channel saying this message will never be handed over again, which is the
@@ -40,16 +50,28 @@ export type DriverChannel = {
   /** Offers the model's name for the chat. Refused if the user named it. */
   nameChat(chatId: string, title: string): boolean;
   /**
-   * The CLI session this chat continues in, or null to start one.
+   * The CLI session this chat continues in, and the epoch it is good for.
    *
    * A session per chat, not per agent: one running agent answers every chat,
    * and a single shared session would feed every conversation's messages into
    * one transcript. `agent` scopes the answer because a session id only means
    * something to the CLI that issued it.
    */
-  chatSession(chatId: string, agent: string): string | null;
-  /** Remembers the session a chat is living in, across agent restarts. */
-  saveChatSession(chatId: string, agent: string, sessionId: string): void;
+  chatSession(chatId: string, agent: string): ChatSession;
+  /**
+   * Remembers the session a chat is living in, across agent restarts.
+   *
+   * `epoch` is the one read when the turn started, and the write is refused if
+   * the chat's session was dropped while that turn ran. A turn takes minutes; a
+   * user clearing the chat under it must not have their clear undone by the
+   * answer arriving afterwards.
+   */
+  saveChatSession(
+    chatId: string,
+    agent: string,
+    sessionId: string,
+    epoch: number,
+  ): void;
   /** Forgets one chat's session. The next turn there starts a fresh one. */
   clearChatSession(chatId: string): void;
 };
@@ -216,10 +238,18 @@ export async function runDrivenLoop(
         return null;
       }
       const reply = await takeTurn(turn);
-      loop.channel.post({ role: "agent", text: reply, agent: loop.agent });
+      const posted = loop.channel.answer({
+        seq: turn.seq,
+        chatId: turn.chatId,
+        text: reply,
+        agent: loop.agent,
+      });
+      // The model answered, so the turn worked. Whether the user still wanted
+      // it is a different question and not a failure of this loop.
       failures = 0;
       try {
-        loop.afterReply?.(turn.chatId);
+        // Nothing to name when the exchange it would be named from is gone.
+        if (posted) loop.afterReply?.(turn.chatId);
       } catch {
         // Naming is best effort. The answer is already posted.
       }
