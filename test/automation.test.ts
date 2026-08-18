@@ -1013,7 +1013,7 @@ describe("AgentLauncher.runOnce", () => {
     // sleep is the window this test is about.
     const bin = fakeBinDir(
       "fake-agent",
-      "#!/bin/sh\nif [ \"$1\" = models ]; then sleep 0.4; echo 'Available models:'; echo '- slow-1'; fi\nexit 0\n",
+      "#!/bin/sh\nif [ \"$1\" = models ]; then /bin/sleep 0.4; echo 'Available models:'; echo '- slow-1'; fi\nexit 0\n",
     );
     const specs: AgentSpec[] = [
       {

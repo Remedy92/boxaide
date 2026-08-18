@@ -57,11 +57,11 @@ function readRegular(path: string): string {
 /**
  * A stand-in agent binary on a PATH that holds nothing else.
  *
- * The default script has to outlive the test that starts it, and both halves
- * of it are load-bearing. `/bin/sleep` by absolute path, because the launcher
- * hands the child a PATH built from `this.env.PATH` — which is this directory
- * and nothing else — so a bare `sleep` is not found and the shell exits 127
- * before the test can stop it. `exec`, because otherwise the sleep is a
+ * Both halves of the default script are load-bearing. `/bin/sleep` by absolute
+ * path, because the launcher hands the child a PATH built from the one it was
+ * given plus its well-known bin directories, and on a CI runner none of those
+ * holds `sleep` — the fake agent then died instantly with 127 and raced every
+ * test that expects it to stay up. `exec`, because otherwise the sleep is a
  * grandchild that keeps the stdio pipes open after the shell is signalled, so
  * "close" never fires and the launcher never reports the exit.
  */

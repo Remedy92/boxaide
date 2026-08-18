@@ -7,6 +7,7 @@ import { Field, Spinner, TechnicalDetails } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -253,258 +254,260 @@ export function ConnectMailboxDialog({
             never sends them anywhere else.
           </DialogDescription>
         </DialogHeader>
+        <DialogBody>
 
-        {/* One tab stop, arrows move the selection — role="radio" without a
-            roving tabindex leaves five separate tab stops and dead arrow keys. */}
-        <div
-          role="radiogroup"
-          aria-label="Provider preset"
-          className="flex flex-wrap gap-1.5"
-          onKeyDown={(event) => {
-            const delta =
-              event.key === "ArrowRight" || event.key === "ArrowDown"
-                ? 1
-                : event.key === "ArrowLeft" || event.key === "ArrowUp"
-                  ? -1
-                  : 0;
-            if (delta === 0) return;
-            event.preventDefault();
-            const at = PROVIDER_PRESETS.findIndex((e) => e.id === preset);
-            const next =
-              PROVIDER_PRESETS[
-                (Math.max(at, 0) + delta + PROVIDER_PRESETS.length) %
-                  PROVIDER_PRESETS.length
-              ];
-            choosePreset(next.id);
-            presetRefs.current.get(next.id)?.focus();
-          }}
-        >
-          {PROVIDER_PRESETS.map((entry) => (
-            <button
-              key={entry.id}
-              ref={(node) => {
-                if (node) presetRefs.current.set(entry.id, node);
-                else presetRefs.current.delete(entry.id);
-              }}
-              type="button"
-              role="radio"
-              aria-checked={preset === entry.id}
-              tabIndex={preset === entry.id ? 0 : -1}
-              onClick={() => choosePreset(entry.id)}
-              className={cn(
-                "h-8 rounded-[var(--radius-md)] border px-3 text-[13px]",
-                "transition-colors duration-[var(--dur-fast)]",
-                preset === entry.id
-                  ? "border-accent bg-accent-subtle text-accent"
-                  : "border-border-control bg-surface-2 text-fg-secondary hover:bg-surface-hover hover:text-fg",
-              )}
-            >
-              {entry.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="space-y-3">
-          <Field id="connect-email" label="Email address">
-            <Input
-              id="connect-email"
-              ref={emailRef}
-              type="email"
-              value={form.email}
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="you@example.com"
-              onChange={(event) => onEmailChange(event.target.value)}
-            />
-          </Field>
-
-          <Field
-            id="connect-password"
-            label={chosen?.passwordName ?? "Password"}
-            helper={chosen?.hint || undefined}
+          {/* One tab stop, arrows move the selection — role="radio" without a
+              roving tabindex leaves five separate tab stops and dead arrow keys. */}
+          <div
+            role="radiogroup"
+            aria-label="Provider preset"
+            className="flex flex-wrap gap-1.5"
+            onKeyDown={(event) => {
+              const delta =
+                event.key === "ArrowRight" || event.key === "ArrowDown"
+                  ? 1
+                  : event.key === "ArrowLeft" || event.key === "ArrowUp"
+                    ? -1
+                    : 0;
+              if (delta === 0) return;
+              event.preventDefault();
+              const at = PROVIDER_PRESETS.findIndex((e) => e.id === preset);
+              const next =
+                PROVIDER_PRESETS[
+                  (Math.max(at, 0) + delta + PROVIDER_PRESETS.length) %
+                    PROVIDER_PRESETS.length
+                ];
+              choosePreset(next.id);
+              presetRefs.current.get(next.id)?.focus();
+            }}
           >
-            <div className="relative">
-              <Input
-                id="connect-password"
-                ref={passwordRef}
-                type={reveal ? "text" : "password"}
-                value={form.password}
-                autoComplete="off"
-                placeholder={chosen?.passwordPlaceholder || undefined}
-                className="pr-8"
-                onChange={(event) => {
-                  setValidation(null);
-                  setForm((value) => ({ ...value, password: event.target.value }));
-                }}
-              />
+            {PROVIDER_PRESETS.map((entry) => (
               <button
+                key={entry.id}
+                ref={(node) => {
+                  if (node) presetRefs.current.set(entry.id, node);
+                  else presetRefs.current.delete(entry.id);
+                }}
                 type="button"
-                aria-label={reveal ? "Hide password" : "Show password"}
-                onClick={() => setReveal((value) => !value)}
-                className="absolute top-1/2 right-1.5 flex size-5 -translate-y-1/2 items-center justify-center rounded-[var(--radius-sm)] text-fg-tertiary hover:bg-surface-hover hover:text-fg"
-              >
-                {reveal ? (
-                  <EyeOff className="size-3.5" strokeWidth={1.5} />
-                ) : (
-                  <Eye className="size-3.5" strokeWidth={1.5} />
+                role="radio"
+                aria-checked={preset === entry.id}
+                tabIndex={preset === entry.id ? 0 : -1}
+                onClick={() => choosePreset(entry.id)}
+                className={cn(
+                  "h-8 rounded-[var(--radius-md)] border px-3 text-[13px]",
+                  "transition-colors duration-[var(--dur-fast)]",
+                  preset === entry.id
+                    ? "border-accent bg-accent-subtle text-accent"
+                    : "border-border-control bg-surface-2 text-fg-secondary hover:bg-surface-hover hover:text-fg",
                 )}
+              >
+                {entry.label}
               </button>
-            </div>
-            {chosen?.passwordUrl && (
-              <Button asChild variant="secondary" size="sm">
-                <a
-                  href={chosen.passwordUrl}
-                  target="_blank"
-                  rel="noreferrer noopener"
-                >
-                  <ExternalLink className="size-3.5" strokeWidth={1.5} />
-                  {chosen.passwordUrlLabel}
-                </a>
-              </Button>
-            )}
-          </Field>
+            ))}
+          </div>
 
-          <button
-            type="button"
-            aria-expanded={advanced}
-            aria-controls="connect-advanced"
-            onClick={() => setAdvanced((value) => !value)}
-            className="flex items-center gap-1 text-[12px] text-fg-tertiary hover:text-fg-secondary"
-          >
-            <ChevronRight
-              aria-hidden="true"
-              className={cn(
-                "size-3.5 transition-transform duration-[var(--dur-fast)]",
-                advanced && "rotate-90",
-              )}
-              strokeWidth={1.5}
-            />
-            More settings
-          </button>
-
-          {advanced && (
-            <div id="connect-advanced" className="space-y-3">
-              <Field
-                id="connect-alias"
-                label="Name"
-                helper="Shown in the sidebar. Lowercase, no spaces."
-              >
-                <Input
-                  id="connect-alias"
-                  value={form.alias}
-                  autoComplete="off"
-                  placeholder={alias || "Taken from the address"}
-                  onChange={(event) =>
-                    setForm((value) => ({ ...value, alias: event.target.value }))
-                  }
-                />
-              </Field>
-
-              <Field
-                id="connect-username"
-                label="Username"
-                helper="Only if your provider signs you in with something other than your address."
-              >
-                <Input
-                  id="connect-username"
-                  value={form.username}
-                  placeholder={form.email.trim() || "Same as email address"}
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="font-mono"
-                  onChange={(event) =>
-                    setForm((value) => ({ ...value, username: event.target.value }))
-                  }
-                />
-              </Field>
-
-              <div className="grid grid-cols-[1fr_5rem] gap-2">
-                <Field id="connect-imap-host" label="Incoming server (IMAP)">
-                  <Input
-                    id="connect-imap-host"
-                    ref={imapRef}
-                    value={form.imapHost}
-                    spellCheck={false}
-                    className="font-mono"
-                    onChange={(event) =>
-                      setForm((value) => ({ ...value, imapHost: event.target.value }))
-                    }
-                  />
-                </Field>
-                <Field id="connect-imap-port" label="Port">
-                  <Input
-                    id="connect-imap-port"
-                    inputMode="numeric"
-                    value={form.imapPort}
-                    className="font-mono"
-                    onChange={(event) =>
-                      setForm((value) => ({ ...value, imapPort: event.target.value }))
-                    }
-                  />
-                </Field>
-              </div>
-
-              <div className="grid grid-cols-[1fr_5rem] gap-2">
-                <Field id="connect-smtp-host" label="Outgoing server (SMTP)">
-                  <Input
-                    id="connect-smtp-host"
-                    ref={smtpRef}
-                    value={form.smtpHost}
-                    spellCheck={false}
-                    className="font-mono"
-                    onChange={(event) =>
-                      setForm((value) => ({ ...value, smtpHost: event.target.value }))
-                    }
-                  />
-                </Field>
-                <Field id="connect-smtp-port" label="Port">
-                  <Input
-                    id="connect-smtp-port"
-                    inputMode="numeric"
-                    value={form.smtpPort}
-                    className="font-mono"
-                    onChange={(event) =>
-                      setForm((value) => ({ ...value, smtpPort: event.target.value }))
-                    }
-                  />
-                </Field>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {existing && (
-          <p className="text-[12px] leading-4 text-fg-tertiary">
-            A mailbox named “{existing.alias}” already exists. Saving replaces its
-            credentials.
-          </p>
-        )}
-
-        <div role="status" aria-live="polite">
-          {validation && (
-            <p className="text-[12px] leading-4 text-danger">{validation}</p>
-          )}
-
-          {create.isError && (
-            <div>
-              <p className="text-[12px] leading-4 text-danger">
-                {friendlyError(
-                  create.error instanceof Error
-                    ? create.error.message
-                    : create.error,
-                )}
-              </p>
-              <TechnicalDetails
-                raw={
-                  create.error instanceof Error
-                    ? create.error.message
-                    : create.error
-                }
+          <div className="space-y-3">
+            <Field id="connect-email" label="Email address">
+              <Input
+                id="connect-email"
+                ref={emailRef}
+                type="email"
+                value={form.email}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="you@example.com"
+                onChange={(event) => onEmailChange(event.target.value)}
               />
-            </div>
-          )}
-        </div>
+            </Field>
 
+            <Field
+              id="connect-password"
+              label={chosen?.passwordName ?? "Password"}
+              helper={chosen?.hint || undefined}
+            >
+              <div className="relative">
+                <Input
+                  id="connect-password"
+                  ref={passwordRef}
+                  type={reveal ? "text" : "password"}
+                  value={form.password}
+                  autoComplete="off"
+                  placeholder={chosen?.passwordPlaceholder || undefined}
+                  className="pr-8"
+                  onChange={(event) => {
+                    setValidation(null);
+                    setForm((value) => ({ ...value, password: event.target.value }));
+                  }}
+                />
+                <button
+                  type="button"
+                  aria-label={reveal ? "Hide password" : "Show password"}
+                  onClick={() => setReveal((value) => !value)}
+                  className="absolute top-1/2 right-1.5 flex size-5 -translate-y-1/2 items-center justify-center rounded-[var(--radius-sm)] text-fg-tertiary hover:bg-surface-hover hover:text-fg"
+                >
+                  {reveal ? (
+                    <EyeOff className="size-3.5" strokeWidth={1.5} />
+                  ) : (
+                    <Eye className="size-3.5" strokeWidth={1.5} />
+                  )}
+                </button>
+              </div>
+              {chosen?.passwordUrl && (
+                <Button asChild variant="secondary" size="sm">
+                  <a
+                    href={chosen.passwordUrl}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                  >
+                    <ExternalLink className="size-3.5" strokeWidth={1.5} />
+                    {chosen.passwordUrlLabel}
+                  </a>
+                </Button>
+              )}
+            </Field>
+
+            <button
+              type="button"
+              aria-expanded={advanced}
+              aria-controls="connect-advanced"
+              onClick={() => setAdvanced((value) => !value)}
+              className="flex items-center gap-1 text-[12px] text-fg-tertiary hover:text-fg-secondary"
+            >
+              <ChevronRight
+                aria-hidden="true"
+                className={cn(
+                  "size-3.5 transition-transform duration-[var(--dur-fast)]",
+                  advanced && "rotate-90",
+                )}
+                strokeWidth={1.5}
+              />
+              More settings
+            </button>
+
+            {advanced && (
+              <div id="connect-advanced" className="space-y-3">
+                <Field
+                  id="connect-alias"
+                  label="Name"
+                  helper="Shown in the sidebar. Lowercase, no spaces."
+                >
+                  <Input
+                    id="connect-alias"
+                    value={form.alias}
+                    autoComplete="off"
+                    placeholder={alias || "Taken from the address"}
+                    onChange={(event) =>
+                      setForm((value) => ({ ...value, alias: event.target.value }))
+                    }
+                  />
+                </Field>
+
+                <Field
+                  id="connect-username"
+                  label="Username"
+                  helper="Only if your provider signs you in with something other than your address."
+                >
+                  <Input
+                    id="connect-username"
+                    value={form.username}
+                    placeholder={form.email.trim() || "Same as email address"}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="font-mono"
+                    onChange={(event) =>
+                      setForm((value) => ({ ...value, username: event.target.value }))
+                    }
+                  />
+                </Field>
+
+                <div className="grid grid-cols-[1fr_5rem] gap-2">
+                  <Field id="connect-imap-host" label="Incoming server (IMAP)">
+                    <Input
+                      id="connect-imap-host"
+                      ref={imapRef}
+                      value={form.imapHost}
+                      spellCheck={false}
+                      className="font-mono"
+                      onChange={(event) =>
+                        setForm((value) => ({ ...value, imapHost: event.target.value }))
+                      }
+                    />
+                  </Field>
+                  <Field id="connect-imap-port" label="Port">
+                    <Input
+                      id="connect-imap-port"
+                      inputMode="numeric"
+                      value={form.imapPort}
+                      className="font-mono"
+                      onChange={(event) =>
+                        setForm((value) => ({ ...value, imapPort: event.target.value }))
+                      }
+                    />
+                  </Field>
+                </div>
+
+                <div className="grid grid-cols-[1fr_5rem] gap-2">
+                  <Field id="connect-smtp-host" label="Outgoing server (SMTP)">
+                    <Input
+                      id="connect-smtp-host"
+                      ref={smtpRef}
+                      value={form.smtpHost}
+                      spellCheck={false}
+                      className="font-mono"
+                      onChange={(event) =>
+                        setForm((value) => ({ ...value, smtpHost: event.target.value }))
+                      }
+                    />
+                  </Field>
+                  <Field id="connect-smtp-port" label="Port">
+                    <Input
+                      id="connect-smtp-port"
+                      inputMode="numeric"
+                      value={form.smtpPort}
+                      className="font-mono"
+                      onChange={(event) =>
+                        setForm((value) => ({ ...value, smtpPort: event.target.value }))
+                      }
+                    />
+                  </Field>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {existing && (
+            <p className="text-[12px] leading-4 text-fg-tertiary">
+              A mailbox named “{existing.alias}” already exists. Saving replaces its
+              credentials.
+            </p>
+          )}
+
+          <div role="status" aria-live="polite">
+            {validation && (
+              <p className="text-[12px] leading-4 text-danger">{validation}</p>
+            )}
+
+            {create.isError && (
+              <div>
+                <p className="text-[12px] leading-4 text-danger">
+                  {friendlyError(
+                    create.error instanceof Error
+                      ? create.error.message
+                      : create.error,
+                  )}
+                </p>
+                <TechnicalDetails
+                  raw={
+                    create.error instanceof Error
+                      ? create.error.message
+                      : create.error
+                  }
+                />
+              </div>
+            )}
+          </div>
+
+        </DialogBody>
         <DialogFooter>
           <Button
             type="button"
