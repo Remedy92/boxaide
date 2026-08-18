@@ -15,6 +15,7 @@ import {
   listMeetings,
   listReusableMailboxes,
   refreshMeetingResponses,
+  removeMeeting,
   startGoogleCalendarAuth,
   type CalDavAccountBody,
   type CreateMeetingBody,
@@ -332,6 +333,22 @@ export function useCreateMeeting() {
       // The time just booked is no longer free. Without this the next dialog
       // would still offer it, from cache.
       void queryClient.invalidateQueries({ queryKey: ["calendar-free-slots"] });
+    },
+  });
+}
+
+/**
+ * Forget a cancelled meeting. Only the meetings list changes: the calendar lost
+ * the event when it was cancelled, so the agenda and the free slots already
+ * reflect this and re-reading them would be two requests for no new answer.
+ */
+export function useRemoveMeeting() {
+  const ctx = useApiCtx();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (meetingId: string) => removeMeeting(meetingId, ctx),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["calendar-meetings"] });
     },
   });
 }

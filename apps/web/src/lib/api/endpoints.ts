@@ -1402,6 +1402,26 @@ export function cancelMeeting(
   );
 }
 
+/**
+ * Forget a cancelled meeting. Boxaide's own record and its recorded replies go;
+ * nothing is sent and no calendar is touched. Cancelled meetings only — the
+ * server answers 400 for anything still scheduled.
+ */
+export function removeMeeting(
+  meetingId: string,
+  ctx: Ctx,
+): Promise<{ removed: boolean }> {
+  return request<{ removed: boolean }>(
+    `/api/calendar/meetings/${encodeURIComponent(meetingId)}`,
+    {
+      method: "DELETE",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /* updates                                                                    */
 /* -------------------------------------------------------------------------- */

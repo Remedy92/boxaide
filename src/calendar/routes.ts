@@ -478,6 +478,27 @@ export function registerCalendarRoutes(
     }
   });
 
+  /**
+   * Forget a cancelled meeting: drops Boxaide's own record and the responses
+   * recorded against it. Nothing is sent and no calendar is touched — the event
+   * itself went when the meeting was cancelled.
+   *
+   * Cancelled only. A scheduled meeting's row is the sole handle the cancel
+   * path has on its UID, its attendees and its sending mailbox, and deleting it
+   * would strand an invite that is out in the world with no way to withdraw it.
+   */
+  app.delete("/api/calendar/meetings/:id", (c) => {
+    const meeting = store.getMeeting(c.req.param("id"));
+    if (!meeting) return c.json({ removed: false }, 404);
+    if (meeting.status !== "cancelled") {
+      return c.json(
+        { error: "Cancel this meeting before removing it, so its guests are told." },
+        400,
+      );
+    }
+    return c.json({ removed: store.deleteMeeting(meeting.id) });
+  });
+
   app.get("/api/calendar/agenda", async (c) => {
     const range = parseAgendaRange({ start: c.req.query("start"), end: c.req.query("end") });
     if ("error" in range) return c.json({ error: range.error }, 400);

@@ -213,6 +213,87 @@ describe("CalendarStore", () => {
     store.markCancelled(meeting.id);
     expect(store.getMeeting(meeting.id)!.status).toBe("cancelled");
   });
+
+  /* A cancelled meeting is kept while anyone might still ask about the invite
+     that went out, and swept a month later so the list is not a permanent
+     record of things that are not happening. */
+  describe("the 30-day sweep", () => {
+    const DAY = 24 * 60 * 60 * 1000;
+
+    function cancelledMeeting(title: string, cancelledAt: string) {
+      const meeting = store.addMeeting({
+        uid: `uid-${title}@boxaide`,
+        calendarAccountId: null,
+        eventId: null,
+        calendarId: null,
+        mailAccountId: "mail-1",
+        title,
+        start: "2026-08-19T09:00:00.000Z",
+        end: "2026-08-19T09:15:00.000Z",
+        attendees: ["ada@acme.example"],
+        location: null,
+        meetingUrl: null,
+      });
+      store.markCancelled(meeting.id, cancelledAt);
+      return meeting;
+    }
+
+    it("drops a meeting cancelled more than 30 days ago", () => {
+      const now = new Date("2026-08-19T00:00:00.000Z");
+      const old = cancelledMeeting("old", new Date(now.getTime() - 31 * DAY).toISOString());
+      expect(store.purgeCancelled(now)).toBe(1);
+      expect(store.getMeeting(old.id)).toBeNull();
+    });
+
+    it("keeps one cancelled inside the 30 days", () => {
+      const now = new Date("2026-08-19T00:00:00.000Z");
+      const recent = cancelledMeeting("recent", new Date(now.getTime() - 29 * DAY).toISOString());
+      expect(store.purgeCancelled(now)).toBe(0);
+      expect(store.getMeeting(recent.id)!.status).toBe("cancelled");
+    });
+
+    /* The row is the only handle the cancel path has on the UID, the attendees
+       and the sending mailbox, so age must never take it. */
+    it("never sweeps a scheduled meeting, however old", () => {
+      const meeting = store.addMeeting({
+        uid: "uid-ancient@boxaide",
+        calendarAccountId: null,
+        eventId: null,
+        calendarId: null,
+        mailAccountId: "mail-1",
+        title: "Ancient",
+        start: "2020-01-01T09:00:00.000Z",
+        end: "2020-01-01T09:15:00.000Z",
+        attendees: ["ada@acme.example"],
+        location: null,
+        meetingUrl: null,
+      });
+      expect(store.purgeCancelled(new Date("2026-08-19T00:00:00.000Z"))).toBe(0);
+      expect(store.getMeeting(meeting.id)!.status).toBe("scheduled");
+    });
+
+    /* Cancelled before the column existed: stamped on first sweep so its 30
+       days start now, rather than deleted for an age nobody recorded. */
+    it("gives a row with no cancellation time a fresh 30 days", () => {
+      const meeting = cancelledMeeting("undated", "2020-01-01T00:00:00.000Z");
+      store.db
+        .prepare(`UPDATE calendar_meetings SET cancelled_at = NULL WHERE id = ?`)
+        .run(meeting.id);
+      const now = new Date("2026-08-19T00:00:00.000Z");
+      expect(store.purgeCancelled(now)).toBe(0);
+      expect(store.getMeeting(meeting.id)).not.toBeNull();
+      // And swept once those 30 days are behind it.
+      expect(store.purgeCancelled(new Date(now.getTime() + 31 * DAY))).toBe(1);
+      expect(store.getMeeting(meeting.id)).toBeNull();
+    });
+
+    it("sweeps when the list is read", () => {
+      const now = Date.now();
+      cancelledMeeting("stale", new Date(now - 31 * DAY).toISOString());
+      const kept = cancelledMeeting("fresh", new Date(now - 1 * DAY).toISOString());
+      expect(store.listMeetings().map((m) => m.id)).toEqual([kept.id]);
+    });
+  });
 });
 
 /* ======================================================================== */
