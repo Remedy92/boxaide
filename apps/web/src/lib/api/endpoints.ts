@@ -1579,6 +1579,11 @@ export type LocalAgentExit = {
   reason: LocalAgentExitReason;
   at: string;
   stderrTail: string;
+  /**
+   * The CLI is signed out — every answer failed for that one reason. Absent on
+   * a server built before this field existed, which reads as "not known".
+   */
+  authRequired?: boolean;
 };
 
 export type LocalAgentsResponse = {
@@ -1615,6 +1620,23 @@ export function startLocalAgent(
       body: Object.keys(body).length > 0 ? body : undefined,
     },
   );
+}
+
+/**
+ * Open the CLI's own login on the server's machine.
+ *
+ * 200 means Terminal was opened with the login command and the server will
+ * restart the agent by itself once the login lands — nothing is returned to
+ * wait on, so the caller watches GET /api/agents for `running` instead. A
+ * machine that has no Terminal to open answers 501 with a sentence.
+ */
+export function signInLocalAgent(ctx: Ctx): Promise<Record<string, never>> {
+  return request<Record<string, never>>("/api/agents/claude-code/signin", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
 }
 
 export function stopLocalAgent(ctx: Ctx): Promise<{ stopping: boolean }> {
