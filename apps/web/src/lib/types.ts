@@ -253,6 +253,11 @@ export type AgentStateResponse = {
   presence: AgentPresence;
   /** The chat those turns came from. Absent on an older server. */
   chat?: AgentChat;
+  /**
+   * Actions waiting on the user. Absent on a server built before agents could
+   * ask, which every reader treats as none.
+   */
+  approvals?: import("@/lib/api/endpoints").AgentApproval[];
 };
 
 /* -------------------------------------------------------------------------- */

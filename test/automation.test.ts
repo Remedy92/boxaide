@@ -1047,13 +1047,16 @@ describe("AgentLauncher.runOnce", () => {
     expect(launcher.runCapacity()).toBe(1);
   });
 
-  it("pre-approves platform tools for runs, never chat tools and never message_send", () => {
+  it("pre-approves platform tools for runs, and never chat tools", () => {
     const names = runPreapprovedToolNames();
     expect(names).toContain("draft_create");
     expect(names).toContain("messages_search");
     expect(names).toContain("automations_list");
     expect(names).toContain("automation_runs_list");
-    expect(names).not.toContain("message_send");
+    // A scheduled run may ASK to send; the server queues that call for a human
+    // rather than performing it, so the CLI flag lists it. See
+    // test/mcp-scope.test.ts for the half that matters.
+    expect(names).toContain("message_send");
     for (const chat of ["chat_await_message", "chat_say", "chat_activity", "chat_history"]) {
       expect(names).not.toContain(chat);
     }

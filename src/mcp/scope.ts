@@ -22,6 +22,10 @@
  *  - `run`    a scheduled automation. No user to talk to, and the schedule is
  *             read-only to it.
  *
+ * No profile sends mail or books a meeting. Every profile may ASK to, and a
+ * person answers — see src/agent/approvals.ts for why that replaced taking the
+ * tools away.
+ *
  * A caller with no profile — the master bearer, or the stdio server a user
  * wired into their own desktop client — is unrestricted, exactly as before.
  */
@@ -46,9 +50,9 @@ export function isScopeProfile(value: unknown): value is ScopeProfile {
 }
 
 /**
- * Every mail and chat tool except message_send. Deliberately hand-written and
- * not "TOOLS minus send": adding a tool to the server must not silently grant
- * it to every launched agent.
+ * Every mail and chat tool. Deliberately hand-written and not "all of TOOLS":
+ * adding a tool to the server must not silently grant it to every launched
+ * agent.
  */
 const BASE_TOOL_NAMES = [
   "accounts_list",
@@ -61,6 +65,7 @@ const BASE_TOOL_NAMES = [
   "drafts_list",
   "draft_delete",
   "folders_list",
+  "message_send",
   "chat_await_message",
   "chat_say",
   "chat_activity",
@@ -99,9 +104,13 @@ const RUN_AUTOMATION_READ_TOOLS = ["automations_list", "automation_runs_list"];
  * Computed per call rather than frozen at import, so the answer is honest
  * about the tool modules at the moment it is asked.
  *
- * The sending tools — message_send, meeting_create, meeting_cancel — are
- * deleted last and unconditionally: the one rule that survives any future
- * addition to any of the sets above.
+ * The sending tools — message_send, meeting_create, meeting_cancel — are in
+ * every profile, and none of them sends anything. A scoped caller reaching one
+ * queues it for a human instead; see src/agent/approvals.ts. That is why the
+ * old blanket deletion at the bottom of this function is gone: taking the
+ * tools away also took away the reason to launch an agent at an inbox, and the
+ * risk they carry is answered by the person who reads the card, not by a name
+ * missing from a list.
  */
 export function scopeToolNames(profile: ScopeProfile): string[] {
   const chat: "loop" | "history" | "none" =
@@ -119,11 +128,8 @@ export function scopeToolNames(profile: ScopeProfile): string[] {
     }
   }
   for (const name of OUTREACH_TOOL_NAMES) names.add(name);
-  // Reads only, every profile. meeting_create and meeting_cancel mail every
-  // attendee the moment they are called.
   for (const name of CALENDAR_READ_TOOL_NAMES) names.add(name);
-  for (const name of CALENDAR_SEND_TOOL_NAMES) names.delete(name);
-  names.delete("message_send");
+  for (const name of CALENDAR_SEND_TOOL_NAMES) names.add(name);
   return [...names];
 }
 
@@ -156,5 +162,5 @@ export function scopeAllows(
 
 /** What a refused call tells the model. It should read as a rule, not a bug. */
 export function scopeRefusal(profile: ScopeProfile, tool: string): string {
-  return `${tool} is not available to this agent: Boxaide launched it with the '${profile}' scope, which excludes that tool. This is a boundary, not a temporary failure — do not retry it. Sending mail and creating meetings are always excluded; draft or queue the work for a human instead.`;
+  return `${tool} is not available to this agent: Boxaide launched it with the '${profile}' scope, which excludes that tool. This is a boundary, not a temporary failure — do not retry it.`;
 }

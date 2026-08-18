@@ -944,11 +944,14 @@ exec /bin/sleep 60
     expect(mode).toBe(0o600);
   });
 
-  it("pre-approves read and draft tools and never message_send", () => {
+  it("pre-approves read, draft and send — send is gated by a person, not by the flag", () => {
     const args = claudeTurnArgs(CTX, { prompt: "hi", system: "s", sessionId: null });
     const allowed = args[args.indexOf("--allowedTools") + 1];
     expect(allowed).toContain("mcp__boxaide__draft_create");
-    expect(allowed).not.toContain("message_send");
+    // Present on purpose. The CLI flag mirrors the scope, and the scope now
+    // carries message_send because the server queues that call for the user
+    // rather than performing it — see test/mcp-scope.test.ts.
+    expect(allowed).toContain("mcp__boxaide__message_send");
     // The agent must not inherit the user's other MCP servers.
     expect(args).toContain("--strict-mcp-config");
   });
@@ -986,13 +989,11 @@ exec /bin/sleep 60
     expect(allowed).toContain("mcp__boxaide__automation_create");
     expect(allowed).toContain("mcp__boxaide__crm_contact_upsert");
     expect(allowed).toContain("mcp__boxaide__outbox_queue_draft");
-    expect(allowed).not.toContain("mcp__boxaide__message_send");
 
     const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
     const grokArgs = grok.args!(CTX);
     expect(grokArgs).toContain("MCPTool(boxaide__automation_create)");
     expect(grokArgs).toContain("MCPTool(boxaide__crm_contact_upsert)");
-    expect(grokArgs.join("\0")).not.toContain("message_send");
   });
 
   it("asks the chat agent for its event stream, and a run for plain text", () => {
@@ -1022,7 +1023,6 @@ exec /bin/sleep 60
     expect(args).toContain("--strict-mcp-config");
     const allowed = args[args.indexOf("--allowedTools") + 1];
     expect(allowed).not.toContain("chat_await_message");
-    expect(allowed).not.toContain("message_send");
   });
 
   it("gives Claude its own config home so a run cannot load the user's setup", () => {
@@ -1119,7 +1119,6 @@ exec /bin/sleep 60
     expect(args).toContain("--allow");
     expect(args).toContain("MCPTool(boxaide__draft_create)");
     expect(args).toContain("MCPTool(boxaide__chat_await_message)");
-    expect(args.join("\0")).not.toContain("message_send");
     expect(args.join("\0")).not.toContain(ctx.bearerToken);
 
     const workDir = join(`${ctx.dataDir}-agents`, "workdir");
