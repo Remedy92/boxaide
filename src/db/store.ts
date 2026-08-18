@@ -23,6 +23,39 @@ export type StoredAccount = {
 };
 
 /**
+ * An action an agent asked for and a human has not answered yet.
+ *
+ * Sending mail and putting a meeting in somebody's calendar are the two things
+ * an agent does that another person sees immediately, and the agent decided to
+ * do them after reading text strangers wrote. So a launched agent never
+ * performs one: it asks, the row lands here, and Boxaide carries it out only
+ * once the user says yes. That is why `args` is stored rather than a summary —
+ * this row IS the action, and nothing re-derives it later from a description.
+ *
+ * `args_enc` holds mail content and attendee addresses, so it is encrypted
+ * with the same master key the account passwords use.
+ */
+export type StoredApproval = {
+  id: string;
+  /** The tool the agent asked for: message_send, meeting_create, meeting_cancel. */
+  tool: string;
+  /** Exactly the arguments the agent passed, replayed verbatim on approval. */
+  args: Record<string, unknown>;
+  /** Which launch asked. `chat`, `driven` or `run` — see src/mcp/scope.ts. */
+  profile: string;
+  /** MCP client name, when the caller gave one. */
+  agent: string | null;
+  /** The conversation it was asked in. Null for a scheduled run. */
+  chatId: string | null;
+  askedAt: string;
+  /** Null while it is still waiting. */
+  decidedAt: string | null;
+  state: "pending" | "approved" | "denied" | "failed";
+  /** Set once carried out or refused: what happened, in the user's words. */
+  outcome: string | null;
+};
+
+/**
  * One turn of the agent conversation.
  *
  * `activity` is the agent narrating what it is doing ("reading 12 messages in
@@ -125,6 +158,19 @@ type TurnRow = {
   delivered: number;
   replyTo: number | null;
   deliveryCount: number;
+};
+
+type ApprovalRow = {
+  id: string;
+  tool: string;
+  argsEnc: string;
+  profile: string;
+  agent: string | null;
+  chatId: string | null;
+  askedAt: string;
+  decidedAt: string | null;
+  state: StoredApproval["state"];
+  outcome: string | null;
 };
 
 type ChatRow = {
@@ -239,6 +285,28 @@ export class Store {
         `ALTER TABLE agent_turns ADD COLUMN delivery_count INTEGER NOT NULL DEFAULT 0`,
       );
     }
+
+    // Actions an agent asked a human to authorise. On disk, not in memory,
+    // because the case this exists for is a scheduled run at three in the
+    // morning: the agent that queued the action is long gone by the time
+    // anybody reads it, and a restart in between must not lose the request.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_approvals (
+        id TEXT PRIMARY KEY,
+        tool TEXT NOT NULL,
+        args_enc TEXT NOT NULL,
+        profile TEXT NOT NULL,
+        agent TEXT,
+        chat_id TEXT,
+        asked_at TEXT NOT NULL,
+        decided_at TEXT,
+        state TEXT NOT NULL DEFAULT 'pending',
+        outcome TEXT
+      );
+    `);
+    this.db.exec(
+      `CREATE INDEX IF NOT EXISTS agent_approvals_state ON agent_approvals (state, asked_at)`,
+    );
 
     // Chats. `seq` stays a single global sequence across all of them — it is
     // the SSE resume cursor and the lease key, and per-chat numbering would
@@ -882,6 +950,123 @@ export class Store {
       .prepare(`DELETE FROM accounts WHERE id = ? OR alias = ?`)
       .run(idOrAlias, idOrAlias);
     return res.changes > 0;
+  }
+
+  /* ---- approvals ---------------------------------------------------------
+     Rows in, rows out, exactly as the conversation is. What may be asked for
+     and what happens on yes lives in src/agent/approvals.ts.
+     --------------------------------------------------------------------- */
+
+  addApproval(input: {
+    id: string;
+    tool: string;
+    args: Record<string, unknown>;
+    profile: string;
+    agent: string | null;
+    chatId: string | null;
+    askedAt: string;
+  }): StoredApproval {
+    this.db
+      .prepare(
+        `INSERT INTO agent_approvals (id, tool, args_enc, profile, agent, chat_id, asked_at, state)
+         VALUES (@id, @tool, @argsEnc, @profile, @agent, @chatId, @askedAt, 'pending')`,
+      )
+      .run({
+        id: input.id,
+        tool: input.tool,
+        argsEnc: encryptSecret(this.masterKey, JSON.stringify(input.args)),
+        profile: input.profile,
+        agent: input.agent,
+        chatId: input.chatId,
+        askedAt: input.askedAt,
+      });
+    return {
+      ...input,
+      decidedAt: null,
+      state: "pending",
+      outcome: null,
+    };
+  }
+
+  /**
+   * Oldest first, and ordered on `rowid` rather than on `asked_at`: two
+   * requests written in the same millisecond are the normal case for an agent
+   * working through a list, and a timestamp cannot separate them. The newest
+   * `limit` are taken and then flipped, so a capped list keeps the recent ones.
+   */
+  listApprovals(options: { pendingOnly?: boolean; limit?: number } = {}): StoredApproval[] {
+    const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
+    const rows = this.db
+      .prepare(
+        `SELECT id, tool, args_enc as argsEnc, profile, agent, chat_id as chatId,
+                asked_at as askedAt, decided_at as decidedAt, state, outcome
+         FROM agent_approvals
+         WHERE (? = 0 OR state = 'pending')
+         ORDER BY rowid DESC
+         LIMIT ?`,
+      )
+      .all(options.pendingOnly ? 1 : 0, limit) as ApprovalRow[];
+    return rows.map((row) => this.toApproval(row)).reverse();
+  }
+
+  getApproval(id: string): StoredApproval | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, tool, args_enc as argsEnc, profile, agent, chat_id as chatId,
+                asked_at as askedAt, decided_at as decidedAt, state, outcome
+         FROM agent_approvals WHERE id = ?`,
+      )
+      .get(id) as ApprovalRow | undefined;
+    return row ? this.toApproval(row) : null;
+  }
+
+  /**
+   * Moves a request out of `pending`, and only from `pending`.
+   *
+   * The guard is in the WHERE clause rather than in a read-then-write above
+   * it: two windows showing the same request is the normal case, and a second
+   * Approve landing after the first has already sent the mail must change
+   * nothing. False means somebody else got there first.
+   */
+  settleApproval(
+    id: string,
+    state: StoredApproval["state"],
+    outcome: string | null,
+    decidedAt: string,
+  ): boolean {
+    const res = this.db
+      .prepare(
+        `UPDATE agent_approvals SET state = ?, outcome = ?, decided_at = ?
+         WHERE id = ? AND state = 'pending'`,
+      )
+      .run(state, outcome, decidedAt, id);
+    return res.changes > 0;
+  }
+
+  private toApproval(row: ApprovalRow): StoredApproval {
+    let args: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(decryptSecret(this.masterKey, row.argsEnc));
+      if (parsed && typeof parsed === "object") {
+        args = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // A row this key cannot read is a row nobody can act on. It comes back
+      // with no arguments, which every caller treats as "cannot be carried
+      // out" — the alternative is refusing to list any of them.
+    }
+    return {
+      id: row.id,
+      tool: row.tool,
+      args,
+      profile: row.profile,
+      agent: row.agent,
+      chatId: row.chatId,
+      askedAt: row.askedAt,
+      decidedAt: row.decidedAt,
+      state: row.state,
+      outcome: row.outcome,
+    };
   }
 
   close(): void {

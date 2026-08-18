@@ -28,6 +28,7 @@ import { handleMcpJsonRpc } from "./mcp/server.js";
 import { ScopedTokens, secretsMatch } from "./mcp/scoped-tokens.js";
 import type { ScopeProfile } from "./mcp/scope.js";
 import { AgentChannel } from "./agent/channel.js";
+import { ApprovalQueue } from "./agent/approvals.js";
 import { AgentLauncher } from "./agent/launcher.js";
 import { createPlatform, type Platform } from "./platform.js";
 import {
@@ -69,6 +70,7 @@ export type Runtime = {
   provider: MailProvider;
   channel: AgentChannel;
   launcher: AgentLauncher;
+  approvals: ApprovalQueue;
   platform: Platform;
   update: UpdateService;
   /**
@@ -147,6 +149,12 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     launcher,
     calendarHelperPath: config.calendarHelperPath,
   });
+
+  // Sending mail and booking a meeting are the two things a launched agent
+  // does that another person sees at once. It may ask for either; this is what
+  // holds the request until a human answers, and what carries it out when they
+  // do. See src/agent/approvals.ts.
+  const approvals = new ApprovalQueue(store, { mail, platform, channel });
 
   // No timers yet — `startServer` starts them. A stdio `boxaide mcp` process
   // has no UI to show an update in and must not poll GitHub on a timer.
@@ -231,6 +239,7 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     launcher,
     platform,
     update,
+    approvals,
     {
       host: config.host,
       port: config.port,
@@ -337,6 +346,7 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
         platform,
         c.req.raw.signal,
         auth.scope,
+        approvals,
       );
       if (c.req.raw.signal.aborted) return c.body(null);
       if (res != null) results.push(res);
@@ -428,6 +438,7 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     platform,
     update,
     scopedTokens,
+    approvals,
     app,
   };
 }

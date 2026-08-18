@@ -75,6 +75,7 @@ import { scopeToolNames, type ScopeProfile } from "../mcp/scope.js";
 import {
   confineCommand,
   plainCommand,
+  resolveAccess,
   type AgentAccess,
   type LaunchCommand,
 } from "./sandbox.js";
@@ -320,18 +321,19 @@ export type AgentSpec = {
    *
    * The sandbox allows the agent's own directories and the tree its binary is
    * installed in; everything else under the home is denied. A CLI that keeps
-   * its credentials or its cache somewhere else has to say so here, or a
-   * confined launch starts and then cannot authenticate.
+   * its credentials, its config or its cache somewhere else has to say so
+   * here, or a confined launch starts and then cannot authenticate.
    *
-   * Read is for credentials the CLI only consults. Write is for the state it
-   * insists on owning — OpenCode creates four directories under the user's
-   * home before it will run at all, and a denied mkdir there is fatal to it.
+   * Writable, all of it. Every CLI here keeps its sign-in by writing a token
+   * down and rewriting it when it refreshes, and OpenCode creates four
+   * directories before it will run at all — a denied write in either case is
+   * fatal, and the first kind fails silently.
    */
   sandbox?: (
     ctx: LaunchContext,
     workDir: string,
     parentEnv: NodeJS.ProcessEnv,
-  ) => { read?: string[]; write?: string[] };
+  ) => { write?: string[] };
   /**
    * A precondition this CLI cannot be launched without, checked before
    * anything is spawned. Returns the reason to refuse, or null to go ahead.
@@ -1205,16 +1207,21 @@ function codexArgsFor(prompt: string, model?: string): string[] {
 
 /**
  * The auth file `codexPrepare` links into the isolated home lives in the
- * user's own `~/.codex`, and a symlink is only as readable as its target. The
+ * user's own `~/.codex`, and a symlink is only as writable as its target. The
  * binary usually sits under that same root, but not when it was installed by a
  * package manager — so it is named rather than assumed.
+ *
+ * Write, not read. A signed-in CLI does not hold a token forever: it refreshes
+ * one and saves the new one, and a refresh that cannot save fails the sign-in
+ * outright. Read-only here is what made a confined agent unable to
+ * authenticate — see `antigravitySandbox` for the case that surfaced it.
  */
 function codexSandbox(
   _ctx: LaunchContext,
   _workDir: string,
   env: NodeJS.ProcessEnv,
-): { read: string[] } {
-  return { read: [env.CODEX_HOME || join(env.HOME || homedir(), ".codex")] };
+): { write: string[] } {
+  return { write: [env.CODEX_HOME || join(env.HOME || homedir(), ".codex")] };
 }
 
 function codexChildEnv(
@@ -1268,20 +1275,26 @@ function grokSandbox(
   _ctx: LaunchContext,
   _workDir: string,
   env: NodeJS.ProcessEnv,
-): { read: string[] } {
-  return { read: [env.GROK_HOME || join(env.HOME || homedir(), ".grok")] };
+): { write: string[] } {
+  return { write: [env.GROK_HOME || join(env.HOME || homedir(), ".grok")] };
 }
 
 /**
  * agy keeps its sign-in under `~/.gemini`, and unlike the others that home
  * cannot be moved — which is the same reason `antigravityPreflight` exists.
+ *
+ * Writable, and this is the CLI that proved why. Confined with `~/.gemini`
+ * readable but not writable, agy starts, tries to establish its session, has
+ * nowhere to put the result, waits, and exits — with no error the user ever
+ * sees. The agent simply never picked the message up. Every CLI here signs in
+ * by writing something down; none of them can do it read-only.
  */
 function antigravitySandbox(
   _ctx: LaunchContext,
   _workDir: string,
   env: NodeJS.ProcessEnv,
-): { read: string[] } {
-  return { read: [join(env.HOME || homedir(), ".gemini")] };
+): { write: string[] } {
+  return { write: [join(env.HOME || homedir(), ".gemini")] };
 }
 
 /** `grok models` prints a bullet list under a prose header. */
@@ -1445,6 +1458,12 @@ export type RunningAgent = {
   model: string | null;
   /** What this launch was actually given, not what was asked for. */
   access: AgentAccess;
+  /**
+   * Why it is not confined, when it is not. Null on a confined launch. The UI
+   * shows this verbatim: an unconfined agent that looks confined is worse than
+   * one that says so.
+   */
+  accessNotice: string | null;
 };
 
 /**
@@ -1519,11 +1538,6 @@ export type OneShotOptions = {
    * an argv element, so nothing unvetted may reach a command line.
    */
   model?: string | null;
-  /**
-   * How much of the machine this run may reach. Defaults to the launcher's
-   * own setting, which is `workspace` unless the install says otherwise.
-   */
-  access?: AgentAccess;
   /** Overridable for tests only; production runs use ONESHOT_TIMEOUT_MS. */
   timeoutMs?: number;
   /** Tests only; production runs use ONESHOT_FIRST_OUTPUT_TIMEOUT_MS. */
@@ -1960,11 +1974,7 @@ export class AgentLauncher {
    * offers; that answer is normally already cached by the list() the UI ran to
    * draw the picker.
    */
-  async start(
-    id: string,
-    model?: string,
-    access?: AgentAccess,
-  ): Promise<RunningAgent> {
+  async start(id: string, model?: string): Promise<RunningAgent> {
     this.assertClosed();
     this.assertIdle();
     const spec = this.registry.find((s) => s.id === id);
@@ -2005,7 +2015,12 @@ export class AgentLauncher {
     // difference between the two scopes, and it is decided here, from the spec,
     // rather than trusted to the CLI's own flags.
     const profile: ScopeProfile = spec.drive ? "driven" : "chat";
-    const granted = access ?? this.ctx.access ?? "workspace";
+    // Not a parameter any more. Whoever pressed Start is not the right person
+    // to be asked which of their files an agent CLI reads, and the answer they
+    // could give that was not `workspace` is the one where the agent reads the
+    // master credential. See resolveAccess.
+    const decided = resolveAccess(this.ctx.access ?? "workspace");
+    const granted = decided.access;
     const { ctx, grant } = this.launchCtx(profile, `chat:${spec.id}`);
     let workDir: string;
     try {
@@ -2080,6 +2095,7 @@ export class AgentLauncher {
       startedAt: new Date().toISOString(),
       model: model ?? null,
       access: granted,
+      accessNotice: decided.notice,
     };
 
     this.child = child;
@@ -2201,7 +2217,7 @@ export class AgentLauncher {
         spec,
         bin,
         workDir,
-        opts.access ?? this.ctx.access ?? "workspace",
+        resolveAccess(this.ctx.access ?? "workspace").access,
       );
       child = spawn(command.bin, [...command.prefix, ...spec.runArgs!(ctx, prompt, workDir, model)], {
         cwd: workDir,
@@ -2501,7 +2517,6 @@ export class AgentLauncher {
       bin,
       access,
       write: [workDir, agentRoot(this.ctx), ...(extra.write ?? [])],
-      read: extra.read ?? [],
       // The credential and the mail store. `:memory:` names no directory, so
       // there is nothing on disk to keep the agent out of.
       deny: this.ctx.dataDir === ":memory:" ? [] : [this.ctx.dataDir],

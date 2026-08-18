@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import { BookOpen, Plug } from "lucide-react";
 import { toast } from "sonner";
 import { SectionLabel, Spinner } from "@/components/atoms";
@@ -9,7 +8,6 @@ import { NavItem } from "@/components/rail/nav-item";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSettings } from "@/lib/hooks/use-settings";
-import type { LocalAgentAccess } from "@/lib/api/endpoints";
 import { friendlyError } from "@/lib/api/errors";
 import {
   useLocalAgents,
@@ -97,16 +95,6 @@ function LocalAgentList() {
   const stop = useStopLocalAgent();
   // Picked in the composer's model select, stored in settings.
   const { agentModel } = useSettings();
-  /**
-   * How much of the machine the next launch may reach.
-   *
-   * Deliberately not remembered between visits. `full` lets an agent read
-   * every file the user can — including the credential Boxaide issued it, which
-   * is the boundary the rest of the system is built on — so it is a decision to
-   * take each time, not a preference to acquire once and forget.
-   */
-  const [access, setAccess] = useState<LocalAgentAccess>("workspace");
-
   const rows = (agents.data?.agents ?? []).filter((a) => a.available);
   if (rows.length === 0) return null;
   const running = agents.data?.running ?? null;
@@ -141,38 +129,16 @@ function LocalAgentList() {
               {agent.label}
               {crashed && <span className="ml-1.5 text-[11px] text-danger">exited</span>}
             </span>
-            {isRunning && running?.access === "full" && (
+            {/* Confinement is not a choice offered here any more — it is on.
+                This is the exception: the machine could not apply it, or the
+                install turned it off, and either way the reason is worth a
+                line rather than a silence. */}
+            {isRunning && running?.accessNotice && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <span className="text-[11px] text-warning">full access</span>
                 </TooltipTrigger>
-                <TooltipContent>
-                  This agent can read every file you can, including Boxaide&apos;s
-                  own credentials.
-                </TooltipContent>
-              </Tooltip>
-            )}
-            {agent.supported && !isRunning && running === null && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="h-5 px-1.5 text-[11px] text-fg-tertiary"
-                    disabled={busy}
-                    onClick={() =>
-                      setAccess(access === "workspace" ? "full" : "workspace")
-                    }
-                  >
-                    {access === "workspace" ? "workspace" : "full access"}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {access === "workspace"
-                    ? "The agent reads and writes only its own folder. Click for full access to your files."
-                    : "The agent can read every file you can. Click to confine it to its own folder."}
-                </TooltipContent>
+                <TooltipContent>{running.accessNotice}</TooltipContent>
               </Tooltip>
             )}
             {agent.supported ? (
@@ -188,7 +154,7 @@ function LocalAgentList() {
                     return;
                   }
                   start.mutate(
-                    { id: agent.id, model, access },
+                    { id: agent.id, model },
                     {
                       onError: (err) =>
                         toast.error(

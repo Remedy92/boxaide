@@ -12,17 +12,29 @@
  * every agent, applied at every spawn, exactly as the scope is — not a per-CLI
  * flag, because two of the five offer none and the next one is unknown.
  *
- * Two levels, chosen per launch:
+ * There is one level a user can be asked about, and it is not a question they
+ * are asked: `workspace` is simply on. It used to be a per-launch switch in
+ * the sidebar, which was wrong twice over — the person clicking Start cannot
+ * be expected to reason about which files a CLI reads, and the switch's other
+ * position was the one where an agent could read `bearer.token`. `full` stays
+ * as an install-level escape (BOXAIDE_AGENT_ACCESS=full) and as what a machine
+ * with no sandbox gets, and both say so out loud rather than passing for
+ * confinement. See `resolveAccess`.
+ *
  *  - `workspace` the agent reads and writes its own directory, reaches its own
- *    CLI's files, and nothing else of the user's. The default.
- *  - `full`      no confinement. What every launch did before this existed.
+ *    CLI's files, and nothing else of the user's. What every launch gets.
+ *  - `full`      no confinement. Only from the install setting, or from a
+ *    platform that has no sandbox to apply.
  *
  * The honest limits, because a sandbox believed in is worse than none:
- *  - macOS only today. Elsewhere `workspace` is refused rather than quietly
- *    granted, so nothing ever claims a confinement it does not have.
+ *  - macOS only today. Elsewhere a launch runs unconfined and is reported that
+ *    way, so nothing ever claims a confinement it does not have.
  *  - The network is open at both levels. An agent still talks to its model
  *    provider and to Boxaide. Confining reads is what keeps the master
  *    credential out of its hands; it is not an exfiltration boundary.
+ *  - Confinement decides what an agent reaches on the DISK. What it may do
+ *    with the user's mail and calendar is decided by src/mcp/scope.ts and, for
+ *    anything another person would see, by src/agent/approvals.ts.
  */
 import { existsSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -31,13 +43,6 @@ import { join, relative, isAbsolute, sep } from "node:path";
 export type AgentAccess = "workspace" | "full";
 
 export const AGENT_ACCESS_LEVELS: readonly AgentAccess[] = ["workspace", "full"];
-
-export function isAgentAccess(value: unknown): value is AgentAccess {
-  return (
-    typeof value === "string" &&
-    (AGENT_ACCESS_LEVELS as readonly string[]).includes(value)
-  );
-}
 
 /**
  * A command split so a caller can rebuild it with different arguments.
@@ -93,12 +98,48 @@ export function sandboxUnavailable(
   platform: string = process.platform,
 ): string | null {
   if (!sandboxSupported(platform)) {
-    return `Boxaide can only confine an agent to its own workspace on macOS, and this is ${platform}. Start the agent with full access if you accept that it can read your files, or set BOXAIDE_AGENT_ACCESS=full to make that the default.`;
+    return `Boxaide can only confine an agent to its own workspace on macOS, and this is ${platform}. This agent can read your files.`;
   }
   if (platform === process.platform && !existsSync(SANDBOX_EXEC)) {
-    return `Boxaide confines an agent with ${SANDBOX_EXEC}, which is not on this machine. Start the agent with full access if you accept that it can read your files.`;
+    return `Boxaide confines an agent with ${SANDBOX_EXEC}, which is not on this machine. This agent can read your files.`;
   }
   return null;
+}
+
+/** What a launch is actually given, and why, when it is not confinement. */
+export type AccessDecision = {
+  access: AgentAccess;
+  /**
+   * Null when the agent is confined. Otherwise the sentence shown next to the
+   * running agent — never swallowed, because an unconfined launch that looks
+   * like a confined one is the failure this module exists to prevent.
+   */
+  notice: string | null;
+};
+
+/**
+ * The level a launch gets, from the install setting and this machine.
+ *
+ * This replaced a per-launch choice, and it deliberately does not refuse.
+ * Refusing was right while the sidebar had a switch to fall back to; with the
+ * switch gone it would mean nobody outside macOS can launch an agent at all.
+ * So a machine with no sandbox runs the agent and says it is unconfined, which
+ * the user can act on. What it must never do is stay quiet.
+ */
+export function resolveAccess(
+  configured: AgentAccess,
+  platform: string = process.platform,
+): AccessDecision {
+  if (configured === "full") {
+    return {
+      access: "full",
+      notice:
+        "This agent runs with full access to your files because BOXAIDE_AGENT_ACCESS=full is set on this install.",
+    };
+  }
+  const blocked = sandboxUnavailable(platform);
+  if (blocked) return { access: "full", notice: blocked };
+  return { access: "workspace", notice: null };
 }
 
 /**
@@ -209,10 +250,14 @@ function sbplString(path: string): string {
 export type ConfineOptions = {
   bin: string;
   access: AgentAccess;
-  /** The launch's own directory, and anything else it may write. */
+  /**
+   * The launch's own directory, and every other tree the CLI must own — its
+   * config home and its credentials among them. There is deliberately no
+   * read-only list beside this one: every CLI here signs in by writing
+   * something down, so a "credentials it only consults" category described a
+   * CLI that does not exist and produced launches that could not authenticate.
+   */
   write: string[];
-  /** Credentials and installations the CLI needs, beyond its own binary. */
-  read: string[];
   /** The data directory. Denied last, whatever else allows it. */
   deny: string[];
   home?: string;
@@ -236,15 +281,12 @@ export function confineCommand(opts: ConfineOptions): LaunchCommand {
   if (blocked) throw new Error(blocked);
 
   const home = opts.home ?? homedir();
+  // Readable, not writable: where the CLI and its runtime are installed. An
+  // agent that can rewrite its own binary is an agent that can rewrite the
+  // next launch's.
   const read = [
     ...readRootsForBinary(opts.bin, home),
     ...readRootsForBinary(opts.execPath ?? process.execPath, home),
-    ...opts.read.flatMap((path) => {
-      // A credential the CLI reads at runtime is named exactly; a credential
-      // under a root already allowed for the binary costs nothing to repeat.
-      const root = homeRootFor(path, home);
-      return root ? [root] : [path];
-    }),
   ];
   const write = [...opts.write, tmpdir()];
   const profile = macosProfile(home, { read, write, deny: opts.deny });

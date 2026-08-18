@@ -33,11 +33,12 @@ Worth stating, because it shrinks the job considerably.
 - **The MCP server is stateless.** `/mcp` is a plain JSON-RPC POST handler with
   no session state (`app.ts:216`, and the DELETE handler says so at `:273`).
   Ten concurrent agents can call tools against it today.
-- **Automations cannot send email.** The run preamble forbids it and the
-  allowlist omits `message_send` (`launcher.ts:157`). Sends go through the
-  server-side engine with its own daily cap and 60s gap (spec invariant 5). So
-  parallel runs cannot double-send. This is the single biggest reason the
-  change is tractable.
+- **Automations cannot send email.** The run preamble forbids it, and a run
+  that calls `message_send` anyway queues a request for the user instead of
+  reaching SMTP (`src/agent/approvals.ts`). Sends go through the server-side
+  engine with its own daily cap and 60s gap (spec invariant 5), or through a
+  human clicking Approve. So parallel runs cannot double-send. This is the
+  single biggest reason the change is tractable.
 - **SQLite is WAL with synchronous writes.** `journal_mode = WAL`
   (`db/store.ts:159`), and better-sqlite3 is synchronous, so writes from one
   process serialize on their own. Cross-process writes are covered by WAL plus

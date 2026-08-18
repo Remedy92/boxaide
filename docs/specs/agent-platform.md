@@ -301,17 +301,20 @@ Scheduler (`AutomationScheduler`):
   outbox_queue_draft or save with draft_create and a human will review."
 - Tools for runs: the `run` scope in `src/mcp/scope.ts` — mail reads and
   drafts, all CRM tools, automation *read* tools (`automations_list`,
-  `automation_runs_list`), outreach tools, calendar reads. Never
-  `message_send`, `meeting_create` or `meeting_cancel`, and no chat tool at
-  all. The scope is enforced by the MCP server against the token the run
-  carries, not by the CLI's flags; a CLI that offers an allowlist flag is
-  additionally given the same list.
+  `automation_runs_list`), outreach tools, calendar reads, and no chat tool at
+  all. `message_send`, `meeting_create` and `meeting_cancel` are in the scope
+  and perform nothing: a run may ask, the request is stored, and the user
+  approves it in the Agent view when they are next at the window — see
+  `src/agent/approvals.ts`. The scope is enforced by the MCP server against the
+  token the run carries, not by the CLI's flags; a CLI that offers an allowlist
+  flag is additionally given the same list.
 - Web access: the CLI's own web tools stay at the CLI's defaults; we do not
   grant or deny them (Claude's headless default allows read-only search).
 - File access: a run is confined to its own directory and its CLI's own
-  installation — `workspace` in `src/agent/sandbox.ts`. Nobody is watching a
-  scheduled run and the mail it reads was written by strangers, so there is no
-  per-run opt-out; `BOXAIDE_AGENT_ACCESS=full` turns it off for the install.
+  installation and credentials — `workspace` in `src/agent/sandbox.ts`. Nobody
+  is watching a scheduled run and the mail it reads was written by strangers,
+  so there is no per-run opt-out; `BOXAIDE_AGENT_ACCESS=full` turns it off for
+  the install, and a machine with no sandbox runs unconfined and reports it.
 
 ### OutreachStore
 

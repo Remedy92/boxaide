@@ -571,6 +571,43 @@ export function clearAgentConversation(
 }
 
 /**
+ * An action an agent asked for and nobody has answered yet.
+ *
+ * Mirrors ApprovalView in src/agent/approvals.ts. The text is built on the
+ * server from the arguments that will actually be replayed, so what the card
+ * shows and what happens on Approve cannot drift apart.
+ */
+export type AgentApproval = {
+  id: string;
+  /** message_send, meeting_create or meeting_cancel. */
+  tool: string;
+  /** One line: what happens if the user says yes. */
+  title: string;
+  fields: { label: string; value: string }[];
+  /** The message or the meeting description. Null when the action has none. */
+  body: string | null;
+  /** Which launch asked: chat, driven, or run for a scheduled automation. */
+  profile: string;
+  agent: string | null;
+  chatId: string | null;
+  askedAt: string;
+};
+
+export function decideAgentApproval(
+  id: string,
+  decision: "approve" | "deny",
+  ctx: Ctx,
+): Promise<{ state: string; outcome: string; pending: AgentApproval[] }> {
+  return request(`/api/agent/approvals/${encodeURIComponent(id)}`, {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+    body: { decision },
+  });
+}
+
+/**
  * Follow the conversation. Resolves when the server closes the stream; the
  * caller reconnects.
  */
@@ -580,6 +617,7 @@ export function streamAgent(
     turn: (turn: AgentTurn) => void;
     presence: (presence: AgentPresence) => void;
     chats?: (chats: AgentChatsResponse) => void;
+    approvals?: (pending: AgentApproval[]) => void;
   },
 ): Promise<void> {
   return stream("/api/agent/stream", {
@@ -591,6 +629,9 @@ export function streamAgent(
         if (event === "turn") on.turn(JSON.parse(data) as AgentTurn);
         else if (event === "presence") on.presence(JSON.parse(data) as AgentPresence);
         else if (event === "chats") on.chats?.(JSON.parse(data) as AgentChatsResponse);
+        else if (event === "approvals") {
+          on.approvals?.(JSON.parse(data) as AgentApproval[]);
+        }
       } catch {
         // A frame we cannot parse is dropped rather than tearing down a live
         // conversation. The next one re-states presence anyway.
@@ -1482,9 +1523,10 @@ export type LocalAgent = {
  * How much of the machine a launched agent may reach. Mirrors AgentAccess in
  * src/agent/sandbox.ts.
  *
- * `workspace` confines it to its own directory and its own CLI's files.
- * `full` is unconfined — it can read anything the user can, including the
- * credential Boxaide issued it, so it is never the default.
+ * `workspace` confines it to its own directory and its own CLI's files, and is
+ * what every launch gets. `full` is unconfined; nothing in this app asks for
+ * it, and a launch only lands there when the install set it or the machine has
+ * no sandbox — in which case `accessNotice` says which.
  */
 export type LocalAgentAccess = "workspace" | "full";
 
@@ -1495,6 +1537,11 @@ export type RunningLocalAgent = {
   model: string | null;
   /** What this launch was actually given, not what was asked for. */
   access: LocalAgentAccess;
+  /**
+   * Why it is unconfined, when it is. Null on a confined launch, and absent on
+   * a server built before this field existed — both mean "say nothing".
+   */
+  accessNotice?: string | null;
 };
 
 /**
@@ -1532,13 +1579,12 @@ export function startLocalAgent(
   id: string,
   ctx: Ctx,
   model?: string,
-  access?: LocalAgentAccess,
 ): Promise<{ running: RunningLocalAgent }> {
-  const body: { model?: string; access?: LocalAgentAccess } = {};
+  // Model only. Confinement is not a per-launch request any more: the server
+  // decides it from the install and the machine, and a field here would be a
+  // second place holding that opinion.
+  const body: { model?: string } = {};
   if (model) body.model = model;
-  // Omitted rather than defaulted here: the server decides what an unstated
-  // access level means, and this is not a second place to hold that opinion.
-  if (access) body.access = access;
   return request<{ running: RunningLocalAgent }>(
     `/api/agents/${encodeURIComponent(id)}/start`,
     {

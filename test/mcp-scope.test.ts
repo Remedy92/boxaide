@@ -14,6 +14,7 @@ import { MailService } from "../src/mail/service.js";
 import { handleMcpJsonRpc } from "../src/mcp/server.js";
 import { createPlatform, type Platform } from "../src/platform.js";
 import { AgentChannel } from "../src/agent/channel.js";
+import { ApprovalQueue, MAX_PENDING } from "../src/agent/approvals.js";
 import type { AgentLauncher } from "../src/agent/launcher.js";
 import {
   SCOPE_PROFILES,
@@ -40,12 +41,7 @@ type ToolResult = {
 
 /** Every tool this server can offer, whatever the scope. */
 function everyToolName(): string[] {
-  return [
-    ...scopeToolNames("chat"),
-    "message_send",
-    "meeting_create",
-    "meeting_cancel",
-  ];
+  return [...new Set(scopeToolNames("chat"))];
 }
 
 describe("agent scopes", () => {
@@ -53,6 +49,7 @@ describe("agent scopes", () => {
   let mail: MailService;
   let platform: Platform;
   let channel: AgentChannel;
+  let approvals: ApprovalQueue;
 
   beforeEach(async () => {
     store = new Store(randomBytes(32), ":memory:");
@@ -64,6 +61,7 @@ describe("agent scopes", () => {
       mail,
       launcher: undefined as unknown as AgentLauncher,
     });
+    approvals = new ApprovalQueue(store, { mail, platform, channel });
     await mail.connectAccount({
       alias: "personal",
       email: "p@test.com",
@@ -88,6 +86,7 @@ describe("agent scopes", () => {
       platform,
       undefined,
       scope,
+      approvals,
     )) as ToolResult;
   }
 
@@ -103,21 +102,105 @@ describe("agent scopes", () => {
     return res.result.tools.map((t) => t.name);
   }
 
-  it("never lets any scope send mail or create a meeting", async () => {
+  it("lets every scope ask to send, and performs none of it", async () => {
+    // The old rule was that these three tools did not exist for a launched
+    // agent, which also meant an inbox agent could not answer an email. They
+    // exist now; what changed is that calling one records a request instead of
+    // reaching SMTP. A scheduled run may ask too — nobody is awake to answer
+    // it, and the request is waiting in the morning.
     for (const scope of SCOPE_PROFILES) {
       for (const tool of ["message_send", "meeting_create", "meeting_cancel"]) {
-        expect(scopeAllows(scope, tool)).toBe(false);
-        expect(await listed(scope)).not.toContain(tool);
+        expect(scopeAllows(scope, tool)).toBe(true);
+        expect(await listed(scope)).toContain(tool);
         const res = await call(tool, scope, {
           account: "personal",
           to: "x@test.com",
           subject: "s",
           text: "t",
         });
-        expect(res.result.isError).toBe(true);
-        expect(res.result.content[0].text).toContain("not available to this agent");
+        expect(res.result.isError).toBeUndefined();
+        const body = JSON.parse(res.result.content[0].text) as {
+          queued: boolean;
+          status: string;
+        };
+        expect(body.queued).toBe(true);
+        // The model has to understand it was not throttled. A "try later"
+        // reading is what produces a retry loop against a human.
+        expect(body.status).toContain("approval");
+        expect(body.status).toContain("Do not call it again");
       }
     }
+    // Nine asks, nine cards, nothing sent.
+    expect(approvals.pending()).toHaveLength(9);
+    expect((await mail.listMessages("personal", { folder: "Sent" })).messages)
+      .toHaveLength(0);
+  });
+
+  it("sends only what the user approved, and never what they declined", async () => {
+    await call("message_send", "chat", {
+      account: "personal",
+      to: "yes@test.com",
+      subject: "approved",
+      text: "body",
+    });
+    await call("message_send", "chat", {
+      account: "personal",
+      to: "no@test.com",
+      subject: "declined",
+      text: "body",
+    });
+    const [first, second] = approvals.pending();
+    // The card is built from the arguments that get replayed, so what the user
+    // reads and what goes out cannot drift.
+    expect(first.title).toContain("approved");
+    expect(first.title).toContain("yes@test.com");
+
+    expect((await approvals.decide(first.id, "approve")).state).toBe("approved");
+    expect((await approvals.decide(second.id, "deny")).state).toBe("denied");
+    expect(approvals.pending()).toHaveLength(0);
+
+    const sent = (await mail.listMessages("personal", { folder: "Sent" })).messages;
+    expect(sent).toHaveLength(1);
+    expect(sent[0].subject).toBe("approved");
+  });
+
+  it("answers a request once, however many windows are looking at it", async () => {
+    await call("message_send", "chat", {
+      account: "personal",
+      to: "x@test.com",
+      subject: "once",
+      text: "body",
+    });
+    const [row] = approvals.pending();
+    await approvals.decide(row.id, "approve");
+    // The second window still had the card painted. Its click must change
+    // nothing rather than send the same mail twice.
+    await expect(approvals.decide(row.id, "approve")).rejects.toThrow(
+      /already approved/,
+    );
+    expect((await mail.listMessages("personal", { folder: "Sent" })).messages)
+      .toHaveLength(1);
+  });
+
+  it("stops a model that asks in a loop instead of filling the pane", async () => {
+    for (let i = 0; i < MAX_PENDING; i++) {
+      const res = await call("message_send", "chat", {
+        account: "personal",
+        to: `x${i}@test.com`,
+        subject: `s${i}`,
+        text: "t",
+      });
+      expect(res.result.isError).toBeUndefined();
+    }
+    const over = await call("message_send", "chat", {
+      account: "personal",
+      to: "one-too-many@test.com",
+      subject: "s",
+      text: "t",
+    });
+    expect(over.result.isError).toBe(true);
+    expect(over.result.content[0].text).toContain("already waiting");
+    expect(approvals.pending()).toHaveLength(MAX_PENDING);
   });
 
   it("still sends for an unscoped caller, so the boundary is the scope and not the tool", async () => {
@@ -240,9 +323,10 @@ describe("/mcp credentials", () => {
     const names = (await res.json()).result.tools.map(
       (t: { name: string }) => t.name,
     );
-    expect(names).not.toContain("message_send");
     expect(names).not.toContain("chat_say");
     expect(names).toContain("draft_create");
+    // A run may ask. What it may not do is send, which the call below is.
+    expect(names).toContain("message_send");
 
     const send = await rt.app.request("/mcp", {
       method: "POST",
@@ -260,7 +344,12 @@ describe("/mcp credentials", () => {
         },
       }),
     });
-    expect((await send.json()).result.isError).toBe(true);
+    // Queued, not sent, and not refused either: over HTTP, on a run's token,
+    // with nobody awake to answer it.
+    const body = await send.json();
+    expect(body.result.isError).toBeUndefined();
+    expect(JSON.parse(body.result.content[0].text).queued).toBe(true);
+    expect(rt.approvals.pending()).toHaveLength(1);
 
     rt.launcher.close();
     rt.channel.close();
