@@ -9,7 +9,7 @@
  * something requires the package. This runner does that during prepare
  * so launch is not the step that downloads the binary.
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { syncServer } from "../apps/desktop/scripts/sync-server.mjs";
@@ -17,6 +17,7 @@ import {
   electronBinaryReady,
   exists,
   markNpmInstalled,
+  mtime,
   needsNpmInstall,
   webExportStale,
 } from "./lib/stale.mjs";
@@ -79,6 +80,38 @@ async function ensureElectron(desktop) {
   await run(process.execPath, [installJs], desktop);
 }
 
+/**
+ * The EventKit helper the local calendar provider spawns.
+ *
+ * macOS only, because EventKit is: Windows and Linux packs carry no such
+ * binary and the provider reports the local path as unavailable there.
+ *
+ * Two slices and a lipo rather than one -target: the mac target is arm64
+ * today, but a universal pack must not silently ship a binary half the
+ * machines cannot exec. `-macos12.0` matches Electron 43's floor.
+ */
+async function compileCalendarHelper(desktop) {
+  if (process.platform !== "darwin") return;
+  const src = join(desktop, "native", "calendar", "main.swift");
+  const out = join(desktop, "build", "boxaide-calendar");
+  // mtime, not the tree hashes the web export uses: one source file and one
+  // output, and a checkout that rewrote the mtime should recompile — 1.4s.
+  if ((await exists(out)) && (await mtime(src)) <= (await mtime(out))) return;
+  if (!hasSwiftc()) {
+    throw new Error(
+      "swiftc is not on PATH. Install the Xcode command line tools — the macOS calendar helper cannot be built without it.",
+    );
+  }
+  log("compiling the calendar helper");
+  await run("swiftc", ["-O", "-target", "arm64-apple-macos12.0", "-o", `${out}.arm64`, src], desktop);
+  await run("swiftc", ["-O", "-target", "x86_64-apple-macos12.0", "-o", `${out}.x64`, src], desktop);
+  await run("lipo", ["-create", "-output", out, `${out}.arm64`, `${out}.x64`], desktop);
+}
+
+function hasSwiftc() {
+  return spawnSync("swiftc", ["--version"], { stdio: "ignore" }).status === 0;
+}
+
 export async function prepare(root) {
   await ensureNpm(root, "repo");
   await compileServer(root);
@@ -93,6 +126,7 @@ export async function prepare(root) {
   const desktop = join(root, "apps", "desktop");
   await ensureNpm(desktop, "apps/desktop");
   await ensureElectron(desktop);
+  await compileCalendarHelper(desktop);
   await syncServer();
 }
 

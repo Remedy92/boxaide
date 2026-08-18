@@ -36,6 +36,16 @@ codesign --force --timestamp --options runtime --sign "$ID" \
 find "$APP/Contents/Resources/app.asar.unpacked" -name "*.node" \
   -exec codesign --force --timestamp --options runtime --sign "$ID" {} \;
 
+# The EventKit helper. Hardened runtime, no entitlements: it is not V8 and
+# needs neither JIT key. Unsigned it fails --deep --strict below, and
+# notarisation after that.
+# An `if`, not a `&&` chain: under `set -e` a false test is a failed command
+# and would abort the whole signing run whenever the helper is absent.
+HELPER="$APP/Contents/Resources/boxaide-calendar"
+if [ -f "$HELPER" ]; then
+  codesign --force --timestamp --options runtime --sign "$ID" "$HELPER"
+fi
+
 # A framework can carry its own helper executables, and signing the framework
 # only seals those as resources — it does not sign them as code. Squirrel's
 # updater, Resources/ShipIt, is one, and notarisation rejected the whole app

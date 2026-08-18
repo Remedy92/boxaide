@@ -482,19 +482,34 @@ export type UpdateState = {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Two providers, and they are not symmetrical. A CalDAV mailbox is a URL, a
+ * Three providers, and they are not symmetrical. A CalDAV account is a URL, a
  * username and an app password, so the UI can create one outright. Google is an
  * OAuth handshake the server finishes after the browser has left for Google, so
- * the UI can only start it — see startGoogleCalendarAuth.
+ * the UI can only start it — see startGoogleCalendarAuth. `local` is the
+ * calendars macOS already holds: there are no credentials at all, only a system
+ * permission the user grants once.
  */
-export type CalendarProvider = "caldav" | "google";
+export type CalendarProvider = "caldav" | "google" | "local";
 
 export type CalendarAccount = {
   id: string;
   alias: string;
   provider: CalendarProvider;
+  /** Empty for `local`: that account is every account macOS holds. */
   email: string;
   createdAt: string;
+};
+
+/** What macOS reports about the local path, probed without prompting anyone. */
+export type LocalCalendarStatus = {
+  available: boolean;
+  /**
+   * Why the local path cannot be used, written for a person to read. Set when
+   * `available` is false, and also when the helper answers perfectly and macOS
+   * is simply refusing — a denial no click can clear, only System Settings.
+   */
+  reason?: string;
+  access?: "notDetermined" | "restricted" | "denied" | "fullAccess" | "writeOnly" | "authorized";
 };
 
 /**
@@ -505,12 +520,39 @@ export type CalendarAccount = {
  * can be served from another origin entirely, and Google rejects the sign-in
  * unless the registered URI matches that string character for character.
  *
- * Optional: a server built before this field simply omits it, and the UI
- * reconstructs a best guess rather than showing nothing.
+ * `local` and `googleBuiltIn` are the same kind of fact: which ways in this
+ * machine and this build can offer. Neither is derivable from anything the page
+ * can see, and both decide what the Add-calendar dialog puts first.
+ *
+ * All three are optional: a server built before them simply omits them, and the
+ * UI falls back to the paths that have always existed.
  */
 export type CalendarAccountsResponse = {
   accounts: CalendarAccount[];
   googleRedirectUri?: string;
+  googleBuiltIn?: boolean;
+  local?: LocalCalendarStatus;
+};
+
+/**
+ * A mailbox whose stored password would also open a calendar. GET
+ * /api/calendar/mailboxes. No secret is in here — the password stays server
+ * side, which is the whole point of connecting by id.
+ */
+export type ReusableMailbox = {
+  mailAccountId: string;
+  email: string;
+  /** The calendar provider's name, for the button: "iCloud", "Fastmail". */
+  provider: string;
+  serverUrl: string;
+  suggestedAlias: string;
+  /**
+   * Set to the name macOS shows for an account that looks like this same
+   * calendar, when the Mac's calendars are connected. Present means connecting
+   * this would probably duplicate an agenda, not that it is forbidden — the
+   * server asks for confirmation rather than refusing.
+   */
+  onThisMac?: string;
 };
 
 export type CalendarEventStatus = "confirmed" | "tentative" | "cancelled";

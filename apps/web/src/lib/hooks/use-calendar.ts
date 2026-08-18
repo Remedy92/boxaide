@@ -4,6 +4,8 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   cancelMeeting,
+  connectLocalCalendar,
+  connectMailboxCalendar,
   createCalDavAccount,
   createMeeting,
   deleteCalendarAccount,
@@ -11,15 +13,16 @@ import {
   getFreeSlots,
   listCalendarAccounts,
   listMeetings,
+  listReusableMailboxes,
   refreshMeetingResponses,
   startGoogleCalendarAuth,
-  testCalDavAccount,
   type CalDavAccountBody,
   type CreateMeetingBody,
   type GoogleCalendarStartBody,
 } from "@/lib/api/endpoints";
 import { localTimeZone, startOfDay } from "@/lib/format/calendar";
 import { useApiCtx } from "@/lib/hooks/use-settings";
+import type { CalendarAccountsResponse } from "@/lib/types";
 
 /**
  * The Calendar view's reads and its writes.
@@ -71,6 +74,28 @@ export function useCalendarAccounts(enabled = true) {
     queryFn: ({ signal }) => listCalendarAccounts({ ...ctx, signal }),
     staleTime: 30_000,
   });
+}
+
+/**
+ * What to draw for the macOS row: a button, a sentence, or nothing.
+ *
+ * `available` alone is not enough. The probe succeeds whatever macOS decided,
+ * so a Mac whose owner refused the permission once reports available with a
+ * reason — and offering a click there invites a failure the click cannot fix.
+ * The reason is the server's own sentence and names the Settings pane, so it
+ * is shown as written rather than swallowed.
+ */
+export function localCalendarOffer(
+  accounts: CalendarAccountsResponse | undefined,
+): { offer: boolean; note: string | null } {
+  const status = accounts?.local;
+  const connected = (accounts?.accounts ?? []).some(
+    (account) => account.provider === "local",
+  );
+  if (!status?.available || connected) return { offer: false, note: null };
+  return status.reason
+    ? { offer: false, note: status.reason }
+    : { offer: true, note: null };
 }
 
 /**
@@ -187,11 +212,68 @@ export function useRefreshMeetingResponses() {
   });
 }
 
-/** A live CalDAV login server-side. Reports {ok}, and never writes anything. */
-export function useTestCalDavAccount() {
+/**
+ * Mailboxes whose stored password would also open a calendar.
+ *
+ * A separate query from the account list because it is a separate endpoint and
+ * because it must be able to come back empty — or fail on an old server that
+ * has no such route — without taking the accounts down with it. `retry: false`
+ * for the same reason: this list is an offer, and an offer that cannot load is
+ * one nobody knew about.
+ */
+export function useReusableMailboxes(enabled = true) {
   const ctx = useApiCtx();
+  return useQuery({
+    queryKey: ["calendar-mailboxes", ctx.baseUrl, ctx.token],
+    enabled: enabled && ctx.baseUrl.length > 0 && ctx.token.length > 0,
+    queryFn: ({ signal }) => listReusableMailboxes({ ...ctx, signal }),
+    retry: false,
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * Connect a mailbox's calendar. The mailbox list is invalidated too: the one
+ * just connected is no longer on offer, and leaving it there would let someone
+ * connect the same login twice.
+ */
+export function useConnectMailboxCalendar() {
+  const ctx = useApiCtx();
+  const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: CalDavAccountBody) => testCalDavAccount(body, ctx),
+    mutationFn: (input: string | { mailAccountId: string; confirmOverlap: boolean }) =>
+      typeof input === "string"
+        ? connectMailboxCalendar(input, ctx)
+        : connectMailboxCalendar(input.mailAccountId, ctx, input.confirmOverlap),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["calendar-accounts"] });
+      void queryClient.invalidateQueries({ queryKey: ["calendar-agenda"] });
+      void queryClient.invalidateQueries({ queryKey: ["calendar-mailboxes"] });
+    },
+  });
+}
+
+/**
+ * Connect the calendars macOS already holds.
+ *
+ * This is the call that raises the system permission dialog, and the server
+ * deliberately waits on it without a timeout — so this mutation can stay
+ * pending for as long as the person reads that dialog. The button it drives
+ * must say so rather than look stuck.
+ */
+export function useConnectLocalCalendar() {
+  const ctx = useApiCtx();
+  const queryClient = useQueryClient();
+  return useMutation({
+    // Required, not defaulted: the caller always knows whether this is the
+    // first ask or the answer to the duplicate warning, and an optional
+    // argument here types the mutation's variable as void.
+    mutationFn: (confirmOverlap: boolean) =>
+      connectLocalCalendar(ctx, confirmOverlap),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["calendar-accounts"] });
+      void queryClient.invalidateQueries({ queryKey: ["calendar-agenda"] });
+    },
   });
 }
 
@@ -205,6 +287,9 @@ export function useCreateCalDavAccount() {
       // A new calendar changes what the agenda contains, not only the list of
       // accounts under it.
       void queryClient.invalidateQueries({ queryKey: ["calendar-agenda"] });
+      // A CalDAV login typed by hand can be the same one a mailbox was
+      // offering, which would then be an offer to connect it twice.
+      void queryClient.invalidateQueries({ queryKey: ["calendar-mailboxes"] });
     },
   });
 }
@@ -217,6 +302,8 @@ export function useDeleteCalendarAccount() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["calendar-accounts"] });
       void queryClient.invalidateQueries({ queryKey: ["calendar-agenda"] });
+      // A disconnected calendar puts its mailbox back on offer.
+      void queryClient.invalidateQueries({ queryKey: ["calendar-mailboxes"] });
     },
   });
 }

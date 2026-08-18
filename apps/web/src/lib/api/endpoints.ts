@@ -55,6 +55,7 @@ import type {
   OutreachBadge,
   OutreachCampaign,
   CampaignStatus,
+  ReusableMailbox,
   RsvpRefreshResult,
   SendResult,
   SuppressionRow,
@@ -1142,10 +1143,78 @@ export async function deleteCalendarAccount(
   }
 }
 
+/**
+ * Mailboxes whose stored password would also open a calendar. Read-only and
+ * cheap — the server makes no network call to answer — so it is safe beside the
+ * account list on every page load.
+ */
+export async function listReusableMailboxes(ctx: Ctx): Promise<ReusableMailbox[]> {
+  const data = await request<{ mailboxes: ReusableMailbox[] }>(
+    "/api/calendar/mailboxes",
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+  return data.mailboxes;
+}
+
+/**
+ * Connect one of them. The mailbox is named in the path and the password never
+ * crosses the wire in either direction — the server already holds it.
+ */
+export async function connectMailboxCalendar(
+  mailAccountId: string,
+  ctx: Ctx,
+  /**
+   * Set only after the person has read the duplicate warning the server sent
+   * back as a 409 and chosen to go ahead. Sending it unasked would silence the
+   * one question worth asking.
+   */
+  confirmOverlap = false,
+): Promise<CalendarAccount> {
+  const data = await request<{ account: CalendarAccount }>(
+    `/api/calendar/mailboxes/${encodeURIComponent(mailAccountId)}`,
+    {
+      method: "POST",
+      body: confirmOverlap ? { confirmOverlap: true } : {},
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.account;
+}
+
+/**
+ * Connect the calendars macOS already holds. There is nothing to send: the
+ * whole handshake is the system permission dialog, which this call raises and
+ * then waits on for as long as the person looks at it.
+ */
+export async function connectLocalCalendar(
+  ctx: Ctx,
+  /** Same rule as connectMailboxCalendar: only after the 409 was shown. */
+  confirmOverlap = false,
+): Promise<CalendarAccount> {
+  const data = await request<{ account: CalendarAccount }>(
+    "/api/calendar/local",
+    {
+      method: "POST",
+      body: confirmOverlap ? { confirmOverlap: true } : {},
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.account;
+}
+
+/**
+ * `clientId` and `clientSecret` are omitted when the server ships its own
+ * Google client — see `googleBuiltIn` on the accounts response. `alias` may be
+ * empty too: the callback falls back to the Google address it learns.
+ */
 export type GoogleCalendarStartBody = {
-  alias: string;
-  clientId: string;
-  clientSecret: string;
+  alias?: string;
+  clientId?: string;
+  clientSecret?: string;
 };
 
 /**

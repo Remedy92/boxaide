@@ -65,6 +65,22 @@ const webRoot = app.isPackaged
   ? join(process.resourcesPath, "web-next")
   : join(here, "..", "server", "web-next");
 
+/**
+ * The EventKit helper the server spawns to read this Mac's calendars.
+ *
+ * The server has no Electron import and so cannot know `process.resourcesPath`;
+ * the shell is the only thing that knows where its own bundle is, so the path
+ * is handed over with the rest of the configuration below. macOS only —
+ * elsewhere nothing is packed and the server reports the local calendar as
+ * unavailable, which is the truth.
+ */
+const calendarHelperPath =
+  process.platform === "darwin"
+    ? app.isPackaged
+      ? join(process.resourcesPath, "boxaide-calendar")
+      : join(here, "..", "build", "boxaide-calendar")
+    : undefined;
+
 /** @type {BrowserWindow | null} */
 let win = null;
 /** @type {(() => Promise<void>) | null} */
@@ -200,6 +216,7 @@ async function start() {
     // OS and Squirrel agree on.
     appVersion: app.getVersion(),
     bootstrapCapability,
+    calendarHelperPath,
   });
   stopServer = started.stop;
   serverUrl = started.url;

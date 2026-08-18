@@ -1,7 +1,8 @@
 /**
- * Calendar provider contract. Two implementations: CalDAV (iCloud, Fastmail,
- * Nextcloud, anything speaking RFC 4791) and Google Calendar (REST + OAuth).
- * Both are stateless — per-account config is handed to every call, mirroring
+ * Calendar provider contract. Three implementations: CalDAV (iCloud, Fastmail,
+ * Nextcloud, anything speaking RFC 4791), Google Calendar (REST + OAuth), and
+ * the calendars macOS already holds, read through a helper binary.
+ * All are stateless — per-account config is handed to every call, mirroring
  * how MailProvider takes ProviderAccount.
  */
 import type { RsvpStatus } from "./ics-parse.js";
@@ -25,12 +26,21 @@ export type GoogleConfig = {
   email: string;
 };
 
-export type CalendarConfig = CalDavConfig | GoogleConfig;
+/**
+ * The calendars already set up in Apple Calendar on this Mac.
+ *
+ * No fields, and that is the point: macOS holds the credentials for every
+ * account behind it, and Boxaide holds one system permission instead. There is
+ * nothing here to encrypt, rotate, or leak.
+ */
+export type LocalConfig = { kind: "local" };
+
+export type CalendarConfig = CalDavConfig | GoogleConfig | LocalConfig;
 
 export type CalendarAccountMeta = {
   id: string;
   alias: string;
-  provider: "caldav" | "google";
+  provider: "caldav" | "google" | "local";
   email: string;
   createdAt: string;
 };

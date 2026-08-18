@@ -24,6 +24,13 @@
 import addressparser from "nodemailer/lib/addressparser/index.js";
 import { CalDavProvider } from "./caldav.js";
 import { GoogleCalendarProvider } from "./google.js";
+import {
+  LocalCalendarProvider,
+  type LocalCalendarLike,
+  type LocalCalendarStatus,
+  type LocalSource,
+} from "./local.js";
+import { OverlapError, findOverlap, overlapSentence, type Overlap } from "./coverage.js";
 import { parseIcs } from "./ics-parse.js";
 import { buildIcs, jitsiLink, newEventUid, type InviteEvent } from "./ics.js";
 import type { CalendarStore, StoredMeeting } from "./store.js";
@@ -35,7 +42,14 @@ import {
   zonedTimeToUtc,
   zoneOffsetMs,
 } from "./timezone.js";
-import type { CalendarConfig, CalendarEvent, CalendarProvider } from "./types.js";
+import { caldavForMailbox } from "./mailbox-reuse.js";
+import type {
+  CalDavConfig,
+  CalendarAccountMeta,
+  CalendarConfig,
+  CalendarEvent,
+  CalendarProvider,
+} from "./types.js";
 import type { MailService } from "../mail/service.js";
 import type { MailAccountMeta } from "../provider/types.js";
 
@@ -63,6 +77,40 @@ const RSVP_MAX_PAGES = 100;
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * A connected mailbox that could become a calendar account with no further
+ * input. `serverUrl` is what would be used and `suggestedAlias` is a name that
+ * is free right now — both are shown, because the user is agreeing to a
+ * connection they never typed.
+ */
+export type ReusableMailbox = {
+  mailAccountId: string;
+  email: string;
+  provider: string;
+  serverUrl: string;
+  suggestedAlias: string;
+};
+
+/** One CalDAV login, for "is this already connected" comparisons. */
+function reuseKey(serverUrl: string, username: string): string {
+  return `${serverUrl.trim().toLowerCase()}|${username.trim().toLowerCase()}`;
+}
+
+/**
+ * A calendar alias nobody holds yet. Calendar aliases are UNIQUE in the store,
+ * and a mail alias like "work" is exactly the alias a user is likely to have
+ * already spent on their first calendar.
+ */
+function freeAlias(base: string, taken: ReadonlySet<string>): string {
+  const clean = base.trim() || "calendar";
+  if (!taken.has(clean.toLowerCase())) return clean;
+  for (let n = 2; n < 100; n += 1) {
+    const candidate = `${clean}-${n}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${clean}-${Date.now()}`;
 }
 
 export type FreeSlot = { start: string; end: string };
@@ -226,25 +274,241 @@ export type CreateMeetingInput = {
 };
 
 export class CalendarService {
-  private providers: { caldav: CalendarProvider; google: CalendarProvider };
+  private providers: {
+    caldav: CalendarProvider;
+    google: CalendarProvider;
+    local: LocalCalendarLike;
+  };
 
   constructor(
     private store: CalendarStore,
     private mail: MailService,
-    providers?: { caldav: CalendarProvider; google: CalendarProvider },
+    providers?: {
+      caldav: CalendarProvider;
+      google: CalendarProvider;
+      local?: LocalCalendarLike;
+    },
+    /** Where the desktop shell put the macOS helper; it alone knows. */
+    localHelperPath?: string,
   ) {
-    this.providers = providers ?? {
-      caldav: new CalDavProvider(),
-      google: new GoogleCalendarProvider(),
+    this.providers = {
+      caldav: providers?.caldav ?? new CalDavProvider(),
+      google: providers?.google ?? new GoogleCalendarProvider(),
+      // Constructing it costs one existsSync on macOS and nothing elsewhere;
+      // it spawns nothing until something asks.
+      local: providers?.local ?? new LocalCalendarProvider({ helperPath: localHelperPath }),
     };
   }
 
+  /**
+   * A lookup, not a ternary: an unknown kind must fail loudly rather than
+   * quietly fall through to CalDAV and report someone else's error.
+   */
   private providerFor(config: CalendarConfig): CalendarProvider {
-    return config.kind === "google" ? this.providers.google : this.providers.caldav;
+    return this.providers[config.kind];
+  }
+
+  /** Can the local macOS path be offered on this machine right now? */
+  async localStatus(): Promise<LocalCalendarStatus> {
+    return this.providers.local.status();
+  }
+
+  /**
+   * The accounts behind the Mac's calendars, but only once the Mac is actually
+   * connected. Before that there is nothing to collide with, and reading them
+   * would be a spawn per page load for a warning nobody can trigger yet.
+   */
+  private async macSources(): Promise<LocalSource[]> {
+    const connected = this.store
+      .listAccounts()
+      .some((account) => account.provider === "local");
+    if (!connected) return [];
+    return this.providers.local.listSources();
+  }
+
+  /**
+   * Would connecting this account duplicate one the Mac already holds?
+   *
+   * Null both when nothing overlaps and when nothing is known — the caller
+   * cannot tell those apart and must not: the warning is advisory either way.
+   */
+  async macOverlapFor(target: {
+    email?: string;
+    serverUrl?: string;
+    provider?: string;
+  }): Promise<Overlap | null> {
+    return findOverlap(await this.macSources(), target);
+  }
+
+  /**
+   * The other direction: connecting the Mac when accounts already exist. Each
+   * connected account is checked against the Mac's own sources, so the warning
+   * can name which ones would double up.
+   *
+   * Reads the Mac's sources directly rather than through macSources, because at
+   * this point no local account exists yet — that is the whole point of asking.
+   */
+  async macConnectOverlaps(): Promise<{ alias: string; overlap: Overlap }[]> {
+    const sources = await this.providers.local.listSources();
+    if (!sources.length) return [];
+    const out: { alias: string; overlap: Overlap }[] = [];
+    for (const account of this.store.listAccounts()) {
+      const config = this.store.getConfig(account.id);
+      if (!config || config.kind === "local") continue;
+      const overlap = findOverlap(sources, {
+        email: account.email,
+        provider: config.kind,
+        serverUrl: config.kind === "caldav" ? config.serverUrl : undefined,
+      });
+      if (overlap) out.push({ alias: account.alias, overlap });
+    }
+    return out;
   }
 
   async testAccount(config: CalendarConfig): Promise<{ ok: boolean; error?: string }> {
     return this.providerFor(config).testConnection(config);
+  }
+
+  /**
+   * Mailboxes that could become a calendar with nothing further to type.
+   *
+   * A mailbox qualifies when its IMAP host maps to a CalDAV server we can name
+   * (src/calendar/mailbox-reuse.ts), it authenticates with a password we hold
+   * rather than an OAuth access token, and the same login is not connected as
+   * a calendar already. Nothing here connects or tests anything — it is the
+   * list a UI offers, so it must be cheap and must never spawn a network call.
+   */
+  listReusableMailboxes(): ReusableMailbox[] {
+    const taken = new Set<string>();
+    const aliases = new Set<string>();
+    for (const account of this.store.listAccounts()) {
+      aliases.add(account.alias.toLowerCase());
+      const config = this.store.getConfig(account.id);
+      if (config?.kind === "caldav") taken.add(reuseKey(config.serverUrl, config.username));
+    }
+
+    const out: ReusableMailbox[] = [];
+    for (const meta of this.mail.listAccounts()) {
+      let account;
+      try {
+        account = this.mail.accountWithCredentials(meta.id);
+      } catch {
+        // A mailbox that vanished between the list and the read is simply not
+        // offered; it is not an error the user can do anything about.
+        continue;
+      }
+      // An XOAUTH2 mailbox holds a short-lived access token, not a password a
+      // CalDAV server would ever accept.
+      if (account.creds.auth.kind !== "password") continue;
+      const target = caldavForMailbox(account.creds.imapHost);
+      if (!target) continue;
+      const username = account.creds.auth.user;
+      if (taken.has(reuseKey(target.serverUrl, username))) continue;
+      out.push({
+        mailAccountId: account.id,
+        email: account.email,
+        provider: target.label,
+        serverUrl: target.serverUrl,
+        suggestedAlias: freeAlias(account.alias, aliases),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * The same list, each entry told whether the Mac looks like it already holds
+   * that calendar. One sources read for the whole list rather than one per
+   * mailbox, which is why this exists instead of the caller looping over
+   * macOverlapFor.
+   */
+  async reusableMailboxes(): Promise<
+    (ReusableMailbox & { onThisMac?: string })[]
+  > {
+    const mailboxes = this.listReusableMailboxes();
+    const sources = await this.macSources();
+    if (!sources.length) return mailboxes;
+    return mailboxes.map((mailbox) => {
+      const overlap = findOverlap(sources, {
+        email: mailbox.email,
+        serverUrl: mailbox.serverUrl,
+      });
+      return overlap ? { ...mailbox, onThisMac: overlap.source } : mailbox;
+    });
+  }
+
+  /**
+   * Turn one named mailbox into a CalDAV calendar account, reusing the
+   * password already stored for it.
+   *
+   * Tested before it is stored, like every other connect path. The failure
+   * sentence names the real cause: several providers scope an app password to
+   * one service, so a password that reads mail can be rejected by the very
+   * same account's calendar, and the fix is a second app password rather than
+   * a retry.
+   */
+  async connectFromMailbox(input: {
+    mailAccountId: string;
+    alias?: string;
+    /** Set once the person has been shown the duplicate warning and said yes. */
+    confirmOverlap?: boolean;
+  }): Promise<CalendarAccountMeta> {
+    const account = this.mail.accountWithCredentials(input.mailAccountId);
+    if (account.creds.auth.kind !== "password") {
+      throw new Error(
+        "This mailbox signs in through its provider rather than with a stored password, " +
+          "so there is nothing here a calendar could reuse. Add the calendar from " +
+          "Calendar → Add calendar.",
+      );
+    }
+    const target = caldavForMailbox(account.creds.imapHost);
+    if (!target) {
+      throw new Error(
+        `Boxaide does not know which calendar server belongs to ${account.creds.imapHost}. ` +
+          "Add the calendar from Calendar → Add calendar and paste the address your " +
+          "provider gave you.",
+      );
+    }
+    const config: CalDavConfig = {
+      kind: "caldav",
+      serverUrl: target.serverUrl,
+      username: account.creds.auth.user,
+      password: account.creds.auth.pass,
+    };
+    const existing = this.store
+      .listAccounts()
+      .some((a) => {
+        const stored = this.store.getConfig(a.id);
+        return (
+          stored?.kind === "caldav" &&
+          reuseKey(stored.serverUrl, stored.username) ===
+            reuseKey(config.serverUrl, config.username)
+        );
+      });
+    if (existing) throw new Error(`${account.email} is already connected as a calendar`);
+
+    // Before the network call, not after: a duplicate is a question for the
+    // person, and there is no reason to make them wait for a connection test
+    // whose result changes nothing about the question.
+    if (!input.confirmOverlap) {
+      const overlap = await this.macOverlapFor({
+        email: account.email,
+        serverUrl: config.serverUrl,
+      });
+      if (overlap) throw new OverlapError(overlapSentence(overlap, account.email));
+    }
+
+    const result = await this.testAccount(config);
+    if (!result.ok) {
+      const detail = result.error ? ` (${result.error})` : "";
+      throw new Error(
+        `The password stored for ${account.email} opens the mailbox but not the calendar` +
+          `${detail}. ${target.label} issues a separate app password for calendars — make ` +
+          "one, then add it from Calendar → Add calendar.",
+      );
+    }
+    const aliases = new Set(this.store.listAccounts().map((a) => a.alias.toLowerCase()));
+    const alias = (input.alias ?? "").trim() || freeAlias(account.alias, aliases);
+    return this.store.addAccount({ alias, email: account.email, config });
   }
 
   /** Returns { events, errors } — NOT a bare array. See the file header. */
