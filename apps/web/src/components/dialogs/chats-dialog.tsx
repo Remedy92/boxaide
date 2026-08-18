@@ -5,6 +5,7 @@ import { Archive, ChevronRight, Plus, Search, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogHeader,
@@ -82,164 +83,166 @@ function ChatsDialogBody({
             Pick up a conversation, or clear out the ones you are done with.
           </DialogDescription>
         </DialogHeader>
+      <DialogBody>
 
-        <div className="flex items-center gap-2">
-          <div className="relative flex-1">
-            <Search
-              aria-hidden="true"
-              strokeWidth={1.5}
-              className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-fg-tertiary"
-            />
-            <Input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search chats"
-              aria-label="Search chats"
-              className="pl-8"
-            />
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void agent.newChat();
-              onOpenChange(false);
-            }}
-          >
-            <Plus className="size-3.5" strokeWidth={1.5} />
-            New
-          </Button>
-        </div>
-
-        <div className="pane-scroll max-h-[46vh] min-h-0 space-y-px overflow-y-auto">
-          {live.length === 0 && (
-            <p className="px-1 py-2 text-[12px] leading-4 text-fg-tertiary">
-              {needle ? "No chats match." : "No chats yet."}
-            </p>
-          )}
-          {live.map((chat) => (
-            <div
-              key={chat.id}
-              className={cn(
-                "group flex items-center gap-2 rounded-[var(--radius-md)] px-2 py-1.5",
-                chat.id === agent.chat?.id
-                  ? "bg-accent-subtle"
-                  : "hover:bg-surface-hover",
-              )}
-            >
-              <button
-                type="button"
-                onClick={() => {
-                  void agent.openChat(chat.id);
-                  onOpenChange(false);
-                }}
-                className="min-w-0 flex-1 text-left"
-              >
-                <span
-                  className={cn(
-                    "block truncate text-[13px] leading-[18px]",
-                    chat.id === agent.chat?.id ? "text-accent" : "text-fg",
-                  )}
-                >
-                  {chat.title}
-                </span>
-                <span className="block text-[11px] leading-4 text-fg-tertiary">
-                  {when(chat.updatedAt)} · {chat.turns}{" "}
-                  {chat.turns === 1 ? "message" : "messages"}
-                  {chat.trimmed ? " · trimmed" : ""}
-                </span>
-              </button>
-              <RowAction
-                label="Archive this chat"
-                onClick={() => void agent.archiveChat(chat.id)}
-              >
-                <Archive className="size-3.5" strokeWidth={1.5} />
-              </RowAction>
-              <RowAction
-                label="Delete this chat"
-                onClick={() => void agent.removeChat(chat.id)}
-              >
-                <Trash2 className="size-3.5" strokeWidth={1.5} />
-              </RowAction>
-            </div>
-          ))}
-
-          {gone.length > 0 && (
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={() => setShowArchived((prev) => !prev)}
-                aria-expanded={showArchived}
-                className="flex w-full items-center gap-1.5 border-t border-border px-1 pt-2 text-left text-[12px] leading-4 text-fg-tertiary hover:text-fg-secondary"
-              >
-                <ChevronRight
-                  aria-hidden="true"
-                  strokeWidth={1.5}
-                  className={cn(
-                    "size-3 shrink-0 transition-transform duration-[var(--dur-fast)] motion-reduce:transition-none",
-                    showArchived && "rotate-90",
-                  )}
-                />
-                Archived · {gone.length}
-                <span className="ml-auto">titles kept, messages dropped</span>
-              </button>
-              {showArchived &&
-                gone.map((chat) => (
-                  <div
-                    key={chat.id}
-                    className="group flex items-center gap-2 rounded-[var(--radius-md)] px-2 py-1.5 opacity-60"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <span className="block truncate text-[13px] leading-[18px] text-fg">
-                        {chat.title}
-                      </span>
-                      <span className="block text-[11px] leading-4 text-fg-tertiary">
-                        Archived {when(chat.archivedAt ?? chat.updatedAt)}
-                      </span>
-                    </div>
-                    <RowAction
-                      label="Delete this chat"
-                      onClick={() => void agent.removeChat(chat.id)}
-                    >
-                      <Trash2 className="size-3.5" strokeWidth={1.5} />
-                    </RowAction>
-                  </div>
-                ))}
-            </div>
-          )}
-        </div>
-
-        {agent.storage.budget > 0 && (
-          <div className="space-y-1.5 border-t border-border pt-3">
-            <div className="flex items-center justify-between text-[12px] leading-4 text-fg-secondary tabular-nums">
-              <span>
-                {agent.storage.chats + agent.storage.archived} chats ·{" "}
-                {formatBytes(agent.storage.bytes)}
-              </span>
-              <span>of {formatBytes(agent.storage.budget)}</span>
-            </div>
-            <div
-              className="h-1 w-full overflow-hidden rounded-full bg-surface-hover"
-              role="img"
-              aria-label={`${formatBytes(agent.storage.bytes)} of ${formatBytes(agent.storage.budget)} used`}
-            >
-              <div
-                className="h-full bg-accent"
-                style={{
-                  width: `${Math.min(
-                    100,
-                    Math.round((agent.storage.bytes / agent.storage.budget) * 100),
-                  )}%`,
-                }}
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search
+                aria-hidden="true"
+                strokeWidth={1.5}
+                className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-fg-tertiary"
+              />
+              <Input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search chats"
+                aria-label="Search chats"
+                className="pl-8"
               />
             </div>
-            <p className="text-[11px] leading-4 text-fg-tertiary">
-              Past this, the oldest chats are archived: the title and date stay,
-              the messages go.
-            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void agent.newChat();
+                onOpenChange(false);
+              }}
+            >
+              <Plus className="size-3.5" strokeWidth={1.5} />
+              New
+            </Button>
           </div>
-        )}
+
+          <div className="pane-scroll max-h-[46vh] min-h-0 space-y-px overflow-y-auto">
+            {live.length === 0 && (
+              <p className="px-1 py-2 text-[12px] leading-4 text-fg-tertiary">
+                {needle ? "No chats match." : "No chats yet."}
+              </p>
+            )}
+            {live.map((chat) => (
+              <div
+                key={chat.id}
+                className={cn(
+                  "group flex items-center gap-2 rounded-[var(--radius-md)] px-2 py-1.5",
+                  chat.id === agent.chat?.id
+                    ? "bg-accent-subtle"
+                    : "hover:bg-surface-hover",
+                )}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    void agent.openChat(chat.id);
+                    onOpenChange(false);
+                  }}
+                  className="min-w-0 flex-1 text-left"
+                >
+                  <span
+                    className={cn(
+                      "block truncate text-[13px] leading-[18px]",
+                      chat.id === agent.chat?.id ? "text-accent" : "text-fg",
+                    )}
+                  >
+                    {chat.title}
+                  </span>
+                  <span className="block text-[11px] leading-4 text-fg-tertiary">
+                    {when(chat.updatedAt)} · {chat.turns}{" "}
+                    {chat.turns === 1 ? "message" : "messages"}
+                    {chat.trimmed ? " · trimmed" : ""}
+                  </span>
+                </button>
+                <RowAction
+                  label="Archive this chat"
+                  onClick={() => void agent.archiveChat(chat.id)}
+                >
+                  <Archive className="size-3.5" strokeWidth={1.5} />
+                </RowAction>
+                <RowAction
+                  label="Delete this chat"
+                  onClick={() => void agent.removeChat(chat.id)}
+                >
+                  <Trash2 className="size-3.5" strokeWidth={1.5} />
+                </RowAction>
+              </div>
+            ))}
+
+            {gone.length > 0 && (
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowArchived((prev) => !prev)}
+                  aria-expanded={showArchived}
+                  className="flex w-full items-center gap-1.5 border-t border-border px-1 pt-2 text-left text-[12px] leading-4 text-fg-tertiary hover:text-fg-secondary"
+                >
+                  <ChevronRight
+                    aria-hidden="true"
+                    strokeWidth={1.5}
+                    className={cn(
+                      "size-3 shrink-0 transition-transform duration-[var(--dur-fast)] motion-reduce:transition-none",
+                      showArchived && "rotate-90",
+                    )}
+                  />
+                  Archived · {gone.length}
+                  <span className="ml-auto">titles kept, messages dropped</span>
+                </button>
+                {showArchived &&
+                  gone.map((chat) => (
+                    <div
+                      key={chat.id}
+                      className="group flex items-center gap-2 rounded-[var(--radius-md)] px-2 py-1.5 opacity-60"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <span className="block truncate text-[13px] leading-[18px] text-fg">
+                          {chat.title}
+                        </span>
+                        <span className="block text-[11px] leading-4 text-fg-tertiary">
+                          Archived {when(chat.archivedAt ?? chat.updatedAt)}
+                        </span>
+                      </div>
+                      <RowAction
+                        label="Delete this chat"
+                        onClick={() => void agent.removeChat(chat.id)}
+                      >
+                        <Trash2 className="size-3.5" strokeWidth={1.5} />
+                      </RowAction>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+
+          {agent.storage.budget > 0 && (
+            <div className="space-y-1.5 border-t border-border pt-3">
+              <div className="flex items-center justify-between text-[12px] leading-4 text-fg-secondary tabular-nums">
+                <span>
+                  {agent.storage.chats + agent.storage.archived} chats ·{" "}
+                  {formatBytes(agent.storage.bytes)}
+                </span>
+                <span>of {formatBytes(agent.storage.budget)}</span>
+              </div>
+              <div
+                className="h-1 w-full overflow-hidden rounded-full bg-surface-hover"
+                role="img"
+                aria-label={`${formatBytes(agent.storage.bytes)} of ${formatBytes(agent.storage.budget)} used`}
+              >
+                <div
+                  className="h-full bg-accent"
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      Math.round((agent.storage.bytes / agent.storage.budget) * 100),
+                    )}%`,
+                  }}
+                />
+              </div>
+              <p className="text-[11px] leading-4 text-fg-tertiary">
+                Past this, the oldest chats are archived: the title and date stay,
+                the messages go.
+              </p>
+            </div>
+          )}
+      </DialogBody>
       </DialogContent>
     </Dialog>
   );

@@ -141,7 +141,9 @@ describe("fetchModels", () => {
   });
 
   it("kills a CLI that hangs instead of waiting on it", async () => {
-    const bin = fakeBin("#!/bin/sh\nsleep 30\n");
+    // Absolute, or the fake CLI exits at once with "sleep: not found" and the
+    // hang this test is about never happens.
+    const bin = fakeBin("#!/bin/sh\nexec /bin/sleep 30\n");
     const started = Date.now();
     await expect(
       fetchModels(bin, { args: ["models"], parse: parseTabbedModels }, {}, 300),

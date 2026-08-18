@@ -55,7 +55,16 @@ function readRegular(path: string): string {
 }
 
 /** A bin directory holding one fake executable that sleeps until killed. */
-function fakeBinDir(name: string, script = "#!/bin/sh\nsleep 60\n"): string {
+/**
+ * `sleep` by absolute path, not by name. The launcher hands the child a PATH
+ * built from the one it was given plus its well-known bin directories, and on a
+ * CI runner none of those holds `sleep` — the fake agent then died instantly
+ * with 127 and raced every test that expects it to stay up.
+ */
+function fakeBinDir(
+  name: string,
+  script = "#!/bin/sh\nexec /bin/sleep 60\n",
+): string {
   const dir = join(tempDir(), "bin");
   mkdirSync(dir, { recursive: true });
   const path = join(dir, name);
@@ -410,7 +419,7 @@ if [ "$1" = "models" ]; then
   printf 'live-a\\tLive A\\nlive-b\\tLive B\\n'
   exit 0
 fi
-sleep 60
+exec /bin/sleep 60
 `,
     );
     let seenArgs: string[] = [];
@@ -537,7 +546,7 @@ if [ "$1" = "models" ]; then
   printf 'live-a\\tLive A\\n'
   exit 0
 fi
-sleep 60
+exec /bin/sleep 60
 `,
     );
     const launcher = new AgentLauncher(
@@ -599,7 +608,7 @@ if [ "$1" = "models" ]; then
   echo 'not logged in' >&2
   exit 1
 fi
-sleep 60
+exec /bin/sleep 60
 `,
     );
     const launcher = new AgentLauncher(

@@ -45,6 +45,7 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { DialogBody } from "@/components/ui/dialog";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useApp } from "@/lib/hooks/use-app-state";
 import { useFolders } from "@/lib/hooks/use-folders";
@@ -452,7 +453,10 @@ function Palette({
       onOpenChange={close}
       title="Command palette"
       description="Search commands, mailboxes and folders."
-      className="top-[18vh] max-w-[600px] translate-y-0 p-0"
+      // Anchored near the top, not centred, so it owns the height cap that
+      // <DialogContent> would otherwise derive from being centred: from 18vh
+      // down to a margin above the window's bottom edge.
+      className="top-[18vh] max-h-[calc(82dvh-1.5rem)] max-w-[600px] translate-y-0"
       showCloseButton={false}
       onKeyDown={(event) => {
         // Backspace on an empty query leaves a sub-page. Without it the only
@@ -478,47 +482,19 @@ function Palette({
         {pageTitle}
         {page !== "root" && ". Press Backspace to go back."}
       </p>
-      <CommandList className="max-h-[420px]">
-        <CommandEmpty>No matching command.</CommandEmpty>
+      {/* The list IS the dialog's scroll region: one scroller, capped by the
+          dialog on a short window and by 420px on a tall one. */}
+      <DialogBody asChild>
+        <CommandList className="max-h-[420px] gap-0">
+          <CommandEmpty>No matching command.</CommandEmpty>
 
-        {page === "root" && (
-          <>
-            {search.trim().length === 0 && recent.length > 0 && (
-              <CommandGroup heading="Recent">
-                {recent.map((entry) => (
-                  <Row
-                    key={`recent-${entry.id}`}
-                    icon={entry.icon}
-                    label={entry.label}
-                    hint={entry.hint}
-                    disabled={entry.disabled}
-                    reason={entry.reason}
-                    onSelect={() => run(entry.id, entry.action)}
-                  />
-                ))}
-              </CommandGroup>
-            )}
-
-            {search.trim().length >= 2 && (
-              <CommandGroup heading="Search">
-                <Row
-                  icon={<Search />}
-                  label={`Search mail for “${search.trim()}”`}
-                  onSelect={() =>
-                    run("search-query", () => app.setRawQuery(search.trim()))
-                  }
-                />
-              </CommandGroup>
-            )}
-
-            {groups.map((group) => {
-              const entries = commands.filter((entry) => entry.group === group);
-              if (entries.length === 0) return null;
-              return (
-                <CommandGroup key={group} heading={group}>
-                  {entries.map((entry) => (
+          {page === "root" && (
+            <>
+              {search.trim().length === 0 && recent.length > 0 && (
+                <CommandGroup heading="Recent">
+                  {recent.map((entry) => (
                     <Row
-                      key={entry.id}
+                      key={`recent-${entry.id}`}
                       icon={entry.icon}
                       label={entry.label}
                       hint={entry.hint}
@@ -527,75 +503,107 @@ function Palette({
                       onSelect={() => run(entry.id, entry.action)}
                     />
                   ))}
-
-                  {group === "Go to" && (
-                    <Row
-                      icon={<Folder />}
-                      label="Go to folder"
-                      trailing={<ChevronRight className="size-3.5" />}
-                      disabled={app.account === "all"}
-                      reason="Pick one mailbox first — folders are per mailbox."
-                      onSelect={() => goToPage("folders")}
-                    />
-                  )}
-
-                  {group === "Mailboxes" && list.length > 0 && (
-                    <Row
-                      icon={<Trash2 />}
-                      label="Remove mailbox"
-                      trailing={<ChevronRight className="size-3.5" />}
-                      onSelect={() => goToPage("remove")}
-                    />
-                  )}
-
-                  {group === "Mail" && (
-                    <Row
-                      icon={<Search />}
-                      label="Search mail…"
-                      hint="/"
-                      onSelect={() => run("focus-search", app.focusSearch)}
-                    />
-                  )}
                 </CommandGroup>
-              );
-            })}
-          </>
-        )}
+              )}
 
-        {page === "folders" && (
-          <CommandGroup heading={`Folders in ${app.account}`}>
-            {(folders.data ?? []).map((folder) => (
-              <Row
-                key={folder.path}
-                icon={<Folder />}
-                label={folder.name}
-                onSelect={() =>
-                  run(`folder-${folder.path}`, () => app.setFolder(folder.path))
-                }
-              />
-            ))}
-          </CommandGroup>
-        )}
+              {search.trim().length >= 2 && (
+                <CommandGroup heading="Search">
+                  <Row
+                    icon={<Search />}
+                    label={`Search mail for “${search.trim()}”`}
+                    onSelect={() =>
+                      run("search-query", () => app.setRawQuery(search.trim()))
+                    }
+                  />
+                </CommandGroup>
+              )}
 
-        {page === "remove" && (
-          <CommandGroup heading="Remove a mailbox">
-            {list.map((account) => (
-              <Row
-                key={account.id}
-                icon={<Trash2 />}
-                label={`Remove ${account.alias}…`}
-                onSelect={() =>
-                  // Opens the same confirmation the sidebar × opens — a fuzzy
-                  // match never deletes a mailbox on its own.
-                  run(`remove-${account.id}`, () =>
-                    app.requestRemoveAccount(account),
-                  )
-                }
-              />
-            ))}
-          </CommandGroup>
-        )}
-      </CommandList>
+              {groups.map((group) => {
+                const entries = commands.filter((entry) => entry.group === group);
+                if (entries.length === 0) return null;
+                return (
+                  <CommandGroup key={group} heading={group}>
+                    {entries.map((entry) => (
+                      <Row
+                        key={entry.id}
+                        icon={entry.icon}
+                        label={entry.label}
+                        hint={entry.hint}
+                        disabled={entry.disabled}
+                        reason={entry.reason}
+                        onSelect={() => run(entry.id, entry.action)}
+                      />
+                    ))}
+
+                    {group === "Go to" && (
+                      <Row
+                        icon={<Folder />}
+                        label="Go to folder"
+                        trailing={<ChevronRight className="size-3.5" />}
+                        disabled={app.account === "all"}
+                        reason="Pick one mailbox first — folders are per mailbox."
+                        onSelect={() => goToPage("folders")}
+                      />
+                    )}
+
+                    {group === "Mailboxes" && list.length > 0 && (
+                      <Row
+                        icon={<Trash2 />}
+                        label="Remove mailbox"
+                        trailing={<ChevronRight className="size-3.5" />}
+                        onSelect={() => goToPage("remove")}
+                      />
+                    )}
+
+                    {group === "Mail" && (
+                      <Row
+                        icon={<Search />}
+                        label="Search mail…"
+                        hint="/"
+                        onSelect={() => run("focus-search", app.focusSearch)}
+                      />
+                    )}
+                  </CommandGroup>
+                );
+              })}
+            </>
+          )}
+
+          {page === "folders" && (
+            <CommandGroup heading={`Folders in ${app.account}`}>
+              {(folders.data ?? []).map((folder) => (
+                <Row
+                  key={folder.path}
+                  icon={<Folder />}
+                  label={folder.name}
+                  onSelect={() =>
+                    run(`folder-${folder.path}`, () => app.setFolder(folder.path))
+                  }
+                />
+              ))}
+            </CommandGroup>
+          )}
+
+          {page === "remove" && (
+            <CommandGroup heading="Remove a mailbox">
+              {list.map((account) => (
+                <Row
+                  key={account.id}
+                  icon={<Trash2 />}
+                  label={`Remove ${account.alias}…`}
+                  onSelect={() =>
+                    // Opens the same confirmation the sidebar × opens — a fuzzy
+                    // match never deletes a mailbox on its own.
+                    run(`remove-${account.id}`, () =>
+                      app.requestRemoveAccount(account),
+                    )
+                  }
+                />
+              ))}
+            </CommandGroup>
+          )}
+        </CommandList>
+      </DialogBody>
     </CommandDialog>
   );
 }

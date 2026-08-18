@@ -7,6 +7,7 @@ import { Segmented } from "@/components/calendar/segmented";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -219,7 +220,7 @@ export function NewMeetingDialog({
       }}
     >
       <DialogContent
-        className="pane-scroll max-h-[86vh] max-w-[480px] overflow-y-auto"
+        className="max-w-[480px]"
         onKeyDown={(event) => {
           if (event.key !== "Enter" || event.metaKey || event.ctrlKey) return;
           if (!(event.target instanceof HTMLInputElement)) return;
@@ -234,203 +235,205 @@ export function NewMeetingDialog({
             list.
           </DialogDescription>
         </DialogHeader>
+        <DialogBody>
 
-        <div className="space-y-3">
-          <Field id="meeting-title" label="Title">
-            <Input
-              id="meeting-title"
-              value={form.title}
-              autoComplete="off"
-              placeholder="Weekly sync"
-              onChange={(event) => {
-                setValidation(null);
-                setForm((v) => ({ ...v, title: event.target.value }));
-              }}
-            />
-          </Field>
+          <div className="space-y-3">
+            <Field id="meeting-title" label="Title">
+              <Input
+                id="meeting-title"
+                value={form.title}
+                autoComplete="off"
+                placeholder="Weekly sync"
+                onChange={(event) => {
+                  setValidation(null);
+                  setForm((v) => ({ ...v, title: event.target.value }));
+                }}
+              />
+            </Field>
 
-          {/* Above the pickers, because tapping one is the fast path and the
-              pickers are the fallback. Silent when the server has nothing to
-              offer, or could not say. */}
-          {suggestions.length > 0 && (
+            {/* Above the pickers, because tapping one is the fast path and the
+                pickers are the fallback. Silent when the server has nothing to
+                offer, or could not say. */}
+            {suggestions.length > 0 && (
+              <div className="space-y-1.5">
+                <span className="block text-[12px] leading-4 font-medium text-fg-secondary">
+                  Suggested times
+                </span>
+                <div className="space-y-1.5">
+                  {suggestions.map((day) => (
+                    <div key={day.key} className="flex items-center gap-2">
+                      <span className="w-[68px] shrink-0 text-[12px] leading-4 text-fg-tertiary">
+                        {formatDayHeadingShort(day.slots[0].start)}
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {day.slots.map((slot) => {
+                          const chosen = isChosen(slot, form.date, form.time);
+                          return (
+                            <button
+                              key={slot.start}
+                              type="button"
+                              aria-pressed={chosen}
+                              onClick={() => applySlot(slot)}
+                              className={cn(
+                                "h-7 rounded-[var(--radius-md)] border px-2.5 text-[12px] tabular-nums",
+                                "transition-colors duration-[var(--dur-fast)]",
+                                chosen
+                                  ? "border-accent bg-accent-subtle text-accent"
+                                  : "border-border-control bg-surface-2 text-fg-secondary hover:bg-surface-hover hover:text-fg",
+                              )}
+                            >
+                              {formatTime(slot.start)}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {/* One line, and the zone is in it: somebody booking across
+                    zones has to know which clock these times are on, and a
+                    badge on every chip would say it six times over. */}
+                <p className="text-[12px] leading-4 text-fg-tertiary">
+                  Free on your calendars
+                  {zone ? `, shown in ${zone}` : ""}. Nothing is held until you
+                  create the meeting.
+                </p>
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-2">
+              <Field id="meeting-date" label="Date">
+                <Input
+                  id="meeting-date"
+                  type="date"
+                  value={form.date}
+                  onChange={(event) => {
+                    setValidation(null);
+                    setForm((v) => ({ ...v, date: event.target.value }));
+                  }}
+                />
+              </Field>
+              <Field id="meeting-time" label="Start">
+                <Input
+                  id="meeting-time"
+                  type="time"
+                  value={form.time}
+                  onChange={(event) => {
+                    setValidation(null);
+                    setForm((v) => ({ ...v, time: event.target.value }));
+                  }}
+                />
+              </Field>
+            </div>
+
             <div className="space-y-1.5">
               <span className="block text-[12px] leading-4 font-medium text-fg-secondary">
-                Suggested times
+                Duration
               </span>
-              <div className="space-y-1.5">
-                {suggestions.map((day) => (
-                  <div key={day.key} className="flex items-center gap-2">
-                    <span className="w-[68px] shrink-0 text-[12px] leading-4 text-fg-tertiary">
-                      {formatDayHeadingShort(day.slots[0].start)}
-                    </span>
-                    <div className="flex flex-wrap gap-1.5">
-                      {day.slots.map((slot) => {
-                        const chosen = isChosen(slot, form.date, form.time);
-                        return (
-                          <button
-                            key={slot.start}
-                            type="button"
-                            aria-pressed={chosen}
-                            onClick={() => applySlot(slot)}
-                            className={cn(
-                              "h-7 rounded-[var(--radius-md)] border px-2.5 text-[12px] tabular-nums",
-                              "transition-colors duration-[var(--dur-fast)]",
-                              chosen
-                                ? "border-accent bg-accent-subtle text-accent"
-                                : "border-border-control bg-surface-2 text-fg-secondary hover:bg-surface-hover hover:text-fg",
-                            )}
-                          >
-                            {formatTime(slot.start)}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              {/* One line, and the zone is in it: somebody booking across
-                  zones has to know which clock these times are on, and a
-                  badge on every chip would say it six times over. */}
-              <p className="text-[12px] leading-4 text-fg-tertiary">
-                Free on your calendars
-                {zone ? `, shown in ${zone}` : ""}. Nothing is held until you
-                create the meeting.
-              </p>
+              <Segmented
+                label="Duration"
+                size="sm"
+                options={DURATIONS}
+                value={form.duration}
+                onChange={(duration) => setForm((v) => ({ ...v, duration }))}
+              />
             </div>
-          )}
 
-          <div className="grid grid-cols-2 gap-2">
-            <Field id="meeting-date" label="Date">
-              <Input
-                id="meeting-date"
-                type="date"
-                value={form.date}
-                onChange={(event) => {
-                  setValidation(null);
-                  setForm((v) => ({ ...v, date: event.target.value }));
-                }}
-              />
-            </Field>
-            <Field id="meeting-time" label="Start">
-              <Input
-                id="meeting-time"
-                type="time"
-                value={form.time}
-                onChange={(event) => {
-                  setValidation(null);
-                  setForm((v) => ({ ...v, time: event.target.value }));
-                }}
-              />
-            </Field>
-          </div>
-
-          <div className="space-y-1.5">
-            <span className="block text-[12px] leading-4 font-medium text-fg-secondary">
-              Duration
-            </span>
-            <Segmented
-              label="Duration"
-              size="sm"
-              options={DURATIONS}
-              value={form.duration}
-              onChange={(duration) => setForm((v) => ({ ...v, duration }))}
-            />
-          </div>
-
-          <Field
-            id="meeting-attendees"
-            label={
-              parsed.length > 0
-                ? `Attendees (${parsed.length})`
-                : "Attendees"
-            }
-            helper="Email addresses, separated by commas. Everyone listed gets an invitation."
-          >
-            <Input
+            <Field
               id="meeting-attendees"
-              value={form.attendees}
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="ada@example.com, grace@example.com"
-              onChange={(event) => {
-                setValidation(null);
-                setForm((v) => ({ ...v, attendees: event.target.value }));
-              }}
-            />
-            {/* The addresses as parsed, so a missed comma or a typo shows up
-                while it is still being typed rather than on submit. */}
-            {parsed.length > 0 && (
-              <ul className="flex flex-wrap gap-1.5">
-                {parsed.map((entry) => (
-                  <li
-                    key={entry.label}
-                    className={cn(
-                      "rounded-[var(--radius-full)] px-2 py-0.5 font-mono text-[11px] leading-4",
-                      entry.valid
-                        ? "bg-surface-1 text-fg-secondary"
-                        : "bg-danger-bg text-danger",
-                    )}
-                  >
-                    {entry.label}
-                    {!entry.valid && (
-                      <span className="sr-only"> — not an email address</span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Field>
-
-          <Field id="meeting-description" label="Description">
-            <Textarea
-              id="meeting-description"
-              rows={3}
-              value={form.description}
-              onChange={(event) =>
-                setForm((v) => ({ ...v, description: event.target.value }))
+              label={
+                parsed.length > 0
+                  ? `Attendees (${parsed.length})`
+                  : "Attendees"
               }
-            />
-          </Field>
+              helper="Email addresses, separated by commas. Everyone listed gets an invitation."
+            >
+              <Input
+                id="meeting-attendees"
+                value={form.attendees}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="ada@example.com, grace@example.com"
+                onChange={(event) => {
+                  setValidation(null);
+                  setForm((v) => ({ ...v, attendees: event.target.value }));
+                }}
+              />
+              {/* The addresses as parsed, so a missed comma or a typo shows up
+                  while it is still being typed rather than on submit. */}
+              {parsed.length > 0 && (
+                <ul className="flex flex-wrap gap-1.5">
+                  {parsed.map((entry) => (
+                    <li
+                      key={entry.label}
+                      className={cn(
+                        "rounded-[var(--radius-full)] px-2 py-0.5 font-mono text-[11px] leading-4",
+                        entry.valid
+                          ? "bg-surface-1 text-fg-secondary"
+                          : "bg-danger-bg text-danger",
+                      )}
+                    >
+                      {entry.label}
+                      {!entry.valid && (
+                        <span className="sr-only"> — not an email address</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Field>
 
-          <label
-            htmlFor="meeting-link"
-            className="flex items-center justify-between gap-3 text-[13px] leading-[18px] text-fg-secondary"
-          >
-            Include a video link
-            <Switch
-              id="meeting-link"
-              checked={form.includeMeetingLink}
-              onCheckedChange={(includeMeetingLink) =>
-                setForm((v) => ({ ...v, includeMeetingLink }))
-              }
-            />
-          </label>
-        </div>
-
-        <div role="status" aria-live="polite">
-          {validation && (
-            <p className="text-[12px] leading-4 text-danger">{validation}</p>
-          )}
-          {create.isError && (
-            <div>
-              <p className="text-[12px] leading-4 text-danger">
-                {friendlyError(
-                  create.error instanceof Error
-                    ? create.error.message
-                    : create.error,
-                )}
-              </p>
-              <TechnicalDetails
-                raw={
-                  create.error instanceof Error
-                    ? create.error.message
-                    : create.error
+            <Field id="meeting-description" label="Description">
+              <Textarea
+                id="meeting-description"
+                rows={3}
+                value={form.description}
+                onChange={(event) =>
+                  setForm((v) => ({ ...v, description: event.target.value }))
                 }
               />
-            </div>
-          )}
-        </div>
+            </Field>
 
+            <label
+              htmlFor="meeting-link"
+              className="flex items-center justify-between gap-3 text-[13px] leading-[18px] text-fg-secondary"
+            >
+              Include a video link
+              <Switch
+                id="meeting-link"
+                checked={form.includeMeetingLink}
+                onCheckedChange={(includeMeetingLink) =>
+                  setForm((v) => ({ ...v, includeMeetingLink }))
+                }
+              />
+            </label>
+          </div>
+
+          <div role="status" aria-live="polite">
+            {validation && (
+              <p className="text-[12px] leading-4 text-danger">{validation}</p>
+            )}
+            {create.isError && (
+              <div>
+                <p className="text-[12px] leading-4 text-danger">
+                  {friendlyError(
+                    create.error instanceof Error
+                      ? create.error.message
+                      : create.error,
+                  )}
+                </p>
+                <TechnicalDetails
+                  raw={
+                    create.error instanceof Error
+                      ? create.error.message
+                      : create.error
+                  }
+                />
+              </div>
+            )}
+          </div>
+
+        </DialogBody>
         <DialogFooter>
           <Button
             type="button"

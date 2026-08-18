@@ -8,6 +8,7 @@ import { Segmented } from "@/components/calendar/segmented";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -311,7 +312,7 @@ export function AddCalendarDialog({
       }}
     >
       <DialogContent
-        className="pane-scroll max-h-[86vh] max-w-[480px] overflow-y-auto"
+        className="max-w-[480px]"
         onKeyDown={(event) => {
           if (event.key !== "Enter" || event.metaKey || event.ctrlKey) return;
           if (!(event.target instanceof HTMLInputElement)) return;
@@ -328,258 +329,260 @@ export function AddCalendarDialog({
             never sends them anywhere else.
           </DialogDescription>
         </DialogHeader>
+        <DialogBody>
 
-        <Segmented
-          label="Calendar provider"
-          options={PRESET_OPTIONS}
-          value={presetId}
-          onChange={choosePreset}
-        />
+          <Segmented
+            label="Calendar provider"
+            options={PRESET_OPTIONS}
+            value={presetId}
+            onChange={choosePreset}
+          />
 
-        {isGoogle ? (
-          <div className="space-y-3">
-            {/* The instructions, not a hint. Google will not hand out a client
-                without every one of these, and the fourth is the one that
-                fails silently hours later if it is skipped. */}
-            <ol className="space-y-2 rounded-[var(--radius-md)] border border-border-subtle bg-surface-2 p-3.5">
-              {GOOGLE_STEPS.map((line, index) => (
-                <li key={line} className="flex gap-2.5">
-                  <span className="tnum mt-[1px] w-4 shrink-0 text-right text-[11px] leading-[18px] text-fg-tertiary">
-                    {index + 1}
-                  </span>
-                  <span className="text-[13px] leading-[18px] text-fg-secondary">
-                    {line}
-                  </span>
-                </li>
-              ))}
-            </ol>
+          {isGoogle ? (
+            <div className="space-y-3">
+              {/* The instructions, not a hint. Google will not hand out a client
+                  without every one of these, and the fourth is the one that
+                  fails silently hours later if it is skipped. */}
+              <ol className="space-y-2 rounded-[var(--radius-md)] border border-border-subtle bg-surface-2 p-3.5">
+                {GOOGLE_STEPS.map((line, index) => (
+                  <li key={line} className="flex gap-2.5">
+                    <span className="tnum mt-[1px] w-4 shrink-0 text-right text-[11px] leading-[18px] text-fg-tertiary">
+                      {index + 1}
+                    </span>
+                    <span className="text-[13px] leading-[18px] text-fg-secondary">
+                      {line}
+                    </span>
+                  </li>
+                ))}
+              </ol>
 
-            <Field
-              id="google-redirect"
-              label="Authorised redirect URI"
-              helper="This is your Boxaide server's own address. Google rejects the sign-in unless it is listed on the client, character for character."
-            >
-              <CopyBlock value={redirectUri || "…"} label="the redirect URI" />
-            </Field>
+              <Field
+                id="google-redirect"
+                label="Authorised redirect URI"
+                helper="This is your Boxaide server's own address. Google rejects the sign-in unless it is listed on the client, character for character."
+              >
+                <CopyBlock value={redirectUri || "…"} label="the redirect URI" />
+              </Field>
 
-            <div className="flex flex-wrap gap-1.5">
-              <Button asChild variant="secondary" size="sm">
-                <a
-                  href={GOOGLE_CALENDAR_API_URL}
-                  target="_blank"
-                  rel="noreferrer noopener"
-                >
-                  <ExternalLink className="size-3.5" strokeWidth={1.5} />
-                  Enable the Calendar API
-                </a>
-              </Button>
-              <Button asChild variant="secondary" size="sm">
-                <a
-                  href={GOOGLE_CREDENTIALS_URL}
-                  target="_blank"
-                  rel="noreferrer noopener"
-                >
-                  <ExternalLink className="size-3.5" strokeWidth={1.5} />
-                  Create the OAuth client
-                </a>
-              </Button>
-            </div>
-
-            <Field
-              id="google-alias"
-              label="Name"
-              helper="Shown beside every event from this calendar."
-            >
-              <Input
-                id="google-alias"
-                value={google.alias}
-                autoComplete="off"
-                placeholder="work"
-                onChange={(event) => {
-                  setValidation(null);
-                  setGoogle((v) => ({ ...v, alias: event.target.value }));
-                }}
-              />
-            </Field>
-
-            <Field id="google-client-id" label="Client ID">
-              <Input
-                id="google-client-id"
-                value={google.clientId}
-                autoComplete="off"
-                spellCheck={false}
-                className="font-mono"
-                onChange={(event) => {
-                  setValidation(null);
-                  setGoogle((v) => ({ ...v, clientId: event.target.value }));
-                }}
-              />
-            </Field>
-
-            <Field id="google-client-secret" label="Client secret">
-              <Input
-                id="google-client-secret"
-                type="password"
-                value={google.clientSecret}
-                autoComplete="off"
-                spellCheck={false}
-                className="font-mono"
-                onChange={(event) => {
-                  setValidation(null);
-                  setGoogle((v) => ({ ...v, clientSecret: event.target.value }));
-                }}
-              />
-            </Field>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            <Field
-              id="calendar-alias"
-              label="Name"
-              helper="Shown beside every event from this calendar."
-            >
-              <Input
-                id="calendar-alias"
-                value={caldav.alias}
-                autoComplete="off"
-                placeholder="personal"
-                onChange={(event) => {
-                  setValidation(null);
-                  setCaldav((v) => ({ ...v, alias: event.target.value }));
-                }}
-              />
-            </Field>
-
-            <Field
-              id="calendar-server"
-              label="Server URL"
-              helper={
-                preset.serverUrl
-                  ? "Filled in for you. Change it only if your provider gave you a different address."
-                  : "The CalDAV address your provider gave you."
-              }
-            >
-              <Input
-                id="calendar-server"
-                value={caldav.serverUrl}
-                autoComplete="off"
-                spellCheck={false}
-                className="font-mono"
-                placeholder={preset.placeholder}
-                onChange={(event) => {
-                  setValidation(null);
-                  setCaldav((v) => ({ ...v, serverUrl: event.target.value }));
-                }}
-              />
-            </Field>
-
-            <Field
-              id="calendar-username"
-              label="Username"
-              helper="Usually the email address you sign in with."
-            >
-              <Input
-                id="calendar-username"
-                value={caldav.username}
-                autoComplete="off"
-                spellCheck={false}
-                className="font-mono"
-                placeholder="you@example.com"
-                onChange={(event) => {
-                  setValidation(null);
-                  setCaldav((v) => ({ ...v, username: event.target.value }));
-                }}
-              />
-            </Field>
-
-            <Field
-              id="calendar-password"
-              label="App password"
-              helper={preset.passwordHelper}
-            >
-              <div className="relative">
-                <Input
-                  id="calendar-password"
-                  type={reveal ? "text" : "password"}
-                  value={caldav.password}
-                  autoComplete="off"
-                  className="pr-8"
-                  onChange={(event) => {
-                    setValidation(null);
-                    setCaldav((v) => ({ ...v, password: event.target.value }));
-                  }}
-                />
-                <button
-                  type="button"
-                  aria-label={reveal ? "Hide password" : "Show password"}
-                  onClick={() => setReveal((value) => !value)}
-                  className="absolute top-1/2 right-1.5 flex size-5 -translate-y-1/2 items-center justify-center rounded-[var(--radius-sm)] text-fg-tertiary hover:bg-surface-hover hover:text-fg"
-                >
-                  {reveal ? (
-                    <EyeOff className="size-3.5" strokeWidth={1.5} />
-                  ) : (
-                    <Eye className="size-3.5" strokeWidth={1.5} />
-                  )}
-                </button>
-              </div>
-              {preset.passwordUrl && (
+              <div className="flex flex-wrap gap-1.5">
                 <Button asChild variant="secondary" size="sm">
                   <a
-                    href={preset.passwordUrl}
+                    href={GOOGLE_CALENDAR_API_URL}
                     target="_blank"
                     rel="noreferrer noopener"
                   >
                     <ExternalLink className="size-3.5" strokeWidth={1.5} />
-                    {preset.passwordUrlLabel}
+                    Enable the Calendar API
                   </a>
                 </Button>
-              )}
-            </Field>
-          </div>
-        )}
+                <Button asChild variant="secondary" size="sm">
+                  <a
+                    href={GOOGLE_CREDENTIALS_URL}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                  >
+                    <ExternalLink className="size-3.5" strokeWidth={1.5} />
+                    Create the OAuth client
+                  </a>
+                </Button>
+              </div>
 
-        <div role="status" aria-live="polite" className="space-y-1.5">
-          {validation && (
-            <p className="text-[12px] leading-4 text-danger">{validation}</p>
-          )}
-
-          {/* The test result, in words. A green button that goes back to grey
-              says nothing a second later. */}
-          {!isGoogle && test.data && (
-            <p
-              className={`flex items-start gap-1.5 text-[12px] leading-4 ${
-                test.data.ok ? "text-success" : "text-danger"
-              }`}
-            >
-              {test.data.ok ? (
-                <CircleCheck
-                  aria-hidden="true"
-                  className="mt-px size-3.5 shrink-0"
-                  strokeWidth={1.5}
+              <Field
+                id="google-alias"
+                label="Name"
+                helper="Shown beside every event from this calendar."
+              >
+                <Input
+                  id="google-alias"
+                  value={google.alias}
+                  autoComplete="off"
+                  placeholder="work"
+                  onChange={(event) => {
+                    setValidation(null);
+                    setGoogle((v) => ({ ...v, alias: event.target.value }));
+                  }}
                 />
-              ) : (
-                <CircleAlert
-                  aria-hidden="true"
-                  className="mt-px size-3.5 shrink-0"
-                  strokeWidth={1.5}
-                />
-              )}
-              {test.data.ok
-                ? "That calendar answered. Nothing is saved yet."
-                : friendlyError(test.data.error ?? "The calendar did not answer.")}
-            </p>
-          )}
+              </Field>
 
-          {(test.isError || error) && (
-            <div>
-              <p className="text-[12px] leading-4 text-danger">
-                {friendlyError(errorText(test.isError ? test.error : error))}
-              </p>
-              <TechnicalDetails raw={errorText(test.isError ? test.error : error)} />
+              <Field id="google-client-id" label="Client ID">
+                <Input
+                  id="google-client-id"
+                  value={google.clientId}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono"
+                  onChange={(event) => {
+                    setValidation(null);
+                    setGoogle((v) => ({ ...v, clientId: event.target.value }));
+                  }}
+                />
+              </Field>
+
+              <Field id="google-client-secret" label="Client secret">
+                <Input
+                  id="google-client-secret"
+                  type="password"
+                  value={google.clientSecret}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono"
+                  onChange={(event) => {
+                    setValidation(null);
+                    setGoogle((v) => ({ ...v, clientSecret: event.target.value }));
+                  }}
+                />
+              </Field>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <Field
+                id="calendar-alias"
+                label="Name"
+                helper="Shown beside every event from this calendar."
+              >
+                <Input
+                  id="calendar-alias"
+                  value={caldav.alias}
+                  autoComplete="off"
+                  placeholder="personal"
+                  onChange={(event) => {
+                    setValidation(null);
+                    setCaldav((v) => ({ ...v, alias: event.target.value }));
+                  }}
+                />
+              </Field>
+
+              <Field
+                id="calendar-server"
+                label="Server URL"
+                helper={
+                  preset.serverUrl
+                    ? "Filled in for you. Change it only if your provider gave you a different address."
+                    : "The CalDAV address your provider gave you."
+                }
+              >
+                <Input
+                  id="calendar-server"
+                  value={caldav.serverUrl}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono"
+                  placeholder={preset.placeholder}
+                  onChange={(event) => {
+                    setValidation(null);
+                    setCaldav((v) => ({ ...v, serverUrl: event.target.value }));
+                  }}
+                />
+              </Field>
+
+              <Field
+                id="calendar-username"
+                label="Username"
+                helper="Usually the email address you sign in with."
+              >
+                <Input
+                  id="calendar-username"
+                  value={caldav.username}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono"
+                  placeholder="you@example.com"
+                  onChange={(event) => {
+                    setValidation(null);
+                    setCaldav((v) => ({ ...v, username: event.target.value }));
+                  }}
+                />
+              </Field>
+
+              <Field
+                id="calendar-password"
+                label="App password"
+                helper={preset.passwordHelper}
+              >
+                <div className="relative">
+                  <Input
+                    id="calendar-password"
+                    type={reveal ? "text" : "password"}
+                    value={caldav.password}
+                    autoComplete="off"
+                    className="pr-8"
+                    onChange={(event) => {
+                      setValidation(null);
+                      setCaldav((v) => ({ ...v, password: event.target.value }));
+                    }}
+                  />
+                  <button
+                    type="button"
+                    aria-label={reveal ? "Hide password" : "Show password"}
+                    onClick={() => setReveal((value) => !value)}
+                    className="absolute top-1/2 right-1.5 flex size-5 -translate-y-1/2 items-center justify-center rounded-[var(--radius-sm)] text-fg-tertiary hover:bg-surface-hover hover:text-fg"
+                  >
+                    {reveal ? (
+                      <EyeOff className="size-3.5" strokeWidth={1.5} />
+                    ) : (
+                      <Eye className="size-3.5" strokeWidth={1.5} />
+                    )}
+                  </button>
+                </div>
+                {preset.passwordUrl && (
+                  <Button asChild variant="secondary" size="sm">
+                    <a
+                      href={preset.passwordUrl}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    >
+                      <ExternalLink className="size-3.5" strokeWidth={1.5} />
+                      {preset.passwordUrlLabel}
+                    </a>
+                  </Button>
+                )}
+              </Field>
             </div>
           )}
-        </div>
 
+          <div role="status" aria-live="polite" className="space-y-1.5">
+            {validation && (
+              <p className="text-[12px] leading-4 text-danger">{validation}</p>
+            )}
+
+            {/* The test result, in words. A green button that goes back to grey
+                says nothing a second later. */}
+            {!isGoogle && test.data && (
+              <p
+                className={`flex items-start gap-1.5 text-[12px] leading-4 ${
+                  test.data.ok ? "text-success" : "text-danger"
+                }`}
+              >
+                {test.data.ok ? (
+                  <CircleCheck
+                    aria-hidden="true"
+                    className="mt-px size-3.5 shrink-0"
+                    strokeWidth={1.5}
+                  />
+                ) : (
+                  <CircleAlert
+                    aria-hidden="true"
+                    className="mt-px size-3.5 shrink-0"
+                    strokeWidth={1.5}
+                  />
+                )}
+                {test.data.ok
+                  ? "That calendar answered. Nothing is saved yet."
+                  : friendlyError(test.data.error ?? "The calendar did not answer.")}
+              </p>
+            )}
+
+            {(test.isError || error) && (
+              <div>
+                <p className="text-[12px] leading-4 text-danger">
+                  {friendlyError(errorText(test.isError ? test.error : error))}
+                </p>
+                <TechnicalDetails raw={errorText(test.isError ? test.error : error)} />
+              </div>
+            )}
+          </div>
+
+        </DialogBody>
         <DialogFooter>
           <Button type="button" variant="ghost" disabled={busy} onClick={close}>
             Cancel
