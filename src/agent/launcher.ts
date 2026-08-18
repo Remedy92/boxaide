@@ -1216,6 +1216,13 @@ export class AgentLauncher {
   >();
   /** Bumped by refreshModels(), so a fetch it invalidated cannot land. */
   private modelGeneration = 0;
+  /**
+   * close() has run. Checked before every spawn, including after the one await
+   * in start(): close() clears `running`, so a start suspended on the model
+   * lookup would otherwise find the chat slot free and spawn an agent nobody
+   * owns, moments after shutdown killed everything else.
+   */
+  private closed = false;
 
   /** How many automation runs may overlap. See runConcurrencyFrom. */
   private readonly limit: number;
@@ -1420,6 +1427,11 @@ export class AgentLauncher {
    * pressing Start must not fail because the schedule happens to be busy, which
    * is the whole point of splitting the two.
    */
+  /** Refuses once close() has run. Nothing may spawn after shutdown. */
+  private assertClosed(): void {
+    if (this.closed) throw new LaunchError(409, "the launcher is shut down");
+  }
+
   private assertIdle(): void {
     const running = this.running;
     if (running) {
@@ -1467,6 +1479,7 @@ export class AgentLauncher {
    * draw the picker.
    */
   async start(id: string, model?: string): Promise<RunningAgent> {
+    this.assertClosed();
     this.assertIdle();
     const spec = this.registry.find((s) => s.id === id);
     if (!spec) throw new LaunchError(404, `unknown agent: ${id}`);
@@ -1493,7 +1506,9 @@ export class AgentLauncher {
       // That await is the only suspension point between the guard at the top
       // and the spawn below, and it reopens what that guard closed: two
       // starts racing here would both spawn, and the first child would be
-      // orphaned by the second overwriting this.child.
+      // orphaned by the second overwriting this.child. A close() landing in the
+      // same window is the other way this launch could become an orphan.
+      this.assertClosed();
       this.assertIdle();
     }
 
@@ -1606,6 +1621,7 @@ export class AgentLauncher {
    * A live chat agent is not a reason to refuse. The two have separate slots.
    */
   async runOnce(opts: OneShotOptions): Promise<OneShotResult> {
+    this.assertClosed();
     if (this.runCapacity() === 0) {
       const held = this.oneShots.size + this.starting.size;
       throw new LaunchError(
@@ -1648,6 +1664,10 @@ export class AgentLauncher {
           throw new LaunchError(400, `${spec.label} does not offer that model`);
         }
       }
+      // That listing is the only suspension point before the spawn, and a
+      // close() landing inside it would otherwise be followed by a run
+      // starting anyway. Same re-check start() makes for the same reason.
+      this.assertClosed();
       render = spec.renderRunLine;
       workDir = this.prepareWorkDir(spec, runWorkDir(this.ctx, opts.runId));
       const prompt = `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
@@ -1729,6 +1749,10 @@ export class AgentLauncher {
     this.oneShots.set(opts.runId, {
       child,
       kill: () => {
+        // Already being killed — by the deadline, the watchdog, or an earlier
+        // call. Saying so twice would write the note into the log twice, and
+        // the first reason is the true one.
+        if (forced !== null) return;
         note(ONESHOT_KILLED_NOTE);
         forced = "killed";
         child.kill("SIGKILL");
@@ -1825,6 +1849,7 @@ export class AgentLauncher {
   }
 
   close(): void {
+    this.closed = true;
     const had = this.running !== null;
     this.stopRequested = true;
     // State cleared before the driver is stopped, for the same reason noteExit

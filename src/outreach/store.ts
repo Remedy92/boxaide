@@ -700,28 +700,38 @@ export class OutreachStore {
       sentAt: null,
       error: null,
     };
-    const already = this.pendingDuplicate(row);
-    if (already) return already;
-    this.db
-      .prepare(
-        `INSERT INTO outbox
-           (id, account_id, campaign_id, contact_id, step_position, to_addr,
-            subject_enc, body_enc, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        row.id,
-        row.accountId,
-        row.campaignId,
-        row.contactId,
-        row.stepPosition,
-        row.to,
-        this.enc(row.subject),
-        this.enc(row.body),
-        row.status,
-        row.createdAt,
-      );
-    return row;
+    // The look-up and the insert are one atomic step. Nothing inside this
+    // process can interleave between them — the code never yields — but a
+    // stdio `boxaide mcp` process serves this same tool over the same file,
+    // and both could otherwise read "no duplicate" and then both insert.
+    // IMMEDIATE takes the write lock at the start rather than at the INSERT,
+    // which is exactly the window that would let that happen.
+    return this.db
+      .transaction((): OutboxRow => {
+        const already = this.pendingDuplicate(row);
+        if (already) return already;
+        this.db
+          .prepare(
+            `INSERT INTO outbox
+               (id, account_id, campaign_id, contact_id, step_position, to_addr,
+                subject_enc, body_enc, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            row.id,
+            row.accountId,
+            row.campaignId,
+            row.contactId,
+            row.stepPosition,
+            row.to,
+            this.enc(row.subject),
+            this.enc(row.body),
+            row.status,
+            row.createdAt,
+          );
+        return row;
+      })
+      .immediate();
   }
 
   /**

@@ -102,10 +102,12 @@ export class AutomationScheduler {
    */
   async idle(): Promise<void> {
     while (this.inFlight.size > 0 || this.queue.length > 0) {
-      // Nothing in flight and no room to start anything: whatever is queued is
-      // waiting on a slot that only another process can free, so waiting here
-      // would never end.
-      if (this.inFlight.size === 0 && this.launcher.runCapacity() === 0) return;
+      // Nothing is running and no dispatch is under way, so nothing can move
+      // the queue: what is waiting needs a slot only another process can free,
+      // or a tick that has not happened yet. Waiting here would never end, and
+      // the capacity check alone missed it — a run deferred by another process
+      // leaves this process with free slots it cannot use.
+      if (this.inFlight.size === 0 && !this.draining) return;
       await Promise.allSettled([...this.inFlight, this.draining]);
       // A run that has just settled still has to reach its own cleanup and
       // re-dispatch. Yielding to the macrotask queue lets that land, so the
@@ -144,11 +146,23 @@ export class AutomationScheduler {
    * same drain promise instead of starting a second one.
    */
   private drain(): Promise<void> {
-    if (!this.draining) {
-      this.draining = this.drainLoop().finally(() => {
-        this.draining = null;
+    if (this.draining) {
+      // The running drain may already be past its last look at the queue, or
+      // even in the moment between finishing and clearing itself, so work
+      // enqueued now would sit there until the next tick. Chain ONE more pass.
+      //
+      // One pass, never a loop: a run another process deferred leaves the queue
+      // non-empty with slots free here, and a loop on that condition would
+      // retry the claim as fast as SQLite could answer it.
+      return this.draining.then(() => {
+        if (this.draining) return;
+        if (this.queue.length === 0 || this.launcher.runCapacity() === 0) return;
+        return this.drain();
       });
     }
+    this.draining = this.drainLoop().finally(() => {
+      this.draining = null;
+    });
     return this.draining;
   }
 

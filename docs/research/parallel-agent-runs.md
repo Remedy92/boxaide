@@ -251,3 +251,43 @@ something to wait on.
   proved by the test suite with fake binaries and a scripted agent; the cost and
   rate-limit argument in §5 remains structural, not empirical.
 - The Electron/desktop side was still not examined.
+
+## Review follow-up
+
+A review of the commit above raised six points. Four were taken, with one
+changed on the way in.
+
+- **`idle()` could spin.** A run deferred by another process leaves this
+  scheduler with an empty in-flight set, free local slots, and a non-empty
+  queue — the capacity guard did not catch that and the loop burned CPU. The
+  guard now asks whether anything is actually under way.
+- **`close()` was not final.** Shutdown clears the chat slot, so a `start()`
+  suspended on the model lookup would resume, find the slot free, and spawn an
+  agent moments after everything else was killed. A `closed` flag now gates
+  every spawn path. This predated concurrency; it was not introduced here.
+- **A run killed twice wrote its note twice.** The kill closure now returns if
+  the run is already ending — the first reason is the true one.
+- **`queueOutbox` was not atomic.** Taken, but not for the reason given: two
+  runs inside one process cannot interleave there, because the code never
+  yields between the look-up and the insert. The real exposure is a second
+  `boxaide mcp` process serving the same tool over the same file. Now one
+  IMMEDIATE transaction.
+
+Two were declined.
+
+- **The proposed `drain()` rewrite loops while the queue is non-empty and
+  capacity is free.** That is exactly the state a deferred run leaves behind,
+  so it would retry the claim — a write-lock transaction — as fast as SQLite
+  could answer, indefinitely. The underlying window is real but narrow: work
+  enqueued in the moment a drain is finishing waits for the next tick. Fixed
+  instead by chaining one more pass onto the drain in progress. One pass
+  terminates; a loop on that condition does not.
+- **A `stopped` flag on the scheduler.** The claimed failure — a spawn after
+  `killRun()` — has no path: `stop()` empties the queue, and the dispatch loop
+  re-reads it every iteration, with no suspension between claiming a slot and
+  spawning. The suggested patch also left a stopped scheduler permanently
+  unable to restart.
+
+Tests added for the two genuine gaps (the outbox merge, the startup sweep) and
+for the shutdown fix. Each was checked against a deliberately broken build to
+confirm it fails when the code it covers is removed.

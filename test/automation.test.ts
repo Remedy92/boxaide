@@ -15,6 +15,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -24,6 +25,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   AgentLauncher,
   AUTOMATION_RUN_PREAMBLE,
+  RUN_WORKDIR_STALE_MS,
   LaunchError,
   runPreapprovedToolNames,
   type AgentSpec,
@@ -750,6 +752,18 @@ describe("AgentLauncher.runOnce", () => {
     };
   }
 
+  /** A minimal runnable registry pointing at an already-created fake binary. */
+  function specsFor(_bin: string): AgentSpec[] {
+    return [
+      {
+        id: "fake",
+        label: "Fake Agent",
+        bin: "fake-agent",
+        runArgs: () => [],
+      },
+    ];
+  }
+
   it("captures stdout and stderr, and prepends the run preamble", async () => {
     let prompt = "";
     const { specs, bin } = runSpecs(
@@ -845,6 +859,41 @@ describe("AgentLauncher.runOnce", () => {
     launcher.killRun("r2");
     expect((await second).status).toBe("killed");
     expect(launcher.runCapacity()).toBe(2);
+  });
+
+  it("sweeps run directories a crash left behind, and spares fresh ones", async () => {
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
+    const dataDir = tempDir();
+    const runs = join(dataDir, "agent-workdir", "runs");
+    mkdirSync(join(runs, "abandoned"), { recursive: true });
+    mkdirSync(join(runs, "in-flight-elsewhere"), { recursive: true });
+    // Older than the deadline plus its margin: nothing alive can own it.
+    const old = (Date.now() - RUN_WORKDIR_STALE_MS - 60_000) / 1000;
+    utimesSync(join(runs, "abandoned"), old, old);
+
+    const launcher = new AgentLauncher({ ...CTX, dataDir }, specsFor(bin), {
+      PATH: bin,
+    });
+    cleanups.push(() => launcher.close());
+
+    expect(existsSync(join(runs, "abandoned"))).toBe(false);
+    // A second Boxaide over this data directory may be running that one right
+    // now. Age is the test, not "no run of mine owns it".
+    expect(existsSync(join(runs, "in-flight-elsewhere"))).toBe(true);
+  });
+
+  it("spawns nothing once the launcher is closed", async () => {
+    const { specs, bin } = runSpecs("#!/bin/sh\nexit 0\n");
+    const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
+
+    launcher.close();
+    // Shutdown clears the chat slot, so the idle check alone would wave these
+    // through and leave a child running after everything else was killed.
+    await expect(launcher.start("fake")).rejects.toThrowError(/shut down/);
+    await expect(
+      launcher.runOnce({ runId: "r1", prompt: "p" }),
+    ).rejects.toThrowError(/shut down/);
+    expect(launcher.status().running).toBeNull();
   });
 
   it("refuses a run id that is not a plain identifier", async () => {

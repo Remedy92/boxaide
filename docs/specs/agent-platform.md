@@ -234,7 +234,14 @@ Scheduler (`AutomationScheduler`):
   `AutomationStore.claimRun` holds the cross-process lock, refusing a second
   run of the same automation outright and then refusing anything past the
   concurrency cap. Both counts and the insert are one IMMEDIATE transaction.
-- `scheduler.idle()` resolves when nothing is running or queued. `tick()` and
+- A drain already in progress is not restarted; one more pass is chained onto
+  it so work enqueued while it was finishing is not stranded until the next
+  tick. One pass, never a loop — a run another process deferred leaves the
+  queue non-empty with slots free here, and looping on that would retry the
+  claim as fast as SQLite could answer.
+- `scheduler.idle()` resolves when nothing is running or queued, and returns
+  early when nothing is in flight and no drain is under way: what is left is
+  waiting on another process, and no amount of waiting here would free it. `tick()` and
   `runNow()` return once runs are *started*, so anything needing a finished
   result waits on `idle()`.
 - A run spawns a one-shot headless CLI agent. `AgentLauncher`
@@ -242,6 +249,9 @@ Scheduler (`AutomationScheduler`):
   same MCP wiring, but prompt = the automation's prompt plus a fixed preamble
   (below), and no chat loop. `runOnce` takes the run row's id: it keys the live
   run for `killRun(id)` and names the run's own working directory.
+- `close()` is final. Every spawn path checks it, including after the model
+  lookup in `start()` — shutdown clears the chat slot, so the idle check alone
+  would let a launch suspended there spawn an agent nobody owns.
 - Runs do not disturb the chat agent and are not disturbed by it. The launcher
   keeps the chat slot and the run slots apart, so Start never fails because the
   schedule is busy, and the schedule never stalls behind a chat session.

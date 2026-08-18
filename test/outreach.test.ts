@@ -589,6 +589,57 @@ describe("outreach", () => {
     expect(row.lastSentAt).toBeNull();
   });
 
+  it("merges a queued draft that repeats a pending one word for word", () => {
+    const draft = {
+      accountId,
+      to: "twice@example.com",
+      subject: "Quick question",
+      body: "Hello there.",
+    };
+    const first = platform.outreachStore.queueOutbox(draft);
+    // What two overlapping automation runs reaching the same conclusion look
+    // like. The second gets the first row back, not a second row.
+    const second = platform.outreachStore.queueOutbox(draft);
+
+    expect(second.id).toBe(first.id);
+    expect(platform.outreachStore.listOutbox({}).length).toBe(1);
+  });
+
+  it("keeps a second draft that differs, however slightly", () => {
+    const base = {
+      accountId,
+      to: "twice@example.com",
+      subject: "Quick question",
+      body: "Hello there.",
+    };
+    platform.outreachStore.queueOutbox(base);
+    // A reviewer can delete a duplicate they can see; they cannot recover a
+    // draft that was never written. So anything not identical is kept.
+    platform.outreachStore.queueOutbox({ ...base, body: "Hello again." });
+    platform.outreachStore.queueOutbox({ ...base, subject: "Another thing" });
+    platform.outreachStore.queueOutbox({ ...base, to: "other@example.com" });
+    platform.outreachStore.queueOutbox({ ...base, campaignId: "c-1" });
+
+    expect(platform.outreachStore.listOutbox({}).length).toBe(5);
+  });
+
+  it("stops matching a draft once the pending row has been decided", () => {
+    const draft = {
+      accountId,
+      to: "twice@example.com",
+      subject: "Quick question",
+      body: "Hello there.",
+    };
+    const first = platform.outreachStore.queueOutbox(draft);
+    platform.outreachStore.decide(first.id, "rejected");
+    // The merge only ever speaks for rows still awaiting review. A rejected
+    // one must not silently swallow a later attempt.
+    const again = platform.outreachStore.queueOutbox(draft);
+
+    expect(again.id).not.toBe(first.id);
+    expect(platform.outreachStore.listOutbox({}).length).toBe(2);
+  });
+
   it("fails an approved row whose address was suppressed after approval", async () => {
     const row = platform.outreachStore.queueOutbox({
       accountId,
