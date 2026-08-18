@@ -1150,7 +1150,14 @@ exec /bin/sleep 60
     const bin = fakeBinDir("grok");
     const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
     const launcher = new AgentLauncher(
-      { mcpUrl: "http://127.0.0.1:9/mcp", bearerToken: "secret-token-xyz", dataDir },
+      {
+        mcpUrl: "http://127.0.0.1:9/mcp",
+        bearerToken: "secret-token-xyz",
+        dataDir,
+        // This is about the config grok's prepare writes, not about
+        // confinement; a workspace launch is refused off macOS by design.
+        access: "full" as const,
+      },
       [grok],
       { PATH: bin },
     );

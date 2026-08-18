@@ -80,8 +80,14 @@ const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 /**
  * Why a confined launch is impossible here, or null when it is possible.
  *
- * A reason, not a boolean, because it is shown to whoever asked for the
- * launch and "it did not work" is not something a person can act on.
+ * A reason, not a boolean, because it is shown to whoever asked for the launch
+ * and "it did not work" is not something a person can act on.
+ *
+ * The two checks are not the same kind of question. Whether the platform has a
+ * sandbox at all is a fact about the named platform. Whether the tool is
+ * actually installed is a fact about *this* machine, and there is no way to
+ * answer it for any other — so it is only asked when the platform named is the
+ * one running. A caller naming another platform is asking the first question.
  */
 export function sandboxUnavailable(
   platform: string = process.platform,
@@ -89,7 +95,7 @@ export function sandboxUnavailable(
   if (!sandboxSupported(platform)) {
     return `Boxaide can only confine an agent to its own workspace on macOS, and this is ${platform}. Start the agent with full access if you accept that it can read your files, or set BOXAIDE_AGENT_ACCESS=full to make that the default.`;
   }
-  if (!existsSync(SANDBOX_EXEC)) {
+  if (platform === process.platform && !existsSync(SANDBOX_EXEC)) {
     return `Boxaide confines an agent with ${SANDBOX_EXEC}, which is not on this machine. Start the agent with full access if you accept that it can read your files.`;
   }
   return null;
