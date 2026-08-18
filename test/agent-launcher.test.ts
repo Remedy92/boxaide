@@ -687,13 +687,147 @@ sleep 60
     expect(run.slice(-2)).toEqual(["--", "--dangerously-skip-permissions"]);
   });
 
-  it("does not launch agents whose CLIs cannot enforce per-tool permissions", () => {
-    const antigravity = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
-    const opencode = KNOWN_AGENTS.find((s) => s.id === "opencode")!;
-    for (const spec of [antigravity, opencode]) {
-      expect(spec.args).toBeUndefined();
-      expect(spec.runArgs).toBeUndefined();
-      expect(spec.prepare).toBeUndefined();
+  it("hands each launch its own scoped credential and takes it back on exit", async () => {
+    const { ScopedTokens } = await import("../src/mcp/scoped-tokens.js");
+    const tokens = new ScopedTokens();
+    const bin = fakeBinDir("fake-agent");
+    // What the spec was actually given, captured off the command line.
+    let sawToken: string | null = null;
+    const launcher = new AgentLauncher(
+      { ...CTX, mintToken: (profile, label) => tokens.mint(profile, label) },
+      specs({
+        args: (ctx) => {
+          sawToken = ctx.bearerToken;
+          return [];
+        },
+      }),
+      { PATH: "" },
+      [bin],
+    );
+
+    await launcher.start("fake");
+    expect(sawToken).not.toBe(CTX.bearerToken);
+    expect(tokens.resolve(sawToken!)).toBe("chat");
+    expect(tokens.list()).toHaveLength(1);
+
+    launcher.close();
+    // Revoked the moment the launch ends, not when the process finally dies:
+    // a child that ignores SIGTERM must not keep a working credential.
+    expect(tokens.resolve(sawToken!)).toBeNull();
+    expect(tokens.list()).toHaveLength(0);
+  });
+
+  it("scopes a scheduled run to 'run' and revokes it when the run finishes", async () => {
+    const { ScopedTokens } = await import("../src/mcp/scoped-tokens.js");
+    const tokens = new ScopedTokens();
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
+    let sawToken: string | null = null;
+    const minted: string[] = [];
+    const launcher = new AgentLauncher(
+      {
+        ...CTX,
+        mintToken: (profile, label) => {
+          minted.push(profile);
+          return tokens.mint(profile, label);
+        },
+      },
+      specs({
+        runArgs: (ctx) => {
+          sawToken = ctx.bearerToken;
+          return [];
+        },
+      }),
+      { PATH: "" },
+      [bin],
+    );
+
+    const result = await launcher.runOnce({
+      runId: "r1",
+      prompt: "do the thing",
+      closeGraceMs: 200,
+    });
+    expect(result.status).toBe("ok");
+    expect(minted).toEqual(["run"]);
+    expect(sawToken).not.toBe(CTX.bearerToken);
+    expect(tokens.resolve(sawToken!)).toBeNull();
+    expect(tokens.list()).toHaveLength(0);
+    launcher.close();
+  });
+
+  it("refuses to launch when a preflight says the credential would not be Boxaide's", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({ runArgs: () => [], preflight: () => "remove the entry first" }),
+      { PATH: "" },
+      [bin],
+    );
+    await expect(launcher.start("fake")).rejects.toThrow("remove the entry first");
+    expect(launcher.status().running).toBeNull();
+    await expect(
+      launcher.runOnce({ runId: "r1", agentId: "fake", prompt: "x" }),
+    ).rejects.toThrow("remove the entry first");
+    // The reservation is released, or the next run would find no capacity.
+    expect(launcher.runCapacity()).toBe(launcher.runLimit());
+    launcher.close();
+  });
+
+  it("blocks Antigravity when the user's own agy config declares a boxaide server", () => {
+    // That entry wins over the one a launch writes, and it carries whatever
+    // credential the user pasted into it — so the scope Boxaide minted would
+    // not be the scope the agent runs on.
+    const spec = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
+    const home = tempDir();
+    const configDir = join(home, ".gemini", "config");
+    mkdirSync(configDir, { recursive: true });
+    const path = join(configDir, "mcp_config.json");
+
+    writeFileSync(path, JSON.stringify({ mcpServers: { supabase: {} } }));
+    expect(spec.preflight!(CTX, { HOME: home })).toBeNull();
+
+    writeFileSync(
+      path,
+      JSON.stringify({ mcpServers: { boxaide: { serverUrl: "http://x/mcp" } } }),
+    );
+    expect(spec.preflight!(CTX, { HOME: home })).toContain("Remove");
+
+    // No file at all is the normal case and must not block a launch.
+    rmSync(path);
+    expect(spec.preflight!(CTX, { HOME: home })).toBeNull();
+  });
+
+  it("launches every registered CLI, including the ones with no allowlist flag", () => {
+    // The boundary is the scoped token the server enforces, so a CLI no longer
+    // has to offer --allowedTools to be launchable. This is the assertion that
+    // would fail if someone re-disabled one of them for that reason.
+    for (const id of ["claude-code", "grok", "antigravity", "opencode", "codex"]) {
+      const spec = KNOWN_AGENTS.find((s) => s.id === id)!;
+      expect(spec.args !== undefined || spec.drive !== undefined).toBe(true);
+      expect(spec.runArgs).toBeDefined();
+    }
+  });
+
+  it("keeps every agent's credential off its command line", () => {
+    // A bearer in argv is readable by every process on the machine and lands
+    // in crash reports. Each spec puts it in a config file or the child env
+    // instead; this holds all of them to it at once, including the next one.
+    const dataDir = tempDir();
+    const ctx = {
+      mcpUrl: "http://127.0.0.1:8787/mcp",
+      bearerToken: "scoped-token-do-not-leak",
+      dataDir,
+    };
+    for (const spec of KNOWN_AGENTS) {
+      const workDir = join(dataDir, spec.id);
+      mkdirSync(workDir, { recursive: true });
+      spec.prepare?.(ctx, workDir, {});
+      const argv = [
+        ...(spec.args?.(ctx) ?? []),
+        ...(spec.runArgs?.(ctx, "do the thing", workDir) ?? []),
+      ];
+      for (const arg of argv) {
+        expect(arg).not.toContain(ctx.bearerToken);
+      }
     }
   });
 
@@ -1157,15 +1291,11 @@ describe("launcher routes", () => {
     expect(body.agents.map((a: { id: string }) => a.id)).toContain("antigravity");
     expect(body.agents.map((a: { id: string }) => a.id)).toContain("opencode");
     expect(body.agents.map((a: { id: string }) => a.id)).not.toContain("gemini");
-    expect(body.agents.find((a: { id: string }) => a.id === "antigravity")?.supported).toBe(
-      false,
-    );
-    expect(body.agents.find((a: { id: string }) => a.id === "opencode")?.supported).toBe(
-      false,
-    );
-    expect(body.agents.find((a: { id: string }) => a.id === "grok")?.supported).toBe(
-      true,
-    );
+    for (const id of ["antigravity", "opencode", "codex", "grok"]) {
+      expect(body.agents.find((a: { id: string }) => a.id === id)?.supported).toBe(
+        true,
+      );
+    }
 
     const unknown = await runtime.app.request("/api/agents/nope/start", {
       method: "POST",
@@ -1173,13 +1303,9 @@ describe("launcher routes", () => {
     });
     expect(unknown.status).toBe(404);
 
-    // Registered but has no launch recipe — 400 regardless of what is
-    // installed on the machine running this suite.
-    const unsupported = await runtime.app.request("/api/agents/codex/start", {
-      method: "POST",
-      headers: auth,
-    });
-    expect(unsupported.status).toBe(400);
+    // Every registered agent now has a launch recipe, so there is no
+    // "registered but unlaunchable" case left to assert here. What the route
+    // still refuses is an id that is not in the registry at all, above.
 
     // A bad model is rejected before anything spawns, so these are safe to
     // hit even on a machine with the real CLI installed.

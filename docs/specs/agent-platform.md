@@ -299,11 +299,13 @@ Scheduler (`AutomationScheduler`):
   MCP tools, then exit. You cannot talk to the user: do not call chat tools;
   write nothing to the user. Never send email: queue outreach with
   outbox_queue_draft or save with draft_create and a human will review."
-- Pre-approved tools for runs: everything in
-  `PREAPPROVED_TOOL_NAMES` (minus the four chat tools) plus all CRM tools,
-  all automation *read* tools (`automations_list`, `automation_runs_list`),
-  and outreach tools except approval (which has no tool anyway):
-  never `message_send`.
+- Tools for runs: the `run` scope in `src/mcp/scope.ts` — mail reads and
+  drafts, all CRM tools, automation *read* tools (`automations_list`,
+  `automation_runs_list`), outreach tools, calendar reads. Never
+  `message_send`, `meeting_create` or `meeting_cancel`, and no chat tool at
+  all. The scope is enforced by the MCP server against the token the run
+  carries, not by the CLI's flags; a CLI that offers an allowlist flag is
+  additionally given the same list.
 - Web access: the CLI's own web tools stay at the CLI's defaults; we do not
   grant or deny them (Claude's headless default allows read-only search).
 

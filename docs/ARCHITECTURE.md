@@ -31,6 +31,8 @@ Ship **Boxaide** as a single **Node 22+ / TypeScript** process:
 2. **One process** — `/` UI, `/api/*` REST, `/mcp` MCP share the same `MailService`.
 3. **Provider interface** — real IMAP and fixture implement the same contract so tests call shipped code.
 4. **Local by default** — bind `127.0.0.1`; bearer token gates API + MCP.
+5. **A launched agent holds a narrower credential than the app** — see Agent
+   scopes below.
 5. **MIT, zero paid SaaS** for core receive/send.
 
 ## The Next.js front end (`apps/web`)
@@ -85,6 +87,27 @@ A browser page served from anywhere other than the Boxaide process itself cannot
 Residual risk: allowlisting a hostname means anyone who can serve a page there — a preview deployment on a shared team, a hijacked account — can reach the server **if they also hold the token**. Prefer a custom domain over a platform-assigned hostname, and keep the list short.
 
 Implementation: `parseAllowedOrigins` / `isApiOriginAllowed` / `applyCors` / `corsPreflight` in `src/api/routes.ts`, threaded through `AppConfig.allowedOrigins` (`src/config.ts`) into `createApi`, `/mcp` and `/health` (`src/app.ts`). Covered by `test/security-http.test.ts`.
+
+## Agent scopes
+
+Boxaide launches agent CLIs. Each launch gets a credential minted for it, bound
+to a scope, accepted on `/mcp` and nowhere else, and revoked when that launch
+ends. The master bearer is never handed to a spawned process.
+
+| Decision | Why |
+| --- | --- |
+| **The scope is enforced by this server, not by the CLI** | It used to be enforced by whichever per-tool allowlist flag the CLI happened to offer, so a CLI without one could not be launched at all. Moving it here made three more CLIs launchable and made the boundary the same for all of them. |
+| **Both the tool listing and the tool call are filtered** | Hiding a tool is a hint; a model that has seen the name once will call it. `dispatch` is the single choke point every transport reaches. |
+| **A tool no scope names is denied** | The failure to design against is a tool added to the server and forgotten in `scope.ts`. Silence means no. |
+| **`message_send`, `meeting_create`, `meeting_cancel` are outside every scope** | They reach a person the moment they are called. Agents draft and queue; a human sends. |
+| **Scoped tokens are rejected on `/api/*`** | A launched agent has no business reading settings, minting credentials, or starting another agent. Before scopes it held the master bearer and could do all three. |
+| **In memory only** | A credential that outlived the process would be one nobody can see and nobody revokes. A restart has already killed every agent. |
+| **A CLI whose config Boxaide cannot control refuses to launch** | `AgentSpec.preflight`. Antigravity reads MCP servers from a file in the user's home that overrides the one a launch writes, so a stale entry there would decide the credential. It says so and stops instead. |
+
+Implementation: `src/mcp/scope.ts` (policy), `src/mcp/scoped-tokens.ts` (mint,
+resolve, revoke), `mcpAuth` in `src/app.ts` (which credential), `dispatch` in
+`src/mcp/server.ts` (enforcement), `AgentLauncher.launchCtx` (per-launch
+credential). Covered by `test/mcp-scope.test.ts`.
 
 ## MVP surface
 
