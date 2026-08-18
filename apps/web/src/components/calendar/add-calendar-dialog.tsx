@@ -16,6 +16,7 @@ import { Segmented } from "@/components/calendar/segmented";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -474,7 +475,7 @@ export function AddCalendarDialog({
       }}
     >
       <DialogContent
-        className="pane-scroll max-h-[86vh] max-w-[480px] overflow-y-auto"
+        className="max-w-[480px]"
         onKeyDown={(event) => {
           if (event.key !== "Enter" || event.metaKey || event.ctrlKey) return;
           if (!(event.target instanceof HTMLInputElement)) return;
@@ -492,6 +493,7 @@ export function AddCalendarDialog({
             never sends it anywhere else.
           </DialogDescription>
         </DialogHeader>
+        <DialogBody>
 
         {!known ? (
           <p className="flex items-center gap-2 py-2 text-[13px] leading-[18px] text-fg-tertiary">
@@ -765,6 +767,7 @@ export function AddCalendarDialog({
           )}
         </div>
 
+        </DialogBody>
         <DialogFooter>
           <Button type="button" variant="ghost" disabled={busy} onClick={close}>
             Cancel

@@ -1478,11 +1478,23 @@ export type LocalAgent = {
   models: LocalAgentModel[];
 };
 
+/**
+ * How much of the machine a launched agent may reach. Mirrors AgentAccess in
+ * src/agent/sandbox.ts.
+ *
+ * `workspace` confines it to its own directory and its own CLI's files.
+ * `full` is unconfined — it can read anything the user can, including the
+ * credential Boxaide issued it, so it is never the default.
+ */
+export type LocalAgentAccess = "workspace" | "full";
+
 export type RunningLocalAgent = {
   id: string;
   pid: number;
   startedAt: string;
   model: string | null;
+  /** What this launch was actually given, not what was asked for. */
+  access: LocalAgentAccess;
 };
 
 /**
@@ -1520,7 +1532,13 @@ export function startLocalAgent(
   id: string,
   ctx: Ctx,
   model?: string,
+  access?: LocalAgentAccess,
 ): Promise<{ running: RunningLocalAgent }> {
+  const body: { model?: string; access?: LocalAgentAccess } = {};
+  if (model) body.model = model;
+  // Omitted rather than defaulted here: the server decides what an unstated
+  // access level means, and this is not a second place to hold that opinion.
+  if (access) body.access = access;
   return request<{ running: RunningLocalAgent }>(
     `/api/agents/${encodeURIComponent(id)}/start`,
     {
@@ -1528,7 +1546,7 @@ export function startLocalAgent(
       baseUrl: ctx.baseUrl,
       token: ctx.token,
       signal: ctx.signal,
-      body: model ? { model } : undefined,
+      body: Object.keys(body).length > 0 ? body : undefined,
     },
   );
 }

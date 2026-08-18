@@ -26,6 +26,12 @@ import {
 } from "../calendar/tools.js";
 import type { DraftInput } from "../provider/types.js";
 import { MAX_LIST_LIMIT, requireListLimit } from "../input-limits.js";
+import {
+  isScopeProfile,
+  scopeAllows,
+  scopeRefusal,
+  type ScopeProfile,
+} from "./scope.js";
 
 /**
  * The platform tool surface, exported for the mcpb connector snapshot
@@ -372,9 +378,22 @@ export const CHAT_TOOLS = [
 
 const CHAT_TOOL_NAMES = new Set(CHAT_TOOLS.map((t) => t.name));
 
-function toolsFor(channel?: AgentChannel, platform?: Platform) {
+/**
+ * What this caller may see.
+ *
+ * `channel` and `platform` say what this server has to offer; `scope` says
+ * what this caller is allowed to reach. Filtering the listing is a courtesy to
+ * the model — it stops it planning around a tool it cannot call — and never
+ * the enforcement: that is `dispatch`, which every path goes through.
+ */
+function toolsFor(
+  channel?: AgentChannel,
+  platform?: Platform,
+  scope?: ScopeProfile | null,
+) {
   const base = channel ? [...TOOLS, ...CHAT_TOOLS] : [...TOOLS];
-  return platform ? [...base, ...PLATFORM_TOOLS] : base;
+  const all = platform ? [...base, ...PLATFORM_TOOLS] : base;
+  return scope ? all.filter((tool) => scopeAllows(scope, tool.name)) : all;
 }
 
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
@@ -383,6 +402,7 @@ export function createMcpServer(
   mail: MailService,
   channel?: AgentChannel,
   platform?: Platform,
+  scope?: ScopeProfile | null,
 ): Server {
   const server = new Server(
     { name: "boxaide", version: "0.1.0" },
@@ -390,7 +410,7 @@ export function createMcpServer(
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: toolsFor(channel, platform),
+    tools: toolsFor(channel, platform, scope),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -405,6 +425,7 @@ export function createMcpServer(
         channel,
         platform,
         extra?.signal,
+        scope,
       );
       return {
         content: [
@@ -452,7 +473,14 @@ async function dispatch(
   channel?: AgentChannel,
   platform?: Platform,
   signal?: AbortSignal,
+  scope?: ScopeProfile | null,
 ): Promise<unknown> {
+  // The enforcement point, ahead of every other check. Both transports and
+  // every tool family reach the server through here, so a tool added to any
+  // of them is refused by default for a scoped caller until scope.ts names it.
+  if (scope && !scopeAllows(scope, name)) {
+    throw new Error(scopeRefusal(scope, name));
+  }
   if (CHAT_TOOL_NAMES.has(name)) {
     if (!channel) throw new Error(`${name} is not available on this server`);
     return dispatchChat(channel, name, args, signal);
@@ -677,12 +705,28 @@ async function dispatchChat(
   }
 }
 
+/**
+ * The stdio server, for a client the user wired up themselves.
+ *
+ * Unrestricted by default: this process is started by the user's own desktop
+ * client, under their account, and narrowing it would silently break the
+ * connector they already have. BOXAIDE_SCOPE narrows it for anyone who wants
+ * the same boundary a launched agent gets.
+ */
 export async function runStdioMcp(
   mail: MailService,
   channel?: AgentChannel,
   platform?: Platform,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-  const server = createMcpServer(mail, channel, platform);
+  const requested = env.BOXAIDE_SCOPE;
+  if (requested && !isScopeProfile(requested)) {
+    throw new Error(
+      `BOXAIDE_SCOPE must be one of chat, driven, run — got ${requested}`,
+    );
+  }
+  const scope = isScopeProfile(requested) ? requested : null;
+  const server = createMcpServer(mail, channel, platform, scope);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -699,6 +743,7 @@ export async function handleMcpJsonRpc(
   channel?: AgentChannel,
   platform?: Platform,
   signal?: AbortSignal,
+  scope?: ScopeProfile | null,
 ): Promise<unknown> {
   const id = message.id ?? null;
   if (message.method === "initialize") {
@@ -735,7 +780,7 @@ export async function handleMcpJsonRpc(
     return {
       jsonrpc: "2.0",
       id,
-      result: { tools: toolsFor(channel, platform) },
+      result: { tools: toolsFor(channel, platform, scope) },
     };
   }
   if (message.method === "tools/call") {
@@ -766,6 +811,7 @@ export async function handleMcpJsonRpc(
         channel,
         platform,
         signal,
+        scope,
       );
       if (signal?.aborted) return null;
       return {

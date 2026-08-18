@@ -728,7 +728,14 @@ describe("automation tools", () => {
 });
 
 describe("AgentLauncher.runOnce", () => {
-  const CTX = { mcpUrl: "http://127.0.0.1:0/mcp", bearerToken: "t", dataDir: ":memory:" };
+  // See test/agent-sandbox.test.ts — confinement is covered there, and off
+  // macOS a workspace launch is refused rather than silently unconfined.
+  const CTX = {
+    mcpUrl: "http://127.0.0.1:0/mcp",
+    bearerToken: "t",
+    dataDir: ":memory:",
+    access: "full" as const,
+  };
 
   function runSpecs(script: string, onPrompt?: (p: string) => void): {
     specs: AgentSpec[];
@@ -864,7 +871,7 @@ describe("AgentLauncher.runOnce", () => {
   it("sweeps run directories a crash left behind, and spares fresh ones", async () => {
     const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
     const dataDir = tempDir();
-    const runs = join(dataDir, "agent-workdir", "runs");
+    const runs = join(`${dataDir}-agents`, "workdir", "runs");
     mkdirSync(join(runs, "abandoned"), { recursive: true });
     mkdirSync(join(runs, "in-flight-elsewhere"), { recursive: true });
     // Older than the deadline plus its margin: nothing alive can own it.
@@ -1006,7 +1013,7 @@ describe("AgentLauncher.runOnce", () => {
     // sleep is the window this test is about.
     const bin = fakeBinDir(
       "fake-agent",
-      "#!/bin/sh\nif [ \"$1\" = models ]; then sleep 0.4; echo 'Available models:'; echo '- slow-1'; fi\nexit 0\n",
+      "#!/bin/sh\nif [ \"$1\" = models ]; then /bin/sleep 0.4; echo 'Available models:'; echo '- slow-1'; fi\nexit 0\n",
     );
     const specs: AgentSpec[] = [
       {
