@@ -80,7 +80,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
           always on screen and overflowing content slides under it. The dialog's
           own padding moves onto the three bands so the scrollbar and the footer
           rule both span the full width. */}
-      <DialogContent className="flex max-h-[86vh] max-w-[560px] flex-col gap-0 overflow-hidden p-0">
+      <DialogContent className="max-w-[560px] gap-0 p-0">
         <div className="flex shrink-0 flex-col gap-4 p-5 pb-0">
           <DialogHeader>
             <DialogTitle className="title-15">Connect your agent</DialogTitle>

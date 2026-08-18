@@ -16,6 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -301,148 +302,150 @@ function ComposeForm({
               forces the From address to the mailbox you pick.
             </DialogDescription>
           </DialogHeader>
+          <DialogBody>
 
-          {seed.threadingUnavailable && (
-            <p className="text-[12px] leading-4 text-fg-tertiary">
-              This message has no Message-ID, so the reply will start a new
-              thread.
-            </p>
-          )}
+            {seed.threadingUnavailable && (
+              <p className="text-[12px] leading-4 text-fg-tertiary">
+                This message has no Message-ID, so the reply will start a new
+                thread.
+              </p>
+            )}
 
-          <div className="space-y-3">
-            <div className="space-y-1.5">
-              <Label
-                htmlFor="compose-from"
-                className="text-[12px] font-medium text-fg-secondary"
-              >
-                From
-              </Label>
-              <Select value={account} onValueChange={setAccount}>
-                <SelectTrigger id="compose-from" className="h-8 w-full">
-                  <SelectValue placeholder="Pick a mailbox" />
-                </SelectTrigger>
-                <SelectContent>
-                  {list.map((entry) => (
-                    <SelectItem key={entry.id} value={entry.alias}>
-                      <span className="flex items-center gap-2">
-                        {entry.alias}
-                        <span className="font-mono text-[11px] text-fg-tertiary">
-                          {entry.email}
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label
+                  htmlFor="compose-from"
+                  className="text-[12px] font-medium text-fg-secondary"
+                >
+                  From
+                </Label>
+                <Select value={account} onValueChange={setAccount}>
+                  <SelectTrigger id="compose-from" className="h-8 w-full">
+                    <SelectValue placeholder="Pick a mailbox" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {list.map((entry) => (
+                      <SelectItem key={entry.id} value={entry.alias}>
+                        <span className="flex items-center gap-2">
+                          {entry.alias}
+                          <span className="font-mono text-[11px] text-fg-tertiary">
+                            {entry.email}
+                          </span>
                         </span>
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <Field id="compose-to" label="To">
+                <Input
+                  id="compose-to"
+                  ref={toRef}
+                  value={to}
+                  className="font-mono"
+                  placeholder="jane@example.com, sam@example.com"
+                  aria-invalid={invalid?.field === "to" ? "true" : undefined}
+                  aria-describedby={
+                    invalid?.field === "to" ? "compose-error" : undefined
+                  }
+                  onChange={(event) => {
+                    setInvalid(null);
+                    setTo(event.target.value);
+                  }}
+                />
+              </Field>
+
+              <button
+                type="button"
+                aria-expanded={showCc}
+                onClick={() => setShowCc((value) => !value)}
+                className="text-[12px] text-fg-tertiary hover:text-fg-secondary"
+              >
+                Cc / Bcc
+              </button>
+
+              {showCc && (
+                <div className="grid grid-cols-2 gap-3">
+                  <Field id="compose-cc" label="Cc">
+                    <Input
+                      id="compose-cc"
+                      value={cc}
+                      className="font-mono"
+                      onChange={(event) => setCc(event.target.value)}
+                    />
+                  </Field>
+                  <Field id="compose-bcc" label="Bcc">
+                    <Input
+                      id="compose-bcc"
+                      value={bcc}
+                      className="font-mono"
+                      onChange={(event) => setBcc(event.target.value)}
+                    />
+                  </Field>
+                </div>
+              )}
+
+              <Field id="compose-subject" label="Subject">
+                <Input
+                  id="compose-subject"
+                  ref={subjectRef}
+                  value={subject}
+                  aria-invalid={invalid?.field === "subject" ? "true" : undefined}
+                  aria-describedby={
+                    invalid?.field === "subject" ? "compose-error" : undefined
+                  }
+                  onChange={(event) => {
+                    setInvalid(null);
+                    setSubject(event.target.value);
+                  }}
+                />
+              </Field>
+
+              <Field id="compose-body" label="Message">
+                <Textarea
+                  id="compose-body"
+                  ref={bodyRef}
+                  rows={12}
+                  value={text}
+                  readOnly={send.isPending}
+                  aria-invalid={invalid?.field === "text" ? "true" : undefined}
+                  aria-describedby={
+                    invalid?.field === "text" ? "compose-error" : undefined
+                  }
+                  onChange={(event) => {
+                    setInvalid(null);
+                    setText(event.target.value);
+                  }}
+                  className="max-h-[24rem] min-h-[15rem] resize-y"
+                />
+              </Field>
             </div>
 
-            <Field id="compose-to" label="To">
-              <Input
-                id="compose-to"
-                ref={toRef}
-                value={to}
-                className="font-mono"
-                placeholder="jane@example.com, sam@example.com"
-                aria-invalid={invalid?.field === "to" ? "true" : undefined}
-                aria-describedby={
-                  invalid?.field === "to" ? "compose-error" : undefined
-                }
-                onChange={(event) => {
-                  setInvalid(null);
-                  setTo(event.target.value);
-                }}
-              />
-            </Field>
+            {invalid && (
+              <p
+                id="compose-error"
+                role="alert"
+                className="text-[12px] leading-4 text-danger"
+              >
+                {invalid.message}
+              </p>
+            )}
 
-            <button
-              type="button"
-              aria-expanded={showCc}
-              onClick={() => setShowCc((value) => !value)}
-              className="text-[12px] text-fg-tertiary hover:text-fg-secondary"
-            >
-              Cc / Bcc
-            </button>
-
-            {showCc && (
-              <div className="grid grid-cols-2 gap-3">
-                <Field id="compose-cc" label="Cc">
-                  <Input
-                    id="compose-cc"
-                    value={cc}
-                    className="font-mono"
-                    onChange={(event) => setCc(event.target.value)}
-                  />
-                </Field>
-                <Field id="compose-bcc" label="Bcc">
-                  <Input
-                    id="compose-bcc"
-                    value={bcc}
-                    className="font-mono"
-                    onChange={(event) => setBcc(event.target.value)}
-                  />
-                </Field>
+            {send.isError && (
+              <div role="alert">
+                <p className="text-[12px] leading-4 text-danger">
+                  {friendlyError(
+                    send.error instanceof Error ? send.error.message : send.error,
+                  )}
+                </p>
+                <TechnicalDetails
+                  raw={send.error instanceof Error ? send.error.message : send.error}
+                />
               </div>
             )}
 
-            <Field id="compose-subject" label="Subject">
-              <Input
-                id="compose-subject"
-                ref={subjectRef}
-                value={subject}
-                aria-invalid={invalid?.field === "subject" ? "true" : undefined}
-                aria-describedby={
-                  invalid?.field === "subject" ? "compose-error" : undefined
-                }
-                onChange={(event) => {
-                  setInvalid(null);
-                  setSubject(event.target.value);
-                }}
-              />
-            </Field>
-
-            <Field id="compose-body" label="Message">
-              <Textarea
-                id="compose-body"
-                ref={bodyRef}
-                rows={12}
-                value={text}
-                readOnly={send.isPending}
-                aria-invalid={invalid?.field === "text" ? "true" : undefined}
-                aria-describedby={
-                  invalid?.field === "text" ? "compose-error" : undefined
-                }
-                onChange={(event) => {
-                  setInvalid(null);
-                  setText(event.target.value);
-                }}
-                className="max-h-[24rem] min-h-[15rem] resize-y"
-              />
-            </Field>
-          </div>
-
-          {invalid && (
-            <p
-              id="compose-error"
-              role="alert"
-              className="text-[12px] leading-4 text-danger"
-            >
-              {invalid.message}
-            </p>
-          )}
-
-          {send.isError && (
-            <div role="alert">
-              <p className="text-[12px] leading-4 text-danger">
-                {friendlyError(
-                  send.error instanceof Error ? send.error.message : send.error,
-                )}
-              </p>
-              <TechnicalDetails
-                raw={send.error instanceof Error ? send.error.message : send.error}
-              />
-            </div>
-          )}
-
+          </DialogBody>
           <DialogFooter className="items-center sm:justify-between">
             <span className="truncate font-mono text-[11px] text-fg-tertiary">
               {chosen

@@ -59,11 +59,17 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          // `[&>*]:min-w-0` is load-bearing, not tidying: a grid item defaults
+          // `[&>*]:min-w-0` is load-bearing, not tidying: a flex item defaults
           // to min-width:auto, so one <pre> of unwrappable configuration makes
           // every sibling in the dialog wider than the dialog and the text
           // runs out past its own border.
-          "fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-[var(--radius-lg)] border border-border-subtle bg-surface-2 p-5 shadow-[var(--shadow-dialog)] duration-[var(--dur-enter)] outline-none [&>*]:min-w-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
+          //
+          // The height cap is load-bearing too. A dialog is centred and fixed,
+          // so a tall one grows past both edges of the window and the page
+          // cannot scroll to reach it — the buttons at the bottom simply are
+          // not reachable. Capping here and scrolling inside <DialogBody>
+          // keeps the header and the footer on screen at every window size.
+          "fixed top-[50%] left-[50%] z-50 flex max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] flex-col gap-4 overflow-hidden rounded-[var(--radius-lg)] border border-border-subtle bg-surface-2 p-5 shadow-[var(--shadow-dialog)] duration-[var(--dur-enter)] outline-none [&>*]:min-w-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
           className
         )}
         {...props}
@@ -83,11 +89,34 @@ function DialogContent({
   )
 }
 
+/**
+ * The one part of a dialog that scrolls. Everything outside it — the title, the
+ * buttons — stays put, so the primary action is never below the fold.
+ *
+ * The negative inline margin pulls the scrollbar out to the dialog edge and
+ * gives focus rings room to draw without being clipped by the scroll box.
+ */
+function DialogBody({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="dialog-body"
+      className={cn(
+        "pane-scroll -mx-5 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 [&>*]:min-w-0",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
 function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-header"
-      className={cn("flex flex-col gap-2 text-center sm:text-left", className)}
+      className={cn(
+        "flex shrink-0 flex-col gap-2 text-center sm:text-left",
+        className
+      )}
       {...props}
     />
   )
@@ -105,7 +134,11 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end",
+        // The hairline appears only under a scrolling body, and runs the full
+        // width of the dialog, so content visibly passes beneath the buttons
+        // instead of looking cut off.
+        "flex shrink-0 flex-col-reverse gap-2 sm:flex-row sm:justify-end",
+        "[[data-slot=dialog-body]+&]:-mx-5 [[data-slot=dialog-body]+&]:border-t [[data-slot=dialog-body]+&]:border-border-subtle [[data-slot=dialog-body]+&]:px-5 [[data-slot=dialog-body]+&]:pt-4",
         className
       )}
       {...props}
@@ -148,6 +181,7 @@ function DialogDescription({
 
 export {
   Dialog,
+  DialogBody,
   DialogClose,
   DialogContent,
   DialogDescription,
