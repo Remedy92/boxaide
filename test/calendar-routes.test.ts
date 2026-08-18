@@ -191,6 +191,34 @@ describe("calendar routes", () => {
     return meeting.id;
   }
 
+  /* Removing forgets Boxaide's own record. It sends nothing and touches no
+     calendar, which is exactly why it is refused while a meeting is still
+     scheduled: the row is the only handle the cancel path has on the invite
+     that is already out. */
+  describe("removing a meeting", () => {
+    it("refuses while the meeting is still scheduled", async () => {
+      const id = meetingWithOneReply();
+      const res = await app.request(`/api/calendar/meetings/${id}`, { method: "DELETE" });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("Cancel this meeting");
+      expect(calendarStore.getMeeting(id)).not.toBeNull();
+    });
+
+    it("removes a cancelled meeting and its recorded replies", async () => {
+      const id = meetingWithOneReply();
+      calendarStore.markCancelled(id);
+      const res = await app.request(`/api/calendar/meetings/${id}`, { method: "DELETE" });
+      expect(res.status).toBe(200);
+      expect((await res.json()) as { removed: boolean }).toEqual({ removed: true });
+      expect(calendarStore.getMeeting(id)).toBeNull();
+    });
+
+    it("answers 404 for a meeting that is already gone", async () => {
+      const res = await app.request("/api/calendar/meetings/nope", { method: "DELETE" });
+      expect(res.status).toBe(404);
+    });
+  });
+
   it("lists meetings with a status per invited guest", async () => {
     meetingWithOneReply();
     const res = await app.request("/api/calendar/meetings");

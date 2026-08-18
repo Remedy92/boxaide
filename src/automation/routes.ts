@@ -26,6 +26,7 @@ export function registerAutomationRoutes(app: Hono, platform: Platform): void {
       cron?: string;
       prompt?: string;
       agentId?: string | null;
+      model?: string | null;
       enabled?: boolean;
     };
     try {
@@ -42,6 +43,7 @@ export function registerAutomationRoutes(app: Hono, platform: Platform): void {
         cron: body.cron,
         prompt: body.prompt,
         agentId: body.agentId ?? null,
+        model: body.model ?? null,
         enabled: body.enabled,
       });
       return c.json({ automation }, 201);
@@ -67,6 +69,14 @@ export function registerAutomationRoutes(app: Hono, platform: Platform): void {
             ? undefined
             : typeof body.agentId === "string"
               ? body.agentId
+              : null,
+        // Same three-way read as agentId: absent leaves it alone, a string
+        // sets it, and an explicit null is how a caller says "CLI default".
+        model:
+          body.model === undefined
+            ? undefined
+            : typeof body.model === "string"
+              ? body.model
               : null,
         enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
       });

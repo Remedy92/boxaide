@@ -1,6 +1,6 @@
 {
   "name": "boxaide-desktop",
-  "version": "0.2.17",
+  "version": "0.2.20",
   "private": true,
   "description": "Desktop shell for Boxaide — runs the Boxaide server in-process and opens the UI in a window",
   "author": "Boxaide contributors",
@@ -24,9 +24,11 @@
     "cron-parser": "^5.9.0",
     "electron-updater": "^6.6.2",
     "hono": "^4.13.1",
+    "ical.js": "^2.2.1",
     "imapflow": "^1.6.6",
     "mailparser": "^3.9.15",
     "nodemailer": "^9.0.5",
+    "tsdav": "^2.3.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

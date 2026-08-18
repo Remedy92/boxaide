@@ -76,7 +76,8 @@ async function harness(script: AgentScript) {
   };
 
   const launcher = {
-    busy: () => false,
+    runCapacity: () => 1,
+    runLimit: () => 1,
     killRun: () => {},
     runOnce: async (opts: { prompt: string }): Promise<OneShotResult> => {
       let result: OneShotResult;
@@ -117,6 +118,8 @@ async function runAutomation(h: H, name: string, prompt: string) {
     now: new Date(Date.now() - 120_000),
   });
   await h.platform.scheduler.tick(new Date());
+  // tick() starts runs and returns; these tests assert on finished ones.
+  await h.platform.scheduler.idle();
   return automation;
 }
 
@@ -272,10 +275,13 @@ describe("Monday outreach automation", () => {
     });
 
     await h.platform.scheduler.tick(new Date());
+    await h.platform.scheduler.idle();
     expect(h.runs).toHaveLength(1);
 
     // And not again on the following tick: the run moved the schedule forward.
     await h.platform.scheduler.tick(new Date());
+    await h.platform.scheduler.idle();
+    await h.platform.scheduler.idle();
     expect(h.runs).toHaveLength(1);
     expect(h.platform.automationStore.get(automation.id)?.lastRunAt).not.toBe(null);
   });

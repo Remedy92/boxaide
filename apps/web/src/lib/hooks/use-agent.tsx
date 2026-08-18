@@ -5,6 +5,7 @@ import {
   archiveAgentChat,
   clearAgentConversation,
   createAgentChat,
+  decideAgentApproval,
   deleteAgentChat,
   getAgentState,
   listAgentChats,
@@ -12,6 +13,7 @@ import {
   selectAgentChat,
   sendAgentMessage,
   streamAgent,
+  type AgentApproval,
 } from "@/lib/api/endpoints";
 import { ApiError } from "@/lib/api/client";
 import { friendlyError } from "@/lib/api/errors";
@@ -110,6 +112,14 @@ export type AgentConversation = {
   renameChat: (id: string, title: string) => Promise<void>;
   archiveChat: (id: string) => Promise<void>;
   removeChat: (id: string) => Promise<void>;
+  /**
+   * Actions an agent asked for and nobody has answered yet. Server-wide, not
+   * per chat: a scheduled run belongs to no conversation, and a request the
+   * user cannot see is a send that never happens.
+   */
+  approvals: AgentApproval[];
+  /** Carries the action out, or drops it. Rejects with the reason it failed. */
+  decideApproval: (id: string, decision: "approve" | "deny") => Promise<void>;
 };
 
 /**
@@ -195,6 +205,7 @@ function AgentSession({
   const [chats, setChats] = React.useState<AgentChat[]>([]);
   const [chat, setChat] = React.useState<AgentChat | null>(null);
   const [storage, setStorage] = React.useState<AgentChatStorage>(NO_STORAGE);
+  const [approvals, setApprovals] = React.useState<AgentApproval[]>([]);
   const claimed = React.useMemo(() => {
     const seqs = new Set<number>(claimedIn(turns, presence));
     return seqs;
@@ -225,6 +236,7 @@ function AgentSession({
       setChat(state.chat ?? null);
       setTurns(state.turns);
       setPresence(normalise(state.presence));
+      setApprovals(state.approvals ?? []);
     },
     [ctx],
   );
@@ -253,6 +265,7 @@ function AgentSession({
           setChat(state.chat ?? null);
           setTurns((prev) => merge(prev, state.turns));
           setPresence(normalise(state.presence));
+          setApprovals(state.approvals ?? []);
           setConnection("live");
           attempt = 0;
           // Not awaited: the conversation must paint whether or not the rail's
@@ -279,6 +292,7 @@ function AgentSession({
                 setTurns((prev) => merge(prev, [turn]));
               },
               presence: (next) => setPresence(normalise(next)),
+              approvals: (pending) => setApprovals(pending),
               chats: (list) => {
                 setChats(list.chats);
                 setStorage(list.storage);
@@ -440,6 +454,30 @@ function AgentSession({
     [ctx, refresh, withChats],
   );
 
+  /**
+   * The answer is applied from the route's own reply rather than waiting for
+   * the stream frame that follows it. The card has to leave the screen on the
+   * click that dismissed it; a second click on a card still painted would come
+   * back 409, which is correct and still reads as a bug.
+   */
+  const decideApproval = React.useCallback(
+    async (id: string, decision: "approve" | "deny") => {
+      setApprovals((prev) => prev.filter((row) => row.id !== id));
+      try {
+        const result = await decideAgentApproval(id, decision, ctx);
+        setApprovals(result.pending);
+      } catch (err) {
+        // Put it back: nothing was sent, and a card that vanished on a failed
+        // approval would read as one that went through.
+        const state = await getAgentState(ctx, undefined, shown.current ?? undefined)
+          .catch(() => null);
+        if (state) setApprovals(state.approvals ?? []);
+        throw err;
+      }
+    },
+    [ctx],
+  );
+
   const value = React.useMemo<AgentConversation>(
     () => ({
       turns,
@@ -458,6 +496,8 @@ function AgentSession({
       renameChat,
       archiveChat,
       removeChat,
+      approvals,
+      decideApproval,
     }),
     [
       turns,
@@ -476,6 +516,8 @@ function AgentSession({
       renameChat,
       archiveChat,
       removeChat,
+      approvals,
+      decideApproval,
     ],
   );
 

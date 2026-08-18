@@ -11,6 +11,9 @@ import type Database from "better-sqlite3";
 import { decryptSecret, encryptSecret } from "../crypto/secrets.js";
 import type { CalendarAccountMeta, CalendarConfig } from "./types.js";
 
+/** How long a cancelled meeting is kept before the list sweeps it. */
+const CANCELLED_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
 /** Where a response came from. Email replies outrank provider state — see recordRsvp. */
 export type RsvpSource = "email" | "provider";
 
@@ -175,6 +178,15 @@ export class CalendarStore {
     if (!columns.has("time_zone")) {
       this.db.exec(`ALTER TABLE calendar_meetings ADD COLUMN time_zone TEXT`);
     }
+    // When the cancellation happened, which is what the 30-day sweep counts
+    // from. Deliberately not `start`: a meeting held last year and cancelled
+    // this morning would be swept the moment it was cancelled, taking the row
+    // off the screen while the person was still looking at it. Rows cancelled
+    // before this migration have no timestamp and are stamped on first sweep,
+    // so their 30 days begin now rather than silently in the past.
+    if (!columns.has("cancelled_at")) {
+      this.db.exec(`ALTER TABLE calendar_meetings ADD COLUMN cancelled_at TEXT`);
+    }
   }
 
   /**
@@ -319,6 +331,7 @@ export class CalendarStore {
   }
 
   listMeetings(opts: { limit?: number } = {}): StoredMeeting[] {
+    this.purgeCancelled();
     const rows = this.db
       .prepare(`SELECT * FROM calendar_meetings ORDER BY start DESC LIMIT ?`)
       .all(Math.min(opts.limit ?? 50, 200)) as MeetingRow[];
@@ -327,10 +340,47 @@ export class CalendarStore {
     return rows.map((r) => this.meeting(r, byMeeting.get(r.id) ?? []));
   }
 
-  markCancelled(id: string): void {
+  markCancelled(id: string, at = new Date().toISOString()): void {
     this.db
-      .prepare(`UPDATE calendar_meetings SET status = 'cancelled' WHERE id = ?`)
-      .run(id);
+      .prepare(
+        `UPDATE calendar_meetings SET status = 'cancelled', cancelled_at = ? WHERE id = ?`,
+      )
+      .run(at, id);
+  }
+
+  /**
+   * Drop cancelled meetings that have been cancelled for more than 30 days.
+   *
+   * A cancelled meeting is kept so the invite that went out, and any replies to
+   * it, stay on record while anyone might still ask about them. After a month
+   * nobody is asking, and a permanent list of things that are not happening is
+   * just clutter. Scheduled meetings are never swept, however old — a row still
+   * marked scheduled is the only handle the cancel path has on its UID and its
+   * attendees.
+   *
+   * Called from listMeetings rather than a timer: it is one indexed DELETE, it
+   * only matters when somebody is looking at the list, and a sweep that runs on
+   * a schedule needs a scheduler that this store deliberately does not own.
+   */
+  purgeCancelled(now = new Date()): number {
+    const cutoff = new Date(now.getTime() - CANCELLED_TTL_MS).toISOString();
+    // Rows cancelled before cancelled_at existed: stamp them now so they are
+    // swept 30 days from today. Dropping them outright would delete history
+    // this migration never recorded the age of.
+    this.db
+      .prepare(
+        `UPDATE calendar_meetings SET cancelled_at = ?
+         WHERE status = 'cancelled' AND cancelled_at IS NULL`,
+      )
+      .run(now.toISOString());
+    const doomed = this.db
+      .prepare(
+        `SELECT id FROM calendar_meetings WHERE status = 'cancelled' AND cancelled_at < ?`,
+      )
+      .all(cutoff) as Array<{ id: string }>;
+    let removed = 0;
+    for (const row of doomed) if (this.deleteMeeting(row.id)) removed += 1;
+    return removed;
   }
 
   /** Drops the meeting and every response recorded against it. */

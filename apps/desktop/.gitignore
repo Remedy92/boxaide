@@ -5,3 +5,8 @@ server/
 
 # electron-builder output
 release/
+
+# Compiled by `npm run desktop` from native/calendar/main.swift.
+build/boxaide-calendar
+build/boxaide-calendar.arm64
+build/boxaide-calendar.x64

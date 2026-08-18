@@ -95,7 +95,6 @@ function LocalAgentList() {
   const stop = useStopLocalAgent();
   // Picked in the composer's model select, stored in settings.
   const { agentModel } = useSettings();
-
   const rows = (agents.data?.agents ?? []).filter((a) => a.available);
   if (rows.length === 0) return null;
   const running = agents.data?.running ?? null;
@@ -130,6 +129,18 @@ function LocalAgentList() {
               {agent.label}
               {crashed && <span className="ml-1.5 text-[11px] text-danger">exited</span>}
             </span>
+            {/* Confinement is not a choice offered here any more — it is on.
+                This is the exception: the machine could not apply it, or the
+                install turned it off, and either way the reason is worth a
+                line rather than a silence. */}
+            {isRunning && running?.accessNotice && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="text-[11px] text-warning">full access</span>
+                </TooltipTrigger>
+                <TooltipContent>{running.accessNotice}</TooltipContent>
+              </Tooltip>
+            )}
             {agent.supported ? (
               <Button
                 type="button"

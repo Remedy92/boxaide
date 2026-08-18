@@ -57,6 +57,8 @@ export function createPlatform(opts: {
   masterKey: Buffer;
   mail: MailService;
   launcher: AgentLauncher;
+  /** Path to the macOS calendar helper, when the shell knows one. */
+  calendarHelperPath?: string;
 }): Platform {
   const crmStore = new CrmStore(opts.db, opts.masterKey);
   const crmService = new CrmService(crmStore, opts.mail);
@@ -67,7 +69,12 @@ export function createPlatform(opts: {
   // Calendar is read-on-demand: no scheduler, no sync loop. It sends invites
   // through the same MailService, so the suppression guard below covers it.
   const calendarStore = new CalendarStore(opts.db, opts.masterKey);
-  const calendarService = new CalendarService(calendarStore, opts.mail);
+  const calendarService = new CalendarService(
+    calendarStore,
+    opts.mail,
+    undefined,
+    opts.calendarHelperPath,
+  );
 
   // Suppression is enforced at the send chokepoint for every caller (spec
   // invariant 2). The guard lives here, not in MailService, so mail stays

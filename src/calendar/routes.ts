@@ -13,12 +13,25 @@ import { randomBytes } from "node:crypto";
 import type { Hono } from "hono";
 import { isLoopbackBindAddress } from "../api/routes.js";
 import type { Platform } from "../platform.js";
+import { OverlapError } from "./coverage.js";
 import { googleAuthUrl } from "./google.js";
 import { parseAgendaRange } from "./range.js";
 import { resolveTimeZone } from "./timezone.js";
-import type { CalDavConfig } from "./types.js";
+import type { CalDavConfig, LocalConfig } from "./types.js";
 
-export type CalendarRouteConfig = { host: string; port: number };
+export type CalendarRouteConfig = {
+  host: string;
+  port: number;
+  /**
+   * The app's own Google OAuth client, when this build ships one
+   * (BOXAIDE_GOOGLE_CLIENT_ID / _SECRET). Present means a user connects Google
+   * Calendar by pressing one button; absent means today's path, where they
+   * create a client in Google Cloud and paste the pair in. Both are supported
+   * on purpose: a self-hoster who wants their own client keeps it.
+   */
+  googleClientId?: string;
+  googleClientSecret?: string;
+};
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 
@@ -170,12 +183,112 @@ export function registerCalendarRoutes(
   // to paste into their Google Cloud OAuth client. Google rejects the exchange
   // on a byte-level mismatch, and it is derived here rather than guessed by
   // the client, which cannot know the bind host.
-  app.get("/api/calendar/accounts", (c) =>
+  //
+  // `local` rides along for the same reason: whether the macOS path can be
+  // offered is a property of THIS machine, not of anything stored, and the
+  // page that lists accounts is the page that offers connecting one. The probe
+  // behind it never raises the system permission dialog.
+  //
+  // `googleBuiltIn` says which of the two Google paths this server can offer,
+  // so the UI shows either one button or the five-step client form — it cannot
+  // work that out from anything else it can see.
+  app.get("/api/calendar/accounts", async (c) =>
     c.json({
       accounts: store.listAccounts(),
       googleRedirectUri: googleRedirectUri(config),
+      googleBuiltIn: Boolean(config.googleClientId && config.googleClientSecret),
+      local: await service.localStatus(),
     }),
   );
+
+  /**
+   * Mailboxes that could become a calendar with nothing further to type. Cheap
+   * and read-only: it decrypts stored credentials to read their IMAP host, and
+   * makes no network call. Secrets never leave the server — the response
+   * carries the address, the server URL and a free name, nothing else.
+   */
+  app.get("/api/calendar/mailboxes", async (c) =>
+    c.json({ mailboxes: await service.reusableMailboxes() }),
+  );
+
+  /**
+   * Connect one of them. The mailbox is named in the path; the only body field
+   * is an optional name, because there is nothing else left to supply.
+   */
+  app.post("/api/calendar/mailboxes/:id", async (c) => {
+    const body =
+      (await readJson<{ alias?: string; confirmOverlap?: boolean }>(c)) ?? {};
+    try {
+      const account = await service.connectFromMailbox({
+        mailAccountId: c.req.param("id"),
+        alias: body.alias,
+        confirmOverlap: body.confirmOverlap === true,
+      });
+      return c.json({ account }, 201);
+    } catch (err) {
+      // 409, and `needsConfirm`, because the same request with confirmOverlap
+      // set is expected to succeed — the client has one thing to ask and then
+      // one thing to resend, and nothing else about the request was wrong.
+      if (err instanceof OverlapError) {
+        return c.json({ error: errMessage(err), needsConfirm: true }, 409);
+      }
+      return c.json({ error: errMessage(err) }, 400);
+    }
+  });
+
+  /**
+   * Connect the calendars macOS already holds. No body is required and no
+   * credentials exist to send — the whole handshake is a system permission.
+   *
+   * testAccount is what raises that permission dialog on a first connect, and
+   * it blocks while the dialog is up. A refusal comes back as the sentence the
+   * provider wrote for it, never as a bare "connection failed".
+   */
+  app.post("/api/calendar/local", async (c) => {
+    const body =
+      (await readJson<{ alias?: string; confirmOverlap?: boolean }>(c)) ?? {};
+    // One grant, one bag of calendars, one account. A second would return the
+    // same events twice into every agenda.
+    if (store.listAccounts().some((a) => a.provider === "local")) {
+      return c.json(
+        { error: "The calendars on this Mac are already connected." },
+        400,
+      );
+    }
+    // The other direction of the duplicate warning: the Mac is being connected
+    // while accounts it may already hold are connected too. Asked BEFORE
+    // testAccount, so the question is not buried under the system permission
+    // dialog — and skipped once the person has answered it.
+    if (body.confirmOverlap !== true) {
+      const overlaps = await service.macConnectOverlaps();
+      if (overlaps.length) {
+        const names = overlaps.map((entry) => entry.alias).join(", ");
+        return c.json(
+          {
+            error:
+              `This Mac probably already holds ${names}. Connecting it as well would ` +
+              "show those events twice in your agenda. Either remove " +
+              `${overlaps.length > 1 ? "those calendars" : "that calendar"} first, or ` +
+              "add this Mac anyway if they are different accounts.",
+            needsConfirm: true,
+          },
+          409,
+        );
+      }
+    }
+    const cfg: LocalConfig = { kind: "local" };
+    const result = await service.testAccount(cfg);
+    if (!result.ok) return c.json({ error: result.error ?? "connection failed" }, 400);
+    const alias = (body.alias ?? "").trim() || "This Mac";
+    try {
+      // No email: this account is every account macOS holds, so naming one of
+      // them would be a lie. Invites are still sent from a mail account.
+      const account = store.addAccount({ alias, email: "", config: cfg });
+      return c.json({ account }, 201);
+    } catch (err) {
+      return c.json({ error: errMessage(err) }, 400);
+    }
+  });
 
   app.post("/api/calendar/accounts", async (c) => {
     const body = await readJson<{
@@ -230,11 +343,24 @@ export function registerCalendarRoutes(
       clientSecret?: string;
     }>(c);
     if (!body) return c.json({ error: "body must be JSON" }, 400);
+    // Optional: with a built-in client there is no form to put a name field
+    // on, and the callback falls back to the Google address it just learned.
     const alias = (body.alias ?? "").trim();
-    const clientId = (body.clientId ?? "").trim();
-    const clientSecret = (body.clientSecret ?? "").trim();
-    if (!alias || !clientId || !clientSecret) {
-      return c.json({ error: "alias, clientId and clientSecret are required" }, 400);
+    // The built-in client is the fallback, not the override: a self-hoster who
+    // sends their own pair still gets theirs. Whichever wins is stored with
+    // the pending state, so the callback and the stored account never learn
+    // which of the two it was.
+    //
+    // The pair is atomic. Falling back field by field would marry one half of
+    // a typed client to the other half of the built-in one, and Google answers
+    // that with a bare invalid_client that names neither.
+    const typedId = (body.clientId ?? "").trim();
+    const typedSecret = (body.clientSecret ?? "").trim();
+    const both = typedId && typedSecret;
+    const clientId = both ? typedId : (config.googleClientId ?? "");
+    const clientSecret = both ? typedSecret : (config.googleClientSecret ?? "");
+    if (!clientId || !clientSecret) {
+      return c.json({ error: "clientId and clientSecret are required" }, 400);
     }
     const state = startGoogleOAuth({ alias, clientId, clientSecret });
     return c.json({
@@ -350,6 +476,27 @@ export function registerCalendarRoutes(
     } catch (err) {
       return c.json({ error: errMessage(err) }, 400);
     }
+  });
+
+  /**
+   * Forget a cancelled meeting: drops Boxaide's own record and the responses
+   * recorded against it. Nothing is sent and no calendar is touched — the event
+   * itself went when the meeting was cancelled.
+   *
+   * Cancelled only. A scheduled meeting's row is the sole handle the cancel
+   * path has on its UID, its attendees and its sending mailbox, and deleting it
+   * would strand an invite that is out in the world with no way to withdraw it.
+   */
+  app.delete("/api/calendar/meetings/:id", (c) => {
+    const meeting = store.getMeeting(c.req.param("id"));
+    if (!meeting) return c.json({ removed: false }, 404);
+    if (meeting.status !== "cancelled") {
+      return c.json(
+        { error: "Cancel this meeting before removing it, so its guests are told." },
+        400,
+      );
+    }
+    return c.json({ removed: store.deleteMeeting(meeting.id) });
   });
 
   app.get("/api/calendar/agenda", async (c) => {

@@ -8,5 +8,19 @@
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
+    <!-- Required, and NOT only for sandboxed apps — that assumption is what
+         made the calendar helper fail silently. The hardened runtime gates
+         calendar access on this entitlement too, so without it macOS refuses
+         kTCCServiceCalendar at the signature level: no permission dialog is
+         ever shown, the status stays notDetermined, System Settings lists no
+         Boxaide row to switch on, and the helper reports a bare denial.
+
+         It belongs to the APP, not the helper. The helper is a plain
+         executable with no bundle of its own, so macOS charges its request to
+         the responsible process — Boxaide.app — and reads the entitlement and
+         the usage strings from there. Signing only the helper with it changes
+         nothing; that was measured, not assumed. -->
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
   </dict>
 </plist>

@@ -1,7 +1,17 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, Download, ExternalLink, Eye, EyeOff, Plug } from "lucide-react";
+import {
+  ArrowLeft,
+  Download,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  Laptop,
+  Mail,
+  Plug,
+  Sparkle,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   BrandGlyph,
@@ -12,7 +22,7 @@ import {
 } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ApiError, friendlyError } from "@/lib/api/errors";
+import { ApiError, friendlyError, serverSentence } from "@/lib/api/errors";
 import { getApiHealth, getHealth, getLocalBootstrap } from "@/lib/api/endpoints";
 import {
   DEFAULT_IMAP_PORT,
@@ -26,9 +36,20 @@ import {
   stripPasswordSpaces,
   type ProviderPreset,
 } from "@/lib/constants";
+import { googleCallbackUri } from "@/components/calendar/add-calendar-dialog";
+import { OptionButton } from "@/components/calendar/option-button";
 import { useCreateAccount } from "@/lib/hooks/use-account-mutations";
 import { useAccounts } from "@/lib/hooks/use-accounts";
+import { useAgent } from "@/lib/hooks/use-agent";
 import { useApp } from "@/lib/hooks/use-app-state";
+import {
+  localCalendarOffer,
+  useCalendarAccounts,
+  useConnectLocalCalendar,
+  useConnectMailboxCalendar,
+  useReusableMailboxes,
+  useStartGoogleCalendar,
+} from "@/lib/hooks/use-calendar";
 import { useSettings, useUpdateSettings } from "@/lib/hooks/use-settings";
 import { hostLabel, isValidBaseUrl, normalizeBaseUrl } from "@/lib/settings";
 import { cn } from "@/lib/utils";
@@ -37,21 +58,22 @@ import { takeDesktopBootstrapCapability } from "@/lib/desktop-bootstrap";
 /**
  * First run, for someone who has never configured a mail client.
  *
- * Three steps, in the order the product actually needs them: reach the server,
- * add one mailbox, done. It is a full-screen surface rather than a dialog
+ * Four steps, in the order the product actually needs them: reach the server,
+ * add one mailbox, add the calendar behind it, done. It is a full-screen surface rather than a dialog
  * because there is nothing behind it worth showing — with no token there is no
  * mail to look at.
  *
- * It writes exactly two things: the server URL and token into localStorage
+ * It writes exactly three things: the server URL and token into localStorage
  * (through useUpdateSettings, which purges the query cache when either
- * changes), and one mailbox through POST /api/accounts.
+ * changes), one mailbox through POST /api/accounts, and — only if asked — one
+ * calendar through the same one-click routes the add-calendar dialog uses.
  *
  * /api/local-bootstrap is called only when the desktop shell supplied a
  * one-time capability in the URL fragment. Served in a normal browser, a
  * human pastes the token even when the page itself came from loopback.
  */
 
-type StepId = 1 | 2 | 3 | 4;
+type StepId = 1 | 2 | 3 | 4 | 5;
 
 type Probe =
   | { status: "idle" }
@@ -82,7 +104,7 @@ export function SetupWizard() {
             Boxaide
           </span>
           <span className="ml-auto flex items-center gap-1.5">
-            {([1, 2, 3, 4] as const).map((index) => (
+            {([1, 2, 3, 4, 5] as const).map((index) => (
               <span
                 key={index}
                 aria-hidden="true"
@@ -92,7 +114,7 @@ export function SetupWizard() {
                 )}
               />
             ))}
-            <span className="sr-only">Step {step} of 4</span>
+            <span className="sr-only">Step {step} of 5</span>
           </span>
         </header>
 
@@ -111,16 +133,19 @@ export function SetupWizard() {
             />
           )}
           {step === 3 && (
+            <CalendarStep onBack={() => setStep(2)} onDone={() => setStep(4)} />
+          )}
+          {step === 4 && (
             <WorkspaceStep
               crm={app.crm}
               onChoose={(value) => {
                 app.setCrm(value);
-                setStep(4);
+                setStep(5);
               }}
-              onBack={() => setStep(2)}
+              onBack={() => setStep(3)}
             />
           )}
-          {step === 4 && (
+          {step === 5 && (
             <DoneStep
               crm={app.crm}
               mailboxes={connected.length}
@@ -946,7 +971,371 @@ function MailboxStep({
 }
 
 /* -------------------------------------------------------------------------- */
-/* step 3 — mail, or mail and a CRM                                           */
+/* step 3 — the calendar behind that mailbox                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The calendar, asked for at the one moment it is nearly free.
+ *
+ * A mailbox was connected on the step before, and its password is already
+ * stored and already known to work — so for iCloud and Fastmail the calendar
+ * behind it is one button with nothing to type. On a Mac the calendars macOS
+ * already holds are another. Both come from the server, because what this
+ * machine can offer is a fact about the machine, not about this page.
+ *
+ * Every row here is one click, and the step itself is one click to leave. That
+ * is deliberate: a calendar is optional in a way a mailbox is not, and a wizard
+ * that stalls someone in front of an OAuth console before they have ever seen
+ * their inbox costs more than the calendar is worth.
+ *
+ * The full CalDAV form is NOT here. Someone whose provider needs a typed server
+ * address is someone who can add it from the sidebar afterwards, and the dialog
+ * that does it is complete.
+ */
+function CalendarStep({
+  onBack,
+  onDone,
+}: {
+  onBack: () => void;
+  onDone: () => void;
+}) {
+  const settings = useSettings();
+  const agent = useAgent();
+  const accounts = useCalendarAccounts();
+  const mailboxes = useReusableMailboxes();
+  const connectLocal = useConnectLocalCalendar();
+  const connectMailbox = useConnectMailboxCalendar();
+  const startGoogle = useStartGoogleCalendar();
+  /* The Google brief was posted to the agent. Not a success claim on its own —
+     agent.error is read live below, and only silence there means it landed. */
+  const [handed, setHanded] = React.useState(false);
+  /* Set only when window.open was blocked, so the approval page becomes a link
+     the person clicks themselves. */
+  const [blockedUrl, setBlockedUrl] = React.useState<string | null>(null);
+  /* The duplicate the server declined to create unasked. Same shape as the
+     add-calendar dialog's, and for the same reason. */
+  const [confirm, setConfirm] = React.useState<{
+    message: string;
+    retry: () => void;
+  } | null>(null);
+
+  /* Both lists have answered. Until then nothing about the offer is known, so
+     nothing about it is drawn — the same rule the dialog follows. */
+  const known = !accounts.isLoading && !mailboxes.isLoading;
+  const calendars = accounts.data?.accounts ?? [];
+  const local = localCalendarOffer(accounts.data);
+  const reusable = mailboxes.data ?? [];
+  const googleBuiltIn = accounts.data?.googleBuiltIn === true;
+  /* What the server says it will send Google. The reconstruction behind it is
+     for a server too old to state its own; this wizard always has a base URL by
+     now, since step 1 is what wrote it. */
+  const redirectUri =
+    accounts.data?.googleRedirectUri ?? googleCallbackUri(settings.baseUrl, "");
+
+  /**
+   * Whether handing the Google job to an agent would reach anybody.
+   *
+   * The agent is paired on the LAST step of this wizard, so at this point
+   * there is usually nothing on the other end: the brief would be written into
+   * a conversation no one is reading, and the row would be the only Google
+   * offer on Windows and Linux. Offered only once an agent has actually called
+   * in — someone who paired one before running the wizard, or who came back
+   * here later.
+   */
+  const agentReachable =
+    agent.connection !== "unsupported" &&
+    (agent.presence.listening ||
+      agent.presence.launchedAgent !== null ||
+      agent.presence.lastSeenAt !== null);
+
+  const busy =
+    connectLocal.isPending ||
+    connectMailbox.isPending ||
+    startGoogle.isPending ||
+    agent.sending;
+
+  const connected = (name: string) => {
+    toast.success(`Connected ${name}`);
+    onDone();
+  };
+
+  /**
+   * The duplicate question, asked exactly as the dialog asks it: a 409 means the
+   * server sees a calendar this Mac probably already holds, and the way past it
+   * is the same call with the confirmation attached.
+   */
+  const onConnectError = (error: unknown, retry: () => void): void => {
+    if (!(error instanceof ApiError) || error.status !== 409) return;
+    setConfirm({ message: serverSentence(error), retry });
+  };
+
+  const connectLocalNow = (confirmOverlap: boolean) =>
+    connectLocal.mutate(confirmOverlap, {
+      onSuccess: (account) => connected(account.alias),
+      onError: (error) =>
+        onConnectError(error, () => {
+          setConfirm(null);
+          connectLocalNow(true);
+        }),
+    });
+
+  const connectMailboxNow = (mailAccountId: string, confirmOverlap: boolean) =>
+    connectMailbox.mutate(
+      { mailAccountId, confirmOverlap },
+      {
+        onSuccess: (account) => connected(account.alias),
+        onError: (error) =>
+          onConnectError(error, () => {
+            setConfirm(null);
+            connectMailboxNow(mailAccountId, true);
+          }),
+      },
+    );
+
+  /**
+   * The Windows and Linux Google path, which has no short version: Google
+   * withdrew CalDAV app passwords, and with no built-in OAuth client the person
+   * has to create one in their own Google Cloud project. That is a console, six
+   * screens and two secrets — so it is handed to the agent as a written brief
+   * with the redirect URI already in it, the same way every other long job in
+   * this app is handed over. Offered only when an agent is actually there to
+   * read it; see agentReachable.
+   *
+   * The wizard does not advance itself afterwards: nothing is connected yet,
+   * and saying otherwise would be a lie. The conversation is queued server-side
+   * and is waiting whenever the agent is opened.
+   */
+  const askAgent = async () => {
+    await agent.send(googleSetupBrief(redirectUri));
+    setHanded(true);
+  };
+
+  return (
+    <section aria-labelledby="wizard-step-3">
+      <h1
+        id="wizard-step-3"
+        className="text-[15px] leading-5 font-semibold tracking-[var(--tracking-tight)] text-fg"
+      >
+        Add your calendar
+      </h1>
+      <p className="mt-1.5 text-[13px] leading-[18px] text-fg-secondary">
+        So your agent can see your day and send real invitations. Skip it and
+        everything else still works.
+      </p>
+
+      {!known ? (
+        <p className="mt-6 flex items-center gap-2 text-[13px] leading-[18px] text-fg-tertiary">
+          <Spinner />
+          Checking what this machine can connect&hellip;
+        </p>
+      ) : (
+        <div className="mt-6 space-y-2">
+          {/* macOS refused once already, and only System Settings can undo
+              that — so this is a sentence, not a button that could only fail. */}
+          {local.note && (
+            <p className="rounded-[var(--radius-md)] border border-border-subtle bg-surface-2 p-3 text-[12px] leading-4 text-fg-secondary">
+              {local.note}
+            </p>
+          )}
+
+          {local.offer && (
+            <OptionButton
+              icon={<Laptop className="size-4" strokeWidth={1.5} />}
+              title="Use the calendars on this Mac"
+              detail="Reads the calendars already set up in Apple Calendar. macOS will ask your permission once."
+              pending={connectLocal.isPending}
+              pendingLabel="Waiting for the macOS permission dialog…"
+              disabled={busy}
+              onClick={() => {
+                setConfirm(null);
+                connectLocalNow(false);
+              }}
+            />
+          )}
+
+          {reusable.map((mailbox) => (
+            <OptionButton
+              key={mailbox.mailAccountId}
+              icon={<Mail className="size-4" strokeWidth={1.5} />}
+              title={`Add your ${mailbox.provider} calendar`}
+              detail={`Uses the password you just gave for ${mailbox.email}. Nothing to type.`}
+              caution={
+                mailbox.onThisMac
+                  ? `This Mac already has ${mailbox.onThisMac}, so these events may appear twice.`
+                  : undefined
+              }
+              pending={
+                connectMailbox.isPending &&
+                typeof connectMailbox.variables === "object" &&
+                connectMailbox.variables.mailAccountId === mailbox.mailAccountId
+              }
+              pendingLabel="Connecting…"
+              disabled={busy}
+              onClick={() => {
+                setConfirm(null);
+                connectMailboxNow(mailbox.mailAccountId, false);
+              }}
+            />
+          ))}
+
+          {googleBuiltIn ? (
+            <OptionButton
+              icon={<ExternalLink className="size-4" strokeWidth={1.5} />}
+              title="Continue with Google"
+              detail="Opens Google's approval page in a new tab. Nothing to set up first."
+              pending={startGoogle.isPending}
+              pendingLabel="Opening Google…"
+              disabled={busy}
+              onClick={() =>
+                startGoogle.mutate(
+                  {},
+                  {
+                    onSuccess: (result) => {
+                      // This is no longer inside the click that started it, so
+                      // a popup blocker will refuse it. The step must not
+                      // advance on a tab that was never opened.
+                      const opened = window.open(
+                        result.authUrl,
+                        "_blank",
+                        "noopener,noreferrer",
+                      );
+                      if (!opened) {
+                        setBlockedUrl(result.authUrl);
+                        return;
+                      }
+                      toast.success("Approve Boxaide in the new tab", {
+                        description:
+                          "The calendar shows up once Google has sent you back.",
+                      });
+                      onDone();
+                    },
+                  },
+                )
+              }
+            />
+          ) : agentReachable ? (
+            <OptionButton
+              icon={<Sparkle className="size-4" strokeWidth={1.5} />}
+              title="Get help connecting Google Calendar"
+              detail="Google needs a few steps in its own website first. Boxaide writes them into your assistant chat, and it talks you through them."
+              pending={agent.sending}
+              pendingLabel="Sending it to your assistant…"
+              disabled={busy}
+              onClick={() => void askAgent()}
+            />
+          ) : null}
+
+          {/* Nothing this machine can offer in one click. Saying so beats an
+              empty panel above a skip link that does not look like a way out. */}
+          {!local.offer &&
+            reusable.length === 0 &&
+            !googleBuiltIn &&
+            !agentReachable && (
+              <p className="rounded-[var(--radius-md)] border border-border-subtle bg-surface-2 p-3 text-[13px] leading-[18px] text-fg-secondary">
+                Nothing on this machine can be connected in one press. You can
+                add a calendar any time from Calendar → Add calendar, which asks
+                for your address and an app password.
+              </p>
+            )}
+        </div>
+      )}
+
+      <div role="status" aria-live="polite" className="mt-4 space-y-1.5">
+        {handed && !agent.error && (
+          <p className="text-[13px] leading-[18px] text-fg-secondary">
+            The steps are in your assistant chat, in the Chat pane. No calendar
+            is connected yet — open that chat and it will take you through it.
+          </p>
+        )}
+
+        {blockedUrl && (
+          <div className="space-y-2">
+            <p className="text-[13px] leading-[18px] text-fg-secondary">
+              Your browser blocked the new tab. Open Google&rsquo;s approval
+              page yourself:
+            </p>
+            <Button asChild variant="secondary" size="sm">
+              <a href={blockedUrl} target="_blank" rel="noreferrer noopener">
+                <ExternalLink className="size-3.5" strokeWidth={1.5} />
+                Open Google&rsquo;s approval page
+              </a>
+            </Button>
+          </div>
+        )}
+
+        {/* The server writes these sentences itself — which System Settings
+            pane to open, which stored password was refused — so they are shown
+            as written. See serverSentence. */}
+        {confirm ? (
+          <div className="rounded-[var(--radius-md)] border border-border-subtle bg-surface-2 p-3">
+            <p className="text-[12px] leading-4 text-warning">{confirm.message}</p>
+            <div className="mt-2 flex gap-1.5">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={busy}
+                onClick={confirm.retry}
+              >
+                Add it anyway
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                onClick={() => setConfirm(null)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : (
+          (connectLocal.error || connectMailbox.error) && (
+            <p className="text-[12px] leading-4 text-danger">
+              {serverSentence(connectLocal.error ?? connectMailbox.error)}
+            </p>
+          )
+        )}
+
+        {startGoogle.isError && (
+          <div>
+            <p className="text-[12px] leading-4 text-danger">
+              {friendlyError(errorText(startGoogle.error))}
+            </p>
+            <TechnicalDetails raw={errorText(startGoogle.error)} />
+          </div>
+        )}
+
+        {agent.error && (
+          <p className="text-[12px] leading-4 text-danger">{agent.error}</p>
+        )}
+      </div>
+
+      <div className="mt-8 flex items-center gap-2">
+        <Button type="button" variant="ghost" disabled={busy} onClick={onBack}>
+          <ArrowLeft className="size-4" strokeWidth={1.5} />
+          Back
+        </Button>
+        {/* A real button, the same weight as Back. On a machine where none of
+            the rows above apply this is the correct move, and the least
+            visible control on the screen is the wrong place to put it. */}
+        <Button
+          type="button"
+          variant="secondary"
+          className="ml-auto"
+          disabled={busy}
+          onClick={onDone}
+        >
+          {handed || calendars.length > 0 ? "Continue" : "Skip for now"}
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* step 4 — mail, or mail and a CRM                                           */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -990,9 +1379,9 @@ function WorkspaceStep({
   const optionRefs = React.useRef(new Map<string, HTMLButtonElement>());
 
   return (
-    <section aria-labelledby="wizard-step-3">
+    <section aria-labelledby="wizard-step-4">
       <h1
-        id="wizard-step-3"
+        id="wizard-step-4"
         className="text-[15px] leading-5 font-semibold tracking-[var(--tracking-tight)] text-fg"
       >
         What do you want Boxaide to be?
@@ -1074,7 +1463,7 @@ function WorkspaceStep({
 }
 
 /* -------------------------------------------------------------------------- */
-/* step 4 — done                                                              */
+/* step 5 — done                                                              */
 /* -------------------------------------------------------------------------- */
 
 function DoneStep({
@@ -1091,9 +1480,9 @@ function DoneStep({
   onConnectAgent: () => void;
 }) {
   return (
-    <section aria-labelledby="wizard-step-4">
+    <section aria-labelledby="wizard-step-5">
       <h1
-        id="wizard-step-4"
+        id="wizard-step-5"
         className="text-[15px] leading-5 font-semibold tracking-[var(--tracking-tight)] text-fg"
       >
         You&rsquo;re set
@@ -1203,4 +1592,30 @@ function describe(error: unknown, host: string): string {
     }
   }
   return `Nothing answered at ${host}.`;
+}
+
+/**
+ * The brief the agent is handed for the long Google path.
+ *
+ * Written as an instruction to the agent rather than as a question from the
+ * person, because the person's part is "do this for me" — they pressed one
+ * button. The redirect URI is in it because it is the one value the agent
+ * cannot look up and the one Google rejects the sign-in over, character for
+ * character.
+ */
+function googleSetupBrief(redirectUri: string): string {
+  return [
+    "Walk me through connecting my Google Calendar to Boxaide.",
+    "",
+    "This install has no built-in Google client, so I have to create my own OAuth client. Take me through it one step at a time and wait for me after each one:",
+    "",
+    "1. Create a project, or pick an existing one, at console.cloud.google.com.",
+    "2. Enable the Google Calendar API for that project.",
+    "3. Configure the OAuth consent screen: External, with my own Google address added as a test user.",
+    "4. Create an OAuth client of type Web application, and add this authorised redirect URI to it exactly as written:",
+    `   ${redirectUri}`,
+    "5. Tell me to open Calendar in Boxaide, press Add calendar, open Continue with Google, and paste the client ID and secret from that client.",
+    "",
+    "Explain what each screen is for as we go, and ask me what I am seeing if the console does not match what you expect.",
+  ].join("\n");
 }

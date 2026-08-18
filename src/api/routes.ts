@@ -4,6 +4,7 @@ import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentChannel, Turn } from "../agent/channel.js";
 import { LaunchError, type AgentLauncher } from "../agent/launcher.js";
+import { ApprovalError, type ApprovalQueue } from "../agent/approvals.js";
 import type { MailService } from "../mail/service.js";
 import type { Platform } from "../platform.js";
 import { registerCrmRoutes } from "../crm/routes.js";
@@ -357,6 +358,11 @@ export function createApi(
   platform?: Platform,
   update?: UpdateService,
   /**
+   * Actions an agent asked a person to authorise. Absent on a server with no
+   * conversation, where nothing can be queued in the first place.
+   */
+  approvals?: ApprovalQueue,
+  /**
    * The address the server is actually reachable on. Only the calendar's
    * Google OAuth flow needs it: the redirect URI it hands Google must match
    * the one the callback later exchanges with, byte for byte. Absent, the
@@ -653,7 +659,8 @@ export function createApi(
      404 rather than 500, and the UI's own capability check is the same
      question: does this server have an agent channel at all?
      --------------------------------------------------------------------- */
-  if (channel) registerAgentRoutes(app, channel);
+  if (channel) registerAgentRoutes(app, channel, approvals);
+  if (approvals) registerApprovalRoutes(app, approvals);
   if (launcher) registerLauncherRoutes(app, launcher);
   // Agent platform routes (CRM, automations, outreach). Registered inside
   // createApi so the /api/* auth middleware above gates all of them.
@@ -683,7 +690,47 @@ const MAX_CHAT_CHARS = 8_000;
  */
 const SSE_HEARTBEAT_MS = 20_000;
 
-function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
+/**
+ * Approve or drop what an agent asked for.
+ *
+ * Two routes and no list route: the pending set rides on `/api/agent/state`
+ * and on the stream beside presence, because it is drawn in the conversation
+ * and a second poll would let the card and the transcript disagree.
+ */
+function registerApprovalRoutes(app: Hono, approvals: ApprovalQueue): void {
+  app.post("/api/agent/approvals/:id", async (c) => {
+    let decision: unknown;
+    try {
+      const body = await c.req.json<{ decision?: unknown }>();
+      decision = body?.decision;
+    } catch {
+      return c.json({ error: "body must be JSON" }, 400);
+    }
+    if (decision !== "approve" && decision !== "deny") {
+      return c.json({ error: "decision must be approve or deny" }, 400);
+    }
+    try {
+      const result = await approvals.decide(c.req.param("id"), decision);
+      return c.json({ ...result, pending: approvals.pending() });
+    } catch (err) {
+      if (err instanceof ApprovalError) {
+        // 502 carries the send's own failure text. It is the one the user has
+        // to read — "could not approve" would hide the SMTP error inside it.
+        return c.json(
+          { error: err.message, pending: approvals.pending() },
+          err.status as 404 | 409 | 502,
+        );
+      }
+      throw err;
+    }
+  });
+}
+
+function registerAgentRoutes(
+  app: Hono,
+  channel: AgentChannel,
+  approvals?: ApprovalQueue,
+): void {
   app.get("/api/agent/state", (c) => {
     const after = c.req.query("after");
     const afterSeq = after !== undefined && /^\d+$/.test(after) ? Number(after) : undefined;
@@ -699,6 +746,7 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
       turns: channel.history(afterSeq, shown.id),
       presence: channel.presence(),
       chat: shown,
+      approvals: approvals?.pending() ?? [],
     });
   });
 
@@ -822,6 +870,14 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
         chatsDirty = true;
         wake?.();
       });
+      // A card appears when an agent asks and disappears when the user
+      // answers, and either can happen while nothing else in the pane moves.
+      let approvalsDirty = false;
+      const unsubscribeApprovals =
+        approvals?.subscribe(() => {
+          approvalsDirty = true;
+          wake?.();
+        }) ?? (() => {});
 
       // `onAbort` is the only close signal that fires for a client that simply
       // went away — the write below can stay pending indefinitely otherwise.
@@ -830,6 +886,7 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
         unsubscribe();
         unsubscribePresence();
         unsubscribeChats();
+        unsubscribeApprovals();
       };
       stream.onAbort(() => {
         open = false;
@@ -841,6 +898,15 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
         event: "presence",
         data: JSON.stringify(channel.presence()),
       });
+      // Sent once on attach, not only on change: a request queued overnight is
+      // waiting before this stream existed, and a client that only followed
+      // changes would show an empty pane over a pending send.
+      if (approvals) {
+        await stream.writeSSE({
+          event: "approvals",
+          data: JSON.stringify(approvals.pending()),
+        });
+      }
 
       try {
         while (open) {
@@ -848,6 +914,14 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
             const turn = queue.shift() as Turn;
             await stream.writeSSE({ event: "turn", data: JSON.stringify(turn) });
             presenceDirty = true;
+          }
+          if (!open) break;
+          if (approvalsDirty && approvals) {
+            approvalsDirty = false;
+            await stream.writeSSE({
+              event: "approvals",
+              data: JSON.stringify(approvals.pending()),
+            });
           }
           if (!open) break;
           if (chatsDirty) {
@@ -913,7 +987,10 @@ function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
 
   app.post("/api/agents/:id/start", async (c) => {
     // Body is optional: { model?: string }. The launcher validates the id
-    // against its own registry; this only rejects non-string shapes.
+    // against its own registry; this only rejects shapes it would not
+    // understand. There is no `access` field any more — how much of the disk a
+    // launch reaches is decided by the install and the machine, not by the
+    // request. See src/agent/sandbox.ts.
     let model: string | undefined;
     try {
       const body = await c.req.json<{ model?: unknown }>();

@@ -21,13 +21,19 @@
  *  - Only binaries from the fixed registry below are ever spawned, resolved
  *    from PATH, with argv built entirely in this file. No request input
  *    reaches a command line.
- *  - Read, draft and platform (CRM / automation / outreach) tools are
- *    pre-approved. `message_send` is NOT in the
- *    allowlist, so a launched agent that tries to send hits the client's own
- *    permission wall, which in headless mode is a denial.
- *  - One agent at a time. The channel hands each user message to exactly one
- *    waiter; a second launched agent would race it for every message.
+ *  - Every launch carries a scoped credential, not the master bearer, and the
+ *    MCP server refuses anything outside that scope — see src/mcp/scope.ts.
+ *    Sending mail and creating meetings are outside every agent scope. The
+ *    per-tool flags below (Claude's --allowedTools, Grok's --allow) mirror the
+ *    same scope onto the CLIs that offer them, so a refusal happens early
+ *    where it can; the CLIs that offer no such flag are launchable anyway,
+ *    because the wall no longer lives in the client.
+ *  - One CHAT agent at a time. The channel hands each user message to exactly
+ *    one waiter; a second launched chat agent would race it for every message.
+ *    Automation runs are separate and may overlap — see `runOnce` and
+ *    docs/specs/agent-platform.md invariant 4.
  */
+import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
   copyFileSync,
@@ -35,7 +41,11 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -45,25 +55,31 @@ import { delimiter, join } from "node:path";
 import {
   lineSplitter,
   readGrokEvent,
+  readOpenCodeEvent,
   renderClaudeRunLine,
   type ReadEvent,
   type RenderRunLine,
 } from "./agent-stream.js";
 import { ClaudeDriver, type ClaudeTurnRequest } from "./claude-driver.js";
 import type { AgentDriver, DriverChannel } from "./driver.js";
+import { OpenCodeDriver, serveBaseUrl } from "./opencode-driver.js";
 import {
   fetchModels,
+  parseBareModels,
   parseBulletModels,
+  parseTabbedModels,
   type ModelLister,
   type ModelOption,
 } from "./model-list.js";
-import { CRM_TOOL_NAMES } from "../crm/tools.js";
-import { AUTOMATION_TOOL_NAMES } from "../automation/tools.js";
-import { OUTREACH_TOOL_NAMES } from "../outreach/tools.js";
+import { scopeToolNames, type ScopeProfile } from "../mcp/scope.js";
 import {
-  CALENDAR_READ_TOOL_NAMES,
-  CALENDAR_SEND_TOOL_NAMES,
-} from "../calendar/tools.js";
+  confineCommand,
+  plainCommand,
+  resolveAccess,
+  type AgentAccess,
+  type LaunchCommand,
+} from "./sandbox.js";
+import type { ScopedGrant } from "../mcp/scoped-tokens.js";
 
 /**
  * Where agent CLIs actually live, beyond PATH.
@@ -110,144 +126,70 @@ normal; call it again. Use chat_activity for anything slow. Draft rather than
 send unless I ask you to send.`;
 
 /**
- * Every Boxaide tool except message_send. Deliberately a hand-written
- * allowlist and not "TOOLS minus send": adding a new server tool must not
- * silently pre-approve it here. Each CLI namespaces these differently.
- */
-const PREAPPROVED_TOOL_NAMES = [
-  "accounts_list",
-  "messages_list",
-  "messages_search",
-  "message_get",
-  "message_mark_read",
-  "draft_create",
-  "draft_update",
-  "drafts_list",
-  "draft_delete",
-  "folders_list",
-  "chat_await_message",
-  "chat_say",
-  "chat_activity",
-  "chat_history",
-];
-
-
-/**
- * The chat loop's own tools: taking a message, answering it, narrating it.
- *
- * A driven session must not have these — the driver holds the lease, and a
- * second asker on one channel answers twice. A scheduled run must not either:
- * it has nobody to talk to.
- */
-const LOOP_TOOL_NAMES = new Set(["chat_await_message", "chat_say", "chat_activity"]);
-
-/**
- * Reading the conversation back. Not a loop tool: it takes no lease and posts
- * nothing, and it is the only way a driven session that lost its own transcript
- * can recover what was already said. A scheduled run still does not get it —
- * the chat is the user's, and a run has no part in it.
- */
-const HISTORY_TOOL_NAME = "chat_history";
-
-const CHAT_TOOL_NAMES = new Set([...LOOP_TOOL_NAMES, HISTORY_TOOL_NAME]);
-
-/**
  * Prepended verbatim to every automation prompt (spec: Scheduler / Run
- * preamble). It states the two boundaries the allowlist also enforces —
- * no chat, no sending — because a model that understands why it is being
- * refused writes a draft instead of retrying the wall.
+ * preamble). It states the two boundaries the server also enforces — no chat,
+ * no sending — because a model that understands why it is being refused writes
+ * a draft instead of retrying the wall.
  */
 export const AUTOMATION_RUN_PREAMBLE =
   "You are a scheduled Boxaide automation. Do the task below using the Boxaide MCP tools, then exit. You cannot talk to the user: do not call chat tools; write nothing to the user. Never send email: queue outreach with outbox_queue_draft or save with draft_create and a human will review.";
 
-/** Automation tools a run may call: reads only. It must not edit the schedule. */
-const RUN_AUTOMATION_READ_TOOLS = ["automations_list", "automation_runs_list"];
-
 /**
- * The one allowlist builder both spawn paths go through.
+ * The allowlists a CLI is given on its command line.
  *
- * Interactive and scheduled agents used to compute their allowlists
- * separately, and drifted: the chat agent never got the platform tools, so
- * "ask the agent to create an automation" — which the Automations UI tells
- * users to do — hit the permission wall. Both paths derive from the same
- * sources here so they cannot drift again.
+ * These are no longer the boundary. src/mcp/scope.ts is: the token each launch
+ * carries is bound to a scope, and the server refuses anything outside it
+ * whatever the CLI was told. These flags stay because a refusal the CLI makes
+ * itself is cheaper and clearer than one that comes back as a tool error, and
+ * because a CLI that offers them should be held to them.
  *
- * The mail/chat base list stays hand-written above; only the platform lists
- * are derived from their owning modules. Computed per call rather than frozen
- * at import, so the result is honest about those sets at spawn time.
- * The sending tools — message_send, meeting_create, meeting_cancel — are
- * deleted last, unconditionally: the one rule that survives any future
- * addition to any of these sets.
+ * They are derived from the scope rather than written twice. The two lists
+ * drifting apart is what made a launched agent's real permissions a question
+ * nobody could answer from one file.
  */
-function preapprovedToolNames(opts: {
-  /**
-   * How much of the conversation this agent may touch: the whole loop (its own
-   * model runs it), reading it back only (a driver runs it), or none of it (a
-   * scheduled run has no user).
-   */
-  chat: "loop" | "history" | "none";
-  /** A run may read the schedule; only the chat agent may edit it. */
-  automation: "all" | "read";
-}): string[] {
-  const names = new Set<string>();
-  for (const name of PREAPPROVED_TOOL_NAMES) {
-    if (!CHAT_TOOL_NAMES.has(name)) names.add(name);
-    else if (opts.chat === "loop") names.add(name);
-    else if (opts.chat === "history" && name === HISTORY_TOOL_NAME) names.add(name);
-  }
-  for (const name of CRM_TOOL_NAMES) names.add(name);
-  for (const name of AUTOMATION_TOOL_NAMES) {
-    if (opts.automation === "all" || RUN_AUTOMATION_READ_TOOLS.includes(name)) {
-      names.add(name);
-    }
-  }
-  for (const name of OUTREACH_TOOL_NAMES) names.add(name);
-  // Reads only, both paths. meeting_create and meeting_cancel mail every
-  // attendee the moment they are called, so they stay off the allowlist and
-  // hit the permission prompt — the user sees the send before it happens.
-  for (const name of CALENDAR_READ_TOOL_NAMES) names.add(name);
-  // Deleted last and unconditionally, exactly like message_send: the loop
-  // above already excludes them, and this is the line that stays true if some
-  // future edit widens it. Without it a scheduled run could be handed a tool
-  // that sends email, and AUTOMATION_RUN_PREAMBLE's "never send email" would
-  // be a request rather than a fact.
-  for (const name of CALENDAR_SEND_TOOL_NAMES) names.delete(name);
-  names.delete("message_send");
-  return [...names];
-}
-
-/** Pre-approved tools for a KICKOFF launch, whose model runs the chat loop. */
 export function chatPreapprovedToolNames(): string[] {
-  return preapprovedToolNames({ chat: "loop", automation: "all" });
+  return scopeToolNames("chat");
 }
 
 /**
- * Pre-approved tools for a driven session: everything the chat agent gets
- * except the loop's own three.
- *
- * A driver already holds the lease. A model that could also call
- * chat_await_message would be a second asker on one channel — it could take the
- * message out from under the loop and answer it twice. `AgentChannel.setDriven`
- * refuses those calls at the server; leaving them off the allowlist means the
- * model never makes them.
- *
- * chat_history stays approved. It is lease-safe, the MCP server does not refuse
- * it for a driven session, and it is the recovery path when a refused resume
- * costs the session its memory: the model can read the conversation back instead
- * of answering the next message as a stranger.
+ * A driven session gets everything the chat agent gets except the loop's own
+ * three: the driver already holds the lease, and a model that could also call
+ * chat_await_message would answer the same message twice.
  */
 export function drivenPreapprovedToolNames(): string[] {
-  return preapprovedToolNames({ chat: "history", automation: "all" });
+  return scopeToolNames("driven");
 }
 
-/** Pre-approved tools for a headless automation run. */
+/** A headless automation run: no chat at all, and the schedule is read-only. */
 export function runPreapprovedToolNames(): string[] {
-  return preapprovedToolNames({ chat: "none", automation: "read" });
+  return scopeToolNames("run");
 }
 
 export type LaunchContext = {
   mcpUrl: string;
+  /**
+   * The credential this launch writes into its CLI's config.
+   *
+   * On the context the launcher is constructed with this is the master bearer,
+   * and it is never what a spawned agent gets: every launch replaces it with a
+   * scoped token from `mintToken` before a spec sees the context. It stays on
+   * the type because the specs read it by that name, and because a launcher
+   * built without a minter (tests, the CLI) still has to hand its CLI
+   * something that works.
+   */
   bearerToken: string;
+  /**
+   * Mints the credential for one launch, bound to a scope the MCP server
+   * enforces. Absent means no scoping is available in this process, and the
+   * launch falls back to `bearerToken` — the pre-scope behaviour, kept so a
+   * launcher can still be constructed standalone.
+   */
+  mintToken?: (profile: ScopeProfile, label: string) => ScopedGrant;
+  /**
+   * How much of the machine a launch may reach when the caller does not say.
+   * `workspace` unless this process was configured otherwise. See sandbox.ts.
+   */
+  access?: AgentAccess;
   /** Where the agent's empty working directory is created. */
   dataDir: string;
   /**
@@ -285,6 +227,13 @@ export type DriveOptions = {
   child: ChildProcess | null;
   /** The resolved binary, for a driver that spawns its own children. */
   bin: string;
+  /**
+   * The same binary, as the launcher actually spawns it: confined when this
+   * launch is confined. A driver that builds its own argument list per turn
+   * must spawn `command.bin` with `[...command.prefix, ...its own args]`, or
+   * its children are the one part of the launch outside the sandbox.
+   */
+  command: LaunchCommand;
   workDir: string;
   model?: string;
   /** The full child environment, exactly as the launcher's own spawn built it. */
@@ -328,8 +277,17 @@ export type AgentSpec = {
    * Headless one-shot form used by automation runs: the same wiring as `args`
    * with the automation prompt and the run allowlist. Absent means this CLI
    * cannot carry a scheduled run, even when it can carry the chat loop.
+   *
+   * Takes `workDir` because runs may overlap and each gets its own: any path a
+   * run's command line names must be that run's, not a directory a sibling run
+   * is rewriting underneath it.
    */
-  runArgs?: (ctx: LaunchContext, prompt: string, model?: string) => string[];
+  runArgs?: (
+    ctx: LaunchContext,
+    prompt: string,
+    workDir: string,
+    model?: string,
+  ) => string[];
   /**
    * Extra child env, overlayed on the inherited env (and the widened PATH).
    * Grok has no --strict-mcp-config; GROK_HOME plus these flags keep the
@@ -359,6 +317,36 @@ export type AgentSpec = {
    */
   renderRunLine?: RenderRunLine;
   /**
+   * What this CLI needs from the user's home when a launch is confined.
+   *
+   * The sandbox allows the agent's own directories and the tree its binary is
+   * installed in; everything else under the home is denied. A CLI that keeps
+   * its credentials, its config or its cache somewhere else has to say so
+   * here, or a confined launch starts and then cannot authenticate.
+   *
+   * Writable, all of it. Every CLI here keeps its sign-in by writing a token
+   * down and rewriting it when it refreshes, and OpenCode creates four
+   * directories before it will run at all — a denied write in either case is
+   * fatal, and the first kind fails silently.
+   */
+  sandbox?: (
+    ctx: LaunchContext,
+    workDir: string,
+    parentEnv: NodeJS.ProcessEnv,
+  ) => { write?: string[] };
+  /**
+   * A precondition this CLI cannot be launched without, checked before
+   * anything is spawned. Returns the reason to refuse, or null to go ahead.
+   *
+   * The one case today is agy, whose MCP servers come from a file in the
+   * user's home that Boxaide neither owns nor can override. Any CLI whose
+   * configuration can be contradicted from outside Boxaide belongs here: the
+   * launcher's promise is that a launched agent holds the credential Boxaide
+   * minted for it, and a spec that cannot keep that promise must say so
+   * instead of starting.
+   */
+  preflight?: (ctx: LaunchContext, env: NodeJS.ProcessEnv) => string | null;
+  /**
    * Runs the chat loop in this process, for a CLI whose model must not be asked
    * to run it. Called once, straight after the launch; the launcher stops it
    * when the child exits or is stopped. Null means the driver declined (no
@@ -387,8 +375,10 @@ export function claudeTurnArgs(
 ): string[] {
   return [
     ...claudeFlagsFor(
-      ctx,
       drivenPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
+      // The chat agent owns the shared workdir: it is the only launch that
+      // uses it, and its session outlives any single turn.
+      agentWorkDir(ctx),
       model,
     ),
     // What is left of KICKOFF once Boxaide runs the loop: the reply text is the
@@ -427,10 +417,16 @@ function claudeDrive(
   return new ClaudeDriver({
     channel: ctx.channel,
     agent: "claude-code",
-    bin: opts.bin,
+    // The launch's command, not the bare binary: Claude Code has no long-lived
+    // child, so these per-turn spawns are the whole agent. Spawning `opts.bin`
+    // here would leave every turn outside the sandbox the launch asked for.
+    bin: opts.command.bin,
     cwd: opts.workDir,
     env: opts.env,
-    argsFor: (turn) => claudeTurnArgs(ctx, turn, opts.model),
+    argsFor: (turn) => [
+      ...opts.command.prefix,
+      ...claudeTurnArgs(ctx, turn, opts.model),
+    ],
     onStop: opts.onStop,
   }).start();
 }
@@ -442,14 +438,15 @@ function claudeDrive(
  * printed nothing until the end, so a hung run wrote a zero-byte log.
  */
 function claudeRunArgs(
-  ctx: LaunchContext,
+  _ctx: LaunchContext,
   prompt: string,
+  workDir: string,
   model?: string,
 ): string[] {
   return [
     ...claudeFlagsFor(
-      ctx,
       runPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
+      workDir,
       model,
     ),
     // A run's prompt always opens with AUTOMATION_RUN_PREAMBLE, so it cannot
@@ -459,10 +456,16 @@ function claudeRunArgs(
   ];
 }
 
-/** Everything on a `claude -p` command line except the prompt itself. */
+/**
+ * Everything on a `claude -p` command line except the prompt itself.
+ *
+ * `workDir` is the launch's own directory: `claudePrepare` writes that
+ * launch's MCP config into it, and naming it here is what keeps two
+ * overlapping runs off each other's config file.
+ */
 function claudeFlagsFor(
-  ctx: LaunchContext,
   allowedTools: string[],
+  workDir: string,
   model?: string,
 ): string[] {
   return [
@@ -475,7 +478,7 @@ function claudeFlagsFor(
     "stream-json",
     "--verbose",
     "--mcp-config",
-    join(agentWorkDir(ctx), "claude-mcp.json"),
+    join(workDir, "claude-mcp.json"),
     "--strict-mcp-config",
     "--allowedTools",
     allowedTools.join(","),
@@ -490,13 +493,18 @@ function claudeFlagsFor(
  * loads, and a scheduled run was observed picking up the user's personal set:
  * a run Boxaide is responsible for must not be reshaped by files the user
  * wrote for their own terminal. CLAUDE_CONFIG_DIR moves all of it to a
- * directory this launcher owns. Deliberately applied to the chat path too,
- * same as Grok — the isolation is about whose config runs, not which path.
+ * directory this launcher owns. Deliberately applied to the chat path too —
+ * the isolation is about whose config runs, not which path.
+ *
+ * Shared across overlapping runs, unlike Grok's home, because this one
+ * accumulates state the CLI itself owns — onboarding, project records, refreshed
+ * credentials. Handing every run an empty home would make each one a first run.
+ * `claude` already supports several sessions against one config directory; what
+ * it cannot survive is a half-written file, so every write here is staged and
+ * renamed (writeSecret / copySecret).
  */
 function claudeConfigHomeFor(ctx: LaunchContext): string {
-  const root =
-    ctx.dataDir === ":memory:" ? join(tmpdir(), "boxaide-agent") : ctx.dataDir;
-  return join(root, "agent-homes", "claude");
+  return join(agentRoot(ctx), "agent-homes", "claude");
 }
 
 function claudeChildEnv(
@@ -512,9 +520,8 @@ function claudePrepare(
   parentEnv: NodeJS.ProcessEnv,
 ): void {
   // Keep the primary bearer out of process listings and crash-report argv.
-  const path = join(workDir, "claude-mcp.json");
-  writeFileSync(
-    path,
+  writeSecret(
+    join(workDir, "claude-mcp.json"),
     JSON.stringify({
       mcpServers: {
         boxaide: {
@@ -524,11 +531,7 @@ function claudePrepare(
         },
       },
     }),
-    { mode: 0o600 },
   );
-  // writeFile preserves an existing file's mode; force the invariant even if
-  // an earlier build or local user created it more broadly.
-  chmodSync(path, 0o600);
 
   const home = claudeConfigHomeFor(ctx);
   mkdirSync(home, { recursive: true });
@@ -549,7 +552,7 @@ function claudePrepare(
  */
 function claudeCopyCredentials(parentHome: string, home: string): void {
   try {
-    copyFileSync(
+    copySecret(
       join(parentHome, ".credentials.json"),
       join(home, ".credentials.json"),
     );
@@ -581,9 +584,7 @@ function claudeWriteAuthSettings(parentHome: string, home: string): void {
       if (parsed?.[key] !== undefined) auth[key] = parsed[key];
     }
     if (Object.keys(auth).length === 0) return;
-    writeFileSync(join(home, "settings.json"), JSON.stringify(auth, null, 2), {
-      mode: 0o600,
-    });
+    writeSecret(join(home, "settings.json"), JSON.stringify(auth, null, 2));
   } catch {
     // No settings.json, malformed JSON, or an unwritable home. None of those
     // are a reason to fail a launch, and the CLI has other paths to auth.
@@ -602,10 +603,21 @@ function claudeWriteAuthSettings(parentHome: string, home: string): void {
  * MCP servers Grok discovers from ~/.claude/plugins cannot be turned off
  * from here — the allowlist is the boundary that still holds.
  */
-function grokHomeFor(ctx: LaunchContext): string {
-  const root =
-    ctx.dataDir === ":memory:" ? join(tmpdir(), "boxaide-agent") : ctx.dataDir;
-  return join(root, "agent-homes", "grok");
+/**
+ * Grok's config home lives inside the launch's own working directory, so two
+ * overlapping automation runs never share one.
+ *
+ * Safe to make per-launch because nothing in this home survives a launch that
+ * mattered: `grokPrepare` rewrites config.toml and trusted_folders.toml from
+ * scratch every time, and auth.json is a link to the user's real one. Claude's
+ * home is shared for the opposite reason — see claudeConfigHomeFor.
+ *
+ * trusted_folders.toml is the reason this cannot stay shared: its content names
+ * the working directory, so a second run writing its own path would untrust the
+ * directory the first run is sitting in.
+ */
+function grokHomeFor(workDir: string): string {
+  return join(workDir, "grok-home");
 }
 
 function grokArgs(_ctx: LaunchContext, model?: string): string[] {
@@ -624,6 +636,9 @@ function grokArgs(_ctx: LaunchContext, model?: string): string[] {
 function grokRunArgs(
   _ctx: LaunchContext,
   prompt: string,
+  // Grok names no per-launch path on its command line: its MCP config and its
+  // trusted-folder list both live in GROK_HOME, which is already per-launch.
+  _workDir: string,
   model?: string,
 ): string[] {
   // Spec (Scheduler): the CLI's own web tools stay at the CLI's defaults on a
@@ -659,9 +674,9 @@ function grokArgsFor(
   return args;
 }
 
-function grokChildEnv(ctx: LaunchContext, _workDir: string): Record<string, string> {
+function grokChildEnv(ctx: LaunchContext, workDir: string): Record<string, string> {
   return {
-    GROK_HOME: grokHomeFor(ctx),
+    GROK_HOME: grokHomeFor(workDir),
     BOXAIDE_TOKEN: ctx.bearerToken,
     GROK_DISABLE_AUTOUPDATER: "1",
     GROK_CLAUDE_MCPS_ENABLED: "0",
@@ -682,7 +697,7 @@ function grokPrepare(
   workDir: string,
   parentEnv: NodeJS.ProcessEnv,
 ): void {
-  const home = grokHomeFor(ctx);
+  const home = grokHomeFor(workDir);
   mkdirSync(home, { recursive: true });
 
   let trusted = workDir;
@@ -692,19 +707,15 @@ function grokPrepare(
     // The directory was just created; the unresolved path is still the cwd.
   }
 
-  writeFileSync(join(home, "config.toml"), grokConfigToml(ctx), { mode: 0o600 });
-  writeFileSync(join(home, "trusted_folders.toml"), grokTrustToml(trusted), {
-    mode: 0o600,
-  });
+  writeSecret(join(home, "config.toml"), grokConfigToml(ctx));
+  writeSecret(join(home, "trusted_folders.toml"), grokTrustToml(trusted));
 
   // If GROK_HOME is ignored, project config in the empty workdir still
   // declares boxaide. Same name as the isolated user server, so it does
   // not stack a second copy when both are read.
   const projectGrok = join(workDir, ".grok");
   mkdirSync(projectGrok, { recursive: true });
-  writeFileSync(join(projectGrok, "config.toml"), grokProjectToml(ctx), {
-    mode: 0o600,
-  });
+  writeSecret(join(projectGrok, "config.toml"), grokProjectToml(ctx));
 
   const parentHome = parentEnv.GROK_HOME || join(homedir(), ".grok");
   const authFrom = join(parentHome, "auth.json");
@@ -757,16 +768,533 @@ function tomlString(value: string): string {
 }
 
 function refreshLink(from: string, to: string): void {
+  // Built under a temporary name and renamed over the target, never unlinked in
+  // place: rename is atomic, so a launch reading this path either sees the old
+  // link or the new one. The unlink-then-symlink it replaced left a window with
+  // no file at all, which a second launch starting in that window read as
+  // "not authenticated".
+  const temp = tempPathFor(to);
   try {
-    unlinkSync(to);
+    symlinkSync(from, temp);
   } catch {
-    // First launch, or a leftover we can overwrite.
+    try {
+      copyFileSync(from, temp);
+    } catch {
+      // Nothing was staged, so there is nothing to rename and nothing to undo.
+      // The existing target, if any, is left exactly as it was.
+      return;
+    }
   }
   try {
-    symlinkSync(from, to);
+    renameSync(temp, to);
   } catch {
-    copyFileSync(from, to);
+    // Leave the target alone rather than half-replaced, and do not strand the
+    // staged file.
+    try {
+      unlinkSync(temp);
+    } catch {
+      // Already gone.
+    }
   }
+}
+
+/**
+ * Write a 0600 file so no reader ever sees it half-written.
+ *
+ * Every config this module writes is read by a CLI that may be starting right
+ * now for a different run. writeFileSync truncates first, so a plain write has
+ * a window where the file exists and is empty or partial — rare, silent, and
+ * exactly the kind of failure that only appears once runs can overlap.
+ */
+function writeSecret(path: string, content: string): void {
+  const temp = tempPathFor(path);
+  writeFileSync(temp, content, { mode: 0o600 });
+  // writeFile preserves an existing file's mode; force the invariant even if an
+  // earlier build or local user created it more broadly.
+  chmodSync(temp, 0o600);
+  renameSync(temp, path);
+}
+
+/** The same staging, for a file whose content comes from another file. */
+function copySecret(from: string, to: string): void {
+  const temp = tempPathFor(to);
+  copyFileSync(from, temp);
+  chmodSync(temp, 0o600);
+  renameSync(temp, to);
+}
+
+/**
+ * A staging path beside the target — same directory, so the rename stays on one
+ * filesystem. The pid and counter keep two launches in one process, or two
+ * processes over one data directory, off each other's staging file.
+ */
+let tempCounter = 0;
+function tempPathFor(path: string): string {
+  return `${path}.${process.pid}.${tempCounter++}.tmp`;
+}
+
+/**
+ * Antigravity (agy), headless.
+ *
+ * It has no --allowedTools and no --mcp-config, which is exactly why it was
+ * listed as "not launchable" before the server learned scopes: the only way to
+ * run it unattended is --dangerously-skip-permissions, and that used to mean
+ * handing the master bearer to a process that would approve anything asked of
+ * it. The scoped token is what makes that flag safe — "skip permissions" now
+ * means "skip asking about tools the server has already decided this launch
+ * may call", and the ones it may not are refused whatever the CLI approves.
+ */
+function antigravityArgs(ctx: LaunchContext, model?: string): string[] {
+  return [
+    "-p",
+    KICKOFF,
+    // Without this agy does not read the .agents/ directory it is standing in,
+    // and Boxaide's server is simply absent from the session — verified
+    // against agy: the same launch lists the server only when the directory is
+    // named here.
+    "--add-dir",
+    agentWorkDir(ctx),
+    "--dangerously-skip-permissions",
+    // The user's own slash commands and skills are not part of a session
+    // Boxaide is responsible for.
+    "--disable-slash-commands",
+    "--output-format",
+    "stream-json",
+    ...(model ? ["--model", model] : []),
+  ];
+}
+
+function antigravityRunArgs(
+  _ctx: LaunchContext,
+  prompt: string,
+  workDir: string,
+  model?: string,
+): string[] {
+  return [
+    "-p",
+    prompt,
+    "--add-dir",
+    workDir,
+    "--dangerously-skip-permissions",
+    "--disable-slash-commands",
+    ...(model ? ["--model", model] : []),
+  ];
+}
+
+/**
+ * agy reads MCP servers from `.agents/mcp_config.json` in the directory it
+ * starts in, on top of the user's own `~/.gemini/config/mcp_config.json`.
+ *
+ * This adds Boxaide to that set; it cannot subtract the user's servers, and
+ * there is no flag or environment variable that isolates them (verified
+ * against agy's own help and its embedded configuration docs). That is a
+ * limitation of this CLI, not a hole in Boxaide's boundary: the user's other
+ * servers can no more reach Boxaide's mail than any other program on the
+ * machine, and what this agent may do with Boxaide's own tools is decided by
+ * the scoped token, not by which servers it can see.
+ */
+function antigravityPrepare(ctx: LaunchContext, workDir: string): void {
+  const agentsDir = join(workDir, ".agents");
+  mkdirSync(agentsDir, { recursive: true });
+  writeSecret(
+    join(agentsDir, "mcp_config.json"),
+    JSON.stringify(
+      {
+        mcpServers: {
+          boxaide: {
+            serverUrl: ctx.mcpUrl,
+            headers: { Authorization: `Bearer ${ctx.bearerToken}` },
+          },
+        },
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+/**
+ * True when this entry from the user's agy config reaches this Boxaide.
+ *
+ * The name is checked because Boxaide's own connect snippet uses it and
+ * because a same-named entry shadows the one a launch writes. The URL is
+ * checked because the name is the user's to choose: `/api/agent-connect` hands
+ * out a URL and an Authorization header with no server name attached, so the
+ * entry that carries the master bearer is as likely to be called "mail" as
+ * "boxaide" — and agy merges every non-colliding server rather than replacing
+ * them, so a differently-named one sits beside the scoped connection and can
+ * send mail.
+ *
+ * Matched on port and path against `ctx.mcpUrl`, with a loopback host: that is
+ * what makes it this server rather than some other MCP server the user runs.
+ */
+function reachesBoxaide(name: string, entry: unknown, mcpUrl: string): boolean {
+  if (name.toLowerCase() === "boxaide") return true;
+  const raw = (entry as { url?: unknown; serverUrl?: unknown }) ?? {};
+  const candidate = typeof raw.url === "string" ? raw.url : raw.serverUrl;
+  if (typeof candidate !== "string") return false;
+  let declared: URL;
+  let ours: URL;
+  try {
+    declared = new URL(candidate);
+    ours = new URL(mcpUrl);
+  } catch {
+    return false;
+  }
+  const local = new Set(["localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"]);
+  if (!local.has(declared.hostname.toLowerCase())) return false;
+  return declared.port === ours.port && declared.pathname === ours.pathname;
+}
+
+/**
+ * agy reads MCP servers from `~/.gemini/config/mcp_config.json` as well as the
+ * workspace, and on a name collision the user's file wins — verified: a
+ * launch whose workspace declared `boxaide` reached the server named in the
+ * user's file instead, with the credential written there. Entries that do not
+ * collide are merged in rather than replaced, so a user entry under any other
+ * name is a second, unscoped connection to the same server.
+ *
+ * Boxaide's own connect dialog tells users to paste exactly such an entry, and
+ * it carries the master bearer. So on a machine that followed those
+ * instructions, a launched agy would hold the unscoped credential no matter
+ * what this launcher mints — the one case where the scope could be bypassed.
+ *
+ * There is no flag that disables the user's file (checked agy's help and its
+ * embedded configuration docs) and no home directory override that keeps the
+ * CLI signed in. So the launch is refused, with the one-line fix, rather than
+ * started on a credential Boxaide did not issue.
+ */
+function antigravityPreflight(
+  ctx: LaunchContext,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const path = join(env.HOME || homedir(), ".gemini", "config", "mcp_config.json");
+  let declared: unknown;
+  try {
+    declared = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    // No file, or one this cannot read as JSON. Nothing shadows Boxaide's own
+    // entry, which is the only thing being checked here.
+    return null;
+  }
+  const servers = (declared as { mcpServers?: Record<string, unknown> })?.mcpServers;
+  if (!servers || typeof servers !== "object") return null;
+  const found = Object.entries(servers).find(([name, entry]) =>
+    reachesBoxaide(name, entry, ctx.mcpUrl),
+  );
+  if (!found) return null;
+  return `Antigravity is configured with its own Boxaide server in ${path}, under the name "${found[0]}" — the agent would reach Boxaide through that entry, on the credential written there, instead of the limited one Boxaide issues for a launch. Remove the "${found[0]}" entry from that file and start again; Boxaide wires the connection itself now, so nothing else is needed.`;
+}
+
+/** `agy models` prints "id<TAB>Label" for everything the account can reach. */
+const ANTIGRAVITY_LISTER: ModelLister = {
+  args: ["models"],
+  parse: parseTabbedModels,
+};
+
+/**
+ * OpenCode, headless.
+ *
+ * `run` ignores spawn cwd and walks to a git checkout (observed: it left the
+ * empty workdir and opened this repo). --dir pins it. Global
+ * ~/.config/opencode/opencode.json is merged unless XDG_CONFIG_HOME is
+ * elsewhere, and that file on a real machine starts the user's other MCP
+ * servers. Auth stays in the default data dir so the process still has keys.
+ */
+function opencodeHomeFor(ctx: LaunchContext): string {
+  return join(agentRoot(ctx), "agent-homes", "opencode");
+}
+
+/**
+ * Pin a model even when the user picked none. OpenCode's own default retries
+ * forever when that endpoint is down, and the pane then waits for a
+ * chat_await_message that never comes.
+ */
+const OPENCODE_DEFAULT_MODEL = "opencode/big-pickle";
+
+/**
+ * Chat launch: the server, not a one-shot `run`.
+ *
+ * `run` answers once and exits, so the loop only exists for as long as the
+ * model keeps choosing to call chat_await_message. The server has no such
+ * opinion — it stays up and the driver holds the loop (see opencode-driver.ts).
+ * The port is 0 and read back off stdout, since a port picked here can be taken
+ * by the time the child binds. Errors are printed because a 500 from this
+ * server carries only a reference id; the trace goes to stderr.
+ */
+function opencodeArgs(_ctx: LaunchContext, _model?: string): string[] {
+  return [
+    "--pure",
+    "serve",
+    "--port",
+    "0",
+    "--hostname",
+    "127.0.0.1",
+    "--print-logs",
+    "--log-level",
+    "ERROR",
+  ];
+}
+
+function opencodeDrive(
+  ctx: LaunchContext,
+  opts: DriveOptions,
+): AgentDriver | null {
+  // Without a channel there is nobody to drive for: the launcher still runs
+  // the server, and the MCP tier is unaffected.
+  if (!ctx.channel) return null;
+  // `args` is set on this spec, so the launcher always has a child here.
+  if (!opts.child) return null;
+  return new OpenCodeDriver({
+    channel: ctx.channel,
+    agent: "opencode",
+    baseUrl: serveBaseUrl(opts.child),
+    directory: opts.workDir,
+    password: opts.childEnv.OPENCODE_SERVER_PASSWORD ?? null,
+    model: opts.model ?? OPENCODE_DEFAULT_MODEL,
+  }).start();
+}
+
+function opencodeRunArgs(
+  _ctx: LaunchContext,
+  prompt: string,
+  workDir: string,
+  model?: string,
+): string[] {
+  return [
+    "--pure",
+    "run",
+    // Auto-approval, same reasoning as agy's skip-permissions: the boundary is
+    // the scoped token, and a run has nobody to answer a prompt anyway.
+    "--auto",
+    "--dir",
+    workDir,
+    "--model",
+    model ?? OPENCODE_DEFAULT_MODEL,
+    prompt,
+  ];
+}
+
+function opencodeChildEnv(
+  ctx: LaunchContext,
+  workDir: string,
+): Record<string, string> {
+  return {
+    XDG_CONFIG_HOME: join(opencodeHomeFor(ctx), "config"),
+    OPENCODE_CONFIG: join(workDir, "opencode.json"),
+    // Loopback still means every local account, and this server executes
+    // whatever it is prompted. A fresh secret per launch; the driver gets the
+    // same env map the child was spawned with.
+    OPENCODE_SERVER_PASSWORD: randomUUID(),
+  };
+}
+
+/**
+ * OpenCode creates four directories under the user's home before it will run,
+ * and a denied mkdir there is fatal — verified: a confined `opencode --version`
+ * failed on each of config, data, cache and state in turn until all four were
+ * writable. Only config is redirected by `opencodeChildEnv`; the others hold
+ * the auth that keeps the launch signed in, which is why they are not.
+ *
+ * XDG variables are read from the parent rather than assumed, so a machine
+ * that moved them is described accurately instead of hopefully.
+ */
+function opencodeSandbox(
+  _ctx: LaunchContext,
+  _workDir: string,
+  env: NodeJS.ProcessEnv,
+): { write: string[] } {
+  const home = env.HOME || homedir();
+  const xdg = (name: string, fallback: string) =>
+    join(env[name] || join(home, fallback), "opencode");
+  return {
+    write: [
+      xdg("XDG_CONFIG_HOME", ".config"),
+      xdg("XDG_DATA_HOME", ".local/share"),
+      xdg("XDG_CACHE_HOME", ".cache"),
+      xdg("XDG_STATE_HOME", ".local/state"),
+    ],
+  };
+}
+
+function opencodePrepare(ctx: LaunchContext, workDir: string): void {
+  mkdirSync(join(opencodeHomeFor(ctx), "config"), { recursive: true });
+  writeSecret(
+    join(workDir, "opencode.json"),
+    JSON.stringify(
+      {
+        $schema: "https://opencode.ai/config.json",
+        model: OPENCODE_DEFAULT_MODEL,
+        mcp: {
+          boxaide: {
+            type: "remote",
+            url: ctx.mcpUrl,
+            enabled: true,
+            oauth: false,
+            timeout: 120_000,
+            headers: { Authorization: `Bearer ${ctx.bearerToken}` },
+          },
+        },
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+/**
+ * `opencode models` prints bare "provider/model" ids. --pure matches how the
+ * launcher runs the CLI, so the list is what a launch would actually accept.
+ */
+const OPENCODE_LISTER: ModelLister = {
+  args: ["--pure", "models"],
+  parse: parseBareModels,
+};
+
+/**
+ * Codex, headless.
+ *
+ * Like agy it has no per-tool allowlist flag, so it could not be launched
+ * before the server carried the boundary. Unlike agy it isolates cleanly:
+ * CODEX_HOME moves every piece of user config, and the MCP server is declared
+ * in the config.toml this writes there rather than on the command line, which
+ * keeps the credential out of process listings.
+ *
+ * The sandbox is left on (`workspace-write`) and only the approval prompt is
+ * turned off. Boxaide's scope governs Boxaide's tools; it says nothing about
+ * shell commands the model runs on the user's machine, and there is no reason
+ * to widen those just because the agent is unattended.
+ */
+function codexHomeFor(workDir: string): string {
+  return join(workDir, "codex-home");
+}
+
+function codexArgs(_ctx: LaunchContext, model?: string): string[] {
+  return codexArgsFor(KICKOFF, model);
+}
+
+function codexRunArgs(
+  _ctx: LaunchContext,
+  prompt: string,
+  _workDir: string,
+  model?: string,
+): string[] {
+  return codexArgsFor(prompt, model);
+}
+
+function codexArgsFor(prompt: string, model?: string): string[] {
+  return [
+    "exec",
+    // The workdir is not a git checkout, and codex refuses to start outside
+    // one without this.
+    "--skip-git-repo-check",
+    // Auto-approval that keeps the workspace-write sandbox on. Verified
+    // against codex 0.147: with any other combination of approval_policy and
+    // sandbox mode short of --dangerously-bypass-approvals-and-sandbox, every
+    // MCP call comes back "user cancelled MCP tool call" — there is nobody to
+    // ask — and the run looks alive while doing nothing. This is the only
+    // setting that approves the calls without also turning the sandbox off.
+    "--approve-for-me",
+    "--json",
+    ...(model ? ["--model", model] : []),
+    // Last, and behind nothing else that takes a value: the prompt is a
+    // positional argument, and a message opening with a dash would otherwise
+    // be read as options.
+    "--",
+    prompt,
+  ];
+}
+
+/**
+ * The auth file `codexPrepare` links into the isolated home lives in the
+ * user's own `~/.codex`, and a symlink is only as writable as its target. The
+ * binary usually sits under that same root, but not when it was installed by a
+ * package manager — so it is named rather than assumed.
+ *
+ * Write, not read. A signed-in CLI does not hold a token forever: it refreshes
+ * one and saves the new one, and a refresh that cannot save fails the sign-in
+ * outright. Read-only here is what made a confined agent unable to
+ * authenticate — see `antigravitySandbox` for the case that surfaced it.
+ */
+function codexSandbox(
+  _ctx: LaunchContext,
+  _workDir: string,
+  env: NodeJS.ProcessEnv,
+): { write: string[] } {
+  return { write: [env.CODEX_HOME || join(env.HOME || homedir(), ".codex")] };
+}
+
+function codexChildEnv(
+  _ctx: LaunchContext,
+  workDir: string,
+): Record<string, string> {
+  return {
+    CODEX_HOME: codexHomeFor(workDir),
+    BOXAIDE_TOKEN: _ctx.bearerToken,
+  };
+}
+
+/**
+ * Codex is prepared once per launch and cannot see, from here, whether that
+ * launch is the chat agent or a scheduled run — so the config it writes has to
+ * carry the widest scope either could hold, and the narrowing that matters
+ * stays with the token. `enabled_tools` is a hint, not the boundary.
+ */
+function codexPrepare(
+  ctx: LaunchContext,
+  workDir: string,
+  parentEnv: NodeJS.ProcessEnv,
+): void {
+  const allowed = chatPreapprovedToolNames();
+  const home = codexHomeFor(workDir);
+  mkdirSync(home, { recursive: true });
+  writeSecret(join(home, "config.toml"), codexConfigToml(ctx, allowed));
+  // Auth lives in CODEX_HOME, and moving the home moves it. Linked from the
+  // user's real one, exactly as Grok's is, so an isolated launch is still
+  // signed in.
+  const parentHome = parentEnv.CODEX_HOME || join(homedir(), ".codex");
+  const authFrom = join(parentHome, "auth.json");
+  if (existsSync(authFrom)) refreshLink(authFrom, join(home, "auth.json"));
+}
+
+function codexConfigToml(ctx: LaunchContext, allowed: readonly string[]): string {
+  return [
+    "[mcp_servers.boxaide]",
+    `url = ${tomlString(ctx.mcpUrl)}`,
+    `bearer_token_env_var = ${tomlString("BOXAIDE_TOKEN")}`,
+    // Codex's own copy of the scope, for the same reason Claude gets
+    // --allowedTools: a refusal here costs no round trip. The server is still
+    // what enforces it.
+    `enabled_tools = [${allowed.map(tomlString).join(", ")}]`,
+    "",
+  ].join("\n");
+}
+
+/** Same as codex: grok's linked `auth.json` points back into the user's home. */
+function grokSandbox(
+  _ctx: LaunchContext,
+  _workDir: string,
+  env: NodeJS.ProcessEnv,
+): { write: string[] } {
+  return { write: [env.GROK_HOME || join(env.HOME || homedir(), ".grok")] };
+}
+
+/**
+ * agy keeps its sign-in under `~/.gemini`, and unlike the others that home
+ * cannot be moved — which is the same reason `antigravityPreflight` exists.
+ *
+ * Writable, and this is the CLI that proved why. Confined with `~/.gemini`
+ * readable but not writable, agy starts, tries to establish its session, has
+ * nowhere to put the result, waits, and exits — with no error the user ever
+ * sees. The agent simply never picked the message up. Every CLI here signs in
+ * by writing something down; none of them can do it read-only.
+ */
+function antigravitySandbox(
+  _ctx: LaunchContext,
+  _workDir: string,
+  env: NodeJS.ProcessEnv,
+): { write: string[] } {
+  return { write: [join(env.HOME || homedir(), ".gemini")] };
 }
 
 /** `grok models` prints a bullet list under a prose header. */
@@ -785,10 +1313,52 @@ const CLAUDE_MODELS: ModelOption[] = [
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
 ];
 
+/**
+ * Everything an agent is pointed at lives under here, and it is deliberately
+ * NOT inside the data directory.
+ *
+ * The data directory holds `bearer.token` and `master.key`. An agent used to
+ * stand in `<dataDir>/agent-workdir`, so `cat ../bearer.token` handed it the
+ * master credential the scope exists to keep away from it, and
+ * `cat ../master.key` decrypted the mail store. Three of the CLIs launched
+ * here run shell commands with approval turned off, and a prompt-injected
+ * email is enough to ask for that read.
+ *
+ * A sibling directory, so nothing the agent is handed — its cwd, its config
+ * home, the env vars naming them — walks up into the secrets. On its own that
+ * only removes the escalation that needs no guessing; an absolute path still
+ * reaches the data directory. `src/agent/sandbox.ts` is what closes that, and
+ * this layout is what makes its rule expressible: one subtree the agent owns,
+ * one it must never see, and no overlap between them.
+ */
+function agentRoot(ctx: LaunchContext): string {
+  if (ctx.dataDir === ":memory:") return join(tmpdir(), "boxaide-agent");
+  return `${ctx.dataDir.replace(/[/\\]+$/, "")}-agents`;
+}
+
+/** The chat agent's working directory. One per install; it owns it alone. */
 function agentWorkDir(ctx: LaunchContext): string {
-  return ctx.dataDir === ":memory:"
-    ? join(tmpdir(), "boxaide-agent")
-    : join(ctx.dataDir, "agent-workdir");
+  return join(agentRoot(ctx), "workdir");
+}
+
+/** Where every automation run's own directory is created. */
+function runWorkDirRoot(ctx: LaunchContext): string {
+  return join(agentWorkDir(ctx), "runs");
+}
+
+/**
+ * One directory per automation run, named for the run.
+ *
+ * Runs may overlap, and an agent is free to write files where it is standing.
+ * Sharing one directory means two runs can overwrite each other's scratch
+ * files, silently and with no way to tell afterwards. It also holds each run's
+ * MCP config and, for Grok, its whole config home.
+ *
+ * Removed when the run finishes, and swept at startup for the ones a crash
+ * left behind.
+ */
+function runWorkDir(ctx: LaunchContext, runId: string): string {
+  return join(runWorkDirRoot(ctx), runId);
 }
 
 export const KNOWN_AGENTS: AgentSpec[] = [
@@ -815,22 +1385,43 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     listModels: GROK_LISTER,
     childEnv: grokChildEnv,
     prepare: grokPrepare,
+    sandbox: grokSandbox,
     readEvent: readGrokEvent,
   },
   {
     id: "antigravity",
     label: "Antigravity",
     bin: "agy",
+    args: antigravityArgs,
+    runArgs: antigravityRunArgs,
+    listModels: ANTIGRAVITY_LISTER,
+    prepare: antigravityPrepare,
+    sandbox: antigravitySandbox,
+    preflight: antigravityPreflight,
   },
   {
     id: "opencode",
     label: "OpenCode",
     bin: "opencode",
+    args: opencodeArgs,
+    runArgs: opencodeRunArgs,
+    listModels: OPENCODE_LISTER,
+    childEnv: opencodeChildEnv,
+    prepare: opencodePrepare,
+    sandbox: opencodeSandbox,
+    readEvent: readOpenCodeEvent,
+    drive: opencodeDrive,
   },
-  // Detected and shown, not launchable: these CLIs have no verified way to
-  // enforce Boxaide's per-tool boundary. A full bearer plus global approval
-  // would let an injected prompt send mail or mutate the platform.
-  { id: "codex", label: "Codex", bin: "codex" },
+  {
+    id: "codex",
+    label: "Codex",
+    bin: "codex",
+    args: codexArgs,
+    runArgs: codexRunArgs,
+    childEnv: codexChildEnv,
+    prepare: codexPrepare,
+    sandbox: codexSandbox,
+  },
 ];
 
 /** A spec this build knows how to start: a child to spawn, a driver, or both. */
@@ -853,6 +1444,8 @@ export type ListedAgent = {
   available: boolean;
   /** This build knows how to launch it. */
   supported: boolean;
+  /** This build can carry a scheduled automation run on it. */
+  runsAutomations: boolean;
   /** Models the user may pick from. Empty means no picker. */
   models: ModelOption[];
 };
@@ -863,6 +1456,14 @@ export type RunningAgent = {
   startedAt: string;
   /** The picked model id, or null for the CLI's own default. */
   model: string | null;
+  /** What this launch was actually given, not what was asked for. */
+  access: AgentAccess;
+  /**
+   * Why it is not confined, when it is not. Null on a confined launch. The UI
+   * shows this verbatim: an unconfined agent that looks confined is worse than
+   * one that says so.
+   */
+  accessNotice: string | null;
 };
 
 /**
@@ -921,10 +1522,22 @@ export type OneShotResult = {
 };
 
 export type OneShotOptions = {
+  /**
+   * The run row's id. Identifies this run among the ones alive beside it, and
+   * names the directory it works in, so it must be a plain id — letters,
+   * digits, dash, underscore.
+   */
+  runId: string;
   /** AgentSpec id, or null/undefined for the first launchable installed CLI. */
   agentId?: string | null;
   /** The automation prompt. The run preamble is prepended here, not by callers. */
   prompt: string;
+  /**
+   * Model id for that CLI, or null/undefined for its own default. Validated
+   * against what the CLI itself offers, exactly as `start` does: the id becomes
+   * an argv element, so nothing unvetted may reach a command line.
+   */
+  model?: string | null;
   /** Overridable for tests only; production runs use ONESHOT_TIMEOUT_MS. */
   timeoutMs?: number;
   /** Tests only; production runs use ONESHOT_FIRST_OUTPUT_TIMEOUT_MS. */
@@ -935,6 +1548,39 @@ export type OneShotOptions = {
 
 /** Spec: 15-minute hard timeout, then SIGKILL and status 'killed'. */
 export const ONESHOT_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * How many automation runs may be alive at once (spec invariant 4). The chat
+ * agent is not one of them and never waits behind them.
+ *
+ * Two by default, not one, so a slow run stops holding up the whole schedule.
+ * Not more by default because every run is a full CLI process with a model
+ * session behind it: N runs is N times the spend in the same window and N times
+ * the pressure on the provider's own rate limit, and a 429 reaches the user as
+ * a failed run with an opaque log.
+ */
+export const DEFAULT_RUN_CONCURRENCY = 2;
+
+/**
+ * The ceiling on that, whatever the environment asks for. Above this the
+ * failure modes are untested and the first symptom would be rate-limit errors
+ * the user cannot act on.
+ */
+export const MAX_RUN_CONCURRENCY = 4;
+
+/**
+ * Reads BOXAIDE_AGENT_CONCURRENCY, clamped. Anything unparseable is the
+ * default: a typo in an environment variable must not silently serialize the
+ * schedule, nor uncap it.
+ */
+export function runConcurrencyFrom(env: NodeJS.ProcessEnv): number {
+  const raw = env.BOXAIDE_AGENT_CONCURRENCY;
+  const parsed = Number(raw);
+  if (!raw || !Number.isInteger(parsed) || parsed < 1) {
+    return DEFAULT_RUN_CONCURRENCY;
+  }
+  return Math.min(parsed, MAX_RUN_CONCURRENCY);
+}
 
 /**
  * How long a streaming run may stay silent at start before it is written off.
@@ -957,6 +1603,14 @@ export const ONESHOT_FIRST_OUTPUT_TIMEOUT_MS = 2 * 60 * 1000;
  * what turned a 15-minute timeout into a 17-minute run.
  */
 export const ONESHOT_CLOSE_GRACE_MS = 2_000;
+
+/**
+ * How old a run directory must be before a starting process removes it. The
+ * deadline plus a margin, so a run still inside its own 15 minutes is never
+ * swept. Mirrors RUN_STALE_MS in src/automation/store.ts, which decides the
+ * same question about the run's database row.
+ */
+export const RUN_WORKDIR_STALE_MS = ONESHOT_TIMEOUT_MS + 5 * 60 * 1000;
 
 /**
  * Notes appended to a run log so the log is never empty. A killed run's log is
@@ -1010,22 +1664,41 @@ export class AgentLauncher {
   private lastExit: LastExit | null = null;
   private stderrTail = "";
   /**
-   * The in-flight automation run. Separate from `child`/`running`, which stay
-   * the interactive chat agent's state: the Agent pane's presence, the
-   * /api/agents status, and stop() must not start reporting on a scheduled run
-   * that the user never pressed Start on.
+   * The in-flight automation runs, keyed by run id. Separate from
+   * `child`/`running`, which stay the interactive chat agent's state: the Agent
+   * pane's presence, the /api/agents status, and stop() must not start
+   * reporting on a scheduled run that the user never pressed Start on.
+   *
+   * A map, not a single child, because runs may overlap up to `runLimit`. Each
+   * entry carries its own kill so one run can be stopped without touching its
+   * siblings.
    */
-  private oneShot: ChildProcess | null = null;
+  private oneShots = new Map<string, { child: ChildProcess; kill: () => void }>();
+  /**
+   * Runs that hold a slot but have no child yet.
+   *
+   * Validating a picked model may have to ask the CLI what it offers, and that
+   * await sits between the scheduler's claim of the run row and the spawn. A
+   * slot counted only once the child exists would let a second run through that
+   * window and put two more runs on a launcher with room for one.
+   *
+   * Chat is no longer part of this. It has its own slot, so a chat launch in
+   * the window can no longer cost a run the fire it already claimed.
+   */
+  private starting = new Set<string>();
   /** The in-process loop driving the chat agent, for specs that have one. */
   private driver: AgentDriver | null = null;
+  /**
+   * The chat launch's scoped credential. Null when nothing is running, or when
+   * this launcher was built without a minter.
+   */
+  private chatGrant: ScopedGrant | null = null;
   /**
    * A stop was asked for on the current launch. It is the only thing that
    * separates "the user pressed Stop" from "it died" once the exit arrives: a
    * signalled child reports code null either way.
    */
   private stopRequested = false;
-  /** Set while a one-shot is alive; closes over that run's kill/status flag. */
-  private killOneShot: (() => void) | null = null;
   /** Per-agent model lists as their CLI last reported them. */
   private modelCache = new Map<
     string,
@@ -1039,13 +1712,60 @@ export class AgentLauncher {
   >();
   /** Bumped by refreshModels(), so a fetch it invalidated cannot land. */
   private modelGeneration = 0;
+  /**
+   * close() has run. Checked before every spawn, including after the one await
+   * in start(): close() clears `running`, so a start suspended on the model
+   * lookup would otherwise find the chat slot free and spawn an agent nobody
+   * owns, moments after shutdown killed everything else.
+   */
+  private closed = false;
+
+  /** How many automation runs may overlap. See runConcurrencyFrom. */
+  private readonly limit: number;
 
   constructor(
     private ctx: LaunchContext,
     private registry: AgentSpec[] = KNOWN_AGENTS,
     private env: NodeJS.ProcessEnv = process.env,
     private extraBinDirs: string[] = wellKnownBinDirs(),
-  ) {}
+    runLimit?: number,
+  ) {
+    this.limit = runLimit ?? runConcurrencyFrom(env);
+    // A crash mid-run leaves its directory behind, and nothing else removes
+    // one. Swept at construction, the same moment AutomationScheduler sweeps
+    // the run rows a dead process left 'running'.
+    this.sweepRunWorkDirs();
+  }
+
+  /**
+   * Removes run directories old enough that no live run can own them.
+   *
+   * Age is the test, not "this process owns none yet": a second Boxaide over
+   * the same data directory may have a run in flight right now, and deleting
+   * the directory out from under it would break a healthy run. Same reasoning,
+   * and the same window, as AutomationStore.sweepStaleRuns.
+   */
+  private sweepRunWorkDirs(now: number = Date.now()): void {
+    const root = runWorkDirRoot(this.ctx);
+    const cutoff = now - RUN_WORKDIR_STALE_MS;
+    let entries: string[];
+    try {
+      entries = readdirSync(root);
+    } catch {
+      // No runs have ever happened here.
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(root, entry);
+      try {
+        if (statSync(path).mtimeMs > cutoff) continue;
+        rmSync(path, { recursive: true, force: true });
+      } catch {
+        // Gone already, or not ours to remove. Wasted disk is not a reason to
+        // refuse to start.
+      }
+    }
+  }
 
   /**
    * The registry, with each agent's models as its own CLI reports them.
@@ -1067,6 +1787,7 @@ export class AgentLauncher {
           label: spec.label,
           available: bin !== null,
           supported: launchable(spec),
+          runsAutomations: spec.runArgs !== undefined,
           models: cached ?? (await this.firstModels(spec, bin)),
         };
       }),
@@ -1194,18 +1915,25 @@ export class AgentLauncher {
   }
 
   /**
-   * Refuses unless this launcher owns no live process. Called before a launch
-   * and again after any await that precedes the spawn — `this.running` is
-   * only trustworthy for as long as the call does not yield.
+   * Refuses unless the chat slot is free. Called before a launch and again
+   * after any await that precedes the spawn — `this.running` is only
+   * trustworthy for as long as the call does not yield.
+   *
+   * An automation run no longer blocks this. The chat agent has its own slot:
+   * pressing Start must not fail because the schedule happens to be busy, which
+   * is the whole point of splitting the two.
    */
+  /** Refuses once close() has run. Nothing may spawn after shutdown. */
+  private assertClosed(): void {
+    if (this.closed) throw new LaunchError(409, "the launcher is shut down");
+  }
+
   private assertIdle(): void {
     const running = this.running;
     if (running) {
       throw new LaunchError(409, `${running.id} is already running`);
     }
-    if (this.oneShot) {
-      throw new LaunchError(409, "an automation run is in progress");
-    }
+
   }
 
   status(): { running: RunningAgent | null; lastExit: LastExit | null } {
@@ -1213,11 +1941,30 @@ export class AgentLauncher {
   }
 
   /**
-   * True while any agent process this launcher owns is alive — chat or
-   * automation run. The scheduler asks before dequeuing (spec invariant 4).
+   * How many more automation runs this launcher will accept right now. The
+   * scheduler asks before dequeuing (spec invariant 4).
+   *
+   * The chat agent is deliberately absent from this sum. It used to consume the
+   * only slot, so a chat session lasting hours stopped every scheduled run
+   * behind it.
    */
-  busy(): boolean {
-    return this.running !== null || this.oneShot !== null;
+  runCapacity(): number {
+    // Reservations count: a run between its claim and its spawn owns a slot
+    // just as much as one with a child.
+    return Math.max(0, this.limit - this.oneShots.size - this.starting.size);
+  }
+
+  /**
+   * The absolute cap. What the database claim compares its count of live runs
+   * against, since that count spans every process over this data directory.
+   */
+  runLimit(): number {
+    return this.limit;
+  }
+
+  /** True while a chat agent is alive. Not affected by automation runs. */
+  chatBusy(): boolean {
+    return this.running !== null;
   }
 
   /**
@@ -1228,6 +1975,7 @@ export class AgentLauncher {
    * draw the picker.
    */
   async start(id: string, model?: string): Promise<RunningAgent> {
+    this.assertClosed();
     this.assertIdle();
     const spec = this.registry.find((s) => s.id === id);
     if (!spec) throw new LaunchError(404, `unknown agent: ${id}`);
@@ -1238,6 +1986,8 @@ export class AgentLauncher {
     if (!bin) {
       throw new LaunchError(400, `${spec.label} is not installed (no ${spec.bin} on PATH)`);
     }
+    const blocked = spec.preflight?.(this.ctx, this.env);
+    if (blocked) throw new LaunchError(400, blocked);
     // A driven-only launch IS its driver, and a driver with no channel declines.
     // Refuse here rather than report a running agent that does nothing.
     if (drivenOnly(spec) && !this.ctx.channel) {
@@ -1254,21 +2004,52 @@ export class AgentLauncher {
       // That await is the only suspension point between the guard at the top
       // and the spawn below, and it reopens what that guard closed: two
       // starts racing here would both spawn, and the first child would be
-      // orphaned by the second overwriting this.child.
+      // orphaned by the second overwriting this.child. A close() landing in the
+      // same window is the other way this launch could become an orphan.
+      this.assertClosed();
       this.assertIdle();
     }
 
-    const workDir = this.prepareWorkDir(spec);
+    // A driven spec's model does not run the chat loop — its driver does — so
+    // it must not be able to take a message off the channel. That is the whole
+    // difference between the two scopes, and it is decided here, from the spec,
+    // rather than trusted to the CLI's own flags.
+    const profile: ScopeProfile = spec.drive ? "driven" : "chat";
+    // Not a parameter any more. Whoever pressed Start is not the right person
+    // to be asked which of their files an agent CLI reads, and the answer they
+    // could give that was not `workspace` is the one where the agent reads the
+    // master credential. See resolveAccess.
+    const decided = resolveAccess(this.ctx.access ?? "workspace");
+    const granted = decided.access;
+    const { ctx, grant } = this.launchCtx(profile, `chat:${spec.id}`);
+    let workDir: string;
+    try {
+      workDir = this.prepareWorkDir(spec, ctx);
+    } catch (err) {
+      // The credential was minted before the directory existed. A launch that
+      // never spawned must not leave a live one behind.
+      grant?.revoke();
+      throw err;
+    }
 
     this.stderrTail = "";
     // Built once and shared with the driver: a spec's childEnv may mint a
     // per-launch secret, and the driver must see the exact value the child got.
-    const childEnv = spec.childEnv?.(this.ctx, workDir) ?? {};
+    const childEnv = spec.childEnv?.(ctx, workDir) ?? {};
     const env = this.baseEnvWith(childEnv);
+    // Built before the spawn and before the driver, because both use it and a
+    // refused confinement must stop the launch rather than half-start it.
+    let command: LaunchCommand;
+    try {
+      command = this.confine(spec, bin, workDir, granted);
+    } catch (err) {
+      grant?.revoke();
+      throw new LaunchError(400, err instanceof Error ? err.message : String(err));
+    }
     // Null for a driven-only spec: its driver spawns one child per turn, and a
     // second long-lived process here would be an agent nobody prompts.
     const child = spec.args
-      ? spawn(bin, spec.args(this.ctx, model), {
+      ? spawn(command.bin, [...command.prefix, ...spec.args(ctx, model)], {
           cwd: workDir,
           env,
           // stdout is piped for the event stream, and MUST be consumed: a pipe
@@ -1313,19 +2094,26 @@ export class AgentLauncher {
       pid: child?.pid ?? -1,
       startedAt: new Date().toISOString(),
       model: model ?? null,
+      access: granted,
+      accessNotice: decided.notice,
     };
 
     this.child = child;
     this.running = started;
+    // Held so every path that ends this launch — a child exit, a driver giving
+    // up, Stop, shutdown — takes the credential back. noteExit is the one
+    // place that does it, because it is the one place they all reach.
+    this.chatGrant = grant;
     this.stopRequested = false;
     // Before the driver: the channel has to know a launched agent exists, or
     // the loop's first awaitUserTurn is stamped against nobody.
     this.ctx.onRunningChange?.(spec.id);
     try {
       this.driver =
-        spec.drive?.(this.ctx, {
+        spec.drive?.(ctx, {
           child,
           bin,
+          command,
           workDir,
           model,
           env,
@@ -1360,34 +2148,89 @@ export class AgentLauncher {
    * chat path: same binary resolution, same MCP config, same widened PATH,
    * same isolated workdir and per-CLI prepare step.
    *
-   * Refuses while any agent is alive rather than queueing internally — the
-   * scheduler owns the queue and its FIFO order, and a launcher that blocked
-   * here would hold a run row open for an unbounded chat session.
+   * Refuses at capacity rather than queueing internally — the scheduler owns
+   * the queue and its FIFO order, and a launcher that blocked here would hold a
+   * run row open while it waited.
+   *
+   * A live chat agent is not a reason to refuse. The two have separate slots.
    */
   async runOnce(opts: OneShotOptions): Promise<OneShotResult> {
-    if (this.running) {
-      throw new LaunchError(409, `${this.running.id} is already running`);
-    }
-    if (this.oneShot) {
-      throw new LaunchError(409, "an automation run is in progress");
-    }
-    const spec = this.resolveRunSpec(opts.agentId);
-    const bin = this.resolveBin(spec.bin);
-    if (!bin) {
+    this.assertClosed();
+    if (this.runCapacity() === 0) {
+      const held = this.oneShots.size + this.starting.size;
       throw new LaunchError(
-        400,
-        `${spec.label} is not installed (no ${spec.bin} on PATH)`,
+        409,
+        `already running ${held} automation ${held === 1 ? "run" : "runs"}`,
       );
     }
-    const workDir = this.prepareWorkDir(spec);
-    const prompt = `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
+    // The id names a directory. Every caller passes a UUID from the run row,
+    // and this keeps it that way rather than trusting them: the same rule the
+    // registry enforces for agent ids, applied to the one other string that
+    // reaches the filesystem from outside this file.
+    if (!/^[A-Za-z0-9_-]+$/.test(opts.runId)) {
+      throw new LaunchError(400, "invalid run id");
+    }
+    if (this.oneShots.has(opts.runId) || this.starting.has(opts.runId)) {
+      throw new LaunchError(409, `run ${opts.runId} is already in progress`);
+    }
+    // Held from here until the child is registered below, because validating a
+    // model can suspend. The scheduler has already claimed the run row by now,
+    // so a slot lost inside that window is not a wait, it is a lost fire.
+    this.starting.add(opts.runId);
+    // Minted before anything can spawn and revoked in finish(), which every
+    // ending of this run goes through.
+    const { ctx, grant } = this.launchCtx("run", `run:${opts.runId}`);
+    let child: ChildProcess;
+    let render: RenderRunLine | undefined;
+    let workDir: string;
+    try {
+      const spec = this.resolveRunSpec(opts.agentId);
+      const bin = this.resolveBin(spec.bin);
+      if (!bin) {
+        throw new LaunchError(
+          400,
+          `${spec.label} is not installed (no ${spec.bin} on PATH)`,
+        );
+      }
+      const blocked = spec.preflight?.(this.ctx, this.env);
+      if (blocked) throw new LaunchError(400, blocked);
+      const model = opts.model ?? undefined;
+      if (model !== undefined) {
+        // The model id becomes an argv element, so it must be one the CLI
+        // itself named — the same rule `start` applies to a chat launch.
+        const offered = await this.modelsFor(spec, bin);
+        if (!offered.some((m) => m.id === model)) {
+          throw new LaunchError(400, `${spec.label} does not offer that model`);
+        }
+      }
+      // That listing is the only suspension point before the spawn, and a
+      // close() landing inside it would otherwise be followed by a run
+      // starting anyway. Same re-check start() makes for the same reason.
+      this.assertClosed();
+      render = spec.renderRunLine;
+      workDir = this.prepareWorkDir(spec, ctx, runWorkDir(ctx, opts.runId));
+      const prompt = `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
 
-    const child = spawn(bin, spec.runArgs!(this.ctx, prompt), {
-      cwd: workDir,
-      env: this.childEnvFor(spec, workDir),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    this.oneShot = child;
+      // A scheduled run is the case this matters most for: nobody is watching
+      // it, and the mail it reads was written by strangers.
+      const command = this.confine(
+        spec,
+        bin,
+        workDir,
+        resolveAccess(this.ctx.access ?? "workspace").access,
+      );
+      child = spawn(command.bin, [...command.prefix, ...spec.runArgs!(ctx, prompt, workDir, model)], {
+        cwd: workDir,
+        env: this.childEnvFor(spec, workDir, ctx),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      // No child, so nothing else will ever release this reservation — or the
+      // credential it was about to use.
+      this.starting.delete(opts.runId);
+      grant?.revoke();
+      throw err;
+    }
 
     let log = "";
     const capture = (chunk: string) => {
@@ -1404,7 +2247,6 @@ export class AgentLauncher {
     // A spec that asks its CLI for an event stream must render it: the raw
     // NDJSON is unreadable, and the run log's only audience is a person. The
     // splitter is kept so finish() can flush a killed run's partial last line.
-    const render = spec.renderRunLine;
     const split = render
       ? lineSplitter((line) => {
           const rendered = render(line);
@@ -1450,11 +2292,23 @@ export class AgentLauncher {
       child.kill("SIGKILL");
     }, opts.timeoutMs ?? ONESHOT_TIMEOUT_MS);
     timer.unref?.();
-    this.killOneShot = () => {
-      note(ONESHOT_KILLED_NOTE);
-      forced = "killed";
-      child.kill("SIGKILL");
-    };
+    // Registered only now, with its kill: everything above can still throw, and
+    // an entry left in the map would consume a slot forever. The reservation
+    // holds the slot until this line, so it is never briefly free.
+    this.oneShots.set(opts.runId, {
+      child,
+      kill: () => {
+        // Already being killed — by the deadline, the watchdog, or an earlier
+        // call. Saying so twice would write the note into the log twice, and
+        // the first reason is the true one.
+        if (forced !== null) return;
+        note(ONESHOT_KILLED_NOTE);
+        forced = "killed";
+        child.kill("SIGKILL");
+      },
+    });
+    // The child holds the slot on its own now.
+    this.starting.delete(opts.runId);
 
     return await new Promise<OneShotResult>((resolve) => {
       let done = false;
@@ -1468,8 +2322,18 @@ export class AgentLauncher {
         // A killed child's last line has no newline on it. It is still the
         // best evidence of what the run was doing when it died.
         split?.flush();
-        this.oneShot = null;
-        this.killOneShot = null;
+        // Before anything that can throw: this run's credential must not
+        // outlive it, and a SIGKILLed child may still be draining pipes.
+        grant?.revoke();
+        // The slot is freed before the directory is removed: a failure to clean
+        // up disk must not cost this launcher a run slot for the rest of the
+        // process's life.
+        this.oneShots.delete(opts.runId);
+        try {
+          rmSync(workDir, { recursive: true, force: true });
+        } catch {
+          // Left for the sweep at the next start.
+        }
         resolve({
           status: forced ?? (code === 0 ? "ok" : "error"),
           exitCode: code,
@@ -1501,9 +2365,21 @@ export class AgentLauncher {
     });
   }
 
-  /** Kills an in-flight automation run. No-op when none is running. */
-  killRun(): void {
-    this.killOneShot?.();
+  /**
+   * Kills one in-flight automation run, or every one when given no id. No-op
+   * when there is nothing to kill.
+   *
+   * The no-argument form is what shutdown wants: each run then finishes as
+   * 'killed' with a log, instead of leaving a row that says 'running' until
+   * some later process sweeps it.
+   */
+  killRun(runId?: string): void {
+    if (runId !== undefined) {
+      this.oneShots.get(runId)?.kill();
+      return;
+    }
+    // Copied first: each kill deletes its own entry from the map on exit.
+    for (const entry of [...this.oneShots.values()]) entry.kill();
   }
 
   /** Idempotent: stopping with nothing running is a no-op. */
@@ -1525,6 +2401,7 @@ export class AgentLauncher {
   }
 
   close(): void {
+    this.closed = true;
     const had = this.running !== null;
     this.stopRequested = true;
     // State cleared before the driver is stopped, for the same reason noteExit
@@ -1539,6 +2416,8 @@ export class AgentLauncher {
     // the process past shutdown.
     driver?.stop();
     child?.kill("SIGTERM");
+    this.chatGrant?.revoke();
+    this.chatGrant = null;
     this.killRun();
     if (had) this.ctx.onRunningChange?.(null);
   }
@@ -1546,32 +2425,111 @@ export class AgentLauncher {
   /**
    * An empty, dedicated working directory: no repository context, no
    * CLAUDE.md, nothing for the agent to read into the session by accident.
-   * Shared by the chat agent and automation runs — they never overlap.
    * OpenCode is also passed this path as --dir; spawn cwd is not enough.
+   *
+   * The chat agent uses the shared one. Each automation run passes its own,
+   * because runs overlap and an agent writes files where it stands.
    */
-  private prepareWorkDir(spec: AgentSpec): string {
-    const workDir = agentWorkDir(this.ctx);
+  private prepareWorkDir(
+    spec: AgentSpec,
+    ctx: LaunchContext,
+    dir?: string,
+  ): string {
+    const workDir = dir ?? agentWorkDir(ctx);
     mkdirSync(workDir, { recursive: true });
-    spec.prepare?.(this.ctx, workDir, this.env);
+    // `ctx`, not `this.ctx`: prepare writes the credential into the CLI's
+    // config file, and the credential is this launch's scoped token.
+    spec.prepare?.(ctx, workDir, this.env);
     return workDir;
   }
 
   /**
    * The workdir a listing is described against — prepared, so the config files
-   * its env points at exist. Preparing is idempotent and writes the same
-   * content a launch would, so doing it early costs nothing. A failure here is
-   * not fatal to a listing: the CLI is asked anyway, against the bare path.
+   * its env points at exist. A failure here is not fatal to a listing: the CLI
+   * is asked anyway, against the bare path.
+   *
+   * Its own directory per agent, never the shared chat workdir. A listing
+   * prepares with no credential (see `listCtx`), and the chat agent's config
+   * files live in that shared directory: preparing there would overwrite a
+   * running launch's MCP config with an empty bearer. That write used to be
+   * harmless because it wrote the same master token a launch did; since the
+   * credential is per-launch it is not.
    */
   private listWorkDir(spec: AgentSpec): string {
+    const dir = join(agentRoot(this.ctx), "model-list", spec.id);
     try {
-      return this.prepareWorkDir(spec);
+      return this.prepareWorkDir(spec, this.listCtx(), dir);
     } catch {
-      return agentWorkDir(this.ctx);
+      return dir;
     }
   }
 
-  private childEnvFor(spec: AgentSpec, workDir: string): NodeJS.ProcessEnv {
-    return this.baseEnvWith(spec.childEnv?.(this.ctx, workDir) ?? {});
+  /**
+   * The context a model listing is described against.
+   *
+   * Deliberately credential-free. Listing runs the CLI's own `models` command,
+   * which never opens an MCP connection — but preparing the workdir writes a
+   * config file, and that file outlives the listing. Writing a usable
+   * credential there would leave one on disk that no launch owns and no exit
+   * revokes. An empty string is inert: a stray connection with it is refused.
+   */
+  private listCtx(): LaunchContext {
+    return { ...this.ctx, bearerToken: "" };
+  }
+
+  /**
+   * The context one launch runs under: everything the launcher was built with,
+   * except the credential, which is minted here and bound to `profile`.
+   *
+   * The grant comes back with it so the caller can revoke it when that launch
+   * ends. A launcher with no minter falls back to the master bearer and no
+   * grant, which is the pre-scope behaviour.
+   */
+  private launchCtx(
+    profile: ScopeProfile,
+    label: string,
+  ): { ctx: LaunchContext; grant: ScopedGrant | null } {
+    const grant = this.ctx.mintToken?.(profile, label) ?? null;
+    if (!grant) return { ctx: this.ctx, grant: null };
+    return { ctx: { ...this.ctx, bearerToken: grant.token }, grant };
+  }
+
+  /**
+   * The command this launch actually spawns.
+   *
+   * Every spawn goes through here — the chat child, each run's child, and (via
+   * `DriveOptions.command`) every turn a driver starts. That is the same shape
+   * as the tool scope: one place decides, and a spec cannot opt out of it.
+   *
+   * Writable: the launch's own directory and the agent root, which holds the
+   * CLI config homes that are shared across launches. Denied last: the data
+   * directory, whatever else named it.
+   */
+  private confine(
+    spec: AgentSpec,
+    bin: string,
+    workDir: string,
+    access: AgentAccess,
+  ): LaunchCommand {
+    if (access === "full") return plainCommand(bin);
+    const extra = spec.sandbox?.(this.ctx, workDir, this.env) ?? {};
+    return confineCommand({
+      bin,
+      access,
+      write: [workDir, agentRoot(this.ctx), ...(extra.write ?? [])],
+      // The credential and the mail store. `:memory:` names no directory, so
+      // there is nothing on disk to keep the agent out of.
+      deny: this.ctx.dataDir === ":memory:" ? [] : [this.ctx.dataDir],
+      home: this.env.HOME || undefined,
+    });
+  }
+
+  private childEnvFor(
+    spec: AgentSpec,
+    workDir: string,
+    ctx: LaunchContext = this.listCtx(),
+  ): NodeJS.ProcessEnv {
+    return this.baseEnvWith(spec.childEnv?.(ctx, workDir) ?? {});
   }
 
   private baseEnvWith(extras: Record<string, string>): NodeJS.ProcessEnv {
@@ -1599,7 +2557,13 @@ export class AgentLauncher {
       return spec;
     }
     const found = this.registry.find(
-      (s) => s.runArgs !== undefined && this.resolveBin(s.bin) !== null,
+      (s) =>
+        s.runArgs !== undefined &&
+        this.resolveBin(s.bin) !== null &&
+        // "First available" must mean first that can actually run: an agent
+        // its preflight would refuse is not a candidate, or every scheduled
+        // run on that machine would fail on the same message.
+        !s.preflight?.(this.ctx, this.env),
     );
     if (!found) {
       throw new LaunchError(400, "no agent CLI is installed to run automations");
@@ -1637,6 +2601,11 @@ export class AgentLauncher {
     // launch being torn down.
     this.running = null;
     this.child = null;
+    // The credential dies with the launch. A child that ignored SIGTERM and is
+    // still alive on the next tick now holds a token the server refuses, which
+    // is the point: revocation must not wait for the process to actually go.
+    this.chatGrant?.revoke();
+    this.chatGrant = null;
     const driver = this.driver;
     this.driver = null;
     // Whatever the loop was prompting is gone.

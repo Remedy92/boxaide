@@ -6,6 +6,7 @@ import { Field, Spinner, TechnicalDetails } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -136,115 +137,117 @@ function DealForm({
   return (
     <Dialog open onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[440px]">
-        <form onSubmit={submit}>
+        <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col gap-4">
           <DialogHeader>
             <DialogTitle>{editing ? "Edit deal" : "New deal"}</DialogTitle>
             <DialogDescription>
               Deals live on this machine. Nothing here is sent anywhere.
             </DialogDescription>
           </DialogHeader>
+          <DialogBody>
 
-          <div className="space-y-3 py-4">
-            <Field id="crm-deal-title" label="Title" error={titleError}>
-              <Input
-                id="crm-deal-title"
-                value={title}
-                aria-invalid={titleError ? true : undefined}
-                onChange={(event) => setTitle(event.target.value)}
-                placeholder="Pilot with Acme"
-              />
-            </Field>
-
-            <Field id="crm-deal-stage" label="Stage">
-              <Select value={stageId} onValueChange={setStageId}>
-                <SelectTrigger id="crm-deal-stage" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {stages.map((stage) => (
-                    <SelectItem key={stage.id} value={stage.id}>
-                      {stage.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-
-            <Field id="crm-deal-contact" label="Contact">
-              <Select value={contactId} onValueChange={setContactId}>
-                <SelectTrigger id="crm-deal-contact" className="w-full">
-                  <SelectValue placeholder="Nobody" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NONE}>Nobody</SelectItem>
-                  {(contacts.data ?? []).map((contact) => (
-                    <SelectItem key={contact.id} value={contact.id}>
-                      {contact.name?.trim() || contact.email}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-
-            <Field id="crm-deal-org" label="Organization">
-              <Select value={orgId} onValueChange={setOrgId}>
-                <SelectTrigger id="crm-deal-org" className="w-full">
-                  <SelectValue placeholder="None" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NONE}>None</SelectItem>
-                  {(orgs.data ?? []).map((org) => (
-                    <SelectItem key={org.id} value={org.id}>
-                      {org.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-
-            <div className="grid grid-cols-[minmax(0,1fr)_100px] gap-2">
-              <Field id="crm-deal-value" label="Value" error={valueError}>
+            <div className="space-y-3">
+              <Field id="crm-deal-title" label="Title" error={titleError}>
                 <Input
-                  id="crm-deal-value"
-                  inputMode="decimal"
-                  value={value}
-                  aria-invalid={valueError ? true : undefined}
-                  onChange={(event) => setValue(event.target.value)}
-                  placeholder="12000"
+                  id="crm-deal-title"
+                  value={title}
+                  aria-invalid={titleError ? true : undefined}
+                  onChange={(event) => setTitle(event.target.value)}
+                  placeholder="Pilot with Acme"
                 />
               </Field>
-              {/* Free text, not a currency picker: the column is a plain TEXT
-                  and nothing server-side validates it against ISO 4217. */}
-              <Field id="crm-deal-currency" label="Currency">
-                <Input
-                  id="crm-deal-currency"
-                  value={currency}
-                  onChange={(event) => setCurrency(event.target.value)}
-                  placeholder="EUR"
-                />
+
+              <Field id="crm-deal-stage" label="Stage">
+                <Select value={stageId} onValueChange={setStageId}>
+                  <SelectTrigger id="crm-deal-stage" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {stages.map((stage) => (
+                      <SelectItem key={stage.id} value={stage.id}>
+                        {stage.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </Field>
+
+              <Field id="crm-deal-contact" label="Contact">
+                <Select value={contactId} onValueChange={setContactId}>
+                  <SelectTrigger id="crm-deal-contact" className="w-full">
+                    <SelectValue placeholder="Nobody" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE}>Nobody</SelectItem>
+                    {(contacts.data ?? []).map((contact) => (
+                      <SelectItem key={contact.id} value={contact.id}>
+                        {contact.name?.trim() || contact.email}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+
+              <Field id="crm-deal-org" label="Organization">
+                <Select value={orgId} onValueChange={setOrgId}>
+                  <SelectTrigger id="crm-deal-org" className="w-full">
+                    <SelectValue placeholder="None" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE}>None</SelectItem>
+                    {(orgs.data ?? []).map((org) => (
+                      <SelectItem key={org.id} value={org.id}>
+                        {org.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+
+              <div className="grid grid-cols-[minmax(0,1fr)_100px] gap-2">
+                <Field id="crm-deal-value" label="Value" error={valueError}>
+                  <Input
+                    id="crm-deal-value"
+                    inputMode="decimal"
+                    value={value}
+                    aria-invalid={valueError ? true : undefined}
+                    onChange={(event) => setValue(event.target.value)}
+                    placeholder="12000"
+                  />
+                </Field>
+                {/* Free text, not a currency picker: the column is a plain TEXT
+                    and nothing server-side validates it against ISO 4217. */}
+                <Field id="crm-deal-currency" label="Currency">
+                  <Input
+                    id="crm-deal-currency"
+                    value={currency}
+                    onChange={(event) => setCurrency(event.target.value)}
+                    placeholder="EUR"
+                  />
+                </Field>
+              </div>
+
+              {upsert.isError && (
+                <div role="alert" className="rounded-[var(--radius-md)] bg-danger-bg p-3">
+                  <p className="text-[13px] text-danger">
+                    {friendlyError(
+                      upsert.error instanceof Error
+                        ? upsert.error.message
+                        : upsert.error,
+                    )}
+                  </p>
+                  <TechnicalDetails
+                    raw={
+                      upsert.error instanceof Error
+                        ? upsert.error.message
+                        : upsert.error
+                    }
+                  />
+                </div>
+              )}
             </div>
 
-            {upsert.isError && (
-              <div role="alert" className="rounded-[var(--radius-md)] bg-danger-bg p-3">
-                <p className="text-[13px] text-danger">
-                  {friendlyError(
-                    upsert.error instanceof Error
-                      ? upsert.error.message
-                      : upsert.error,
-                  )}
-                </p>
-                <TechnicalDetails
-                  raw={
-                    upsert.error instanceof Error
-                      ? upsert.error.message
-                      : upsert.error
-                  }
-                />
-              </div>
-            )}
-          </div>
-
+          </DialogBody>
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
               Cancel

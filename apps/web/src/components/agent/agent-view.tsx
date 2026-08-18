@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { Archive, ArrowDown, Menu, Plug, Trash2 } from "lucide-react";
+import { AgentApprovals } from "@/components/agent/agent-approvals";
 import { AgentComposer } from "@/components/agent/agent-composer";
 import { AgentPresenceBadge } from "@/components/agent/agent-presence";
 import { AgentRunView, groupRuns } from "@/components/agent/agent-run";
@@ -261,6 +262,9 @@ export function AgentView({
 
       <div className="shrink-0 px-5 pb-4">
         <div className="mx-auto w-full max-w-[720px]">
+          {/* Above the error and above the composer: this is the one thing on
+              the pane that another person is waiting on. */}
+          <AgentApprovals />
           {agent.error && (
             <div className="mb-2 rounded-[var(--radius-md)] border border-border-subtle bg-danger-bg px-3 py-2 text-[12px] leading-4 text-danger">
               {agent.error}

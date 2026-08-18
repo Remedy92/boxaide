@@ -53,7 +53,13 @@ async function main(): Promise<void> {
     }
     // stdio: no console.log on stdout. Platform tools included; platform
     // timers deliberately NOT started — the serve process owns those.
-    await runStdioMcp(runtime.mail, runtime.channel, runtime.platform);
+    await runStdioMcp(
+      runtime.mail,
+      runtime.channel,
+      runtime.platform,
+      process.env,
+      runtime.approvals,
+    );
     return;
   }
 

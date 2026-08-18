@@ -55,6 +55,7 @@ import type {
   OutreachBadge,
   OutreachCampaign,
   CampaignStatus,
+  ReusableMailbox,
   RsvpRefreshResult,
   SendResult,
   SuppressionRow,
@@ -570,6 +571,43 @@ export function clearAgentConversation(
 }
 
 /**
+ * An action an agent asked for and nobody has answered yet.
+ *
+ * Mirrors ApprovalView in src/agent/approvals.ts. The text is built on the
+ * server from the arguments that will actually be replayed, so what the card
+ * shows and what happens on Approve cannot drift apart.
+ */
+export type AgentApproval = {
+  id: string;
+  /** message_send, meeting_create or meeting_cancel. */
+  tool: string;
+  /** One line: what happens if the user says yes. */
+  title: string;
+  fields: { label: string; value: string }[];
+  /** The message or the meeting description. Null when the action has none. */
+  body: string | null;
+  /** Which launch asked: chat, driven, or run for a scheduled automation. */
+  profile: string;
+  agent: string | null;
+  chatId: string | null;
+  askedAt: string;
+};
+
+export function decideAgentApproval(
+  id: string,
+  decision: "approve" | "deny",
+  ctx: Ctx,
+): Promise<{ state: string; outcome: string; pending: AgentApproval[] }> {
+  return request(`/api/agent/approvals/${encodeURIComponent(id)}`, {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+    body: { decision },
+  });
+}
+
+/**
  * Follow the conversation. Resolves when the server closes the stream; the
  * caller reconnects.
  */
@@ -579,6 +617,7 @@ export function streamAgent(
     turn: (turn: AgentTurn) => void;
     presence: (presence: AgentPresence) => void;
     chats?: (chats: AgentChatsResponse) => void;
+    approvals?: (pending: AgentApproval[]) => void;
   },
 ): Promise<void> {
   return stream("/api/agent/stream", {
@@ -590,6 +629,9 @@ export function streamAgent(
         if (event === "turn") on.turn(JSON.parse(data) as AgentTurn);
         else if (event === "presence") on.presence(JSON.parse(data) as AgentPresence);
         else if (event === "chats") on.chats?.(JSON.parse(data) as AgentChatsResponse);
+        else if (event === "approvals") {
+          on.approvals?.(JSON.parse(data) as AgentApproval[]);
+        }
       } catch {
         // A frame we cannot parse is dropped rather than tearing down a live
         // conversation. The next one re-states presence anyway.
@@ -854,12 +896,22 @@ export async function listAutomations(ctx: Ctx): Promise<Automation[]> {
 }
 
 /**
- * PATCH — a partial write. The UI sends only `enabled`; every other field is
- * the agent's to author. A bad cron or a duplicate name is a 400, not a 500.
+ * PATCH — a partial write. The UI sends only how a run happens (`enabled`,
+ * `agentId`, `model`); what it does — name, cron, prompt — is the agent's to
+ * author. A bad cron or a duplicate name is a 400, not a 500.
  */
 export async function updateAutomation(
   automationId: string,
-  patch: { enabled?: boolean; name?: string; cron?: string; prompt?: string },
+  // agentId and model take null to mean "back to the default", so an absent
+  // key and an explicit null are different requests — never collapse them.
+  patch: {
+    enabled?: boolean;
+    name?: string;
+    cron?: string;
+    prompt?: string;
+    agentId?: string | null;
+    model?: string | null;
+  },
   ctx: Ctx,
 ): Promise<Automation> {
   const data = await request<{ automation: Automation }>(
@@ -1132,10 +1184,78 @@ export async function deleteCalendarAccount(
   }
 }
 
+/**
+ * Mailboxes whose stored password would also open a calendar. Read-only and
+ * cheap — the server makes no network call to answer — so it is safe beside the
+ * account list on every page load.
+ */
+export async function listReusableMailboxes(ctx: Ctx): Promise<ReusableMailbox[]> {
+  const data = await request<{ mailboxes: ReusableMailbox[] }>(
+    "/api/calendar/mailboxes",
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+  return data.mailboxes;
+}
+
+/**
+ * Connect one of them. The mailbox is named in the path and the password never
+ * crosses the wire in either direction — the server already holds it.
+ */
+export async function connectMailboxCalendar(
+  mailAccountId: string,
+  ctx: Ctx,
+  /**
+   * Set only after the person has read the duplicate warning the server sent
+   * back as a 409 and chosen to go ahead. Sending it unasked would silence the
+   * one question worth asking.
+   */
+  confirmOverlap = false,
+): Promise<CalendarAccount> {
+  const data = await request<{ account: CalendarAccount }>(
+    `/api/calendar/mailboxes/${encodeURIComponent(mailAccountId)}`,
+    {
+      method: "POST",
+      body: confirmOverlap ? { confirmOverlap: true } : {},
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.account;
+}
+
+/**
+ * Connect the calendars macOS already holds. There is nothing to send: the
+ * whole handshake is the system permission dialog, which this call raises and
+ * then waits on for as long as the person looks at it.
+ */
+export async function connectLocalCalendar(
+  ctx: Ctx,
+  /** Same rule as connectMailboxCalendar: only after the 409 was shown. */
+  confirmOverlap = false,
+): Promise<CalendarAccount> {
+  const data = await request<{ account: CalendarAccount }>(
+    "/api/calendar/local",
+    {
+      method: "POST",
+      body: confirmOverlap ? { confirmOverlap: true } : {},
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.account;
+}
+
+/**
+ * `clientId` and `clientSecret` are omitted when the server ships its own
+ * Google client — see `googleBuiltIn` on the accounts response. `alias` may be
+ * empty too: the callback falls back to the Google address it learns.
+ */
 export type GoogleCalendarStartBody = {
-  alias: string;
-  clientId: string;
-  clientSecret: string;
+  alias?: string;
+  clientId?: string;
+  clientSecret?: string;
 };
 
 /**
@@ -1282,6 +1402,26 @@ export function cancelMeeting(
   );
 }
 
+/**
+ * Forget a cancelled meeting. Boxaide's own record and its recorded replies go;
+ * nothing is sent and no calendar is touched. Cancelled meetings only — the
+ * server answers 400 for anything still scheduled.
+ */
+export function removeMeeting(
+  meetingId: string,
+  ctx: Ctx,
+): Promise<{ removed: boolean }> {
+  return request<{ removed: boolean }>(
+    `/api/calendar/meetings/${encodeURIComponent(meetingId)}`,
+    {
+      method: "DELETE",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /* updates                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -1393,15 +1533,35 @@ export type LocalAgent = {
   available: boolean;
   /** This Boxaide build knows how to launch it. */
   supported: boolean;
+  /** It can carry a scheduled automation run, not only the chat loop. */
+  runsAutomations: boolean;
   /** Models the server lets you pick from. Empty means no picker. */
   models: LocalAgentModel[];
 };
+
+/**
+ * How much of the machine a launched agent may reach. Mirrors AgentAccess in
+ * src/agent/sandbox.ts.
+ *
+ * `workspace` confines it to its own directory and its own CLI's files, and is
+ * what every launch gets. `full` is unconfined; nothing in this app asks for
+ * it, and a launch only lands there when the install set it or the machine has
+ * no sandbox — in which case `accessNotice` says which.
+ */
+export type LocalAgentAccess = "workspace" | "full";
 
 export type RunningLocalAgent = {
   id: string;
   pid: number;
   startedAt: string;
   model: string | null;
+  /** What this launch was actually given, not what was asked for. */
+  access: LocalAgentAccess;
+  /**
+   * Why it is unconfined, when it is. Null on a confined launch, and absent on
+   * a server built before this field existed — both mean "say nothing".
+   */
+  accessNotice?: string | null;
 };
 
 /**
@@ -1440,6 +1600,11 @@ export function startLocalAgent(
   ctx: Ctx,
   model?: string,
 ): Promise<{ running: RunningLocalAgent }> {
+  // Model only. Confinement is not a per-launch request any more: the server
+  // decides it from the install and the machine, and a field here would be a
+  // second place holding that opinion.
+  const body: { model?: string } = {};
+  if (model) body.model = model;
   return request<{ running: RunningLocalAgent }>(
     `/api/agents/${encodeURIComponent(id)}/start`,
     {
@@ -1447,7 +1612,7 @@ export function startLocalAgent(
       baseUrl: ctx.baseUrl,
       token: ctx.token,
       signal: ctx.signal,
-      body: model ? { model } : undefined,
+      body: Object.keys(body).length > 0 ? body : undefined,
     },
   );
 }
