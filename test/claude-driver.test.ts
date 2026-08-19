@@ -44,6 +44,12 @@ type Step = {
   /** Pad the answer to this many characters. */
   pad?: number;
   /**
+   * Announce the turn, then hold it until the test releases it. What a long
+   * answer looks like from outside: the test gets to act on the chat while the
+   * model is demonstrably still working on it.
+   */
+  slow?: boolean;
+  /**
    * Report subtype "success" with nothing on it. What a signed-out CLI was
    * actually observed doing, and what reached the user as "claude: success".
    */
@@ -86,6 +92,16 @@ if (step.hang) {
     () => fs.writeFileSync(process.env.FAKE_ANSWERED, ""),
   );
   setInterval(() => say({ type: "system", subtype: "still_here" }), 20);
+} else if (step.slow) {
+  // Says it started, then waits to be let go. The turn is genuinely in flight
+  // for as long as the test wants it to be.
+  fs.writeFileSync(process.env.FAKE_STARTED, "");
+  const tick = setInterval(() => {
+    if (!fs.existsSync(process.env.FAKE_RELEASE)) return;
+    clearInterval(tick);
+    say({ type: "result", subtype: "success", is_error: false, result: answer });
+    process.exit(0);
+  }, 10);
 } else if (step.noNewline) {
   // The last write of a turn, unterminated: a reader that only emits on newline
   // scores this finished turn as no answer. Exit once it has drained, or a write
@@ -119,6 +135,10 @@ type Fake = {
   calls: () => string[][];
   /** True once a deaf step's result line has reached the pipe. */
   answered: () => boolean;
+  /** True once a slow step has announced its turn. */
+  started: () => boolean;
+  /** Lets a slow step finish. */
+  release: () => void;
 };
 
 const cleanup: Array<() => void | Promise<void>> = [];
@@ -135,6 +155,8 @@ function fakeCli(steps: Step[]): Fake {
   writeFileSync(script, FAKE_CLI);
   writeFileSync(join(dir, "steps.json"), JSON.stringify(steps));
   const answered = join(dir, "answered");
+  const started = join(dir, "started");
+  const release = join(dir, "release");
   return {
     script,
     env: {
@@ -142,8 +164,12 @@ function fakeCli(steps: Step[]): Fake {
       FAKE_LOG: log,
       FAKE_SCRIPT: join(dir, "steps.json"),
       FAKE_ANSWERED: answered,
+      FAKE_STARTED: started,
+      FAKE_RELEASE: release,
     },
     answered: () => existsSync(answered),
+    started: () => existsSync(started),
+    release: () => writeFileSync(release, ""),
     calls: () =>
       existsSync(log)
         ? readFileSync(log, "utf8")
@@ -437,12 +463,15 @@ describe("ClaudeDriver", () => {
     const driver = new ClaudeDriver({
       channel: {
         awaitUserTurn: () => Promise.reject(new Error("The database connection is not open")),
-        post: () => undefined,
+        answer: () => true,
         releaseLease: () => "missing",
         noteAgentActivity: () => {},
         setDriven: () => {},
         needsTitle: () => false,
         nameChat: () => false,
+        chatSession: () => ({ id: null, epoch: 0 }),
+        saveChatSession: () => {},
+        clearChatSession: () => {},
       },
       agent: "claude-code",
       bin: process.execPath,
@@ -511,6 +540,93 @@ describe("ClaudeDriver", () => {
     await driver.done;
   });
 
+  it("gives each chat its own session, and resumes it after a restart", async () => {
+    const fake = fakeCli([
+      { session: "ses-a", answer: "chat one" },
+      { session: "ses-b", answer: "chat two" },
+      // No session of its own: whatever this call was told to resume.
+      { answer: "back in one" },
+    ]);
+    const { channel } = make();
+    const first = channel.activeChat().id;
+    const second = channel.createChat().id;
+    // Named by the user, so nothing asks the model for a title and every call
+    // in the log is a turn.
+    channel.renameChat(first, "First");
+    channel.renameChat(second, "Second");
+    const driver = drive(channel, fake);
+
+    channel.post({ role: "user", text: "one", chatId: first });
+    await until(() => channel.history(undefined, first).some((t) => t.role === "agent"));
+    channel.post({ role: "user", text: "two", chatId: second });
+    await until(() => channel.history(undefined, second).some((t) => t.role === "agent"));
+
+    // Two chats, two fresh sessions: the second conversation does not open in
+    // the middle of the first one's transcript.
+    expect(fake.calls()[0]).not.toContain("--resume");
+    expect(fake.calls()[1]).not.toContain("--resume");
+
+    driver.stop();
+    await driver.done;
+
+    // A restart is not a new conversation. The ids are in the store and the
+    // workdir the transcripts live in is the same one.
+    const again = drive(channel, fake);
+    channel.post({ role: "user", text: "still there?", chatId: first });
+    await until(
+      () => channel.history(undefined, first).filter((t) => t.role === "agent").length === 2,
+    );
+
+    const resumed = fake.calls()[2];
+    expect(resumed[resumed.indexOf("--resume") + 1]).toBe("ses-a");
+    expect(resumed[resumed.indexOf("-p") + 1]).toBe("still there?");
+
+    again.stop();
+    await again.done;
+  });
+
+  it("drops only the refused chat's session when a resume is refused", async () => {
+    const fake = fakeCli([
+      { session: "ses-a", answer: "chat one" },
+      { session: "ses-b", answer: "chat two" },
+      { errors: ["No conversation found with session ID: $RESUME"] },
+      { session: "ses-a2", answer: "fresh start" },
+      { answer: "chat two again" },
+    ]);
+    const { store, channel } = make();
+    const first = channel.activeChat().id;
+    const second = channel.createChat().id;
+    channel.renameChat(first, "First");
+    channel.renameChat(second, "Second");
+    const driver = drive(channel, fake);
+
+    channel.post({ role: "user", text: "one", chatId: first });
+    await until(() => channel.history(undefined, first).some((t) => t.role === "agent"));
+    channel.post({ role: "user", text: "two", chatId: second });
+    await until(() => channel.history(undefined, second).some((t) => t.role === "agent"));
+
+    channel.post({ role: "user", text: "one again", chatId: first });
+    await until(
+      () => channel.history(undefined, first).filter((t) => t.role === "agent").length === 2,
+    );
+
+    // The refused chat started over; the other chat's transcript was never in
+    // question and is still what its next turn resumes.
+    expect(store.chatSession(first, "claude-code").id).toBe("ses-a2");
+    expect(store.chatSession(second, "claude-code").id).toBe("ses-b");
+
+    channel.post({ role: "user", text: "two again", chatId: second });
+    await until(
+      () => channel.history(undefined, second).filter((t) => t.role === "agent").length === 2,
+    );
+    const onSecond = fake.calls()[4];
+    expect(onSecond[onSecond.indexOf("--resume") + 1]).toBe("ses-b");
+    expect(store.listDroppedUserSeqs()).toEqual([]);
+
+    driver.stop();
+    await driver.done;
+  });
+
   it("repairs the credential once and answers the same message on the retry", async () => {
     // The observed failure, exactly: exit 0, subtype success, and the sign-out
     // notice sitting where the answer goes. Posted as an answer it reaches the
@@ -546,6 +662,39 @@ describe("ClaudeDriver", () => {
     await driver.done;
   });
 
+  it("does not put a cleared chat back on the session it was answering in", async () => {
+    const fake = fakeCli([
+      { session: "ses-a", answer: "the long answer", slow: true },
+      { session: "ses-b", answer: "after the clear" },
+    ]);
+    const { store, channel } = make();
+    const chat = channel.activeChat().id;
+    channel.renameChat(chat, "Mine");
+    const driver = drive(channel, fake);
+
+    channel.post({ role: "user", text: "something long", chatId: chat });
+    await until(() => fake.started());
+
+    // The user empties the chat while the model is still working on it.
+    channel.clear(chat);
+    fake.release();
+    await until(() => fake.calls().length === 1 && !channel.presence().working);
+
+    // The answer landed on a session the chat no longer has, and saving it
+    // would have handed the next message a transcript the user just emptied.
+    expect(store.chatSession(chat, "claude-code").id).toBeNull();
+
+    // The next message starts a session rather than resuming the emptied one.
+    channel.post({ role: "user", text: "still empty?", chatId: chat });
+    await until(() => fake.calls().length === 2);
+    expect(fake.calls()[1]).not.toContain("--resume");
+    await until(() => store.chatSession(chat, "claude-code").id !== null);
+    expect(store.chatSession(chat, "claude-code").id).toBe("ses-b");
+
+    driver.stop();
+    await driver.done;
+  });
+
   it("treats a result event with nothing in it as the same failure", async () => {
     // "claude: success" — a result the CLI called successful and put no text on.
     // Unusable whatever caused it, and what the signed-out run actually emitted.
@@ -566,6 +715,45 @@ describe("ClaudeDriver", () => {
     expect(channel.history().find((t) => t.role === "agent")!.text).toBe(
       "back in business",
     );
+
+    driver.stop();
+    await driver.done;
+  });
+
+  it("drops an answer to a question the user deleted while it was being written", async () => {
+    const fake = fakeCli([
+      { session: "ses-a", answer: "the long answer", slow: true },
+      { session: "ses-b", answer: "second answer" },
+    ]);
+    const { store, channel } = make();
+    const emptied = channel.activeChat().id;
+    const other = channel.createChat().id;
+    channel.renameChat(emptied, "Mine");
+    channel.renameChat(other, "Elsewhere");
+    const driver = drive(channel, fake);
+
+    channel.post({ role: "user", text: "something long", chatId: emptied });
+    await until(() => fake.started());
+
+    // The user empties the chat and looks at another one while the model works.
+    channel.clear(emptied);
+    channel.selectChat(other);
+    fake.release();
+
+    // The loop takes one turn at a time, so the next answer landing proves the
+    // first one was finished with — posted or dropped — before this ran.
+    channel.post({ role: "user", text: "next", chatId: other });
+    await until(() => channel.history(undefined, other).some((t) => t.role === "agent"));
+
+    // The first answer went with the question the user deleted. It is not in
+    // the chat it was asked in, and it did not land in the chat they moved to.
+    expect(channel.history(undefined, emptied)).toEqual([]);
+    expect(
+      store
+        .listTurns()
+        .filter((t) => t.role === "agent")
+        .map((t) => t.text),
+    ).toEqual(["second answer"]);
 
     driver.stop();
     await driver.done;

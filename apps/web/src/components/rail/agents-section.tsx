@@ -8,13 +8,8 @@ import { agentExitedBadly, agentSignedOut } from "@/components/rail/agent-exit";
 import { NavItem } from "@/components/rail/nav-item";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useSettings } from "@/lib/hooks/use-settings";
 import { friendlyError } from "@/lib/api/errors";
-import {
-  useLocalAgents,
-  useStartLocalAgent,
-  useStopLocalAgent,
-} from "@/lib/hooks/use-local-agents";
+import { useLocalAgents, useStopLocalAgent } from "@/lib/hooks/use-local-agents";
 
 /**
  * Boxaide still cannot tell you whether an agent is CONNECTED.
@@ -27,8 +22,8 @@ import {
  * What became knowable is narrower and is reported elsewhere. An agent parked
  * in `chat_await_message` is holding a request open — the Agent nav row calls
  * that "listening", and only that. The conversation header also names the
- * CLI this process spawned (sidebar Start), which is a different fact: see
- * AgentChannel.presence.launchedAgent. Neither is "connected".
+ * CLI this process spawned (picked in the composer), which is a different
+ * fact: see AgentChannel.presence.launchedAgent. Neither is "connected".
  */
 export function AgentsSection({
   collapsed = false,
@@ -81,36 +76,32 @@ export function AgentsSection({
 }
 
 /**
- * Agent CLIs found on this machine, launchable in one click. The server does
- * the launching (POST /api/agents/:id/start) with read and draft tools
- * pre-approved — never message_send. Only installed CLIs appear; installed
- * ones this build cannot launch yet say so instead of hiding.
+ * The agent in play, and only that: the one running now, or the one that just
+ * died. Choosing an agent happens in the composer, next to the question it
+ * will answer — a rail listing every installed CLI with a Start button was a
+ * second place to make the same choice, and the two disagreed.
  *
- * No status dot per row. Five rows of grey dots and one green one is a legend
- * the reader has to learn; "Stop" already means running and "Start" already
- * means stopped, in words, on the control that changes it.
+ * No status dot per row. A row is here because it is running or because it
+ * exited; "Stop" says running in a word, on the control that changes it.
  */
 function LocalAgentList() {
   const agents = useLocalAgents();
-  const start = useStartLocalAgent();
   const stop = useStopLocalAgent();
-  // Picked in the composer's model select, stored in settings.
-  const { agentModel } = useSettings();
-  const rows = (agents.data?.agents ?? []).filter((a) => a.available);
-  if (rows.length === 0) return null;
   const running = agents.data?.running ?? null;
   const lastExit = agents.data?.lastExit ?? null;
-  const busy = start.isPending || stop.isPending;
+  const rows = (agents.data?.agents ?? []).filter(
+    (a) =>
+      a.available &&
+      (running?.id === a.id ||
+        agentExitedBadly(a.id, { running, lastExit })),
+  );
+  if (rows.length === 0) return null;
+  const busy = stop.isPending;
 
   return (
     <div className="space-y-0.5 pb-1">
       {rows.map((agent) => {
         const isRunning = running?.id === agent.id;
-        // Only pass the pick to an agent that offers it; others start on
-        // their default instead of failing the launch.
-        const model = agent.models.some((m) => m.id === agentModel)
-          ? agentModel
-          : undefined;
         const crashed = agentExitedBadly(agent.id, { running, lastExit });
         // A signed-out CLI is a crash with a known cause and a one-click fix,
         // so it says the cause instead of "exited" and offers the fix.
@@ -124,9 +115,7 @@ function LocalAgentList() {
               className={
                 isRunning
                   ? "min-w-0 flex-1 truncate text-[13px] font-medium text-fg"
-                  : agent.supported
-                    ? "min-w-0 flex-1 truncate text-[13px] text-fg-secondary"
-                    : "min-w-0 flex-1 truncate text-[13px] text-fg-tertiary"
+                  : "min-w-0 flex-1 truncate text-[13px] text-fg-secondary"
               }
               title={
                 signedOut
@@ -156,36 +145,27 @@ function LocalAgentList() {
                 <TooltipContent>{running.accessNotice}</TooltipContent>
               </Tooltip>
             )}
-            {agent.supported ? (
+            {isRunning && (
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
                 className="h-5 px-1.5 text-[11px] text-fg-secondary"
-                disabled={busy || (running !== null && !isRunning)}
-                onClick={() => {
-                  if (isRunning) {
-                    stop.mutate();
-                    return;
-                  }
-                  start.mutate(
-                    { id: agent.id, model },
-                    {
-                      onError: (err) =>
-                        toast.error(
-                          friendlyError(
-                            err instanceof Error ? err.message : String(err),
-                          ),
+                disabled={busy}
+                onClick={() =>
+                  stop.mutate(undefined, {
+                    onError: (err) =>
+                      toast.error(
+                        friendlyError(
+                          err instanceof Error ? err.message : String(err),
                         ),
-                    },
-                  );
-                }}
+                      ),
+                  })
+                }
               >
                 {busy && <Spinner />}
-                {isRunning ? "Stop" : "Start"}
+                Stop
               </Button>
-            ) : (
-              <span className="text-[11px] text-fg-tertiary">soon</span>
             )}
           </div>
         );

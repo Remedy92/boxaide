@@ -30,6 +30,43 @@ afterEach(() => {
 });
 
 describe("AgentChannel", () => {
+  it("puts a line about another chat in that chat, and answers nothing with it", async () => {
+    const { channel } = make();
+    const asked = channel.activeChat().id;
+    const elsewhere = channel.createChat().id;
+    // The user is looking at the chat they asked in, and the agent is working
+    // on that question.
+    channel.selectChat(asked);
+    const question = channel.post({ role: "user", text: "send it", chatId: asked });
+    await channel.awaitUserTurn({ timeoutMs: 1_000 });
+
+    // Boxaide narrating about a request that came from the other chat — an
+    // approval note is the case this exists for.
+    channel.post({
+      role: "activity",
+      text: "Approved: message_send",
+      agent: "claude-code",
+      chatId: elsewhere,
+    });
+
+    const note = channel.history(undefined, elsewhere);
+    expect(note.map((t) => t.text)).toEqual(["Approved: message_send"]);
+    // Not stamped as a reply to a question in a different pane.
+    expect(note[0].replyTo).toBeNull();
+    // The chat being worked on did not get it, and the user was not moved.
+    expect(channel.history(undefined, asked).map((t) => t.text)).toEqual(["send it"]);
+    expect(channel.activeChat().id).toBe(asked);
+    // The agent is still holding the question it was handed.
+    expect(channel.presence().working?.seq).toBe(question.seq);
+  });
+
+  it("refuses a line for a chat that is not there", () => {
+    const { channel } = make();
+    expect(() =>
+      channel.post({ role: "activity", text: "note", chatId: "nope" }),
+    ).toThrowError(/no such chat/);
+  });
+
   it("hands a queued message to the first agent that asks", async () => {
     const { channel } = make();
     channel.post({ role: "user", text: "what came in today?" });

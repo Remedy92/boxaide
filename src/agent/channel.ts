@@ -41,6 +41,7 @@
  */
 import {
   MAX_DELIVERIES,
+  type ChatSession,
   type Store,
   type StoredChat,
   type StoredTurn,
@@ -346,23 +347,45 @@ export class AgentChannel {
     text: string;
     agent?: string | null;
     chatId?: string;
+    /**
+     * The question this answers, when the caller knows it. Set by `answer`,
+     * which has the turn in hand; left off by the MCP tier, where an agent may
+     * volunteer a line with no question open at all.
+     */
+    answerTo?: { seq: number; chatId: string };
   }): Turn {
     const text = input.text.trim();
     if (!text) throw new Error("text is required");
-    if (input.role === "user" && input.chatId) {
-      if (!this.selectChat(input.chatId)) throw new Error("no such chat");
+    if (input.chatId && !this.writable(input.chatId)) {
+      throw new Error("no such chat");
     }
+    // Only a user turn moves the active chat. A line about some other chat says
+    // where it goes without saying where the user should be looking.
+    if (input.role === "user" && input.chatId) this.selectChat(input.chatId);
     if (input.role !== "user") this.touch(input.agent ?? null);
     // Stamp before clearing: the claimed seq is the owner, even if another
     // user turn arrived while this work was open.
     const answering = input.role === "agent" || input.role === "activity";
-    const replyTo = answering && this.work ? this.work.seq : null;
-    // An answer belongs to the chat the question was asked in. Only a turn
-    // that answers nothing lands wherever the user is now.
+    // The question this line answers, if it answers one: named by the caller
+    // that has the turn in hand, or the message the agent is working through.
+    const answered =
+      input.answerTo ??
+      (answering && this.work
+        ? { seq: this.work.seq, chatId: this.work.chatId }
+        : null);
+    // The chat it belongs to, most specific first. A caller naming a chat is
+    // saying where the line goes and is taken at its word: an approval note
+    // belongs to the request it is about, not to whatever the agent happens to
+    // be working on, and not to whichever chat the user has open. Only a line
+    // that names nothing and answers nothing lands wherever the user is now.
     const chatId =
-      answering && this.work
-        ? this.work.chatId
-        : this.store.ensureActiveChat().id;
+      (answering ? input.chatId : undefined) ??
+      answered?.chatId ??
+      this.store.ensureActiveChat().id;
+    // A line in a different conversation from the question answers nothing, so
+    // it is not stamped as a reply to it — a reply_to across chats would put an
+    // answer under a message that is not in the same pane.
+    const replyTo = answered && answered.chatId === chatId ? answered.seq : null;
     // The answer is what ends the work. An activity line does not: the agent
     // is narrating mid-task and is still holding the message.
     if (input.role === "agent") this.work = null;
@@ -391,6 +414,36 @@ export class AgentChannel {
     this.emitChats();
     if (input.role === "user") this.handOff();
     return turn;
+  }
+
+  /**
+   * Posts a model's answer to the question it answers, or drops it.
+   *
+   * False means dropped, and the only way that happens is the user emptying or
+   * deleting the chat while the model was still working on it. `post` alone
+   * would land that answer wherever the user is now, under no question at all:
+   * a reply to a message nobody can see, in a conversation it was never asked
+   * in. The user removed the question; the answer goes with it.
+   */
+  answer(input: {
+    seq: number;
+    chatId: string;
+    text: string;
+    agent?: string | null;
+  }): boolean {
+    if (!this.store.answerable(input.seq, input.chatId)) {
+      // Nothing is being worked on any more either way.
+      if (this.work?.seq === input.seq) this.work = null;
+      this.emitPresence();
+      return false;
+    }
+    this.post({
+      role: "agent",
+      text: input.text,
+      agent: input.agent,
+      answerTo: { seq: input.seq, chatId: input.chatId },
+    });
+    return true;
   }
 
   /**
@@ -496,6 +549,31 @@ export class AgentChannel {
     const ok = this.store.renameChat(id, clean, "agent");
     if (ok) this.emitChats();
     return ok;
+  }
+
+  /**
+   * The CLI session a chat's turns are answered in.
+   *
+   * Straight through to the store, and deliberately so: two processes launch
+   * agents, and an id kept in whichever one is running would be lost the moment
+   * that agent restarted — leaving the model to answer the next message with no
+   * memory of the conversation it is in.
+   */
+  chatSession(chatId: string, agent: string): ChatSession {
+    return this.store.chatSession(chatId, agent);
+  }
+
+  saveChatSession(
+    chatId: string,
+    agent: string,
+    sessionId: string,
+    epoch: number,
+  ): void {
+    this.store.saveChatSession(chatId, agent, sessionId, epoch);
+  }
+
+  clearChatSession(chatId: string): void {
+    this.store.clearChatSession(chatId);
   }
 
   archiveChat(id: string): boolean {

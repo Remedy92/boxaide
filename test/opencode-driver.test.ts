@@ -31,9 +31,15 @@ type Fake = {
  */
 function startFake(
   reply: (call: Call) => { status: number; body?: unknown } | null,
+  // Run just before a session-creation response goes out, while the driver is
+  // still awaiting it. The window a clear has to land in.
+  onSession?: () => void,
 ): Promise<Fake> {
   const calls: Call[] = [];
   const streams: Array<{ path: string; auth: string | undefined }> = [];
+  // The first session is the one every single-chat test names. Later ones are
+  // numbered, so a test with two chats can tell the two sessions apart.
+  let sessions = 0;
   const open = new Set<ServerResponse>();
   const sockets = new Set<Socket>();
   const server: Server = createServer((req, res) => {
@@ -57,9 +63,13 @@ function startFake(
         body: raw ? JSON.parse(raw) : null,
       };
       calls.push(call);
-      const out = call.path.startsWith("/session?")
-        ? { status: 200, body: { id: "ses_test" } }
-        : reply(call);
+      let out: { status: number; body?: unknown } | null;
+      if (call.path.startsWith("/session?")) {
+        onSession?.();
+        out = { status: 200, body: { id: ++sessions === 1 ? "ses_test" : `ses_test_${sessions}` } };
+      } else {
+        out = reply(call);
+      }
       if (!out) return;
       res.statusCode = out.status;
       res.setHeader("content-type", "application/json");
@@ -254,6 +264,131 @@ describe("OpenCodeDriver", () => {
     expect(fake.calls.some((c) => c.path.includes("/abort"))).toBe(false);
   });
 
+  it("gives each chat its own session and prompts the one the message came from", async () => {
+    const fake = await startFake(() => ({
+      status: 200,
+      body: { parts: [{ type: "text", text: "answered" }] },
+    }));
+    cleanup.push(fake.close);
+    const { store, channel } = make();
+    const first = channel.activeChat().id;
+    const second = channel.createChat().id;
+    // Named by the user, so no naming prompt rides the same endpoint and every
+    // message call below is a turn.
+    channel.renameChat(first, "First");
+    channel.renameChat(second, "Second");
+    const driver = new OpenCodeDriver({
+      channel,
+      agent: "opencode",
+      baseUrl: fake.url,
+      directory: "/tmp/boxaide-agent",
+      waitMs: 1_000,
+    }).start();
+    cleanup.push(() => driver.stop());
+
+    channel.post({ role: "user", text: "one", chatId: first });
+    await until(() => channel.history(undefined, first).some((t) => t.role === "agent"));
+    channel.post({ role: "user", text: "two", chatId: second });
+    await until(() => channel.history(undefined, second).some((t) => t.role === "agent"));
+    channel.post({ role: "user", text: "one again", chatId: first });
+    await until(
+      () => channel.history(undefined, first).filter((t) => t.role === "agent").length === 2,
+    );
+
+    // Two chats, two sessions, and the third turn goes back to the session its
+    // conversation is living in rather than the one that answered last.
+    const prompted = fake.calls
+      .filter((c) => c.path.includes("/message"))
+      .map((c) => c.path.split("/")[2]);
+    expect(prompted).toEqual(["ses_test", "ses_test_2", "ses_test"]);
+    expect(fake.calls.filter((c) => c.path.startsWith("/session?")).length).toBe(2);
+    // Kept where a restarted agent can read them back.
+    expect(store.chatSession(first, "opencode").id).toBe("ses_test");
+    expect(store.chatSession(second, "opencode").id).toBe("ses_test_2");
+  });
+
+  it("resets only the failing chat's session, and keeps the other chat's", async () => {
+    let attempts = 0;
+    const fake = await startFake((call) => {
+      if (!call.path.includes("/message")) return { status: 200 };
+      // The second chat opens a session of its own, and its opening turn fails
+      // once. Nothing the first chat asks for ever fails.
+      if (call.path.startsWith("/session/ses_test_2/") && ++attempts === 1) {
+        return { status: 500, body: { name: "UnknownError" } };
+      }
+      return { status: 200, body: { parts: [{ type: "text", text: "answered" }] } };
+    });
+    cleanup.push(fake.close);
+    const { store, channel } = make();
+    const first = channel.activeChat().id;
+    const second = channel.createChat().id;
+    channel.renameChat(first, "First");
+    channel.renameChat(second, "Second");
+    const driver = new OpenCodeDriver({
+      channel,
+      agent: "opencode",
+      baseUrl: fake.url,
+      directory: "/tmp/boxaide-agent",
+      waitMs: 1_000,
+      retryBaseMs: 10,
+    }).start();
+    cleanup.push(() => driver.stop());
+
+    channel.post({ role: "user", text: "one", chatId: first });
+    await until(() => channel.history(undefined, first).some((t) => t.role === "agent"));
+    expect(store.chatSession(first, "opencode").id).toBe("ses_test");
+
+    channel.post({ role: "user", text: "two", chatId: second });
+    await until(() => channel.history(undefined, second).some((t) => t.role === "agent"));
+
+    // The failed turn took its own session down and was retried on a new one.
+    // The other conversation never noticed: same session, no abort of it.
+    expect(store.chatSession(second, "opencode").id).toBe("ses_test_3");
+    expect(store.chatSession(first, "opencode").id).toBe("ses_test");
+    expect(fake.calls.filter((c) => c.path.includes("/abort"))).toHaveLength(1);
+    expect(fake.calls.find((c) => c.path.includes("/abort"))!.path).toContain("ses_test_2");
+    expect(store.listDroppedUserSeqs()).toEqual([]);
+  });
+
+  it("does not save a session for a chat that was cleared while it was made", async () => {
+    let clear: (() => void) | null = null;
+    const fake = await startFake(
+      () => ({ status: 200, body: { parts: [{ type: "text", text: "answered" }] } }),
+      // The user empties the chat while the server is still making the session
+      // this turn was about to run in.
+      () => {
+        clear?.();
+        clear = null;
+      },
+    );
+    cleanup.push(fake.close);
+    const { store, channel } = make();
+    const chat = channel.activeChat().id;
+    channel.renameChat(chat, "Mine");
+    clear = () => channel.clear(chat);
+    const driver = new OpenCodeDriver({
+      channel,
+      agent: "opencode",
+      baseUrl: fake.url,
+      directory: "/tmp/boxaide-agent",
+      waitMs: 1_000,
+    }).start();
+    cleanup.push(() => driver.stop());
+
+    channel.post({ role: "user", text: "one", chatId: chat });
+    await until(() => fake.calls.some((c) => c.path.includes("/message")));
+
+    // The session belongs to a conversation the user emptied, so nothing points
+    // at it: the next turn opens one of its own rather than resuming this.
+    expect(store.chatSession(chat, "opencode").id).toBeNull();
+
+    channel.post({ role: "user", text: "two", chatId: chat });
+    await until(
+      () => fake.calls.filter((c) => c.path.startsWith("/session?")).length === 2,
+    );
+    await until(() => store.chatSession(chat, "opencode").id === "ses_test_2");
+  });
+
   it("releases the lease and retries when the API fails", async () => {
     let attempts = 0;
     const fake = await startFake((call) => {
@@ -379,7 +514,9 @@ describe("OpenCodeDriver", () => {
   it("abandons a prompt the server has gone quiet on, and retries it", async () => {
     let attempts = 0;
     const fake = await startFake((call) => {
-      if (!call.path.startsWith("/session/ses_test/message")) {
+      // A failed turn takes its session with it, so the retry runs on a new
+      // one: what counts here is that a prompt was attempted, not where.
+      if (!call.path.includes("/message")) {
         return { status: 200, body: {} };
       }
       if (isNaming(call)) {
@@ -424,7 +561,9 @@ describe("OpenCodeDriver", () => {
   it("does not let a server heartbeat stand in for progress on the turn", async () => {
     let attempts = 0;
     const fake = await startFake((call) => {
-      if (!call.path.startsWith("/session/ses_test/message")) {
+      // A failed turn takes its session with it, so the retry runs on a new
+      // one: what counts here is that a prompt was attempted, not where.
+      if (!call.path.includes("/message")) {
         return { status: 200, body: {} };
       }
       if (isNaming(call)) {
