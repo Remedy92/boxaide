@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { timingSafeEqual } from "node:crypto";
-import { statSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
@@ -1057,8 +1057,16 @@ function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
     if (!bin) {
       return c.json({ error: "claude-code is not installed (no claude on PATH)" }, 400);
     }
+    // The login must run against the SAME isolated home the launches use. On
+    // macOS the CLI keys its keychain entry to the config directory, so a
+    // plain `claude /login` signs the user's terminal in and leaves every
+    // launch exactly as signed out as before — a button that "works" forever.
+    const home = launcher.claudeConfigHome();
     try {
-      openClaudeLogin(bin);
+      // A first sign-in can predate the first launch; the CLI needs the
+      // directory to exist before it can write a login into it.
+      mkdirSync(home, { recursive: true });
+      openClaudeLogin(bin, home);
     } catch (err) {
       return c.json(
         { error: `could not open Terminal: ${err instanceof Error ? err.message : String(err)}` },
@@ -1069,7 +1077,7 @@ function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
     // signing in once, in one terminal, and the fresh window is the one to wait
     // on.
     watching?.();
-    watching = watchForClaudeSignIn(launcher, claudeSignInFiles());
+    watching = watchForClaudeSignIn(launcher, claudeSignInFiles(home));
     return c.json({ opened: true, watching: true, watchMs: SIGNIN_WATCH_MS });
   });
 }
@@ -1089,25 +1097,35 @@ const SIGNIN_WATCH_MS = 5 * 60 * 1000;
 /**
  * The files a finished `claude /login` writes.
  *
- * Two, because which one moves depends on how the machine stores the login:
- * `.credentials.json` for a file-backed one, and `~/.claude.json` — the CLI's
- * own account record — which is rewritten either way, including when the token
- * itself went to the macOS keychain and no credentials file exists at all.
+ * The isolated home's pair first — that terminal runs with CLAUDE_CONFIG_DIR
+ * set there, and its `.claude.json` account record is rewritten on every
+ * login, including when the token itself went to the macOS keychain and no
+ * credentials file exists at all. The user's own pair is still watched too:
+ * someone who closes the opened terminal and runs a plain `claude /login`
+ * instead has file-backed logins propagated into the launch by prepare's
+ * credential copy, and their landing should relaunch the agent all the same.
  */
-function claudeSignInFiles(): string[] {
-  return [join(homedir(), ".claude", ".credentials.json"), join(homedir(), ".claude.json")];
+function claudeSignInFiles(home: string): string[] {
+  return [
+    join(home, ".credentials.json"),
+    join(home, ".claude.json"),
+    join(homedir(), ".claude", ".credentials.json"),
+    join(homedir(), ".claude.json"),
+  ];
 }
 
 /**
- * The AppleScript that puts `claude /login` in front of the user.
+ * The AppleScript that puts `claude /login` in front of the user — pointed at
+ * the launch's isolated home, because that is the only place a login is worth
+ * anything to the agent (see the sign-in route).
  *
  * Two levels of quoting, both of which have to survive a path with a space in
  * it — `/Users/Ada Byron/.local/bin/claude` is an ordinary install: the shell
  * inside `do script`, and the AppleScript string literal around that. Pure and
  * exported so both are actually tested rather than eyeballed.
  */
-export function claudeLoginScript(bin: string): string {
-  const shell = `${shellQuote(bin)} /login`;
+export function claudeLoginScript(bin: string, configDir: string): string {
+  const shell = `CLAUDE_CONFIG_DIR=${shellQuote(configDir)} ${shellQuote(bin)} /login`;
   const applescript = shell.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return `tell application "Terminal"\nactivate\ndo script "${applescript}"\nend tell`;
 }
@@ -1117,8 +1135,8 @@ function shellQuote(value: string): string {
 }
 
 /** Runs that script. Detached: the terminal outlives the request that opened it. */
-function openClaudeLogin(bin: string): void {
-  const child = spawn("osascript", ["-e", claudeLoginScript(bin)], {
+function openClaudeLogin(bin: string, configDir: string): void {
+  const child = spawn("osascript", ["-e", claudeLoginScript(bin, configDir)], {
     stdio: "ignore",
     detached: true,
   });

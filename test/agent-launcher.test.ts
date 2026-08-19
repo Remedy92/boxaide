@@ -24,6 +24,7 @@ import {
   AgentLauncher,
   KNOWN_AGENTS,
   LaunchError,
+  claudeCopyCredentials,
   claudeHealCredentials,
   claudeTurnArgs,
   oneShotDeadlineNote,
@@ -1566,6 +1567,39 @@ describe("claude sign-in", () => {
     expect(claudeHealCredentials(parentHome, home)).toBe(false);
   });
 
+  it("does not repair over a login the home made for itself", () => {
+    // A `claude /login` run inside the isolated home records the account in
+    // that home's .claude.json; on macOS the token itself sits in a keychain
+    // entry keyed to the directory, invisible to this file. Copying the user's
+    // terminal credential in would shadow that working login with a leftover.
+    const { parentHome, home } = homes();
+    writeFileSync(join(home, ".claude.json"), '{"oauthAccount":{"emailAddress":"a@b.c"}}');
+    credential(parentHome, '{"leftover":true}', Date.now());
+
+    expect(claudeHealCredentials(parentHome, home)).toBe(false);
+    expect(existsSync(join(home, ".credentials.json"))).toBe(false);
+  });
+
+  it("keeps prepare's credential copy away from a home that owns its login", () => {
+    const { parentHome, home } = homes();
+    credential(parentHome, '{"leftover":true}', Date.now());
+
+    // Owning nothing, the copy still happens — the Linux/file path.
+    claudeCopyCredentials(parentHome, home);
+    expect(existsSync(join(home, ".credentials.json"))).toBe(true);
+    rmSync(join(home, ".credentials.json"));
+
+    // Owning a login, it must not.
+    writeFileSync(join(home, ".claude.json"), '{"oauthAccount":{"emailAddress":"a@b.c"}}');
+    claudeCopyCredentials(parentHome, home);
+    expect(existsSync(join(home, ".credentials.json"))).toBe(false);
+
+    // A signed-out record — /logout writes null — reopens the copy path.
+    writeFileSync(join(home, ".claude.json"), '{"oauthAccount":null}');
+    claudeCopyCredentials(parentHome, home);
+    expect(existsSync(join(home, ".credentials.json"))).toBe(true);
+  });
+
   it("names the same binary a launch would spawn, and the model it last used", async () => {
     const bin = fakeBinDir("fake-agent");
     const launcher = new AgentLauncher(
@@ -1590,13 +1624,26 @@ describe("claude sign-in", () => {
   it("quotes the login command through both the shell and the AppleScript", () => {
     // An ordinary install path with a space in it. Unquoted, Terminal runs
     // `/Users/Ada` and the user sees a shell error instead of a login.
-    const script = claudeLoginScript("/Users/Ada Byron/.local/bin/claude");
-    expect(script).toContain(`do script "'/Users/Ada Byron/.local/bin/claude' /login"`);
+    const script = claudeLoginScript(
+      "/Users/Ada Byron/.local/bin/claude",
+      "/Users/Ada Byron/.sley-agents/agent-homes/claude",
+    );
+    expect(script).toContain(
+      `do script "CLAUDE_CONFIG_DIR='/Users/Ada Byron/.sley-agents/agent-homes/claude' '/Users/Ada Byron/.local/bin/claude' /login"`,
+    );
     expect(script).toContain('tell application "Terminal"');
     expect(script).toContain("activate");
     // A quote in the path would otherwise end the AppleScript string early and
     // run whatever followed it.
-    expect(claudeLoginScript(`/tmp/a"b/claude`)).toContain(`a\\"b`);
+    expect(claudeLoginScript(`/tmp/a"b/claude`, "/tmp/home")).toContain(`a\\"b`);
+  });
+
+  it("signs the login into the isolated home, not the user's own", () => {
+    // The macOS keychain keys the CLI's login to its config directory. A login
+    // without CLAUDE_CONFIG_DIR lands where no launch looks, and the button
+    // "works" forever without fixing anything.
+    const script = claudeLoginScript("/usr/local/bin/claude", "/data-agents/agent-homes/claude");
+    expect(script).toContain("CLAUDE_CONFIG_DIR='/data-agents/agent-homes/claude'");
   });
 
   it("restarts the agent when a login lands, on the model it last used", async () => {

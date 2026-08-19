@@ -566,9 +566,18 @@ function claudeParentHome(parentEnv: NodeJS.ProcessEnv): string {
  * ~/.claude/.credentials.json — a process Boxaide is responsible for must not
  * edit the user's terminal auth. prepare runs before every spawn, so the copy
  * is at most one run stale. On macOS the credentials live in the keychain and
- * there is no file at all; then nothing is copied and the CLI finds its own.
+ * there is no file at all; then nothing is copied and the CLI finds its own —
+ * keyed to the config directory, which is why a login made inside the isolated
+ * home (the sign-in route's job) is the only one a launch can actually see.
+ *
+ * Never over a login the home owns. Once `claude /login` has run inside the
+ * isolated home, that home's credential — keychain entry or file — is the real
+ * one, and seeding a copy of the user's terminal file on top of it would
+ * shadow a working login with a possibly-stale leftover: the exact failure
+ * the heal below exists to undo.
  */
-function claudeCopyCredentials(parentHome: string, home: string): void {
+export function claudeCopyCredentials(parentHome: string, home: string): void {
+  if (claudeHomeOwnsLogin(home)) return;
   try {
     copySecret(
       join(parentHome, ".credentials.json"),
@@ -604,6 +613,11 @@ function claudeCopyCredentials(parentHome: string, home: string): void {
  * the identical credential.
  */
 export function claudeHealCredentials(parentHome: string, home: string): boolean {
+  // A home that signed in for itself has no copy to undo: its credential IS
+  // the login, and a turn that still failed on it needs the user, not a byte
+  // moved from the parent — which would shadow the home's own login with the
+  // terminal leftover this repair exists to delete.
+  if (claudeHomeOwnsLogin(home)) return false;
   const copied = join(home, ".credentials.json");
   const parent = join(parentHome, ".credentials.json");
   const copiedAt = mtimeOrNull(copied);
@@ -628,6 +642,28 @@ export function claudeHealCredentials(parentHome: string, home: string): boolean
     }
   }
   return healed;
+}
+
+/**
+ * Whether a `claude /login` has landed inside this home itself.
+ *
+ * The CLI records the signed-in account in its config directory's
+ * `.claude.json` (`oauthAccount`), whether the token went to a file or to the
+ * macOS keychain. That record is the only durable trace a keychain-backed
+ * login leaves, so it is what decides "this home has its own auth" for the
+ * copy and heal above. Exported for their tests.
+ */
+export function claudeHomeOwnsLogin(home: string): boolean {
+  try {
+    const record = JSON.parse(
+      readFileSync(join(home, ".claude.json"), "utf8"),
+    ) as Record<string, unknown>;
+    return record.oauthAccount !== undefined && record.oauthAccount !== null;
+  } catch {
+    // No record, or one the CLI is mid-rewrite on. Not owning a login is the
+    // safe reading: the copy stays possible and the heal stays available.
+    return false;
+  }
 }
 
 function mtimeOrNull(path: string): number | null {
@@ -2038,6 +2074,19 @@ export class AgentLauncher {
   binFor(id: string): string | null {
     const spec = this.registry.find((s) => s.id === id);
     return spec ? this.resolveBin(spec.bin) : null;
+  }
+
+  /**
+   * The isolated home a Claude Code launch reads its config and login from.
+   *
+   * Exposed for the sign-in route, and for the same reason as binFor: the
+   * login has to land where the launches look. On macOS the CLI keys its
+   * keychain entry to the config directory, so a `claude /login` run against
+   * the user's own home produces a login no launch can see — the sign-in
+   * button then "works" every time and fixes nothing.
+   */
+  claudeConfigHome(): string {
+    return claudeConfigHomeFor(this.ctx);
   }
 
   /**
