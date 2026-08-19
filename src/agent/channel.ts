@@ -766,8 +766,11 @@ export class AgentChannel {
     if (this.closed) return Promise.resolve(null);
     if (signal?.aborted) return Promise.resolve(null);
 
-    // Anything typed before the agent got here is already on disk.
-    const pending = this.store.claimNextUserTurn();
+    // Anything typed before the agent got here is already on disk. The chat on
+    // screen goes first — see handOff, which is the same rule on the other
+    // path, and both have to carry it or the order depends on whether an agent
+    // happened to be parked when the message landed.
+    const pending = this.store.claimNextUserTurn(this.store.ensureActiveChat().id);
     if (pending) {
       if (signal?.aborted) {
         this.releaseLease(pending.seq, { revertAttempt: true });
@@ -847,13 +850,20 @@ export class AgentChannel {
     this.emitChats();
   }
 
-  /** Hands the oldest unclaimed user turn to the longest-waiting agent. */
+  /**
+   * Hands the next unclaimed user turn to the longest-waiting agent.
+   *
+   * Next, not oldest: the chat the user is looking at is served first, and only
+   * then the rest, oldest first. Whichever pane is open is the one where the
+   * user is waiting for an answer, and an agent quietly working another chat's
+   * backlog is indistinguishable from an agent that does not work.
+   */
   private handOff(): void {
     let handed = false;
     while (this.waiters.length > 0) {
       this.pruneAbortedWaiters();
       if (this.waiters.length === 0) break;
-      const turn = this.store.claimNextUserTurn();
+      const turn = this.store.claimNextUserTurn(this.store.ensureActiveChat().id);
       if (!turn) break;
       const waiter = this.waiters.shift();
       if (!waiter) {
@@ -1077,8 +1087,17 @@ export class AgentChannel {
    * warning and change nothing else.
    */
   requeueDropped(): number {
+    // Retire the stale ones before offering anything back. A launch is exactly
+    // when a backlog would otherwise be resurrected wholesale, and this is the
+    // moment the user finds out: the messages nobody picked up in time are
+    // marked, the pane says so, and the agent starts on what is still current
+    // instead of on last night.
+    const expired = this.store.expireStaleUserTurns();
     const requeued = this.store.requeueDroppedUserTurns();
-    if (requeued === 0) return 0;
+    if (requeued === 0) {
+      if (expired > 0) this.emitPresence();
+      return 0;
+    }
     // A requeued row writes no turn, so nothing else would notice it: the
     // warning has to be recalculated, and a waiter already parked would
     // otherwise sit through its whole timeout beside a message it can have.

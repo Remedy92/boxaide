@@ -32,6 +32,9 @@
  *  - The network is open at both levels. An agent still talks to its model
  *    provider and to Boxaide. Confining reads is what keeps the master
  *    credential out of its hands; it is not an exfiltration boundary.
+ *  - The login keychain is reachable. See `keychainDir`: without it no CLI
+ *    that signs in through the keychain can authenticate at all, and macOS
+ *    gates the items inside on the asking program, not on this profile.
  *  - Confinement decides what an agent reaches on the DISK. What it may do
  *    with the user's mail and calendar is decided by src/mcp/scope.ts and, for
  *    anything another person would see, by src/agent/approvals.ts.
@@ -81,6 +84,28 @@ export function sandboxSupported(platform: string = process.platform): boolean {
 }
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+
+/**
+ * The login keychain, which every confined launch may reach.
+ *
+ * It sits under the home, so the blanket home deny took it — and taking it is
+ * what made Claude Code impossible to sign in to. On macOS that CLI keeps its
+ * token in the keychain rather than in a file, keyed to the config directory,
+ * so a confined launch answered "Not logged in" on every turn while the same
+ * command outside the sandbox answered normally. Signing in again changed
+ * nothing, because the login was never the part that was missing.
+ *
+ * Allowed as a directory because there is no finer unit here: one file holds
+ * every item, and no profile rule can name one item inside it. What keeps the
+ * other items out of reach is macOS itself — an item is released to the
+ * programs its own list names, and an agent CLI is not on anybody else's.
+ *
+ * Writable, not only readable: a CLI refreshing an expired token writes the
+ * new one back, and a read-only keychain turns every expiry into this bug.
+ */
+function keychainDir(home: string): string {
+  return join(home, "Library", "Keychains");
+}
 
 /**
  * Why a confined launch is impossible here, or null when it is possible.
@@ -288,7 +313,7 @@ export function confineCommand(opts: ConfineOptions): LaunchCommand {
     ...readRootsForBinary(opts.bin, home),
     ...readRootsForBinary(opts.execPath ?? process.execPath, home),
   ];
-  const write = [...opts.write, tmpdir()];
+  const write = [...opts.write, tmpdir(), keychainDir(home)];
   const profile = macosProfile(home, { read, write, deny: opts.deny });
   // `-p` rather than a profile file: a file would be one more thing to write
   // before a launch, clean up after it, and keep in step with the directory it
