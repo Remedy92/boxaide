@@ -1,16 +1,17 @@
 "use client";
 
-import { useCallback } from "react";
+import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   listLocalAgents,
+  signInLocalAgent,
   startLocalAgent,
   stopLocalAgent,
   type LocalAgent,
   type RunningLocalAgent,
 } from "@/lib/api/endpoints";
-import { friendlyError, needsConfirmation } from "@/lib/api/errors";
+import { friendlyError, needsConfirmation, serverSentence } from "@/lib/api/errors";
 import { useApiCtx, useSettings } from "@/lib/hooks/use-settings";
 
 /**
@@ -109,7 +110,7 @@ export function useEnsureAgentRunning(): () => Promise<void> {
   const { picked, model } = usePickedAgent();
   const start = useStartLocalAgent();
   const pending = start.isPending;
-  return useCallback(async () => {
+  return React.useCallback(async () => {
     if (pending || !picked || !picked.supported) return;
     const fresh = await agents.refetch();
     if (fresh.data?.running) return;
@@ -128,6 +129,38 @@ export function useEnsureAgentRunning(): () => Promise<void> {
       },
     );
   }, [agents, picked, model, pending, start]);
+}
+
+/**
+ * Sign the launched CLI back in.
+ *
+ * The request only opens Terminal on the server's machine; the login happens
+ * there, and the server restarts the agent itself when it lands. So there is
+ * nothing to await — the wait ends when the existing poll reports something
+ * running again, which is also what ends it if the user starts the agent by
+ * hand instead.
+ */
+export function useAgentSignIn() {
+  const ctx = useApiCtx();
+  const agents = useLocalAgents();
+  const running = agents.data?.running ?? null;
+  // Which exit the ask was made against, so the wait ends by itself: a launch
+  // clears `running`, and a second failure writes a new exit — either way the
+  // state below stops matching, with no effect to unset it.
+  const exitAt = agents.data?.lastExit?.at ?? "";
+  const [askedFor, setAskedFor] = React.useState<string | null>(null);
+  const signIn = useMutation({
+    mutationFn: () => signInLocalAgent(ctx),
+    onSuccess: () => setAskedFor(exitAt),
+  });
+
+  return {
+    signIn: () => signIn.mutate(),
+    /** Terminal is open and nothing has come back yet. */
+    waiting: !running && (signIn.isPending || askedFor === exitAt),
+    /** The server's own sentence — 501 on a machine with no Terminal to open. */
+    error: signIn.error ? serverSentence(signIn.error) : null,
+  };
 }
 
 export function useStopLocalAgent() {

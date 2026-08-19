@@ -837,6 +837,41 @@ export class Store {
   }
 
   /**
+   * Puts every dropped user message back on the queue, and returns how many.
+   *
+   * Dropping used to be final. It was written for the message an agent cannot
+   * answer — the one that makes it fall over three times running — and for that
+   * message it is right: retrying forever is a loop nobody can stop.
+   *
+   * But the commonest reason a message is dropped has nothing to do with the
+   * message. It is an agent that could not run at all: signed out, out of
+   * quota, pointed at a model that no longer exists. Every delivery of every
+   * queued message burns against that, and what the user sees is their question
+   * marked "never answered" by an agent that never read it. So when a NEW agent
+   * starts, the count is reset and the question is asked again, instead of
+   * asking the user to retype what they already typed.
+   *
+   * To zero, not down by one: the three deliveries were spent on a process that
+   * no longer exists, and the agent replacing it deserves its own three. The
+   * cap still holds for the case it was written for — an agent that keeps
+   * failing on the same message drops it again, without a relaunch in between.
+   */
+  requeueDroppedUserTurns(): number {
+    const res = this.db
+      .prepare(
+        `UPDATE agent_turns SET delivered = 0, delivery_count = 0
+         WHERE role = 'user' AND delivered = 1
+           AND COALESCE(delivery_count, 0) >= ?
+           AND seq NOT IN (
+             SELECT reply_to FROM agent_turns
+             WHERE role = 'agent' AND reply_to IS NOT NULL
+           )`,
+      )
+      .run(Store.MAX_DELIVERIES);
+    return res.changes;
+  }
+
+  /**
    * The oldest user turn no agent is holding, marked as held in the same
    * transaction. Returns null when there is nothing waiting.
    *

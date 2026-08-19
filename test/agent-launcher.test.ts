@@ -14,6 +14,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +24,7 @@ import {
   AgentLauncher,
   KNOWN_AGENTS,
   LaunchError,
+  claudeHealCredentials,
   claudeTurnArgs,
   oneShotDeadlineNote,
   oneShotSilentNote,
@@ -32,6 +34,7 @@ import {
 import { renderClaudeRunLine } from "../src/agent/agent-stream.js";
 import { DRIVEN_SYSTEM, type DriverChannel } from "../src/agent/driver.js";
 import { parseTabbedModels } from "../src/agent/model-list.js";
+import { claudeLoginScript, watchForClaudeSignIn } from "../src/api/routes.js";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -266,6 +269,60 @@ describe("AgentLauncher", () => {
     expect(exit?.reason).toBe("error");
     expect(exit?.code).toBeNull();
     expect(exit?.stderrTail).toContain("Invalid API key");
+    // A give-up that said nothing about auth is not a sign-out, and the pane
+    // must not offer a login for it.
+    expect(exit?.authRequired).toBe(false);
+  });
+
+  it("carries a sign-out into the exit record as its own field", async () => {
+    const bin = fakeBinDir("fake-agent");
+    let give!: DriveOptions["onStop"];
+    const launcher = new AgentLauncher(
+      { ...CTX, channel: fakeChannel() },
+      specs({
+        args: undefined,
+        drive: (_ctx, opts) => {
+          give = opts.onStop;
+          return { stop: () => {} };
+        },
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    await launcher.start("fake");
+    give("claude is not signed in: run `claude /login`", { authRequired: true });
+    await until(() => launcher.status().running === null);
+
+    const exit = launcher.status().lastExit;
+    expect(exit?.reason).toBe("error");
+    // The field, not the sentence: the pane's sign-in button must keep working
+    // the day the CLI rewords its notice.
+    expect(exit?.authRequired).toBe(true);
+  });
+
+  it("reports a clean stop as a stop even when the driver names a sign-out", async () => {
+    const bin = fakeBinDir("fake-agent");
+    let give!: DriveOptions["onStop"];
+    const launcher = new AgentLauncher(
+      { ...CTX, channel: fakeChannel() },
+      specs({
+        args: undefined,
+        drive: (_ctx, opts) => {
+          give = opts.onStop;
+          return { stop: () => {} };
+        },
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    await launcher.start("fake");
+    give(null, { authRequired: true });
+    await until(() => launcher.status().running === null);
+
+    expect(launcher.status().lastExit?.reason).toBe("stopped");
+    expect(launcher.status().lastExit?.authRequired).toBe(false);
   });
 
   it("does not leave a running agent behind when its driver cannot start", async () => {
@@ -1441,5 +1498,186 @@ describe("GUI PATH detection", () => {
     const running = await launcher.start("fake");
     expect(running.id).toBe("fake");
     launcher.close();
+  });
+});
+
+/**
+ * Getting a signed-out Claude Code back on its feet, from the two ends the
+ * server owns: the credential the launch copied, and the terminal the user has
+ * to finish the login in.
+ */
+describe("claude sign-in", () => {
+  function homes(): { parentHome: string; home: string } {
+    const root = tempDir();
+    const parentHome = join(root, "parent");
+    const home = join(root, "agent-home");
+    mkdirSync(parentHome, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    return { parentHome, home };
+  }
+
+  function credential(dir: string, content: string, mtime: number): string {
+    const path = join(dir, ".credentials.json");
+    writeFileSync(path, content);
+    utimesSync(path, mtime / 1000, mtime / 1000);
+    return path;
+  }
+
+  it("drops the copied credential and takes the newer one from the user's home", () => {
+    const { parentHome, home } = homes();
+    credential(home, '{"stale":true}', Date.now() - 60_000);
+    credential(parentHome, '{"fresh":true}', Date.now());
+
+    expect(claudeHealCredentials(parentHome, home)).toBe(true);
+    expect(readFileSync(join(home, ".credentials.json"), "utf8")).toBe('{"fresh":true}');
+    // The user's own file is what isolation exists to protect; a repair must
+    // read it and nothing more.
+    expect(readFileSync(join(parentHome, ".credentials.json"), "utf8")).toBe(
+      '{"fresh":true}',
+    );
+  });
+
+  it("leaves nothing behind when the copy is the only file there is", () => {
+    // The macOS case this was written for: the real login is in the keychain,
+    // and the copied file is an expired leftover shadowing it. Deleting it is
+    // the whole repair — the CLI then finds the keychain by itself.
+    const { parentHome, home } = homes();
+    credential(home, '{"stale":true}', Date.now() - 60_000);
+
+    expect(claudeHealCredentials(parentHome, home)).toBe(true);
+    expect(existsSync(join(home, ".credentials.json"))).toBe(false);
+  });
+
+  it("does not overwrite a copy that is newer than the user's own file", () => {
+    // A login that landed after this launch started wrote the newer file. Going
+    // back to the parent's older one would undo the fix mid-run.
+    const { parentHome, home } = homes();
+    credential(parentHome, '{"older":true}', Date.now() - 60_000);
+    credential(home, '{"newer":true}', Date.now());
+
+    expect(claudeHealCredentials(parentHome, home)).toBe(true);
+    expect(existsSync(join(home, ".credentials.json"))).toBe(false);
+  });
+
+  it("says nothing moved when there is nothing to move", () => {
+    // False is the driver's signal not to spend another process: a retry would
+    // meet the identical credential.
+    const { parentHome, home } = homes();
+    expect(claudeHealCredentials(parentHome, home)).toBe(false);
+  });
+
+  it("names the same binary a launch would spawn, and the model it last used", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const launcher = new AgentLauncher(
+      CTX,
+      [...specs(), { id: "ghost", label: "Ghost", bin: "not-installed" }],
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    expect(launcher.binFor("fake")).toBe(join(bin, "fake-agent"));
+    expect(launcher.binFor("ghost")).toBeNull();
+    expect(launcher.binFor("nobody")).toBeNull();
+
+    expect(launcher.lastModelFor("fake")).toBeNull();
+    await launcher.start("fake");
+    launcher.stop();
+    // Null is an answer here — the CLI's own default — and it survives the exit
+    // so a relaunch nobody pressed Start for restores what was picked.
+    expect(launcher.lastModelFor("fake")).toBeNull();
+  });
+
+  it("quotes the login command through both the shell and the AppleScript", () => {
+    // An ordinary install path with a space in it. Unquoted, Terminal runs
+    // `/Users/Ada` and the user sees a shell error instead of a login.
+    const script = claudeLoginScript("/Users/Ada Byron/.local/bin/claude");
+    expect(script).toContain(`do script "'/Users/Ada Byron/.local/bin/claude' /login"`);
+    expect(script).toContain('tell application "Terminal"');
+    expect(script).toContain("activate");
+    // A quote in the path would otherwise end the AppleScript string early and
+    // run whatever followed it.
+    expect(claudeLoginScript(`/tmp/a"b/claude`)).toContain(`a\\"b`);
+  });
+
+  it("restarts the agent when a login lands, on the model it last used", async () => {
+    const dir = tempDir();
+    const credentials = join(dir, ".credentials.json");
+    const record = join(dir, ".claude.json");
+    writeFileSync(record, "{}");
+    const started: Array<string | undefined> = [];
+    const cancel = watchForClaudeSignIn(
+      {
+        chatBusy: () => false,
+        lastModelFor: () => "claude-sonnet-4-5",
+        start: (id, model) => {
+          started.push(model);
+          expect(id).toBe("claude-code");
+          return Promise.resolve({});
+        },
+      },
+      [credentials, record],
+      { pollMs: 10, windowMs: 5_000 },
+    );
+    cleanups.push(cancel);
+
+    // The file did not exist when the watch started: a first sign-in is exactly
+    // the case where it does not.
+    writeFileSync(credentials, '{"fresh":true}');
+    await until(() => started.length === 1);
+    expect(started).toEqual(["claude-sonnet-4-5"]);
+
+    // One landing, one relaunch: the watch stops itself rather than starting an
+    // agent again every time the CLI refreshes a token.
+    writeFileSync(credentials, '{"fresher":true}');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(started).toHaveLength(1);
+  });
+
+  it("does not start a second agent over one the user started themselves", async () => {
+    const dir = tempDir();
+    const credentials = join(dir, ".credentials.json");
+    let starts = 0;
+    const cancel = watchForClaudeSignIn(
+      {
+        chatBusy: () => true,
+        lastModelFor: () => null,
+        start: () => {
+          starts += 1;
+          return Promise.resolve({});
+        },
+      },
+      [credentials],
+      { pollMs: 10, windowMs: 5_000 },
+    );
+    cleanups.push(cancel);
+
+    writeFileSync(credentials, "{}");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(starts).toBe(0);
+  });
+
+  it("gives up on a login that never lands, and cancels cleanly", async () => {
+    const dir = tempDir();
+    let starts = 0;
+    const cancel = watchForClaudeSignIn(
+      {
+        chatBusy: () => false,
+        lastModelFor: () => null,
+        start: () => {
+          starts += 1;
+          return Promise.resolve({});
+        },
+      },
+      [join(dir, ".credentials.json")],
+      { pollMs: 10, windowMs: 20 },
+    );
+    // The window passes with nothing written: the terminal was abandoned, and
+    // nothing may be started an hour later out of nowhere.
+    await new Promise((r) => setTimeout(r, 80));
+    expect(starts).toBe(0);
+    // Cancelling an already-finished watch is a no-op, which is what lets the
+    // route cancel unconditionally when the button is pressed twice.
+    cancel();
+    cancel();
   });
 });

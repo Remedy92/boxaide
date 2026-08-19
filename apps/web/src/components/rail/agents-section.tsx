@@ -3,7 +3,8 @@
 import { BookOpen, Plug } from "lucide-react";
 import { toast } from "sonner";
 import { SectionLabel, Spinner } from "@/components/atoms";
-import { agentExitedBadly } from "@/components/rail/agent-exit";
+import { AgentSignIn } from "@/components/agent/agent-sign-in";
+import { agentExitedBadly, agentSignedOut } from "@/components/rail/agent-exit";
 import { NavItem } from "@/components/rail/nav-item";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -102,6 +103,9 @@ function LocalAgentList() {
       {rows.map((agent) => {
         const isRunning = running?.id === agent.id;
         const crashed = agentExitedBadly(agent.id, { running, lastExit });
+        // A signed-out CLI is a crash with a known cause and a one-click fix,
+        // so it says the cause instead of "exited" and offers the fix.
+        const signedOut = agentSignedOut(agent.id, { running, lastExit });
         return (
           <div
             key={agent.id}
@@ -113,11 +117,22 @@ function LocalAgentList() {
                   ? "min-w-0 flex-1 truncate text-[13px] font-medium text-fg"
                   : "min-w-0 flex-1 truncate text-[13px] text-fg-secondary"
               }
-              title={crashed ? lastExit?.stderrTail || "exited" : undefined}
+              title={
+                signedOut
+                  ? "This CLI is signed out."
+                  : crashed
+                    ? lastExit?.stderrTail || "exited"
+                    : undefined
+              }
             >
               {agent.label}
-              {crashed && <span className="ml-1.5 text-[11px] text-danger">exited</span>}
+              {crashed && (
+                <span className="ml-1.5 text-[11px] text-danger">
+                  {signedOut ? "signed out" : "exited"}
+                </span>
+              )}
             </span>
+            {signedOut && <AgentSignIn compact />}
             {/* Confinement is not a choice offered here any more — it is on.
                 This is the exception: the machine could not apply it, or the
                 install turned it off, and either way the reason is worth a

@@ -61,7 +61,7 @@ import {
   type RenderRunLine,
 } from "./agent-stream.js";
 import { ClaudeDriver, type ClaudeTurnRequest } from "./claude-driver.js";
-import type { AgentDriver, DriverChannel } from "./driver.js";
+import type { AgentDriver, DriverChannel, StopCause } from "./driver.js";
 import { OpenCodeDriver, serveBaseUrl } from "./opencode-driver.js";
 import {
   fetchModels,
@@ -241,11 +241,19 @@ export type DriveOptions = {
   /** The spec's own childEnv entries alone. Per-launch secrets ride here. */
   childEnv: Record<string, string>;
   /**
+   * The launcher's own environment, before any spec overlay — the same thing
+   * `prepare` is handed. A driver that has to repair what `prepare` copied
+   * needs the home it was copied FROM, and `env` cannot answer that: the
+   * spec's childEnv has already overwritten the variable naming it.
+   */
+  parentEnv: NodeJS.ProcessEnv;
+  /**
    * Reports the loop's end. For a spec with no `args` this is the only exit
    * there is — nothing else the launcher owns can close — so a driver that gave
    * up passes the reason and it becomes `lastExit`. Null means it was stopped.
+   * The cause carries what the reason string cannot be parsed for.
    */
-  onStop: (error: string | null) => void;
+  onStop: (error: string | null, cause?: StopCause) => void;
 };
 
 export type AgentSpec = {
@@ -427,6 +435,11 @@ function claudeDrive(
       ...opts.command.prefix,
       ...claudeTurnArgs(ctx, turn, opts.model),
     ],
+    // The driver decides when a sign-in failure is worth one repair; which
+    // files that repair touches stays here, with everything else that knows
+    // where a launch keeps its home.
+    healAuth: () =>
+      claudeHealCredentials(claudeParentHome(opts.parentEnv), claudeConfigHomeFor(ctx)),
     onStop: opts.onStop,
   }).start();
 }
@@ -535,9 +548,14 @@ function claudePrepare(
 
   const home = claudeConfigHomeFor(ctx);
   mkdirSync(home, { recursive: true });
-  const parentHome = parentEnv.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+  const parentHome = claudeParentHome(parentEnv);
   claudeCopyCredentials(parentHome, home);
   claudeWriteAuthSettings(parentHome, home);
+}
+
+/** Where the user's own `claude` keeps its config, as that CLI resolves it. */
+function claudeParentHome(parentEnv: NodeJS.ProcessEnv): string {
+  return parentEnv.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
 }
 
 /**
@@ -560,6 +578,63 @@ function claudeCopyCredentials(parentHome: string, home: string): void {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
     // Unreadable credentials are not fatal: the CLI reports its own auth error,
     // and a prepare that throws would fail the launch instead.
+  }
+}
+
+/**
+ * Undoes a bad credential copy, mid-run, when the CLI says it is signed out.
+ *
+ * The copy above is the launch's weakest link. On macOS the real login normally
+ * lives in the keychain and there is no file to copy — but if one was ever
+ * written, by an older CLI or an expired session, it stays on disk, gets copied
+ * into every launch, and SHADOWS the keychain login the CLI would otherwise
+ * find. A perfectly signed-in machine then runs a signed-out agent, forever,
+ * and the only symptom is "Not logged in" arriving as the answer to every
+ * question.
+ *
+ * So: drop the copy, which restores whatever fallback the CLI has of its own,
+ * and take a fresh one only if the user's file is genuinely newer than what was
+ * copied — a login that landed after this launch started is the other way this
+ * gets fixed, and it must not be overwritten by staleness in the other
+ * direction. Nothing here touches the user's own file; the isolation the copy
+ * exists for still holds.
+ *
+ * Returns whether anything moved, because the caller's decision is whether to
+ * spend another turn: a repair that changed no bytes would be retried against
+ * the identical credential.
+ */
+export function claudeHealCredentials(parentHome: string, home: string): boolean {
+  const copied = join(home, ".credentials.json");
+  const parent = join(parentHome, ".credentials.json");
+  const copiedAt = mtimeOrNull(copied);
+  let healed = false;
+  if (copiedAt !== null) {
+    try {
+      unlinkSync(copied);
+      healed = true;
+    } catch {
+      // Already gone, or not ours to remove. Either way the fresh copy below
+      // is still worth attempting.
+    }
+  }
+  const parentAt = mtimeOrNull(parent);
+  if (parentAt !== null && (copiedAt === null || parentAt > copiedAt)) {
+    try {
+      copySecret(parent, copied);
+      healed = true;
+    } catch {
+      // Unreadable or unwritable. The delete above already improved matters,
+      // and a failed copy is not worth failing the turn over.
+    }
+  }
+  return healed;
+}
+
+function mtimeOrNull(path: string): number | null {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
   }
 }
 
@@ -1491,6 +1566,15 @@ export type LastExit = {
   at: string;
   /** Last few KB of stderr, for the UI to explain a crash. */
   stderrTail: string;
+  /**
+   * The CLI has no sign-in, so nothing will run on it until a login lands.
+   *
+   * Its own field rather than a phrase the UI greps for out of `stderrTail`:
+   * this is the one exit a user can fix in one click, and a pane that offered
+   * that click on a string match would stop offering it the day the CLI
+   * reworded its notice. False for every other ending, including a stop.
+   */
+  authRequired: boolean;
 };
 
 const STDERR_TAIL_LIMIT = 4_096;
@@ -1662,6 +1746,8 @@ export class AgentLauncher {
   private child: ChildProcess | null = null;
   private running: RunningAgent | null = null;
   private lastExit: LastExit | null = null;
+  /** Per-agent, the model its last chat launch was given. See lastModelFor. */
+  private lastModels = new Map<string, string | null>();
   private stderrTail = "";
   /**
    * The in-flight automation runs, keyed by run id. Separate from
@@ -1941,6 +2027,29 @@ export class AgentLauncher {
   }
 
   /**
+   * The binary this launcher would spawn for a registry id, or null when the
+   * CLI is not installed.
+   *
+   * Exposed for the sign-in route, which has to run the SAME `claude` the
+   * launches use: a machine with two of them installed would otherwise send the
+   * user to log in to the one Boxaide never starts, and the sign-in would look
+   * like it silently failed.
+   */
+  binFor(id: string): string | null {
+    const spec = this.registry.find((s) => s.id === id);
+    return spec ? this.resolveBin(spec.bin) : null;
+  }
+
+  /**
+   * The model the last chat launch of this agent used, or null for the CLI's
+   * own default. Kept past the exit so a relaunch the user did not press Start
+   * for — the one after a sign-in lands — restores what they had picked.
+   */
+  lastModelFor(id: string): string | null {
+    return this.lastModels.get(id) ?? null;
+  }
+
+  /**
    * How many more automation runs this launcher will accept right now. The
    * scheduler asks before dequeuing (spec invariant 4).
    *
@@ -2100,6 +2209,7 @@ export class AgentLauncher {
 
     this.child = child;
     this.running = started;
+    this.lastModels.set(spec.id, model ?? null);
     // Held so every path that ends this launch — a child exit, a driver giving
     // up, Stop, shutdown — takes the credential back. noteExit is the one
     // place that does it, because it is the one place they all reach.
@@ -2118,7 +2228,8 @@ export class AgentLauncher {
           model,
           env,
           childEnv,
-          onStop: (error) => this.noteDriverStop(spec.id, error),
+          parentEnv: this.env,
+          onStop: (error, cause) => this.noteDriverStop(spec.id, error, cause),
         }) ?? null;
     } catch (err) {
       // A launch whose loop never started is not a running agent. Without this
@@ -2579,19 +2690,26 @@ export class AgentLauncher {
    * driver gave up. A give-up carries its reason into `lastExit.stderrTail`,
    * which is what the pane reads to explain why the agent stopped answering.
    */
-  private noteDriverStop(id: string, error: string | null): void {
+  private noteDriverStop(id: string, error: string | null, cause?: StopCause): void {
     if (this.running?.id !== id) return;
     if (error) this.stderrTail = `${this.stderrTail}\n${error}`.trim();
     // No code: a loop is not a process, and inventing 0 or 1 for it is what made
     // a stopped driven agent read as clean and a stopped child-backed one read
     // as a crash. The reason is the fact; the code stays absent because there
     // was none.
-    this.noteExit(id, { code: null, reason: error ? "error" : "stopped" });
+    this.noteExit(id, {
+      code: null,
+      reason: error ? "error" : "stopped",
+      // Only a give-up can be a sign-out. A driver that reports one on a clean
+      // stop is reporting the run before it, and the pane would offer a sign-in
+      // for an agent the user simply switched off.
+      authRequired: error !== null && cause?.authRequired === true,
+    });
   }
 
   private noteExit(
     id: string,
-    exit: { code: number | null; reason: ExitReason },
+    exit: { code: number | null; reason: ExitReason; authRequired?: boolean },
   ): void {
     if (this.running?.id !== id) return;
     // Everything that can call back into this method is cleared FIRST. A driver
@@ -2616,6 +2734,7 @@ export class AgentLauncher {
       reason: exit.reason,
       at: new Date().toISOString(),
       stderrTail: this.stderrTail,
+      authRequired: exit.authRequired === true,
     };
     this.ctx.onRunningChange?.(null);
   }
