@@ -460,8 +460,12 @@ function turnError(ctx: {
  */
 function signedOutMessage(outcome: ClaudeTurnOutcome): string {
   const said = (outcome.text ?? outcome.error ?? "").trim();
+  // No `claude /login` instruction here: on macOS a login run in the user's
+  // own terminal lands in a keychain slot the launch cannot see, and telling
+  // them to do that is what kept the sign-out loop turning. The Sign in
+  // button runs the login against the launch's own home.
   if (!said || said === CLAUDE_EMPTY_SUCCESS) {
-    return "claude is not signed in: run `claude /login`";
+    return "claude is not signed in: use the Sign in button";
   }
   return `claude is not signed in: ${said}`;
 }
