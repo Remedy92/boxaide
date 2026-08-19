@@ -531,7 +531,7 @@ export default function InstallPage() {
         <section className="py-18 sm:py-20">
           <div className="mx-auto w-full max-w-[940px] px-6">
             <h2 data-reveal="0" className="mailmux-section-title">
-              Mail, and the work around it
+              All your mailboxes connected to all your agents
             </h2>
             <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2">
               {FEATURES.map(({ Icon, title, body }, i) => (

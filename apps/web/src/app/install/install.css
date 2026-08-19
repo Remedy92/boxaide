@@ -200,14 +200,14 @@
 
 /* A heading is the thing the eye lands on first, so it gets the one effect
    nothing else does: it resolves out of focus rather than sliding. */
-[data-armed] .mailmux-section-title[data-reveal] {
+[data-armed] .mailmux-section-title[data-reveal]:not(.mailmux-shown) {
   filter: blur(7px);
   transform: translate3d(0, 22px, 0);
 }
 
 /* The app icon does not slide in. It is an object on a desk: it starts a little
    large and seats, the same move app-mark.tsx makes when the groove is cut. */
-[data-armed] .mailmux-mark-seat[data-reveal] {
+[data-armed] .mailmux-mark-seat[data-reveal]:not(.mailmux-shown) {
   transform: scale(1.05);
 }
 
