@@ -6,14 +6,14 @@ import type { Metadata } from "next";
  * A layout carries it because the page itself is a client component.
  */
 export const metadata: Metadata = {
-  title: "Boxaide — every mailbox, one inbox",
+  title: "Boxaide: every mailbox, one agent",
   description:
-    "Gmail, Outlook, iCloud and work mail in one window on your own computer. Free, open source, and every agent you use can read it over MCP.",
+    "Connect as many mailboxes as you want, then point every agent on your machine at all of them. A CRM, scheduled runs and an outreach queue, all on your own computer. Free and open source.",
   openGraph: {
     type: "website",
-    title: "Boxaide — every mailbox, one inbox",
+    title: "Boxaide: every mailbox, one agent",
     description:
-      "Gmail, Outlook, iCloud and work mail in one window on your own computer. Free and open source.",
+      "Connect as many mailboxes as you want, then point every agent on your machine at all of them. Free, open source, and it never leaves your computer.",
   },
 };
 
