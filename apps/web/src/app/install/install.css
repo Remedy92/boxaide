@@ -200,14 +200,14 @@
 
 /* A heading is the thing the eye lands on first, so it gets the one effect
    nothing else does: it resolves out of focus rather than sliding. */
-[data-armed] .mailmux-section-title[data-reveal] {
+[data-armed] .mailmux-section-title[data-reveal]:not(.mailmux-shown) {
   filter: blur(7px);
   transform: translate3d(0, 22px, 0);
 }
 
 /* The app icon does not slide in. It is an object on a desk: it starts a little
    large and seats, the same move app-mark.tsx makes when the groove is cut. */
-[data-armed] .mailmux-mark-seat[data-reveal] {
+[data-armed] .mailmux-mark-seat[data-reveal]:not(.mailmux-shown) {
   transform: scale(1.05);
 }
 
@@ -259,50 +259,9 @@
   will-change: transform;
 }
 
-/* ---------------------------------------------------------------------------
-   The beam field, in motion.
-
-   Two movements, both on the field the page already draws.
-
-   Drift turns the whole fan two degrees and back over a minute and a half. It
-   is too slow to catch in the act, which is the point: the page is never twice
-   the same and never appears to be animating.
-
-   Arrival sends a short length of light down a beam, inward, where it dies at
-   the mark. That is the product drawn as motion: many places, one inbox. It is rare on purpose, and
-   it is rare on purpose: six beams, staggered, one every second and a half.
-   --------------------------------------------------------------------------- */
-@keyframes mailmux-beam-drift {
-  from { transform: rotate(-1.1deg); }
-  to   { transform: rotate(1.1deg); }
-}
-
-.mailmux-beams {
-  /* The convergence point in the field's own units, so the fan turns about the
-     place the beams meet rather than the middle of the window. */
-  transform-origin: 800px 207px;
-  animation: mailmux-beam-drift 96s ease-in-out infinite alternate;
-}
-
-@keyframes mailmux-beam-arrive {
-  0%   { stroke-dashoffset: -1500; opacity: 0; }
-  4%   { opacity: 0.85; }
-  26%  { opacity: 0.85; }
-  32%  { stroke-dashoffset: 0; opacity: 0; }
-  100% { stroke-dashoffset: 0; opacity: 0; }
-}
-
-.mailmux-beam-pulse {
-  stroke-width: 2.2;
-  stroke-dasharray: 120 3000;
-  animation: mailmux-beam-arrive 9.3s linear infinite;
-}
-
-/* globals.css collapses every duration under reduced motion, which would leave
-   the pulses flickering rather than travelling. They are decoration; they go. */
+/* globals.css collapses every duration under reduced motion. The parallax is
+   travel rather than a duration, so it is cancelled by hand. */
 @media (prefers-reduced-motion: reduce) {
-  .mailmux-beams { animation: none; }
-  .mailmux-beam-pulse { animation: none; opacity: 0; }
   .mailmux-cue { animation: none; }
   .mailmux-atmosphere { transform: none; }
 }
