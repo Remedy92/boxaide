@@ -450,6 +450,26 @@ export type SuppressionRow = {
 /** GET /api/outreach/badge — a COUNT of pending rows and nothing else. */
 export type OutreachBadge = { pending: number };
 
+/** Which service a connector's key buys: prospect data, or a web index. */
+export type ConnectorKind = "enrichment" | "search";
+
+/**
+ * GET /api/connectors, and the body of PUT /api/connectors/:id.
+ *
+ * The server never returns a full key. `maskedKey` is the last four characters
+ * of whichever source won, and `source` says which one that was: a key saved
+ * here beats one in the server's environment, and clearing the saved key falls
+ * back to the environment rather than to nothing.
+ */
+export type Connector = {
+  id: string;
+  label: string;
+  kind: ConnectorKind;
+  configured: boolean;
+  source: "settings" | "env" | null;
+  maskedKey: string | null;
+};
+
 /**
  * GET /api/update — the whole updater state, in one object.
  *

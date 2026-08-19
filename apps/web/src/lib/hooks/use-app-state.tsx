@@ -73,6 +73,7 @@ export const SETTINGS_SECTIONS = [
   "general",
   "connection",
   "agents",
+  "connectors",
   "appearance",
   "updates",
   "about",

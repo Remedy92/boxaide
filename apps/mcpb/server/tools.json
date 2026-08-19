@@ -1273,5 +1273,113 @@
       },
       "additionalProperties": false
     }
+  },
+  {
+    "name": "enrich_find_email",
+    "description": "Find the work email address for one person at one organisation domain. Give either fullName, or firstName and lastName, plus orgDomain. Returns the address with a confidence from 0 to 100, a status of 'valid', 'risky', 'unknown' or 'invalid', and which provider answered. This is a paid lookup against an external provider, so call it once per person and use crm_contact_upsert to keep what you learn. Do not call it to check an address you already hold; enrich_verify_email is the cheaper tool for that. Finding or verifying an address does not permit mailing it. Queue anything you want sent with outbox_queue_draft, which a human approves.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "fullName": {
+          "type": "string",
+          "description": "Whole name, when the parts are not separated."
+        },
+        "firstName": {
+          "type": "string"
+        },
+        "lastName": {
+          "type": "string"
+        },
+        "orgDomain": {
+          "type": "string",
+          "description": "Organisation domain such as 'acme.com'. Not a website URL, and not the person's own address."
+        }
+      },
+      "required": [
+        "orgDomain"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "enrich_verify_email",
+    "description": "Check whether one address is deliverable before anything is queued to it. Returns the same shape as enrich_find_email: confidence 0 to 100, a status of 'valid', 'risky', 'unknown' or 'invalid', and the provider. A 'risky' status means a catch-all domain that accepts anything, so the address is unproven rather than good. This is a paid lookup; the answer is cached for a day, and a repeat call inside that day costs nothing. Finding or verifying an address does not permit mailing it. Queue anything you want sent with outbox_queue_draft, which a human approves.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "description": "One address to check."
+        }
+      },
+      "required": [
+        "email"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "crm_contacts_import",
+    "description": "Import contacts into the CRM from CSV text. The first line is a header; 'email' is required and 'name', 'title', 'org', 'orgDomain' and 'tags' are optional. Quoted fields and commas inside quotes are handled. Addresses that are not addresses are skipped, repeats of an earlier line are skipped, and every skip comes back with its line number and reason. At most 500 rows per call: a longer file is refused outright, so split it rather than expecting a partial import. Nothing here contacts anyone or enrols anyone in a campaign.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "csv": {
+          "type": "string",
+          "description": "The whole CSV document, header line included."
+        }
+      },
+      "required": [
+        "csv"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "web_search",
+    "description": "Search the public web and get back ranked results: title, url, snippet, and a publication date when the index knows one. Use it for anything outside the user's own mail and CRM, such as what an organisation does, whether a company still exists, or recent news about a person you are about to write to. Do NOT use it to look up the user's own contacts, past mail or deals: crm_contacts_search and message_search know those and this does not. web_search returns short snippets chosen by a search index, which are often enough to answer a question and are never enough to quote from. When the answer has to be exact, or the snippet is cut off mid-thought, call web_fetch on the url to read the page itself.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "What to search for, phrased as you would type it into a search engine. One question per call; two topics in one query gets you results for neither."
+        },
+        "numResults": {
+          "type": "number",
+          "description": "How many results to return. Default 5, maximum 10. Values outside that range are clamped, not refused.",
+          "default": 5
+        },
+        "provider": {
+          "type": "string",
+          "description": "Which search back end to use. Omit this unless the user named one: with no value the first configured provider is used, which is what the operator set up.",
+          "enum": [
+            "exa",
+            "parallel"
+          ]
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "web_fetch",
+    "description": "Read one public web page and get its text back, with the markup, scripts and navigation stripped out. Use it to read a page a search result pointed at, or a link the user gave you. web_search returns short snippets chosen by a search index, which are often enough to answer a question and are never enough to quote from. When the answer has to be exact, or the snippet is cut off mid-thought, call web_fetch on the url to read the page itself. Only public http and https addresses are reachable: private, loopback and cloud metadata addresses are refused at every redirect hop, and so is anything that is not text, such as a PDF or an image. The text is capped at 40,000 characters and the response says whether it was cut, so do not treat a truncated page as the whole story.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Absolute http or https URL, e.g. https://example.com/about. Take it from a web_search result or from the user, never from a guess at what a company's page might be called."
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false
+    }
   }
 ]

@@ -90,7 +90,26 @@ src/outreach/store.ts     OutreachStore(db, masterKey)
 src/outreach/engine.ts    OutreachEngine               follow-ups, opt-out detection, approved-send
 src/outreach/tools.ts     OUTREACH_TOOLS + dispatchOutreachTool
 src/outreach/routes.ts    registerOutreachRoutes(app, deps)
+src/enrichment/service.ts EnrichmentService            provider waterfall, cache, CSV import
+src/enrichment/tools.ts   ENRICHMENT_TOOLS + dispatchEnrichmentTool
+src/research/service.ts   ResearchService              web search and one-page reads
+src/research/tools.ts     RESEARCH_TOOLS + dispatchResearchTool
 ```
+
+Enrichment finds and checks work email addresses through a paid provider
+waterfall, Hunter first and Prospeo second, and imports contacts from CSV text.
+It owns no table: an answer is held in memory for a day so a repeated lookup is
+not billed twice, and nothing it holds is message-derived, so it needs no
+master key. It never imports the CRM. Wiring in `src/platform.ts` hands it one
+callback that writes a contact, which is the whole of its reach into another
+module. Finding an address grants nothing: outreach still owns the queue, the
+suppression list, and the human approval step.
+
+Research searches the public web through Exa or Parallel and reads one page at
+a time as text. It stores nothing, sends nothing, and has no timers, so both of
+its tools are reads by construction and no approval step applies. `web_fetch`
+refuses private and loopback addresses before connecting, follows at most three
+redirects with the same check on every hop, and caps what it returns.
 
 Seams (wired by the architect, present in the skeleton):
 - `src/app.ts` constructs the three stores, `CrmService`, `AutomationScheduler`,
@@ -499,6 +518,45 @@ Outreach (`src/outreach/tools.ts`):
 - `suppression_list` {}
 
 Deliberately absent: outbox approve/reject/send tools (invariant 1).
+
+Enrichment (`src/enrichment/tools.ts`):
+- `enrich_find_email` { orgDomain, fullName? | firstName? + lastName? } — one
+  paid lookup; returns address, confidence 0 to 100, status and provider.
+- `enrich_verify_email` { email } — same shape, for an address already held.
+- `crm_contacts_import` { csv } — header line plus at most 500 rows; every
+  skipped row comes back with its line number and reason. Contacts nobody.
+
+Research (`src/research/tools.ts`):
+- `web_search` { query, numResults=5, provider? } — ranked results with
+  snippets, not page text.
+- `web_fetch` { url } — one public http or https page as text.
+
+Keys come from Settings > Connectors, stored encrypted in the `connectors`
+table (`src/connectors/`). The environment stays as the fallback for a headless
+install: `BOXAIDE_HUNTER_API_KEY` and `BOXAIDE_PROSPEO_API_KEY` for enrichment,
+`BOXAIDE_EXA_API_KEY` and `BOXAIDE_PARALLEL_API_KEY` for research. Settings beat
+the environment, and nothing is cached, so a key saved in the UI takes effect on
+the next call with no restart. With none of a module's keys set, its tools refuse
+with a message naming the screen and the variables.
+
+`GET /api/connectors` lists all four with a masked key and a source of
+`settings`, `env` or null; `PUT /api/connectors/:id` takes `{ apiKey }` and
+clears on an empty value. A full key never leaves the server.
+
+With no search connector at all, a launched CLI keeps its own web search and
+fetch instead (`LaunchContext.searchConfigured` in `src/agent/launcher.ts`).
+Configure Exa or Parallel and the launcher goes back to stripping those tools,
+so agents search through Boxaide.
+
+Scope (`src/mcp/scope.ts`): `web_search`, `web_fetch`, `enrich_find_email` and
+`enrich_verify_email` are in all three profiles. `crm_contacts_import` is not in
+`run`, which has no person to hand it a file.
+
+Pre-send verification: when an enrichment provider is configured, the outreach
+engine verifies each approved recipient immediately before the send. A verdict
+of `invalid` fails the row with the address in the error and it leaves the
+queue; `risky`, `unknown` and a verifier that is down do not block anything.
+The day-long cache means a row held back by the daily cap is not billed twice.
 
 ## REST surface (all inside `createApi` after auth)
 

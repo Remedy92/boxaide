@@ -27,6 +27,7 @@ import type {
   AutomationRun,
   CalendarAccount,
   CalendarAccountsResponse,
+  Connector,
   ConnectionTestResult,
   CreatedAccount,
   CrmContact,
@@ -1087,6 +1088,39 @@ export function getOutreachBadge(ctx: Ctx): Promise<OutreachBadge> {
     token: ctx.token,
     signal: ctx.signal,
   });
+}
+
+/* -------------------------------------------------------------------------- */
+/* connectors: /api/connectors                                                */
+/* -------------------------------------------------------------------------- */
+
+/** Metadata only: every key is masked to its last four characters. */
+export async function listConnectors(ctx: Ctx): Promise<Connector[]> {
+  const data = await request<{ connectors: Connector[] }>("/api/connectors", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+  return data.connectors;
+}
+
+/** An empty `apiKey` clears the saved key, leaving any environment key in place. */
+export async function setConnectorKey(
+  id: string,
+  apiKey: string,
+  ctx: Ctx,
+): Promise<Connector> {
+  const data = await request<{ connector: Connector }>(
+    `/api/connectors/${encodeURIComponent(id)}`,
+    {
+      method: "PUT",
+      body: { apiKey },
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.connector;
 }
 
 /* -------------------------------------------------------------------------- */

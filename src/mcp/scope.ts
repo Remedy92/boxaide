@@ -36,6 +36,11 @@ import {
   CALENDAR_READ_TOOL_NAMES,
   CALENDAR_SEND_TOOL_NAMES,
 } from "../calendar/tools.js";
+import {
+  ENRICHMENT_PAID_TOOL_NAMES,
+  ENRICHMENT_LOCAL_TOOL_NAMES,
+} from "../enrichment/tools.js";
+import { RESEARCH_TOOL_NAMES } from "../research/tools.js";
 
 export type ScopeProfile = "chat" | "driven" | "run";
 
@@ -130,6 +135,18 @@ export function scopeToolNames(profile: ScopeProfile): string[] {
   for (const name of OUTREACH_TOOL_NAMES) names.add(name);
   for (const name of CALENDAR_READ_TOOL_NAMES) names.add(name);
   for (const name of CALENDAR_SEND_TOOL_NAMES) names.add(name);
+  // Reading the public web is a read in every profile, including a scheduled
+  // run: a run that cannot look anything up has to guess instead.
+  for (const name of RESEARCH_TOOL_NAMES) names.add(name);
+  // Paid lookups reach a vendor and bill the operator. Every profile gets
+  // them, a run included, because the cap that matters is the vendor's own
+  // quota and the answers are cached for a day.
+  for (const name of ENRICHMENT_PAID_TOOL_NAMES) names.add(name);
+  // Bulk contact import writes to the CRM from a file a person supplied. A
+  // scheduled run has nobody to supply one, so it does not get the tool.
+  for (const name of ENRICHMENT_LOCAL_TOOL_NAMES) {
+    if (profile !== "run") names.add(name);
+  }
   return [...names];
 }
 

@@ -346,6 +346,7 @@ describe("HTTP security surface (shipped app)", () => {
       "/api/automations",
       "/api/outreach/outbox",
       "/api/outreach/badge",
+      "/api/connectors",
     ];
     for (const route of routes) {
       const anon = await runtime.app.request(route);

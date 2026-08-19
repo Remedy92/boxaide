@@ -237,6 +237,19 @@ describe("agent scopes", () => {
     expect(scopeAllows("chat", "automation_create")).toBe(true);
   });
 
+  it("gives every profile the web and the lookups, and the CSV import to none but a person's session", async () => {
+    for (const profile of SCOPE_PROFILES) {
+      expect(scopeAllows(profile, "web_search")).toBe(true);
+      expect(scopeAllows(profile, "web_fetch")).toBe(true);
+      expect(scopeAllows(profile, "enrich_find_email")).toBe(true);
+      expect(scopeAllows(profile, "enrich_verify_email")).toBe(true);
+    }
+    // A scheduled run has nobody to hand it a file, so bulk import is not its.
+    expect(scopeAllows("run", "crm_contacts_import")).toBe(false);
+    expect(scopeAllows("chat", "crm_contacts_import")).toBe(true);
+    expect(scopeAllows("driven", "crm_contacts_import")).toBe(true);
+  });
+
   it("refuses by default: a tool no scope names is denied, not allowed", async () => {
     // The failure this guards against is a tool added to the server and
     // forgotten in scope.ts. Silence must mean no.

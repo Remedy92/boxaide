@@ -416,6 +416,16 @@ Each `BOXAIDE_*` name is preferred. Then `SLEY_*`, then `MAILMUX_*`.
 | `BOXAIDE_SEND_DAILY_CAP` | `50` | Approved outreach sends per account per UTC day |
 | `BOXAIDE_GOOGLE_CLIENT_ID` | empty | OAuth client for Google Calendar — see below |
 | `BOXAIDE_GOOGLE_CLIENT_SECRET` | empty | Secret for that client |
+| `BOXAIDE_HUNTER_API_KEY` | empty | Hunter key. Finds and verifies work email addresses, and checks a recipient before an approved send |
+| `BOXAIDE_PROSPEO_API_KEY` | empty | Prospeo key, tried after Hunter |
+| `BOXAIDE_EXA_API_KEY` | empty | Exa key. Lets an agent search the web and read a page |
+| `BOXAIDE_PARALLEL_API_KEY` | empty | Parallel key, used when Exa is not set |
+
+Those last four are also settable in Settings > Connectors, which stores them
+encrypted on the server and takes effect without a restart. A key saved there
+beats the environment variable, and the screen only ever shows the last four
+characters. Set no search key at all, in either place, and a launched agent
+keeps its own CLI's web search instead of Boxaide's.
 
 ### Bind address (`BOXAIDE_HOST`)
 

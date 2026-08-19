@@ -124,6 +124,10 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
   // and this server is what enforces the scope that credential carries. See
   // src/mcp/scope.ts for why the boundary moved to the server.
   const scopedTokens = new ScopedTokens();
+  // The launcher is built before the platform, and a connector saved in
+  // Settings must reach the next launch without a restart, so the search check
+  // reads through this rather than taking a value now.
+  let platformRef: Platform | null = null;
   const launcher = new AgentLauncher({
     mcpUrl: `http://${launcherHost}:${config.port}/mcp`,
     bearerToken: config.bearerToken,
@@ -137,6 +141,9 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     channel,
     onRunningChange: (id) => channel.setLaunchedAgent(id),
     onActivity: (tool) => channel.noteAgentActivity(tool),
+    // False here lets a launched CLI use its own web search and fetch. See
+    // LaunchContext.searchConfigured.
+    searchConfigured: () => platformRef?.hasSearchConnector() ?? true,
   });
   // The agent platform (CRM, automations, outreach) shares the Store's SQLite
   // handle. Constructed here so every entry point has the tools; its timers
@@ -149,6 +156,7 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     launcher,
     calendarHelperPath: config.calendarHelperPath,
   });
+  platformRef = platform;
 
   // Sending mail and booking a meeting are the two things a launched agent
   // does that another person sees at once. It may ask for either; this is what

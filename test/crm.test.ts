@@ -8,7 +8,8 @@ import { CrmStore } from "../src/crm/store.js";
 import { CrmService } from "../src/crm/service.js";
 import { CRM_TOOLS, dispatchCrmTool } from "../src/crm/tools.js";
 import { registerCrmRoutes } from "../src/crm/routes.js";
-import type { Platform } from "../src/platform.js";
+import { createPlatform, type Platform } from "../src/platform.js";
+import type { AgentLauncher } from "../src/agent/launcher.js";
 
 const baseCreds = {
   imapHost: "fixture",
@@ -696,6 +697,35 @@ describe("CRM REST routes", () => {
     expect(
       (await app.request(`/api/crm/deals/${dealId}`, { method: "DELETE" })).status,
     ).toBe(200);
+
+    h.store.close();
+  });
+});
+
+/**
+ * The CSV import path is wired in platform.ts, not in either module: the CRM
+ * must not know about enrichment and enrichment must not know about the CRM.
+ * That makes the callback the only place a column can go missing, so it gets
+ * the real object graph rather than a stand-in.
+ */
+describe("csv import wiring", () => {
+  it("writes the tags column the parser read and the tool promises", async () => {
+    const h = await harness();
+    const platform = createPlatform({
+      db: h.store.db,
+      masterKey: h.masterKey,
+      mail: h.mail,
+      launcher: {} as AgentLauncher,
+    });
+
+    const outcome = platform.enrichmentService.importContacts(
+      "email,name,org,tags\njane@acme.test,Jane,Acme,vip;eu\n",
+    );
+    expect(outcome.skipped).toEqual([]);
+    expect(outcome.imported).toHaveLength(1);
+
+    const contactId = outcome.imported[0].contactId;
+    expect(h.crmStore.listTags(contactId)).toEqual(["eu", "vip"]);
 
     h.store.close();
   });

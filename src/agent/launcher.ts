@@ -214,7 +214,39 @@ export type LaunchContext = {
    * then launch exactly as before and the MCP tier carries the conversation.
    */
   channel?: DriverChannel;
+  /**
+   * Whether this server has a search connector configured.
+   *
+   * False means the CLI keeps its own web search and fetch: with no Boxaide
+   * web_search there is nothing to prefer, and an agent that cannot look
+   * anything up is worse than one using its vendor's index. True means Boxaide
+   * owns search, so the CLI's native web tools stay off and the agent goes
+   * through web_search and web_fetch.
+   *
+   * Called per launch, not read at construction, so a key saved in Settings
+   * changes the next agent without a restart. Absent means the same as true:
+   * a launcher built standalone (tests, the CLI) keeps today's stripping.
+   */
+  searchConfigured?: () => boolean;
 };
+
+/**
+ * Whether this launch may use its CLI's own web tools. Absent thunk means no,
+ * so the conservative behaviour is what a context without the field gets.
+ */
+function nativeWebAllowed(ctx: LaunchContext): boolean {
+  return ctx.searchConfigured?.() === false;
+}
+
+/**
+ * Claude Code's own web tools, by the names its `--allowedTools` expects.
+ * Verified against claude 2.1.233. WebFetch is deliberately withheld: it is a
+ * raw fetch with none of the address checks src/research/safe-url.ts applies
+ * to boxaide's own web_fetch, so granting it would let a hostile URL in mail
+ * reach loopback or link-local services. Search results alone are enough for
+ * the unconfigured fallback.
+ */
+const CLAUDE_NATIVE_WEB_TOOLS = ["WebSearch"];
 
 export type { ModelOption } from "./model-list.js";
 
@@ -387,7 +419,7 @@ export function claudeTurnArgs(
       // The chat agent owns the shared workdir: it is the only launch that
       // uses it, and its session outlives any single turn.
       agentWorkDir(ctx),
-      model,
+      { nativeWebTools: nativeWebAllowed(ctx), model },
     ),
     // What is left of KICKOFF once Boxaide runs the loop: the reply text is the
     // answer, and no loop tool is to be called. Appended rather than folded into
@@ -451,7 +483,7 @@ function claudeDrive(
  * printed nothing until the end, so a hung run wrote a zero-byte log.
  */
 function claudeRunArgs(
-  _ctx: LaunchContext,
+  ctx: LaunchContext,
   prompt: string,
   workDir: string,
   model?: string,
@@ -460,7 +492,7 @@ function claudeRunArgs(
     ...claudeFlagsFor(
       runPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
       workDir,
-      model,
+      { nativeWebTools: nativeWebAllowed(ctx), model },
     ),
     // A run's prompt always opens with AUTOMATION_RUN_PREAMBLE, so it cannot
     // lead with a dash today. Behind `--` anyway: the day something is prepended
@@ -475,15 +507,23 @@ function claudeRunArgs(
  * `workDir` is the launch's own directory: `claudePrepare` writes that
  * launch's MCP config into it, and naming it here is what keeps two
  * overlapping runs off each other's config file.
+ *
+ * `--allowedTools` is an exhaustive allowlist, so Claude's own web tools are
+ * excluded unless `nativeWebTools` adds WebSearch (and only WebSearch; see
+ * CLAUDE_NATIVE_WEB_TOOLS). Never drop the flag to grant them: that would
+ * un-gate Bash and the file tools with it.
  */
 function claudeFlagsFor(
   allowedTools: string[],
   workDir: string,
-  model?: string,
+  opts: { nativeWebTools: boolean; model?: string },
 ): string[] {
+  const allowed = opts.nativeWebTools
+    ? [...allowedTools, ...CLAUDE_NATIVE_WEB_TOOLS]
+    : allowedTools;
   return [
     "-p",
-    ...(model ? ["--model", model] : []),
+    ...(opts.model ? ["--model", opts.model] : []),
     // NDJSON of the session's own events, which agent-stream.ts reads for
     // presence. --verbose is what makes -p emit the per-event lines rather
     // than only the final result; both flags were verified against the CLI.
@@ -494,7 +534,7 @@ function claudeFlagsFor(
     join(workDir, "claude-mcp.json"),
     "--strict-mcp-config",
     "--allowedTools",
-    allowedTools.join(","),
+    allowed.join(","),
   ];
 }
 
@@ -731,10 +771,13 @@ function grokHomeFor(workDir: string): string {
   return join(workDir, "grok-home");
 }
 
-function grokArgs(_ctx: LaunchContext, model?: string): string[] {
+function grokArgs(ctx: LaunchContext, model?: string): string[] {
   return [
     ...grokArgsFor(KICKOFF, chatPreapprovedToolNames(), {
-      disableWebSearch: true,
+      // Boxaide's own web_search is what the chat agent should reach for, so
+      // the CLI's index stays off while a search connector exists. With none
+      // configured there is nothing to prefer, and Grok keeps its own.
+      disableWebSearch: !nativeWebAllowed(ctx),
       model,
     }),
     // Same reason as Claude's stream-json, same chat-only rule. Grok's ACP

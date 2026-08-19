@@ -20,6 +20,10 @@ import { OutreachStore } from "./outreach/store.js";
 import { OutreachEngine } from "./outreach/engine.js";
 import { CalendarStore } from "./calendar/store.js";
 import { CalendarService } from "./calendar/service.js";
+import { EnrichmentService } from "./enrichment/service.js";
+import { ResearchService } from "./research/service.js";
+import { ConnectorStore } from "./connectors/store.js";
+import { ConnectorsService } from "./connectors/service.js";
 
 /**
  * Shape of one MCP tool definition, structurally identical to the entries of
@@ -46,6 +50,19 @@ export type Platform = {
   calendarStore: CalendarStore;
   /** Agenda, free slots, and the meeting write path. No timers of its own. */
   calendarService: CalendarService;
+  /** Paid address lookups and the CSV contact import. Stores nothing. */
+  enrichmentService: EnrichmentService;
+  /** Web search and page reads. No store, no key of its own, no timers. */
+  researchService: ResearchService;
+  /** Provider API keys saved in settings, encrypted. Env stays the fallback. */
+  connectorStore: ConnectorStore;
+  /** Which provider keys this server has, and where each one came from. */
+  connectorsService: ConnectorsService;
+  /**
+   * True when a search back end has a key today. Read live, so the launcher
+   * can ask per launch: with no connector the CLI keeps its own web tools.
+   */
+  hasSearchConnector: () => boolean;
   /** Start CRM sync, automation scheduler, and outreach engine timers. */
   start: () => void;
   /** Stop every timer and any in-flight automation run. */
@@ -65,7 +82,52 @@ export function createPlatform(opts: {
   const automationStore = new AutomationStore(opts.db, opts.masterKey);
   const scheduler = new AutomationScheduler(automationStore, opts.launcher);
   const outreachStore = new OutreachStore(opts.db, opts.masterKey);
-  const engine = new OutreachEngine(outreachStore, crmStore, opts.mail);
+  // One key reader for both paid services. Settings beat the environment, and
+  // every call re-reads SQLite, so a key added in the Connectors screen is in
+  // force on the next lookup with no restart.
+  const connectorStore = new ConnectorStore(opts.db, opts.masterKey);
+  const connectorsService = new ConnectorsService(connectorStore);
+  const getKey = (providerId: string) => connectorsService.getKey(providerId);
+  // Enrichment never imports the CRM (spec invariant 6). It is handed one
+  // callback instead, and this is the only place that knows both shapes: an
+  // imported row names an organisation by text, the CRM wants an org id.
+  const enrichmentService = new EnrichmentService({
+    getKey,
+    upsertContact: (row) => {
+      const orgName = row.org ?? row.orgDomain;
+      const org = orgName
+        ? crmStore.upsertOrg({ name: orgName, domain: row.orgDomain })
+        : null;
+      const contact = crmStore.upsertContact({
+        email: row.email,
+        name: row.name,
+        title: row.title,
+        orgId: org?.id ?? null,
+        source: "import",
+      });
+      // The CSV parser reads a tags column and the tool description promises
+      // it, so the tags have to be written here: nothing else on this path
+      // knows they exist, and a silently dropped tag makes every later search
+      // by that tag miss the whole import.
+      if (row.tags.length > 0) crmStore.addTags(contact.id, row.tags);
+      return contact;
+    },
+  });
+  // Research reaches the public web and keeps nothing, so it needs no db, no
+  // master key, and no start/stop.
+  const researchService = new ResearchService({ getKey });
+  const engine = new OutreachEngine(outreachStore, crmStore, opts.mail, {
+    // Deliverability check at the send chokepoint. The engine holds no
+    // opinion about who does the checking: it asks this callback, and with
+    // no provider key set the callback answers null and nothing changes.
+    // The answer is cached by the enrichment service for a day, so a row
+    // that waited behind the daily cap is not billed twice.
+    verifyRecipient: async (email) => {
+      if (!enrichmentService.isConfigured()) return null;
+      const result = await enrichmentService.verifyEmail(email);
+      return { status: result.status, confidence: result.confidence };
+    },
+  });
   // Calendar is read-on-demand: no scheduler, no sync loop. It sends invites
   // through the same MailService, so the suppression guard below covers it.
   const calendarStore = new CalendarStore(opts.db, opts.masterKey);
@@ -109,6 +171,11 @@ export function createPlatform(opts: {
     engine,
     calendarStore,
     calendarService,
+    enrichmentService,
+    researchService,
+    connectorStore,
+    connectorsService,
+    hasSearchConnector: () => connectorsService.hasSearchConnector(),
     start: () => {
       crmService.start();
       scheduler.start();
