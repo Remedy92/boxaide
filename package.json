@@ -1,6 +1,6 @@
 {
   "name": "boxaide",
-  "version": "0.2.21",
+  "version": "0.2.22",
   "description": "Free self-host multi-mailbox agentic inbox with web UI + MCP for any agent",
   "type": "module",
   "license": "MIT",
