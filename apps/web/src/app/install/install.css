@@ -163,3 +163,192 @@
   transform-origin: center;
   animation: mailmux-mark-engrave 520ms var(--ease-out-expo) both;
 }
+
+/* ---------------------------------------------------------------------------
+   Scroll motion.
+
+   The page below the fold arrives in pieces. Every part carries `data-reveal`
+   with its place in its own group, and use-scroll-motion.ts turns that number
+   into a delay, so a section lands as a sequence rather than a slab.
+
+   The hidden half is here, under `[data-armed]`, which the server renders. That
+   is deliberate: hiding from a hook instead would paint the page in full and
+   then take it away one frame later, which is worse than either state. The page
+   carries a <noscript> sheet that cancels the whole thing for a browser that
+   never runs the hook.
+
+   620ms is far outside the product's own 100 to 150ms budget. That budget is right
+   for a window kept open all day and wrong for a page looked at once, and this
+   file already breaks it for the same reason. prefers-reduced-motion is handled
+   globally in globals.css, which drops every duration to 0.01ms; the parts
+   still reveal, they simply appear.
+   --------------------------------------------------------------------------- */
+[data-armed] [data-reveal] {
+  opacity: 0;
+  transform: translate3d(0, 18px, 0);
+}
+
+[data-armed] [data-reveal].mailmux-shown {
+  opacity: 1;
+  transform: none;
+  filter: none;
+  transition:
+    opacity 620ms var(--ease-out-expo) var(--reveal-delay, 0ms),
+    transform 620ms var(--ease-out-expo) var(--reveal-delay, 0ms),
+    filter 620ms var(--ease-out-expo) var(--reveal-delay, 0ms);
+}
+
+/* A heading is the thing the eye lands on first, so it gets the one effect
+   nothing else does: it resolves out of focus rather than sliding. */
+[data-armed] .mailmux-section-title[data-reveal] {
+  filter: blur(7px);
+  transform: translate3d(0, 22px, 0);
+}
+
+/* The app icon does not slide in. It is an object on a desk: it starts a little
+   large and seats, the same move app-mark.tsx makes when the groove is cut. */
+[data-armed] .mailmux-mark-seat[data-reveal] {
+  transform: scale(1.05);
+}
+
+.mailmux-mark-seat {
+  display: block;
+}
+
+.mailmux-section-title {
+  font-size: clamp(24px, 3.4vw, 28px);
+  line-height: 1.16;
+  font-weight: 600;
+  letter-spacing: -0.022em;
+  color: var(--text-primary);
+  text-wrap: balance;
+}
+
+/* ---------------------------------------------------------------------------
+   The header.
+
+   It follows the page now that the page is taller than a screen. It carries no
+   rule at the top, because a line under a wordmark over a hero is noise, and it
+   grows one the moment the hero is behind you. `data-scrolled` is written by
+   use-scroll-motion.ts.
+   --------------------------------------------------------------------------- */
+.mailmux-header {
+  border-bottom: 1px solid transparent;
+  transition:
+    border-color var(--dur-enter) ease-out,
+    background-color var(--dur-enter) ease-out;
+}
+
+[data-scrolled="true"] .mailmux-header {
+  border-bottom-color: var(--border-subtle);
+  background: color-mix(in oklab, var(--surface-1) 82%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+/* ---------------------------------------------------------------------------
+   Parallax.
+
+   The atmosphere is fixed, so it would otherwise sit perfectly still while the
+   page moves over it, which reads as a printed backdrop. A quarter of the
+   page's own travel is enough to give it depth and not enough to notice as an
+   effect. The property is written once per frame by use-scroll-motion.ts and
+   only ever moves a composited layer.
+   --------------------------------------------------------------------------- */
+.mailmux-atmosphere {
+  transform: translate3d(0, calc(var(--mailmux-parallax, 0px) * -1), 0);
+  will-change: transform;
+}
+
+/* ---------------------------------------------------------------------------
+   The beam field, in motion.
+
+   Two movements, both on the field the page already draws.
+
+   Drift turns the whole fan two degrees and back over a minute and a half. It
+   is too slow to catch in the act, which is the point: the page is never twice
+   the same and never appears to be animating.
+
+   Arrival sends a short length of light down a beam, inward, where it dies at
+   the mark. That is the product drawn as motion: many places, one inbox. It is rare on purpose, and
+   it is rare on purpose: six beams, staggered, one every second and a half.
+   --------------------------------------------------------------------------- */
+@keyframes mailmux-beam-drift {
+  from { transform: rotate(-1.1deg); }
+  to   { transform: rotate(1.1deg); }
+}
+
+.mailmux-beams {
+  /* The convergence point in the field's own units, so the fan turns about the
+     place the beams meet rather than the middle of the window. */
+  transform-origin: 800px 207px;
+  animation: mailmux-beam-drift 96s ease-in-out infinite alternate;
+}
+
+@keyframes mailmux-beam-arrive {
+  0%   { stroke-dashoffset: -1500; opacity: 0; }
+  4%   { opacity: 0.85; }
+  26%  { opacity: 0.85; }
+  32%  { stroke-dashoffset: 0; opacity: 0; }
+  100% { stroke-dashoffset: 0; opacity: 0; }
+}
+
+.mailmux-beam-pulse {
+  stroke-width: 2.2;
+  stroke-dasharray: 120 3000;
+  animation: mailmux-beam-arrive 9.3s linear infinite;
+}
+
+/* globals.css collapses every duration under reduced motion, which would leave
+   the pulses flickering rather than travelling. They are decoration; they go. */
+@media (prefers-reduced-motion: reduce) {
+  .mailmux-beams { animation: none; }
+  .mailmux-beam-pulse { animation: none; opacity: 0; }
+  .mailmux-cue { animation: none; }
+  .mailmux-atmosphere { transform: none; }
+}
+
+/* ---------------------------------------------------------------------------
+   Everything below the fold.
+   --------------------------------------------------------------------------- */
+
+/* The cue is the only thing on the first screen that says there is a second
+   one. It breathes rather than bounces: an arrow that hops reads as a demand. */
+@keyframes mailmux-cue {
+  0%, 100% { opacity: 0.35; transform: translateY(0); }
+  50%      { opacity: 0.75; transform: translateY(3px); }
+}
+
+.mailmux-cue {
+  animation: mailmux-cue 2.8s ease-in-out infinite;
+}
+
+.mailmux-logo {
+  transition: color var(--dur-fast) ease-out;
+}
+
+.mailmux-logo svg {
+  transition: color var(--dur-fast) ease-out;
+}
+
+.mailmux-logo:hover svg {
+  color: var(--text-primary);
+}
+
+/* A card lifts a hair on hover. One pixel and a border is the whole effect;
+   a card that grows a shadow would be the only inline shadow in the product. */
+.mailmux-card {
+  transition:
+    border-color var(--dur-fast) ease-out,
+    transform var(--dur-enter) var(--ease-out-expo);
+}
+
+.mailmux-card:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-2px);
+}
+
+/* The one card on the page that is a picture of the product rather than a
+   surface of it, so it is allowed the dialog shadow. */
+.mailmux-ask {
+  box-shadow: var(--shadow-dialog);
+}

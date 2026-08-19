@@ -79,6 +79,16 @@ const BEAMS: Beam[] = Array.from({ length: COUNT }, (_, i) => {
   // draw the same line twice.
 }).filter((beam) => beam.angle < BLIND_SPOT.from || beam.angle > BLIND_SPOT.to);
 
+/**
+ * Which beams carry an arriving light, spread around the fan rather than
+ * bunched, so no two travel side by side. Indices into the filtered list, and
+ * fixed for the same reason the field is: this markup is rendered on a build
+ * machine and re-rendered in the browser, and the two must agree exactly.
+ */
+const PULSE_BEAMS = [1, 5, 9, 13, 18, 23];
+
+const PULSES: Beam[] = PULSE_BEAMS.map((i) => BEAMS[i]).filter(Boolean);
+
 export function HeroBeams() {
   return (
     <svg
@@ -105,7 +115,10 @@ export function HeroBeams() {
         </mask>
       </defs>
 
+      {/* The rotation lives inside the mask, so the field turns while the void
+          the icon sits in stays exactly where the icon is. */}
       <g
+        className="mailmux-beams"
         mask="url(#mailmux-beams)"
         fill="none"
         strokeWidth="1.4"
@@ -118,6 +131,20 @@ export function HeroBeams() {
             // currentColor is set once, by the wrapper, per theme.
             stroke={beam.accent ? "var(--accent)" : "currentColor"}
             opacity={beam.accent ? beam.accent : beam.opacity}
+          />
+        ))}
+
+        {/* The arrivals: the same beams again, drawn as a short dash that
+            travels inward and dies at the meeting point. Six of them, spread
+            over the cycle, so the field is never busy and never quite still. */}
+        {PULSES.map(({ d }, i) => (
+          <path
+            key={`pulse-${i}`}
+            className="mailmux-beam-pulse"
+            d={d}
+            stroke="var(--accent)"
+            opacity="0"
+            style={{ animationDelay: `${i * 1.55}s` }}
           />
         ))}
       </g>
