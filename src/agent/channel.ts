@@ -356,22 +356,36 @@ export class AgentChannel {
   }): Turn {
     const text = input.text.trim();
     if (!text) throw new Error("text is required");
-    if (input.role === "user" && input.chatId) {
-      if (!this.selectChat(input.chatId)) throw new Error("no such chat");
+    if (input.chatId && !this.writable(input.chatId)) {
+      throw new Error("no such chat");
     }
+    // Only a user turn moves the active chat. A line about some other chat says
+    // where it goes without saying where the user should be looking.
+    if (input.role === "user" && input.chatId) this.selectChat(input.chatId);
     if (input.role !== "user") this.touch(input.agent ?? null);
     // Stamp before clearing: the claimed seq is the owner, even if another
     // user turn arrived while this work was open.
     const answering = input.role === "agent" || input.role === "activity";
-    const target =
+    // The question this line answers, if it answers one: named by the caller
+    // that has the turn in hand, or the message the agent is working through.
+    const answered =
       input.answerTo ??
       (answering && this.work
         ? { seq: this.work.seq, chatId: this.work.chatId }
         : null);
-    const replyTo = target ? target.seq : null;
-    // An answer belongs to the chat the question was asked in. Only a turn
-    // that answers nothing lands wherever the user is now.
-    const chatId = target ? target.chatId : this.store.ensureActiveChat().id;
+    // The chat it belongs to, most specific first. A caller naming a chat is
+    // saying where the line goes and is taken at its word: an approval note
+    // belongs to the request it is about, not to whatever the agent happens to
+    // be working on, and not to whichever chat the user has open. Only a line
+    // that names nothing and answers nothing lands wherever the user is now.
+    const chatId =
+      (answering ? input.chatId : undefined) ??
+      answered?.chatId ??
+      this.store.ensureActiveChat().id;
+    // A line in a different conversation from the question answers nothing, so
+    // it is not stamped as a reply to it — a reply_to across chats would put an
+    // answer under a message that is not in the same pane.
+    const replyTo = answered && answered.chatId === chatId ? answered.seq : null;
     // The answer is what ends the work. An activity line does not: the agent
     // is narrating mid-task and is still holding the message.
     if (input.role === "agent") this.work = null;
