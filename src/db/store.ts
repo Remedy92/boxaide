@@ -158,6 +158,21 @@ export type ChatSession = { id: string | null; epoch: number };
  */
 export const MAX_DELIVERIES = 3;
 
+/**
+ * How long a queued user message stays worth answering.
+ *
+ * A message waits on the queue until an agent asks for one, and nothing used to
+ * put a floor under that wait. Start an agent the next morning and it was
+ * handed last night's question first, ahead of the one the user had just typed
+ * — and because a launch requeues dropped messages, the same backlog came back
+ * every time. The window is what makes a quiet evening cost one evening.
+ *
+ * Twelve hours, so it never cuts across a working session. An agent can hold a
+ * single message for a long tool run, and a user can leave a question queued
+ * over lunch; both stay inside this. What falls outside it is yesterday.
+ */
+export const USER_TURN_TTL_MS = 12 * 60 * 60 * 1000;
+
 type TurnRow = {
   seq: number;
   at: string;
@@ -856,41 +871,85 @@ export class Store {
    * cap still holds for the case it was written for — an agent that keeps
    * failing on the same message drops it again, without a relaunch in between.
    */
-  requeueDroppedUserTurns(): number {
+  requeueDroppedUserTurns(now: number = Date.now()): number {
+    // Never back past the freshness window. Without this the requeue is what
+    // keeps a stale backlog alive: every launch would hand yesterday's
+    // questions back to the queue, including the ones expiry had just retired,
+    // and the two would trade the same rows for the life of the install.
+    const cutoff = new Date(now - USER_TURN_TTL_MS).toISOString();
     const res = this.db
       .prepare(
         `UPDATE agent_turns SET delivered = 0, delivery_count = 0
-         WHERE role = 'user' AND delivered = 1
+         WHERE role = 'user' AND delivered = 1 AND at >= ?
            AND COALESCE(delivery_count, 0) >= ?
            AND seq NOT IN (
              SELECT reply_to FROM agent_turns
              WHERE role = 'agent' AND reply_to IS NOT NULL
            )`,
       )
-      .run(Store.MAX_DELIVERIES);
+      .run(cutoff, Store.MAX_DELIVERIES);
     return res.changes;
   }
 
   /**
-   * The oldest user turn no agent is holding, marked as held in the same
+   * Retires every queued user message that has gone stale, and says how many.
+   *
+   * A message with nobody listening waits on the queue, and until this existed
+   * it waited without end: start an agent a day later and the first thing it
+   * was handed was yesterday's question, in a chat the user had moved on from,
+   * while the message they had just typed sat behind it. The backlog survived
+   * every restart — dropping it only marked it, and the next launch requeued
+   * it — so one quiet evening poisoned every session after it.
+   *
+   * Retired, not deleted: the row is marked exactly as a dropped one is, so the
+   * pane already has the words for it — this was never picked up, send it again
+   * — and the user decides whether it still matters. Nothing an agent answered
+   * is touched, and neither is anything inside the window.
+   */
+  expireStaleUserTurns(now: number = Date.now()): number {
+    const cutoff = new Date(now - USER_TURN_TTL_MS).toISOString();
+    const res = this.db
+      .prepare(
+        `UPDATE agent_turns
+         SET delivered = 1, delivery_count = ?
+         WHERE role = 'user' AND delivered = 0 AND at < ?`,
+      )
+      .run(Store.MAX_DELIVERIES, cutoff);
+    return res.changes;
+  }
+
+  /**
+   * The next user turn no agent is holding, marked as held in the same
    * transaction. Returns null when there is nothing waiting.
    *
    * The claim has to be atomic. Two agents polling the same channel would
    * otherwise both read the same row and both answer it. It is a lease: the
    * holder is exclusive until they answer, vanish, or hit the delivery cap.
+   *
+   * `activeChatId` is the conversation the user is looking at, and it is served
+   * before any other. Plain oldest-first is right within one chat and wrong
+   * across several: an agent would work another chat's backlog while the pane
+   * in front of the user said nothing was listening, which reads as an agent
+   * that does not work at all. Ordering by the chat on screen first costs the
+   * other chats nothing — every message is still delivered, and still oldest
+   * first among its peers.
+   *
+   * Stale messages are retired first, in the same transaction, so a claim can
+   * never hand over one this store would refuse to keep queued.
    */
-  claimNextUserTurn(): StoredTurn | null {
+  claimNextUserTurn(activeChatId?: string | null): StoredTurn | null {
     const claim = this.db.transaction((): StoredTurn | null => {
+      this.expireStaleUserTurns();
       const row = this.db
         .prepare(
           `SELECT seq, at, chat_id as chatId, role, text_enc as textEnc, agent,
                   reply_to as replyTo, COALESCE(delivery_count, 0) as deliveryCount
            FROM agent_turns
            WHERE role = 'user' AND delivered = 0
-           ORDER BY seq ASC
+           ORDER BY (chat_id IS NOT NULL AND chat_id = ?) DESC, seq ASC
            LIMIT 1`,
         )
-        .get() as TurnRow | undefined;
+        .get(activeChatId ?? null) as TurnRow | undefined;
       if (!row) return null;
       this.db
         .prepare(

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { AgentChannel, MAX_DELIVERIES } from "../src/agent/channel.js";
+import { USER_TURN_TTL_MS } from "../src/db/store.js";
 import { createRuntime } from "../src/app.js";
 import { encryptSecret } from "../src/crypto/secrets.js";
 import { Store } from "../src/db/store.js";
@@ -438,6 +439,56 @@ describe("AgentChannel", () => {
     expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" })).toBeNull();
     expect(channel.history()[0].delivered).toBe(true);
     expect(channel.presence().dropped).toEqual([posted.seq]);
+  });
+
+  it("retires a message nobody picked up inside the window", async () => {
+    const { store, channel } = make();
+    const stale = store.appendTurn({
+      at: new Date(Date.now() - USER_TURN_TTL_MS - 1_000).toISOString(),
+      chatId: channel.activeChat().id,
+      role: "user",
+      text: "yesterday",
+      agent: null,
+    });
+
+    // An agent starting now must not be handed last night's question.
+    const handed = await channel.awaitUserTurn({ timeoutMs: 200, agent: "grok" });
+    expect(handed).toBeNull();
+    // Marked the same way a dropped message is, so the pane already says it.
+    expect(store.listDroppedUserSeqs()).toEqual([stale.seq]);
+  });
+
+  it("does not offer a retired message again when an agent starts", async () => {
+    const { store, channel } = make();
+    const stale = store.appendTurn({
+      at: new Date(Date.now() - USER_TURN_TTL_MS - 1_000).toISOString(),
+      chatId: channel.activeChat().id,
+      role: "user",
+      text: "yesterday",
+      agent: null,
+    });
+
+    // The requeue is what used to keep a backlog alive: every launch handed
+    // the same old questions back to the queue, forever.
+    channel.setLaunchedAgent("claude-code");
+
+    expect(channel.presence().dropped).toEqual([stale.seq]);
+    expect(await channel.awaitUserTurn({ timeoutMs: 200, agent: "claude-code" })).toBeNull();
+  });
+
+  it("serves the chat on screen before another chat's backlog", async () => {
+    const { channel } = make();
+    const other = channel.activeChat().id;
+    // Older, and in a chat the user is not looking at.
+    channel.post({ role: "user", text: "older, elsewhere", chatId: other });
+
+    const onScreen = channel.createChat().id;
+    channel.selectChat(onScreen);
+    const asked = channel.post({ role: "user", text: "just typed", chatId: onScreen });
+
+    const handed = await channel.awaitUserTurn({ timeoutMs: 500, agent: "grok" });
+    expect(handed?.seq).toBe(asked.seq);
+    expect(handed?.text).toBe("just typed");
   });
 
   it("offers a dropped message again to the agent that just started", async () => {

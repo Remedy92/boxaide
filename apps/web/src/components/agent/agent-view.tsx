@@ -251,6 +251,12 @@ export function AgentView({
                     claimed={
                       run.question !== null && agent.claimed.has(run.question.seq)
                     }
+                    /* An agent is holding a message, and it is not this one —
+                       including one in another chat, which is the case that
+                       used to read as "no agent is listening". */
+                    busyElsewhere={
+                      work !== null && work.seq !== run.question?.seq
+                    }
                   />
                 ))}
               </div>

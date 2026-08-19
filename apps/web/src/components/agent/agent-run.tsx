@@ -79,6 +79,7 @@ export function AgentRunView({
   waiting,
   lastSeenAt,
   claimed,
+  busyElsewhere,
 }: {
   run: Run;
   /** Set when THIS run is the one an agent is answering right now. */
@@ -88,6 +89,8 @@ export function AgentRunView({
   lastSeenAt: string | null;
   /** True when this question was dead-lettered — see useAgent().claimed. */
   claimed: boolean;
+  /** An agent is answering some other message — this one's, but not here. */
+  busyElsewhere: boolean;
 }) {
   const running = work !== null;
   const unanswered = run.answers.length === 0;
@@ -112,7 +115,11 @@ export function AgentRunView({
       {/* No answer, and nothing in flight. Which of the two reasons it is
           changes what the user should do, so they are never merged. */}
       {unanswered && !running && run.question && (
-        <Unanswered waiting={waiting} claimed={claimed} />
+        <Unanswered
+          waiting={waiting}
+          claimed={claimed}
+          busyElsewhere={busyElsewhere}
+        />
       )}
     </div>
   );
@@ -277,10 +284,13 @@ function Steps({
 }
 
 /**
- * A question with no answer, and the two ways that happens.
+ * A question with no answer, and the three ways that happens.
  *
  * Queued is recoverable and needs nothing from the user: the message sits
- * unclaimed on disk and the next agent to call in gets it.
+ * unclaimed on disk and the next agent to call in gets it. When the one agent
+ * there is happens to be answering a different message, it says that instead —
+ * "waiting for an agent" beside a running agent is what made a working queue
+ * look like a broken one.
  *
  * Dropped is not. After a few failed leases the row stays claimed — no agent
  * is offered it again — so telling somebody to wait would be telling them to
@@ -293,9 +303,11 @@ function Steps({
 function Unanswered({
   waiting,
   claimed,
+  busyElsewhere,
 }: {
   waiting: number;
   claimed: boolean;
+  busyElsewhere: boolean;
 }) {
   const agents = useLocalAgents();
   const signedOut = signedOutExit({
@@ -331,7 +343,9 @@ function Unanswered({
       />
       {waiting > 0
         ? "Handing this to your agent…"
-        : "Waiting for an agent. This is delivered as soon as one starts."}
+        : busyElsewhere
+          ? "Your agent is answering another message. This one is next."
+          : "Waiting for an agent. This is delivered as soon as one starts."}
     </p>
   );
 }

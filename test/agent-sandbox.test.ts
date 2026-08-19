@@ -175,6 +175,32 @@ describe("building the command", () => {
     expect(cmd.prefix.at(-1)).toBe("/usr/local/bin/grok");
     expect(cmd.prefix[0]).toBe("-p");
   });
+
+  it("leaves the login keychain reachable", () => {
+    // Claude Code keeps its token in the keychain on macOS, not in a file. The
+    // blanket home deny took the keychain with everything else, so every
+    // confined turn reported "Not logged in" while the same command outside
+    // the sandbox answered — and signing in again fixed nothing, because the
+    // login was never the missing part.
+    const cmd = confineCommand({
+      bin: "/usr/local/bin/claude",
+      access: "workspace",
+      write: ["/tmp/w"],
+      deny: [],
+      platform: "darwin",
+      home: HOME,
+    });
+    const profile = cmd.prefix[1];
+    const keychains = join(HOME, "Library", "Keychains");
+    // Written after the home deny, so it is the rule that wins, and writable
+    // because a refreshed token is written back.
+    expect(profile.indexOf(keychains)).toBeGreaterThan(
+      profile.indexOf(`(deny file-read* file-write* (subpath "${HOME}")`),
+    );
+    expect(profile).toContain(
+      `(allow file-read* file-write* (subpath "${keychains}"))`,
+    );
+  });
 });
 
 describe("what each CLI declares it needs", () => {
