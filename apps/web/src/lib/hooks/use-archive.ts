@@ -3,7 +3,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { archiveMessage, moveMessage } from "@/lib/api/endpoints";
-import { friendlyError } from "@/lib/api/errors";
+import { ApiError, friendlyError } from "@/lib/api/errors";
 import { useApp } from "@/lib/hooks/use-app-state";
 import { useMessageNavigation } from "@/lib/hooks/use-selection";
 import { useApiCtx } from "@/lib/hooks/use-settings";
@@ -117,6 +117,15 @@ export function useArchive() {
     },
 
     onError: (error, _input, context) => {
+      // 404 is not a failure: the server is saying the message had already
+      // left that folder, which another client did a moment ago. Putting the
+      // row back would paint a message that no longer exists, so the optimistic
+      // removal stands and the list is refetched to find out where it went.
+      if (error instanceof ApiError && error.status === 404) {
+        void queryClient.invalidateQueries({ queryKey: ["messages"] });
+        toast("Already archived elsewhere");
+        return;
+      }
       for (const [key, data] of context?.listSnapshots ?? []) {
         queryClient.setQueryData(key, data);
       }

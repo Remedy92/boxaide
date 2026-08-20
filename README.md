@@ -221,7 +221,7 @@ Agents that speak TOML use `[mcp_servers.boxaide]`. Tool calls show up as `mcp__
 | `message_get` | Full body |
 | `message_mark_read` | Set or clear the read flag |
 | `message_archive` | Move one message to the account's Archive mailbox |
-| `message_move` | Move one message to any folder (also the undo of an archive) |
+| `message_move` | Move one message to any folder (also the undo of an archive). A launched agent has to have it approved, because Trash is a folder |
 | `folders_list` | Folders on one account |
 | `draft_create` / `draft_update` / `drafts_list` / `draft_delete` | Drafts in the mailbox |
 | `message_send` | Send now, or — for an agent Boxaide launched — ask you first. Not outreach approval. |

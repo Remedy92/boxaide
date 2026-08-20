@@ -136,6 +136,63 @@ describe("agent scopes", () => {
       .toHaveLength(0);
   });
 
+  it("archives without asking, and asks before any other move", async () => {
+    // The two halves of the same decision. Archiving files into the mailbox
+    // the account itself names and is undone by moving back, so a launched
+    // agent does it. Any other destination includes Trash, which is how mail
+    // gets deleted, so that one waits for a person.
+    const inbox = await mail.listMessages("personal", { limit: 5 });
+    const messageId = inbox.messages[0].id;
+
+    const archived = await call("message_archive", "chat", {
+      account: "personal",
+      messageId,
+    });
+    expect(archived.result.isError).toBeUndefined();
+    expect(JSON.parse(archived.result.content[0].text).result).toMatchObject({
+      moved: true,
+      toFolder: "Archive",
+    });
+    expect(approvals.pending()).toHaveLength(0);
+
+    const moved = await call("message_move", "chat", {
+      account: "personal",
+      messageId: JSON.parse(archived.result.content[0].text).result.id,
+      folder: "INBOX",
+    });
+    expect(JSON.parse(moved.result.content[0].text).queued).toBe(true);
+    const [card] = approvals.pending();
+    // The card names where the mail is going, because that is the whole
+    // question the user is being asked.
+    expect(card.title).toContain("INBOX");
+    // Still in Archive: asking moved nothing.
+    expect(
+      (await mail.listMessages("personal", { folder: "Archive" })).messages,
+    ).toHaveLength(1);
+
+    await approvals.decide(card.id, "approve");
+    expect(
+      (await mail.listMessages("personal", { folder: "Archive" })).messages,
+    ).toHaveLength(0);
+  });
+
+  it("fails a queued move whose message left before anyone approved it", async () => {
+    // A card can sit for hours. By the time it is answered the message may
+    // have been moved by hand, and moveMessage reports that by returning
+    // rather than throwing — so the queue has to notice, or the card reads
+    // "Done." for a move that never happened.
+    await call("message_move", "chat", {
+      account: "personal",
+      messageId: "personal:INBOX:9999",
+      folder: "Archive",
+    });
+    const [card] = approvals.pending();
+    await expect(approvals.decide(card.id, "approve")).rejects.toThrow(
+      /no longer in/,
+    );
+    expect(approvals.pending()).toHaveLength(0);
+  });
+
   it("sends only what the user approved, and never what they declined", async () => {
     await call("message_send", "chat", {
       account: "personal",

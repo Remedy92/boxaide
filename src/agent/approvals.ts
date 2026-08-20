@@ -43,6 +43,13 @@ export const APPROVAL_TOOL_NAMES: ReadonlySet<string> = new Set([
   "message_send",
   "meeting_create",
   "meeting_cancel",
+  // The odd one out: nobody else sees a move, so it is not here for the
+  // stranger's sake. It is here because the destination is a free-text folder
+  // and Trash is a folder — a move is the only way an agent can make mail
+  // disappear, and on Gmail the server empties Trash 30 days later. Archiving
+  // is not queued: it files into one mailbox the account itself names, and
+  // moving it back is the undo.
+  "message_move",
 ]);
 
 export function needsApproval(tool: string): boolean {
@@ -211,6 +218,24 @@ export class ApprovalQueue {
       });
       return;
     }
+    if (row.tool === "message_move") {
+      const result = await this.deps.mail.moveMessage(
+        String(args.account),
+        String(args.messageId),
+        String(args.folder),
+      );
+      // A queued move is carried out whenever the user gets to it, which may
+      // be hours after it was asked for. By then the message may have been
+      // moved by hand in another client, and `moveMessage` reports that by
+      // returning rather than throwing. Say so: a card that reads "Done." for
+      // a move that did not happen is the one lie this queue must not tell.
+      if (!result.moved) {
+        throw new Error(
+          `the message is no longer in ${result.fromFolder}, so nothing was moved`,
+        );
+      }
+      return;
+    }
     if (CALENDAR_SEND_TOOL_NAMES.has(row.tool)) {
       if (!this.deps.platform) {
         throw new Error(`${row.tool} is not available on this server`);
@@ -317,6 +342,12 @@ export function describe(row: StoredApproval): ApprovalView {
     push(fields, "Invites", attendees.join(", ") || null);
     push(fields, "Location", text("location"));
     body = text("description");
+  } else if (row.tool === "message_move") {
+    const folder = text("folder") ?? "(no folder named)";
+    title = `Move a message to ${folder}`;
+    push(fields, "Account", text("account"));
+    push(fields, "Message", text("messageId"));
+    push(fields, "Into", folder);
   } else if (row.tool === "meeting_cancel") {
     title = "Cancel a meeting and tell everyone invited";
     push(fields, "Meeting", text("meetingId"));

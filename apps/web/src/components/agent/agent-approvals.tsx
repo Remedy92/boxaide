@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { CalendarPlus, CalendarX, Send } from "lucide-react";
+import { CalendarPlus, CalendarX, FolderInput, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/atoms";
 import { useAgent } from "@/lib/hooks/use-agent";
@@ -121,12 +121,17 @@ function ApprovalCard({ approval }: { approval: AgentApproval }) {
 }
 
 function ToolIcon({ tool }: { tool: string }) {
+  // A move is not a send. The paper plane on a card that files mail into a
+  // folder reads as "this leaves the machine", which is the one thing it does
+  // not do.
   const Icon =
     tool === "meeting_create"
       ? CalendarPlus
       : tool === "meeting_cancel"
         ? CalendarX
-        : Send;
+        : tool === "message_move"
+          ? FolderInput
+          : Send;
   return (
     <Icon
       className="mt-0.5 size-4 shrink-0 text-fg-tertiary"

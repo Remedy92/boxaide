@@ -210,7 +210,7 @@ export const TOOLS = [
   {
     name: "message_move",
     description:
-      "Move one message into another mailbox of the same account. Use a path from folders_list. Nothing is deleted and nothing is sent. The Drafts mailbox is off limits in both directions — drafts have their own tools. Returns { moved: false } when the message had already left its folder.",
+      "Move one message into another mailbox of the same account. Use a path from folders_list. Nothing is sent. A move into Trash is how mail gets deleted on most servers, so this is the escalation of the pair: prefer message_archive, which files into the account's own Archive mailbox and needs no approval. A launched agent calling this does not move anything. The call is put in front of the user, who carries it out or drops it. The Drafts mailbox is off limits in both directions: drafts have their own tools. Returns { moved: false } when the message had already left its folder.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -519,9 +519,10 @@ async function dispatch(
     throw new Error(scopeRefusal(scope, name));
   }
   // The second boundary, and the one that lets a launched agent have these
-  // tools at all. A scoped caller reaching message_send, meeting_create or
-  // meeting_cancel does not perform it: the call is recorded and put in front
-  // of the user, who carries it out or drops it. See src/agent/approvals.ts.
+  // tools at all. A scoped caller reaching message_send, message_move,
+  // meeting_create or meeting_cancel does not perform it: the call is recorded
+  // and put in front of the user, who carries it out or drops it. See
+  // src/agent/approvals.ts.
   //
   // Ahead of every dispatch below for the same reason the scope check is —
   // one gate, so a tool family added later cannot route around it. An

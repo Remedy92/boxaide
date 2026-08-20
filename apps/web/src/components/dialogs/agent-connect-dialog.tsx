@@ -219,11 +219,13 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
               <li>Read and search mail in every connected mailbox.</li>
               <li>Write, update, list and discard drafts.</li>
               <li>Mark messages read or unread.</li>
-              <li>Send mail — a separate tool, and the escalation.</li>
+              <li>Archive mail into your own Archive mailbox.</li>
+              <li>Send mail, and move mail between folders. Both ask you first.</li>
             </ul>
             <p className="text-[12px] leading-4 text-fg-tertiary">
-              It cannot connect or remove a mailbox, and it cannot archive,
-              delete, move or label mail. Those endpoints do not exist.
+              It cannot connect or remove a mailbox, and it cannot delete, label
+              or star mail. Archiving is a move, so nothing it does removes a
+              message. A move to any other folder waits for you to approve it.
             </p>
           </div>
 

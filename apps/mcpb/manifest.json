@@ -44,6 +44,8 @@
     { "name": "messages_search", "description": "Free-text search" },
     { "name": "message_get", "description": "Read a full message" },
     { "name": "message_mark_read", "description": "Mark read or unread" },
+    { "name": "message_archive", "description": "File a message into the Archive mailbox" },
+    { "name": "message_move", "description": "Move a message to another folder (you approve it first)" },
     { "name": "draft_create", "description": "Write a draft" },
     { "name": "draft_update", "description": "Update a draft" },
     { "name": "drafts_list", "description": "List drafts" },

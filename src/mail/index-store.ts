@@ -96,6 +96,11 @@ export class MailIndexStore {
       );
       CREATE INDEX IF NOT EXISTS message_summaries_account_folder_date
         ON message_summaries (account_id, folder, date DESC);
+      -- The primary key is (account_id, folder, uid), so every lookup that
+      -- knows only the message id — mark read, and now the delete an archive
+      -- leaves behind — scans the account's whole index without this.
+      CREATE INDEX IF NOT EXISTS message_summaries_account_id
+        ON message_summaries (account_id, id);
       DROP INDEX IF EXISTS message_summaries_date;
     `);
     // Columns added after the first release. SQLite has no ADD COLUMN IF NOT
