@@ -22,6 +22,7 @@
  *   - A failed check never erases an update that was already found. The
  *     error is reported beside it; the offer stands.
  */
+import { readableNotes } from "./notes.js";
 import { isNewer } from "./semver.js";
 import { appVersion } from "../version.js";
 
@@ -42,7 +43,7 @@ export type UpdateState = {
   currentVersion: string;
   /** The newest version seen, which may equal `currentVersion`. */
   latestVersion: string | null;
-  /** Release notes, trimmed and capped. Plain text or markdown. */
+  /** Release notes as plain text: flattened, trimmed and capped. */
   notes: string | null;
   releaseUrl: string | null;
   publishedAt: string | null;
@@ -468,10 +469,14 @@ function clampFraction(value: number): number {
   return Math.min(Math.max(value, 0), 1);
 }
 
+/**
+ * Both channels hand this raw release bodies — HTML from the desktop feed,
+ * markdown from the REST API — so the flattening happens here, before any
+ * state is stored. Nothing downstream ever sees a tag.
+ */
 function trimNotes(raw: unknown): string | null {
-  if (typeof raw !== "string") return null;
-  const text = raw.trim();
-  if (text.length === 0) return null;
+  const text = readableNotes(raw);
+  if (text === null) return null;
   if (text.length <= MAX_NOTES) return text;
   return `${text.slice(0, MAX_NOTES).trimEnd()}…`;
 }

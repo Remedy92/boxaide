@@ -262,8 +262,8 @@ function Notes({ state }: { state: UpdateState }) {
         <p className="mb-1.5 text-[12px] leading-4 font-medium text-fg">
           Boxaide {state.latestVersion}
         </p>
-        {/* The release body as written, not rendered: it is somebody's
-            markdown and this is a 288px popover. Wrapped and scrolled. */}
+        {/* Plain text by the time it arrives: src/update/notes.ts flattens
+            the release body, so this only has to wrap and scroll it. */}
         <div className="pane-scroll max-h-64 overflow-y-auto">
           <p className="text-[12px] leading-4 whitespace-pre-wrap text-fg-secondary">
             {state.notes}
