@@ -41,6 +41,22 @@ is called three times:
 - **The `commit-msg` hook**, for a local commit, where `npm run ship:hooks`
   has been run. Weakest of the three: it never sees a pull request title.
 
+The first of those depends on a GitHub setting that is not in this repo, so it
+cannot be reviewed and will not show up in a diff:
+
+```
+gh api repos/Remedy92/boxaide --jq .squash_merge_commit_title   # PR_TITLE
+```
+
+It must read `PR_TITLE`. On the default, `COMMIT_OR_PR_TITLE`, a pull request
+holding exactly one commit is squashed under *that commit's* subject instead of
+the title, and CI only ever read the title. The check would still be green and
+the words would still be unread. Restore it with:
+
+```
+gh api -X PATCH repos/Remedy92/boxaide -f squash_merge_commit_title=PR_TITLE
+```
+
 It refuses a commit-type prefix (`feat:`), a diff-word opener (refactor, bump,
 tweak, wip, misc), a lowercase start, a trailing full stop, an em dash, and
 anything over 80 characters. Merges, reverts, `fixup!` and
