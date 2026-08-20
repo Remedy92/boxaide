@@ -1,0 +1,38 @@
+name: release note
+
+# A squash-merge writes the pull request title to master verbatim, and
+# ship.sh turns that line into what Boxaide prints under "What is new". This
+# is the only gate that sees the words before they are user-facing copy.
+#
+# Its own workflow, not a job in ci.yml, because of `edited`: a title change
+# must re-check the title, and it must not re-run the build matrix.
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, reopened, synchronize, edited]
+
+concurrency:
+  group: release-note-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  subject:
+    name: subject
+    # Dependabot's title is not ours to write, and ship.sh drops its "Bump ..."
+    # line from the release body rather than print it to a user.
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Through the environment, never interpolated into the shell: a title is
+      # attacker-controlled text on a fork's pull request.
+      - name: Check the pull request title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: node scripts/lib/check-subject.mjs "$TITLE"

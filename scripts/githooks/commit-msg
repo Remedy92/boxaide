@@ -1,0 +1,13 @@
+#!/bin/sh
+# The weakest of the three subject gates, and the earliest. It never sees a
+# pull request title, which is what a squash-merge actually writes to master,
+# so CI is the gate that matters. This one catches a commit made straight on
+# master before it is pushed. Only runs where `npm run ship:hooks` was run.
+set -eu
+ROOT="$(git rev-parse --show-toplevel)"
+CHECK="$ROOT/scripts/lib/check-subject.mjs"
+[ -f "$CHECK" ] || exit 0
+command -v node >/dev/null || exit 0
+# First line only: the body is not release copy.
+SUBJECT="$(sed -n 1p "$1")"
+node "$CHECK" "$SUBJECT"
