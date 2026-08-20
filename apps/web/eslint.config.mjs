@@ -7,9 +7,10 @@ const eslintConfig = defineConfig([
   ...nextTs,
   {
     rules: {
-      // The reader renders bodyText only; bodyHtml is raw unsanitised sender
-      // HTML and there is no sanitiser in this codebase. Making this an error
-      // keeps that rule mechanical rather than remembered (§6.4).
+      // bodyHtml is raw unsanitised sender HTML. It renders only through
+      // HtmlBody's sandboxed frame (§6.4.6), never through the React tree.
+      // Making this an error keeps that rule mechanical rather than
+      // remembered (§6.4).
       "react/no-danger": "error",
     },
   },
