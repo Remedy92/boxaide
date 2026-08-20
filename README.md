@@ -442,8 +442,8 @@ Each `BOXAIDE_*` name is preferred. Then `SLEY_*`, then `MAILMUX_*`.
 | `BOXAIDE_GOOGLE_CLIENT_SECRET` | empty | Secret for that client |
 | `BOXAIDE_HUNTER_API_KEY` | empty | Hunter key. Finds and verifies work email addresses, and checks a recipient before an approved send |
 | `BOXAIDE_PROSPEO_API_KEY` | empty | Prospeo key, tried after Hunter |
-| `BOXAIDE_EXA_API_KEY` | empty | Exa key. Lets an agent search the web and read a page |
-| `BOXAIDE_PARALLEL_API_KEY` | empty | Parallel key, used when Exa is not set |
+| `BOXAIDE_PARALLEL_API_KEY` | empty | Parallel key. Lets an agent search the web and read a page. Tried first: it is a seventh of Exa's price for the same search |
+| `BOXAIDE_EXA_API_KEY` | empty | Exa key. A second index for the same job, used when Parallel has no key or when a tool call names Exa |
 | `BOXAIDE_APOLLO_API_KEY` | empty | Apollo key. Lets an agent find companies and people it does not know yet |
 
 Those last five are also settable in Settings > Connectors, which stores them
