@@ -27,6 +27,7 @@ import { Reader } from "@/components/reader/reader";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { AgentProvider } from "@/lib/hooks/use-agent";
 import { AppStateProvider, useApp } from "@/lib/hooks/use-app-state";
+import { useArchive } from "@/lib/hooks/use-archive";
 import { useCrmContacts } from "@/lib/hooks/use-crm-contacts";
 import { useDrafts } from "@/lib/hooks/use-drafts";
 import { useKeyboard } from "@/lib/hooks/use-keyboard";
@@ -64,6 +65,7 @@ function Shell() {
   const accounts = useAccounts();
   const nav = useMessageNavigation();
   const markRead = useMarkRead();
+  const archive = useArchive();
   const inMail = app.view === "mail";
   const drafting = app.view === "drafts";
   const peopling = app.view === "people";
@@ -277,6 +279,15 @@ function Shell() {
           accountId: current.accountId,
           messageId: current.id,
           seen: !current.seen,
+        });
+      },
+      archive: () => {
+        if (!inMail) return;
+        const current = nav.current;
+        if (!current) return;
+        archive.mutate({
+          accountId: current.accountId,
+          messageId: current.id,
         });
       },
       reply: () => (inMail ? app.requestReply("reply") : undefined),

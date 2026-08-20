@@ -39,6 +39,7 @@ const GROUPS: Array<[string, Array<[string, string[]]>]> = [
     "Message",
     [
       ["Toggle read / unread", ["u"]],
+      ["Archive", ["e"]],
       ["Reply", ["r"]],
       ["Reply all", ["a"]],
       ["Forward", ["f"]],
@@ -102,8 +103,10 @@ export function ShortcutsDialog({
         </div>
 
         <p className="text-[12px] leading-4 text-fg-tertiary">
-          Boxaide can&rsquo;t archive, delete, star, or snooze — so those keys do
-          nothing here. j and k walk drafts too when the Drafts view is open.
+          Archiving moves the message to your mailbox&rsquo;s Archive folder;
+          nothing is deleted. Boxaide can&rsquo;t delete, star, or snooze — so
+          those keys do nothing here. j and k walk drafts too when the Drafts
+          view is open.
         </p>
       </DialogContent>
     </Dialog>

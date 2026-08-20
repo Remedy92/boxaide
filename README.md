@@ -30,6 +30,18 @@ npm run dev
 
 In the UI: **Connect mailbox** → pick a preset (Gmail / Fastmail / Outlook / iCloud) or enter IMAP/SMTP hosts → use an **app password** where required.
 
+### Archiving
+
+`e` in the list, or the archive button in the reader, moves the message to the
+account's **Archive** mailbox — the one your server advertises as `\Archive`,
+or Gmail's *All Mail*, which is what archiving means there. Nothing is deleted,
+and the toast's **Undo** moves the message straight back to the folder it came
+from.
+
+A mailbox whose server has no Archive folder says so instead of guessing:
+create one named `Archive` in your mail provider and it is picked up on the
+next archive.
+
 ### Production-ish start
 
 ```bash
@@ -206,6 +218,8 @@ Agents that speak TOML use `[mcp_servers.boxaide]`. Tool calls show up as `mcp__
 | `messages_search` | Free-text search |
 | `message_get` | Full body |
 | `message_mark_read` | Set or clear the read flag |
+| `message_archive` | Move one message to the account's Archive mailbox |
+| `message_move` | Move one message to any folder (also the undo of an archive) |
 | `folders_list` | Folders on one account |
 | `draft_create` / `draft_update` / `drafts_list` / `draft_delete` | Drafts in the mailbox |
 | `message_send` | Send now (confirm in your agent). Not outreach approval. |

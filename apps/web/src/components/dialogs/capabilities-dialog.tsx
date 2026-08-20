@@ -20,6 +20,7 @@ const CAN = [
   "Read mail from every connected mailbox",
   "Search mailboxes (Inbox only)",
   "Mark messages read and unread",
+  "Archive messages, and move them between folders",
   "Write, edit, list and discard drafts",
   "Send mail, including replies that thread correctly",
   "List folders",
@@ -28,7 +29,7 @@ const CAN = [
 
 const CANNOT = [
   "Answer you by itself — Boxaide runs no model and never calls one",
-  "Archive, delete, or move messages",
+  "Delete messages — archiving moves them, it never removes them",
   "Star, flag, label, or tag",
   "Snooze or remind",
   "Group messages into conversations",
@@ -37,7 +38,7 @@ const CANNOT = [
   "Push new mail — this page fetches when you ask it to",
 ];
 
-/** The fifteen tools in src/mcp/server.ts, in the order they are declared. */
+/** The seventeen tools in src/mcp/server.ts, in the order they are declared. */
 const TOOLS = [
   "accounts_list",
   "messages_list",
@@ -45,6 +46,8 @@ const TOOLS = [
   "message_get",
   "message_send",
   "message_mark_read",
+  "message_archive",
+  "message_move",
   "draft_create",
   "draft_update",
   "drafts_list",

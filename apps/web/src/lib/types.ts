@@ -61,6 +61,18 @@ export type MessageListResponse = {
   errors: AccountError[];
 };
 
+/**
+ * POST /api/messages/:accountId/:messageId/archive → this, 200.
+ * Also the body of POST …/move. 404 means the message had already left
+ * `fromFolder` — another client moved it first and nothing was written.
+ */
+export type MoveResult = {
+  moved: boolean;
+  fromFolder: string; // where it came from — an undo moves it back here
+  toFolder: string; // where it landed
+  id?: string; // its new id. ABSENT on a server without UIDPLUS, so no undo.
+};
+
 /** POST /api/messages/send 201 → { result: SendResult } */
 export type SendResult = { messageId: string; accepted: string[] }; // messageId may be ""
 

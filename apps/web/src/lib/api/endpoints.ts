@@ -44,6 +44,7 @@ import type {
   MailAccountMeta,
   MessageListResponse,
   MetaResponse,
+  MoveResult,
   OutboxRow,
   OutboxStatus,
   OutreachBadge,
@@ -300,6 +301,49 @@ export function markRead(
     {
       method: "POST",
       body: { seen },
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
+/**
+ * Archive one message — a move into the account's Archive mailbox, never a
+ * delete. The result names the folder it left, which is what `moveMessage`
+ * below needs to put it back.
+ *
+ * 404 means the message had already left that folder. 400 means this account's
+ * server has no Archive mailbox at all; the message text says so.
+ */
+export function archiveMessage(
+  accountId: string,
+  messageId: string,
+  ctx: Ctx,
+): Promise<MoveResult> {
+  return request<MoveResult>(
+    `/api/messages/${encodeURIComponent(accountId)}/${encodeURIComponent(messageId)}/archive`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
+/** Move one message to a named mailbox. The undo of an archive posts here. */
+export function moveMessage(
+  accountId: string,
+  messageId: string,
+  folder: string,
+  ctx: Ctx,
+): Promise<MoveResult> {
+  return request<MoveResult>(
+    `/api/messages/${encodeURIComponent(accountId)}/${encodeURIComponent(messageId)}/move`,
+    {
+      method: "POST",
+      body: { folder },
       baseUrl: ctx.baseUrl,
       token: ctx.token,
       signal: ctx.signal,
