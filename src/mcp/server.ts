@@ -412,6 +412,9 @@ function toolsFor(
 
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
 
+/** Every tool a server with a platform offers, in one set. See tools/call. */
+const PLATFORM_TOOL_NAMES = new Set(PLATFORM_TOOLS.map((t) => t.name));
+
 export function createMcpServer(
   mail: MailService,
   channel?: AgentChannel,
@@ -841,14 +844,14 @@ export async function handleMcpJsonRpc(
       name: string;
       arguments?: Record<string, unknown>;
     };
+    // Derived from PLATFORM_TOOLS rather than listed family by family: this
+    // check and toolsFor() must agree, and a hand-written list drifted the
+    // moment enrichment and research were added — both were advertised by
+    // tools/list and then refused here as unknown.
     const known =
       TOOL_NAMES.has(params.name) ||
       (channel !== undefined && CHAT_TOOL_NAMES.has(params.name)) ||
-      (platform !== undefined &&
-        (CRM_TOOL_NAMES.has(params.name) ||
-          AUTOMATION_TOOL_NAMES.has(params.name) ||
-          OUTREACH_TOOL_NAMES.has(params.name) ||
-          CALENDAR_TOOL_NAMES.has(params.name)));
+      (platform !== undefined && PLATFORM_TOOL_NAMES.has(params.name));
     if (!known) {
       return {
         jsonrpc: "2.0",

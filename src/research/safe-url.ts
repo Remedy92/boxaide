@@ -11,20 +11,24 @@
  * research tool into a read primitive on the operator's private network.
  *
  * So the rule is a deny list of address ranges rather than a deny list of
- * names: names are attacker-chosen and a name can point anywhere. We resolve
- * the host, refuse when any address it answers with is private, and repeat the
- * whole check on every redirect hop, because a public host is free to redirect
- * to 127.0.0.1 and the second request is the one that matters.
+ * names: names are attacker-chosen and a name can point anywhere. We refuse
+ * when any address the host answers with is private, and repeat the whole check
+ * on every redirect hop, because a public host is free to redirect to 127.0.0.1
+ * and the second request is the one that matters.
  *
- * The known and accepted gap: between the resolve and the connect, a name can
- * change its answer (DNS rebinding). Closing that needs a connect-time hook
- * onto the socket, which means dropping fetch for a hand-rolled client, and
- * this module has a hard no-new-dependencies rule. The window is small, the
- * blast radius is a read of one page, and it is written down here rather than
- * left as a surprise.
+ * Where the check happens is the point. `vettingLookup` is the guard: it is
+ * handed to node:http and node:https as the request's `lookup`, so the one
+ * resolution it vets is the same resolution the socket connects with. A name
+ * that changes its answer between two lookups (DNS rebinding) has nothing to
+ * change here, because there is no second lookup between the check and the
+ * connect. `assertPublicHost` still runs first, but only to refuse an obvious
+ * address with a friendly message before a socket exists, and to catch the one
+ * case the hook never sees: a URL with an IP literal in it, which Node connects
+ * to without calling `lookup` at all. The hook is the guard; the pre-check is a
+ * courtesy.
  */
 import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import { isIP, type LookupFunction } from "node:net";
 
 /** Schemes we will fetch. Everything else, file: and data: included, is out. */
 const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
@@ -201,4 +205,53 @@ export async function assertPublicHost(url: URL, resolve: HostResolver): Promise
       throw new Error(`url resolves to a blocked address: ${host} -> ${address} (${reason})`);
     }
   }
+}
+
+/**
+ * The guard itself, shaped as the `lookup` option of a node:http or node:https
+ * request. Node calls it once per request and connects to exactly what it hands
+ * back, so an address that passes here is the address the socket uses. That is
+ * the whole difference from checking first and connecting afterwards.
+ *
+ * Every answer is vetted, not just the first. Node attempts them in turn
+ * (happy eyeballs is on, and it asks with `all: true`), so one private address
+ * in an otherwise public answer is enough to refuse the lot.
+ *
+ * The error text matches assertPublicHost's, because both end up in front of an
+ * agent and one refusal reading two different ways helps nobody.
+ */
+export function vettingLookup(resolve: HostResolver): LookupFunction {
+  return (hostname, options, callback) => {
+    const host = hostname.replace(/^\[|\]$/g, "");
+    void (async () => {
+      let addresses: string[];
+      try {
+        addresses = await resolve(host);
+      } catch {
+        callback(new Error(`url host could not be resolved: ${host}`), "", 0);
+        return;
+      }
+      if (addresses.length === 0) {
+        callback(new Error(`url host could not be resolved: ${host}`), "", 0);
+        return;
+      }
+      const answers: { address: string; family: number }[] = [];
+      for (const address of addresses) {
+        const reason = blockedAddressReason(address);
+        if (reason) {
+          callback(
+            new Error(`url resolves to a blocked address: ${host} -> ${address} (${reason})`),
+            "",
+            0,
+          );
+          return;
+        }
+        answers.push({ address, family: isIP(address) });
+      }
+      // `all` is not decoration: answer the shape the caller asked for or Node
+      // rejects the request with "Invalid IP address: undefined".
+      if (options.all) callback(null, answers);
+      else callback(null, answers[0].address, answers[0].family);
+    })();
+  };
 }

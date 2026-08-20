@@ -108,8 +108,12 @@ suppression list, and the human approval step.
 Research searches the public web through Exa or Parallel and reads one page at
 a time as text. It stores nothing, sends nothing, and has no timers, so both of
 its tools are reads by construction and no approval step applies. `web_fetch`
-refuses private and loopback addresses before connecting, follows at most three
-redirects with the same check on every hop, and caps what it returns.
+refuses private and loopback addresses, follows at most three redirects with the
+same check on every hop, and caps what it returns. The check is the request's
+own DNS lookup (`vettingLookup` in `src/research/safe-url.ts`, carried by the
+node transport in `src/research/node-fetch.ts`), so the address that passes the
+check is the address the socket connects to and a name cannot rebind in
+between. No dependency was added for it: node:https already has the hook.
 
 Seams (wired by the architect, present in the skeleton):
 - `src/app.ts` constructs the three stores, `CrmService`, `AutomationScheduler`,

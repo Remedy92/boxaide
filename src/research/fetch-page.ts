@@ -2,9 +2,10 @@
  * Read one public web page as plain text.
  *
  * Four limits, all deliberate. The SSRF guard in safe-url.ts decides which
- * addresses may be reached, and is re-run on every redirect hop. Redirects are
- * followed by hand, at most three, because `redirect: "follow"` would hand the
- * hop decision to fetch and there would be no place left to re-check. The body
+ * addresses may be reached, and runs again on every redirect hop: the transport
+ * carries it as its connect-time lookup, so each hop is a fresh request and a
+ * fresh check. Redirects are followed by hand, at most three, because a
+ * transport that followed them itself would leave no place to re-check. The body
  * is read through the stream and abandoned at two megabytes, so a hostile or
  * merely enormous URL cannot fill memory. The whole thing is under one fifteen
  * second deadline covering every hop, not fifteen seconds each.
@@ -15,6 +16,7 @@
  * wrong part of it.
  */
 import { appVersion } from "../version.js";
+import { nodeFetch } from "./node-fetch.js";
 import { assertPublicHost, dnsHostResolver, parseFetchUrl, type HostResolver } from "./safe-url.js";
 import type { FetchedPage } from "./types.js";
 
@@ -37,7 +39,7 @@ function userAgent(): string {
 }
 
 export type FetchPageDeps = {
-  /** Injection seam for tests. Production uses the global fetch. */
+  /** Injection seam for tests. Production uses the vetted node transport. */
   fetch?: typeof globalThis.fetch;
   /** Host resolver used by the SSRF guard. Production uses DNS. */
   resolve?: HostResolver;
@@ -240,6 +242,45 @@ async function readCapped(res: Response): Promise<string> {
 }
 
 /**
+ * Drops a response nobody is going to read.
+ *
+ * The body is the socket. Abandoning it on a redirect hop, an HTTP error or a
+ * refused content type leaves the connection open and a hostile server free to
+ * keep sending into a buffer that is never drained, for the life of the
+ * process. Cancelling the stream destroys the decompressor and the socket
+ * under it.
+ */
+function discard(res: Response): void {
+  void res.body?.cancel().catch(() => {});
+}
+
+/**
+ * Runs `work` under the fetch deadline.
+ *
+ * The abort signal only reaches the HTTP request, and name resolution happens
+ * before there is one. Production resolves with dns.lookup, which is
+ * getaddrinfo on the libuv threadpool: four threads shared with every fs, zlib
+ * and crypto call in the process. A name whose nameserver black-holes queries
+ * would otherwise hold one of them until the OS gives up, and four such names
+ * would stall the mail server, not just this tool.
+ */
+async function underDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw new Error("fetch deadline passed");
+  let onAbort = () => {};
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_settle, fail) => {
+        onAbort = () => fail(new Error("fetch deadline passed"));
+        signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
  * GET a public URL and return its readable text.
  *
  * Throws with a specific, lower-case message on every refusal: a bad scheme, a
@@ -247,18 +288,33 @@ async function readCapped(res: Response): Promise<string> {
  * The agent is expected to read the message and tell the user, not to retry.
  */
 export async function fetchPage(raw: string, deps: FetchPageDeps = {}): Promise<FetchedPage> {
-  const doFetch = deps.fetch ?? globalThis.fetch;
-  const resolve = deps.resolve ?? dnsHostResolver;
   const controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const resolver = deps.resolve ?? dnsHostResolver;
+  // Both users of the resolver are covered by wrapping it once: the pre-check
+  // below, and the connect-time guard the transport carries as its lookup.
+  const resolve: HostResolver = async (hostname) =>
+    await underDeadline(resolver(hostname), controller.signal);
+  // Not the global fetch: that transport resolves the host a second time, and
+  // the address it connects to is one nothing has checked. See node-fetch.ts.
+  const doFetch = deps.fetch ?? nodeFetch(resolve);
   try {
     let url = parseFetchUrl(raw);
     let res: Response | null = null;
     for (let hop = 0; ; hop++) {
-      await assertPublicHost(url, resolve);
+      try {
+        await assertPublicHost(url, resolve);
+      } catch (err) {
+        if (controller.signal.aborted) {
+          throw new Error(`fetch timed out after ${FETCH_TIMEOUT_MS / 1000}s: ${url.toString()}`);
+        }
+        throw err;
+      }
       try {
         res = await doFetch(url.toString(), {
           method: "GET",
+          // For a fetch-shaped stub. The node transport never follows a
+          // redirect on its own, so there is nothing for it to turn off.
           redirect: "manual",
           signal: controller.signal,
           headers: {
@@ -274,6 +330,9 @@ export async function fetchPage(raw: string, deps: FetchPageDeps = {}): Promise<
       }
       const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
       if (!location) break;
+      // The hop's own body is never read, and a redirect is allowed to carry
+      // one. Let go of the socket before opening the next.
+      discard(res);
       if (hop >= MAX_REDIRECTS) {
         throw new Error(`too many redirects (limit ${MAX_REDIRECTS}): ${raw}`);
       }
@@ -284,10 +343,12 @@ export async function fetchPage(raw: string, deps: FetchPageDeps = {}): Promise<
     }
     if (!res) throw new Error(`fetch failed: ${raw}`);
     if (!res.ok) {
+      discard(res);
       throw new Error(`fetch failed with HTTP ${res.status}: ${url.toString()}`);
     }
     const contentType = res.headers.get("content-type");
     if (!readableContentType(contentType)) {
+      discard(res);
       throw new Error(`page is not readable text (content-type ${contentType}): ${url.toString()}`);
     }
     const body = await readCapped(res);
