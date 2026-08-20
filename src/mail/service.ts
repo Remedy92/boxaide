@@ -14,6 +14,7 @@ import type {
   MailMessage,
   MailMessageSummary,
   MailProvider,
+  MoveResult,
   ProviderAccount,
   SearchMessagesOpts,
   SendMessageInput,
@@ -316,6 +317,89 @@ export class MailService {
     const ok = await this.provider.markRead(account, messageId, seen);
     if (ok) this.index.setSeen(account.id, messageId, seen);
     return ok;
+  }
+
+  /**
+   * File one message into the account's Archive mailbox.
+   *
+   * Nothing is deleted: archiving is a move, and `fromFolder` in the result is
+   * what an undo moves it back to. A server with no Archive mailbox throws —
+   * see MailProvider.archiveMessage for why that is not guessed at.
+   */
+  async archiveMessage(
+    accountRef: string,
+    messageId: string,
+  ): Promise<MoveResult> {
+    const account = this.resolve(accountRef);
+    const result = await this.provider.archiveMessage(account, messageId);
+    this.applyMove(account.id, messageId, result);
+    return result;
+  }
+
+  /** Move one message to a named mailbox. The undo of an archive goes here. */
+  async moveMessage(
+    accountRef: string,
+    messageId: string,
+    folder: string,
+  ): Promise<MoveResult> {
+    if (!folder.trim()) throw new Error("folder is required");
+    // ImapFlow's compiler already refuses CR/LF/NUL in a mailbox name, but
+    // with a wire-level "Unquotable character" error. Refuse here with a
+    // sentence the toast can show.
+    if (/[\0\r\n]/.test(folder)) {
+      throw new Error("folder name contains control characters");
+    }
+    const account = this.resolve(accountRef);
+    const result = await this.provider.moveMessage(account, messageId, folder);
+    this.applyMove(account.id, messageId, result);
+    return result;
+  }
+
+  /**
+   * Keep the index in step with a move that already happened on the server:
+   * the row leaves the folder it was in, and the folder it landed in is marked
+   * for a refresh rather than having a row fabricated into it — only the server
+   * knows the uid the message now has there.
+   */
+  private applyMove(
+    accountId: string,
+    messageId: string,
+    result: MoveResult,
+  ): void {
+    if (!result.moved) return;
+    this.index.removeMessage(accountId, messageId);
+    this.index.markDirty(accountId, result.toFolder);
+  }
+
+  /** The account id behind an alias or id. Throws when neither names one. */
+  accountId(accountRef: string): string {
+    return this.resolve(accountRef).id;
+  }
+
+  /**
+   * What a message is, in the terms a person judges it by, from the local
+   * index alone. Null when it was never indexed.
+   *
+   * No IMAP: the caller is the approval card, which is drawn while the user
+   * waits and may be drawn for a message that has since moved.
+   */
+  describeMessage(
+    accountRef: string,
+    messageId: string,
+  ): { subject: string; from: string; folder: string } | null {
+    let accountId: string;
+    try {
+      accountId = this.resolve(accountRef).id;
+    } catch {
+      return null;
+    }
+    const summary = this.index.getSummary(accountId, messageId);
+    if (!summary) return null;
+    return {
+      subject: summary.subject,
+      from: summary.from,
+      folder: summary.folder,
+    };
   }
 
   async listFolders(accountRef: string): Promise<MailFolder[]> {

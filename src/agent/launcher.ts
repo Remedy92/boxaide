@@ -2592,6 +2592,17 @@ export class AgentLauncher {
     for (const entry of [...this.oneShots.values()]) entry.kill();
   }
 
+  /**
+   * Ends the turn `seq` belongs to on the running agent, and leaves it up.
+   *
+   * The launched agent only. A message being answered by an agent that
+   * connected over MCP is not this process's to kill — there is no child here
+   * to signal — and false is what tells the route to say so.
+   */
+  interrupt(seq: number): boolean {
+    return this.driver?.interrupt?.(seq) ?? false;
+  }
+
   /** Idempotent: stopping with nothing running is a no-op. */
   stop(): void {
     this.stopRequested = true;

@@ -48,6 +48,18 @@ export type StoredApproval = {
   /** The conversation it was asked in. Null for a scheduled run. */
   chatId: string | null;
   askedAt: string;
+  /**
+   * What the request is ABOUT, in the user's terms, captured when it was made.
+   *
+   * Not part of the call and never replayed: `args` stays exactly what the
+   * agent passed. This is the one thing a card cannot rebuild from the
+   * arguments — `message_move` names a message by an opaque accountId:folder:uid
+   * id, and a person cannot approve moving mail to Trash without knowing whose
+   * mail it is. Captured at ask time on purpose: by the time the card is read
+   * the message may have moved, and the subject the user is being asked about
+   * is the one that was true when the agent asked.
+   */
+  context: { subject?: string; from?: string; folder?: string } | null;
   /** Null while it is still waiting. */
   decidedAt: string | null;
   state: "pending" | "approved" | "denied" | "failed";
@@ -189,6 +201,7 @@ type ApprovalRow = {
   id: string;
   tool: string;
   argsEnc: string;
+  contextEnc: string | null;
   profile: string;
   agent: string | null;
   chatId: string | null;
@@ -196,6 +209,18 @@ type ApprovalRow = {
   decidedAt: string | null;
   state: StoredApproval["state"];
   outcome: string | null;
+};
+
+export type AgentArchiveRow = {
+  id: number;
+  accountId: string;
+  /** The message's id in the Archive mailbox, or null without UIDPLUS. */
+  messageId: string | null;
+  fromFolder: string;
+  toFolder: string;
+  agent: string | null;
+  chatId: string | null;
+  at: string;
 };
 
 type ChatRow = {
@@ -332,6 +357,41 @@ export class Store {
     this.db.exec(
       `CREATE INDEX IF NOT EXISTS agent_approvals_state ON agent_approvals (state, asked_at)`,
     );
+    // Added after the first release: what the request is about, for the card.
+    const approvalCols = this.db
+      .prepare(`PRAGMA table_info(agent_approvals)`)
+      .all() as Array<{ name: string }>;
+    if (!approvalCols.some((c) => c.name === "context_enc")) {
+      this.db.exec(`ALTER TABLE agent_approvals ADD COLUMN context_enc TEXT`);
+    }
+
+    // Every message a launched agent archived, so the user can put a whole
+    // sweep back.
+    //
+    // Archiving is the one mail write an agent performs unasked, on the
+    // grounds that it is reversible. That is only true if reversing it is
+    // something a person can actually do: an agent told to tidy an inbox can
+    // file hundreds of messages, and undoing that one toast at a time is not
+    // an undo. The row keeps where the message came from and the id it now
+    // has, which is everything a move back needs.
+    //
+    // `message_id` is nullable on purpose. A server without UIDPLUS does not
+    // name the new uid, so the message is archived with nothing to address it
+    // by; the row is still written, because the count the user is shown must
+    // be the truth about what happened, not about what can be reversed.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_archives (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id TEXT NOT NULL,
+        message_id TEXT,
+        from_folder TEXT NOT NULL,
+        to_folder TEXT NOT NULL,
+        agent TEXT,
+        chat_id TEXT,
+        at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS agent_archives_at ON agent_archives (at);
+    `);
 
     // Chats. `seq` stays a single global sequence across all of them — it is
     // the SSE resume cursor and the lease key, and per-chat numbering would
@@ -1189,16 +1249,22 @@ export class Store {
     agent: string | null;
     chatId: string | null;
     askedAt: string;
+    context?: StoredApproval["context"];
   }): StoredApproval {
+    const context = input.context ?? null;
     this.db
       .prepare(
-        `INSERT INTO agent_approvals (id, tool, args_enc, profile, agent, chat_id, asked_at, state)
-         VALUES (@id, @tool, @argsEnc, @profile, @agent, @chatId, @askedAt, 'pending')`,
+        `INSERT INTO agent_approvals (id, tool, args_enc, context_enc, profile, agent, chat_id, asked_at, state)
+         VALUES (@id, @tool, @argsEnc, @contextEnc, @profile, @agent, @chatId, @askedAt, 'pending')`,
       )
       .run({
         id: input.id,
         tool: input.tool,
         argsEnc: encryptSecret(this.masterKey, JSON.stringify(input.args)),
+        // Encrypted like the arguments: a subject line is mail content.
+        contextEnc: context
+          ? encryptSecret(this.masterKey, JSON.stringify(context))
+          : null,
         profile: input.profile,
         agent: input.agent,
         chatId: input.chatId,
@@ -1206,6 +1272,7 @@ export class Store {
       });
     return {
       ...input,
+      context,
       decidedAt: null,
       state: "pending",
       outcome: null,
@@ -1222,7 +1289,7 @@ export class Store {
     const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
     const rows = this.db
       .prepare(
-        `SELECT id, tool, args_enc as argsEnc, profile, agent, chat_id as chatId,
+        `SELECT id, tool, args_enc as argsEnc, context_enc as contextEnc, profile, agent, chat_id as chatId,
                 asked_at as askedAt, decided_at as decidedAt, state, outcome
          FROM agent_approvals
          WHERE (? = 0 OR state = 'pending')
@@ -1236,7 +1303,7 @@ export class Store {
   getApproval(id: string): StoredApproval | null {
     const row = this.db
       .prepare(
-        `SELECT id, tool, args_enc as argsEnc, profile, agent, chat_id as chatId,
+        `SELECT id, tool, args_enc as argsEnc, context_enc as contextEnc, profile, agent, chat_id as chatId,
                 asked_at as askedAt, decided_at as decidedAt, state, outcome
          FROM agent_approvals WHERE id = ?`,
       )
@@ -1267,6 +1334,56 @@ export class Store {
     return res.changes > 0;
   }
 
+  /* ---- what a launched agent archived ------------------------------------ */
+
+  addAgentArchive(input: {
+    accountId: string;
+    messageId: string | null;
+    fromFolder: string;
+    toFolder: string;
+    agent: string | null;
+    chatId: string | null;
+    at: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO agent_archives
+           (account_id, message_id, from_folder, to_folder, agent, chat_id, at)
+         VALUES (@accountId, @messageId, @fromFolder, @toFolder, @agent, @chatId, @at)`,
+      )
+      .run(input);
+  }
+
+  /** Oldest first, so a sweep reads in the order the agent worked. */
+  listAgentArchives(options: { since?: string; limit?: number } = {}): AgentArchiveRow[] {
+    const limit = Math.min(Math.max(options.limit ?? 1000, 1), 5000);
+    return this.db
+      .prepare(
+        `SELECT id, account_id as accountId, message_id as messageId,
+                from_folder as fromFolder, to_folder as toFolder,
+                agent, chat_id as chatId, at
+         FROM agent_archives
+         WHERE (@since IS NULL OR at >= @since)
+         ORDER BY id ASC
+         LIMIT @limit`,
+      )
+      .all({ since: options.since ?? null, limit }) as AgentArchiveRow[];
+  }
+
+  deleteAgentArchives(ids: number[]): void {
+    if (ids.length === 0) return;
+    const stmt = this.db.prepare(`DELETE FROM agent_archives WHERE id = ?`);
+    const run = this.db.transaction((all: number[]) => {
+      for (const id of all) stmt.run(id);
+    });
+    run(ids);
+  }
+
+  /** Drops rows older than the cutoff. Called when the log is read. */
+  pruneAgentArchives(before: string): void {
+    this.db.prepare(`DELETE FROM agent_archives WHERE at < ?`).run(before);
+  }
+
   private toApproval(row: ApprovalRow): StoredApproval {
     let args: Record<string, unknown> = {};
     try {
@@ -1279,10 +1396,23 @@ export class Store {
       // with no arguments, which every caller treats as "cannot be carried
       // out" — the alternative is refusing to list any of them.
     }
+    let context: StoredApproval["context"] = null;
+    if (row.contextEnc) {
+      try {
+        const parsed = JSON.parse(decryptSecret(this.masterKey, row.contextEnc));
+        if (parsed && typeof parsed === "object") {
+          context = parsed as StoredApproval["context"];
+        }
+      } catch {
+        // Same rule as the arguments above: unreadable is not fatal. The card
+        // falls back to naming the message by its id.
+      }
+    }
     return {
       id: row.id,
       tool: row.tool,
       args,
+      context,
       profile: row.profile,
       agent: row.agent,
       chatId: row.chatId,

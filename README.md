@@ -30,6 +30,25 @@ npm run dev
 
 In the UI: **Connect mailbox** → pick a preset (Gmail / Fastmail / Outlook / iCloud) or enter IMAP/SMTP hosts → use an **app password** where required.
 
+### Archiving
+
+`e` in the list, or the archive button in the reader, moves the message to the
+account's **Archive** mailbox: the one your server advertises as `\Archive`,
+or Gmail's *All Mail*, which is what archiving means there. Nothing is deleted,
+and the toast offers an **Undo** that moves the message straight back to the
+folder it came from. A server that cannot name the message's new id after a
+move (no UIDPLUS) shows no Undo at all, rather than one that would fail.
+
+An agent Boxaide launched can archive too, and every message it files is
+written down: the Agent view shows *Claude archived 37 messages* with one
+button that moves the run back. Any other move it wants to make, Trash
+included, waits for you to approve it first.
+
+A mailbox whose server has no Archive folder says so instead of guessing:
+create one named `Archive` in your mail provider and it is picked up on the
+next archive. Archiving is one message per request: there is no bulk archive
+yet.
+
 ### Production-ish start
 
 ```bash
@@ -206,6 +225,8 @@ Agents that speak TOML use `[mcp_servers.boxaide]`. Tool calls show up as `mcp__
 | `messages_search` | Free-text search |
 | `message_get` | Full body |
 | `message_mark_read` | Set or clear the read flag |
+| `message_archive` | Move one message to the account's Archive mailbox |
+| `message_move` | Move one message to any folder (also the undo of an archive). A launched agent has to have it approved, because Trash is a folder |
 | `folders_list` | Folders on one account |
 | `draft_create` / `draft_update` / `drafts_list` / `draft_delete` | Drafts in the mailbox |
 | `message_send` | Send now, or — for an agent Boxaide launched — ask you first. Not outreach approval. |

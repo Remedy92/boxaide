@@ -9,9 +9,12 @@ import * as React from "react";
  * a textarea or a contenteditable, when any overlay is open, and when a
  * modifier other than the one listed is held.
  *
- * Explicitly unbound and staying that way: e, s, h, #, !, z, x, l, v. Each maps
- * to a Gmail or Superhuman action this backend cannot perform, and a shortcut
- * that toasts "not supported" is worse than a key that does nothing.
+ * `e` archives, exactly as it does in Gmail, because the backend can perform
+ * that one: it moves the message into the account's Archive mailbox.
+ *
+ * Explicitly unbound and staying that way: s, h, #, !, z, x, l, v. Each maps to
+ * a Gmail or Superhuman action this backend cannot perform, and a shortcut that
+ * toasts "not supported" is worse than a key that does nothing.
  */
 
 export type KeyboardHandlers = {
@@ -20,6 +23,7 @@ export type KeyboardHandlers = {
   open: () => void;
   escape: () => void;
   toggleRead: () => void;
+  archive: () => void;
   reply: () => void;
   replyAll: () => void;
   forward: () => void;
@@ -156,6 +160,10 @@ export function useKeyboard(
         case "u":
           event.preventDefault();
           h.toggleRead();
+          return;
+        case "e":
+          event.preventDefault();
+          h.archive();
           return;
         case "r":
           event.preventDefault();

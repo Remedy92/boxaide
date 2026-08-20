@@ -212,6 +212,38 @@ export const TOOLS = [
     },
   },
   {
+    name: "message_archive",
+    description:
+      "File one message into the account's Archive mailbox. This is a move, not a delete: the result names the folder it came from (fromFolder) and the one it landed in (toFolder), and message_move puts it back. Returns { moved: false } when the message had already left that folder. Fails on an account whose server has no Archive mailbox.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        account: { type: "string", description: "Account alias or id." },
+        messageId: { type: "string", description: MESSAGE_ID_DESC },
+      },
+      required: ["account", "messageId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "message_move",
+    description:
+      "Move one message into another mailbox of the same account. Use a path from folders_list. Nothing is sent. A move into Trash is how mail gets deleted on most servers, so this is the escalation of the pair: prefer message_archive, which files into the account's own Archive mailbox and needs no approval. A launched agent calling this does not move anything. The call is put in front of the user, who carries it out or drops it. The Drafts mailbox is off limits in both directions: drafts have their own tools. Returns { moved: false } when the message had already left its folder.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        account: { type: "string", description: "Account alias or id." },
+        messageId: { type: "string", description: MESSAGE_ID_DESC },
+        folder: {
+          type: "string",
+          description: "Destination mailbox path, from folders_list.",
+        },
+      },
+      required: ["account", "messageId", "folder"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "draft_create",
     description: `Save a new draft into an account's Drafts folder. ${DRAFT_SAFETY} Every field except account is optional, so a half-written draft is fine. To draft a reply in-thread, set inReplyTo and references from the Message-ID header of the message you answer.`,
     inputSchema: {
@@ -508,9 +540,10 @@ async function dispatch(
     throw new Error(scopeRefusal(scope, name));
   }
   // The second boundary, and the one that lets a launched agent have these
-  // tools at all. A scoped caller reaching message_send, meeting_create or
-  // meeting_cancel does not perform it: the call is recorded and put in front
-  // of the user, who carries it out or drops it. See src/agent/approvals.ts.
+  // tools at all. A scoped caller reaching message_send, message_move,
+  // meeting_create or meeting_cancel does not perform it: the call is recorded
+  // and put in front of the user, who carries it out or drops it. See
+  // src/agent/approvals.ts.
   //
   // Ahead of every dispatch below for the same reason the scope check is —
   // one gate, so a tool family added later cannot route around it. An
@@ -622,6 +655,35 @@ async function dispatch(
           String(args.account),
           String(args.messageId),
           args.seen === undefined ? true : Boolean(args.seen),
+        ),
+      };
+    case "message_archive": {
+      const result = await mail.archiveMessage(
+        String(args.account),
+        String(args.messageId),
+      );
+      // Only a launched agent's archives are written down, and only the ones
+      // that happened. The user's own client is the user: they archived it on
+      // purpose and have the toast's own undo. An agent working a list needs
+      // one undo for the list, which is what this row feeds.
+      if (scope && result.moved) {
+        platform?.archiveLog?.record({
+          accountId: mail.accountId(String(args.account)),
+          messageId: result.id ?? null,
+          fromFolder: result.fromFolder,
+          toFolder: result.toFolder,
+          agent: channel?.presence().lastAgent ?? null,
+          chatId: scope === "run" ? null : (channel?.activeChat().id ?? null),
+        });
+      }
+      return { result };
+    }
+    case "message_move":
+      return {
+        result: await mail.moveMessage(
+          String(args.account),
+          String(args.messageId),
+          String(args.folder),
         ),
       };
     case "draft_create":

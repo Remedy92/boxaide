@@ -28,6 +28,7 @@ import { Reader } from "@/components/reader/reader";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { AgentProvider } from "@/lib/hooks/use-agent";
 import { AppStateProvider, useApp } from "@/lib/hooks/use-app-state";
+import { useArchive } from "@/lib/hooks/use-archive";
 import { useCrmContacts } from "@/lib/hooks/use-crm-contacts";
 import { useDrafts } from "@/lib/hooks/use-drafts";
 import { useKeyboard } from "@/lib/hooks/use-keyboard";
@@ -65,6 +66,7 @@ function Shell() {
   const accounts = useAccounts();
   const nav = useMessageNavigation();
   const markRead = useMarkRead();
+  const archive = useArchive();
   const inMail = app.view === "mail";
   const drafting = app.view === "drafts";
   const peopling = app.view === "people";
@@ -281,6 +283,21 @@ function Shell() {
           accountId: current.accountId,
           messageId: current.id,
           seen: !current.seen,
+        });
+      },
+      archive: () => {
+        if (!inMail) return;
+        // The selection, not nav.current. They differ whenever the open
+        // message has dropped out of the visible list — the unread filter
+        // refetching after the message was auto-marked read is the everyday
+        // way that happens — and the reader still shows it, with a working
+        // Archive button. `e` has to archive the message on screen, or it is
+        // a dead key with nothing to explain itself.
+        const current = nav.current ?? app.selected;
+        if (!current) return;
+        archive.mutate({
+          accountId: current.accountId,
+          messageId: "id" in current ? current.id : current.messageId,
         });
       },
       reply: () => (inMail ? app.requestReply("reply") : undefined),

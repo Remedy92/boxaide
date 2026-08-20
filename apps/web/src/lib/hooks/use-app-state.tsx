@@ -31,6 +31,13 @@ export type ComposeSeed = {
   bcc: string;
   subject: string;
   text: string;
+  /**
+   * Forward only: the source message's HTML part, sanitised, wrapped in the
+   * same forwarded-message header the text version carries. The composer
+   * cannot edit it, so it is always droppable in one click and the composer
+   * says out loud that it is there (§6.4).
+   */
+  html?: string;
   inReplyTo?: string;
   references?: string;
   /** True when the source message carried no Message-ID (§6.4). */

@@ -53,6 +53,7 @@ import type {
   MeetingsResponse,
   MessageListResponse,
   MetaResponse,
+  MoveResult,
   OutboxRow,
   OutboxStatus,
   OutreachBadge,
@@ -321,12 +322,58 @@ export function markRead(
   );
 }
 
+/**
+ * Archive one message — a move into the account's Archive mailbox, never a
+ * delete. The result names the folder it left, which is what `moveMessage`
+ * below needs to put it back.
+ *
+ * 404 means the message had already left that folder. 400 means this account's
+ * server has no Archive mailbox at all; the message text says so.
+ */
+export function archiveMessage(
+  accountId: string,
+  messageId: string,
+  ctx: Ctx,
+): Promise<MoveResult> {
+  return request<MoveResult>(
+    `/api/messages/${encodeURIComponent(accountId)}/${encodeURIComponent(messageId)}/archive`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
+/** Move one message to a named mailbox. The undo of an archive posts here. */
+export function moveMessage(
+  accountId: string,
+  messageId: string,
+  folder: string,
+  ctx: Ctx,
+): Promise<MoveResult> {
+  return request<MoveResult>(
+    `/api/messages/${encodeURIComponent(accountId)}/${encodeURIComponent(messageId)}/move`,
+    {
+      method: "POST",
+      body: { folder },
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
 export type SendMessageBody = {
   /** Account id or alias. `from` is forced server-side to that account's address. */
   account: string;
   to: string;
   subject: string;
   text: string;
+  /** Forwarded HTML, already sanitised client-side. The reader never relays
+      what it would not run: see lib/mail/sanitize. */
+  html?: string;
   cc?: string;
   bcc?: string;
   inReplyTo?: string;
@@ -559,6 +606,27 @@ export function sendAgentMessage(
   });
 }
 
+/**
+ * Stops the message the agent is answering right now.
+ *
+ * `seq` is the message the button was showing, and the server checks it: the
+ * run can end and the next one be claimed between the paint and the click, and
+ * `stopped` comes back false rather than killing that one instead. No `chat`
+ * argument — a seq names one message across every conversation.
+ */
+export function stopAgentTurn(
+  seq: number,
+  ctx: Ctx,
+): Promise<{ stopped: boolean; presence: AgentPresence }> {
+  return request<{ stopped: boolean; presence: AgentPresence }>("/api/agent/stop", {
+    method: "POST",
+    body: { seq },
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
 /** Same `chat` rule as sendAgentMessage: clear the pane's chat, not the active one. */
 export function clearAgentConversation(
   ctx: Ctx,
@@ -595,6 +663,34 @@ export type AgentApproval = {
   chatId: string | null;
   askedAt: string;
 };
+
+/**
+ * One run of archiving by one launched agent. `undoable` is lower than `count`
+ * on a server that archived without naming the message's new id, and the pane
+ * says so rather than promising a full undo it cannot deliver.
+ */
+export type AgentArchiveSweep = {
+  id: number;
+  agent: string | null;
+  chatId: string | null;
+  count: number;
+  undoable: number;
+  firstAt: string;
+  lastAt: string;
+};
+
+/** Move a whole sweep back. Partial success is normal; the counts say so. */
+export function undoAgentArchiveSweep(
+  id: number,
+  ctx: Ctx,
+): Promise<{ restored: number; failed: number; sweeps: AgentArchiveSweep[] }> {
+  return request(`/api/agent/archives/${id}/undo`, {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
 
 export function decideAgentApproval(
   id: string,

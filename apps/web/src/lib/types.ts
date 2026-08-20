@@ -40,7 +40,7 @@ export type MailMessageSummary = {
 /** GET /api/messages/:accountId/:messageId → { message: MailMessage } */
 export type MailMessage = MailMessageSummary & {
   bodyText: string; // always present, may be "", truncated at 50 000 chars
-  bodyHtml?: string; // RAW UNSANITISED SENDER HTML. NEVER RENDER. NEVER dangerouslySetInnerHTML.
+  bodyHtml?: string; // RAW UNSANITISED SENDER HTML. Hostile input. Render ONLY via <HtmlBody> (DOMPurify + sandboxed frame). NEVER dangerouslySetInnerHTML. Why: SECURITY.md, "HTML mail rendering" (§6.4.6).
   cc?: string;
   bcc?: string; // declared but never populated on the read path — always undefined in practice
   references?: string; // space-separated Message-ID chain
@@ -59,6 +59,18 @@ export type AccountError = { account: string; error: string }; // `account` is t
 export type MessageListResponse = {
   messages: MailMessageSummary[];
   errors: AccountError[];
+};
+
+/**
+ * POST /api/messages/:accountId/:messageId/archive → this, 200.
+ * Also the body of POST …/move. 404 means the message had already left
+ * `fromFolder` — another client moved it first and nothing was written.
+ */
+export type MoveResult = {
+  moved: boolean;
+  fromFolder: string; // where it came from — an undo moves it back here
+  toFolder: string; // where it landed
+  id?: string; // its new id. ABSENT on a server without UIDPLUS, so no undo.
 };
 
 /** POST /api/messages/send 201 → { result: SendResult } */
@@ -258,6 +270,11 @@ export type AgentStateResponse = {
    * ask, which every reader treats as none.
    */
   approvals?: import("@/lib/api/endpoints").AgentApproval[];
+  /**
+   * What launched agents archived, newest run first. Absent on a server built
+   * before the log existed, which every reader treats as none.
+   */
+  archiveSweeps?: import("@/lib/api/endpoints").AgentArchiveSweep[];
 };
 
 /* -------------------------------------------------------------------------- */

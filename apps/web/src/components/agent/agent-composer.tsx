@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { Spinner } from "@/components/atoms";
 import { AgentModelSelect } from "@/components/agent/agent-model-select";
 import { AgentSelect } from "@/components/agent/agent-select";
@@ -24,15 +24,29 @@ const MAX_HEIGHT = 168;
  * nobody listening is queued on the server and handed over the moment one
  * starts, so refusing to send would break the perfectly normal "type the
  * question, then start your agent" order.
+ *
+ * The one button is Stop while a run is live and the box is empty, and Send the
+ * rest of the time. It never changes under a typed message: a button that turns
+ * into Stop because the agent started answering is one that cancels the run the
+ * user was about to add to. Enter keeps sending throughout — a message typed
+ * mid-run is queued, exactly as before.
  */
 export function AgentComposer({
   onSend,
   sending,
+  onStop,
+  running,
+  stopping,
   disabled,
   autoFocus,
 }: {
   onSend: (text: string) => void;
   sending: boolean;
+  /** Ends the run in flight. Absent on a server that cannot stop one. */
+  onStop?: () => void;
+  /** A message in this conversation is being answered right now. */
+  running?: boolean;
+  stopping?: boolean;
   disabled?: boolean;
   autoFocus?: boolean;
 }) {
@@ -81,6 +95,7 @@ export function AgentComposer({
   };
 
   const overLimit = text.length > MAX_CHARS;
+  const showStop = Boolean(running && onStop) && !text.trim();
 
   return (
     <form
@@ -144,9 +159,12 @@ export function AgentComposer({
           </p>
         </div>
         <button
-          type="submit"
-          aria-label="Send to your agent"
-          disabled={!text.trim() || sending || disabled || overLimit}
+          type={showStop ? "button" : "submit"}
+          aria-label={showStop ? "Stop the agent" : "Send to your agent"}
+          onClick={showStop ? onStop : undefined}
+          disabled={
+            showStop ? stopping : !text.trim() || sending || disabled || overLimit
+          }
           className={cn(
             "flex size-7 shrink-0 items-center justify-center rounded-[var(--radius-md)]",
             "bg-accent-fill text-accent-fill-fg transition-colors duration-[var(--dur-fast)]",
@@ -154,7 +172,19 @@ export function AgentComposer({
             "disabled:bg-surface-hover disabled:text-fg-disabled",
           )}
         >
-          {sending ? <Spinner /> : <ArrowUp className="size-4" strokeWidth={1.5} />}
+          {showStop ? (
+            stopping ? (
+              <Spinner />
+            ) : (
+              // Filled, because the square outline alone reads as an empty
+              // checkbox at this size.
+              <Square className="size-3 fill-current" strokeWidth={1.5} />
+            )
+          ) : sending ? (
+            <Spinner />
+          ) : (
+            <ArrowUp className="size-4" strokeWidth={1.5} />
+          )}
         </button>
       </div>
     </form>

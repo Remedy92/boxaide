@@ -66,6 +66,13 @@ const BASE_TOOL_NAMES = [
   "messages_search",
   "message_get",
   "message_mark_read",
+  // Filing, not deleting. `message_archive` runs as asked: it moves one
+  // message into the account's own Archive mailbox and the move is undone by
+  // moving it back. `message_move` is named here too, but it never runs for a
+  // scoped caller — it goes to the approval queue, because "move" includes
+  // "move to Trash", and on most servers that is how mail gets deleted.
+  "message_archive",
+  "message_move",
   "draft_create",
   "draft_update",
   "drafts_list",

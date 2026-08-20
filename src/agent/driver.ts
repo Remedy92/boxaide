@@ -78,7 +78,25 @@ export type DriverChannel = {
 };
 
 /** A running driver, from the launcher's side. Stopping is idempotent. */
-export type AgentDriver = { stop(): void };
+export type AgentDriver = {
+  stop(): void;
+  /**
+   * Ends the turn `seq` belongs to and leaves the loop running.
+   *
+   * This is the user pressing Stop, not shutdown: the agent stays up and takes
+   * the next message. It is the seq and not "whatever is running" because the
+   * two are not the same thing: a loop that has claimed the message is not
+   * necessarily prompting for it yet — it may still be finishing the previous
+   * chat's naming call — and killing that would stop nothing while the stopped
+   * question went on to be asked. So the seq is recorded as well as killed, and
+   * a driver that meets it later refuses to hand it to the model.
+   *
+   * False means this driver will not honour it: it is already stopped, or it is
+   * from before this existed. The message itself is closed by the channel
+   * (`cancelWork`), so a driver only has to end the work.
+   */
+  interrupt?(seq: number): boolean;
+};
 
 /**
  * What a loop's end was, beyond the sentence explaining it.
@@ -92,6 +110,14 @@ export type StopCause = {
   /** The CLI is signed out. Nothing will run on it until a login lands. */
   authRequired: boolean;
 };
+
+/**
+ * Why a turn that was stopped never reached the model.
+ *
+ * It travels the failure path like any other unanswerable turn, and is never
+ * read by a person: the channel has already written the line the user sees.
+ */
+export const STOPPED_BY_USER = "stopped by the user";
 
 /** Backoff after a failed turn: doubles, capped, so a dead CLI is cheap. */
 export const RETRY_BASE_MS = 1_000;
@@ -278,6 +304,14 @@ export async function runDrivenLoop(
       // Give the message back rather than swallow it: the next attempt is handed
       // the same turn, and the delivery cap ends it if the CLI stays broken.
       const gave = release(loop, turn.seq);
+      // The question is already answered — the user pressed Stop, which closes
+      // the lease with a line of its own. Nothing failed that a retry could
+      // fix, and counting it would spend the give-up budget on the user's own
+      // button. Straight back to waiting, at full speed.
+      if (gave === "acked") {
+        failures = 0;
+        continue;
+      }
       failures += 1;
       // A cap means this loop is the agent, so a dead end has to be reported
       // instead of spun on: without an exit the pane shows a live agent that

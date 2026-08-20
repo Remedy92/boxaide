@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  Archive,
   ChevronLeft,
   ChevronRight,
   Forward,
@@ -33,9 +34,9 @@ import type { MailMessage } from "@/lib/types";
 
 /**
  * §6.4.1. Only these controls, because these are the only mutations the API
- * has: send (reply / reply all / forward) and mark read. There is no archive,
- * delete, move, star, snooze or label anywhere behind this bar, so none is
- * drawn — not even greyed out.
+ * has: send (reply / reply all / forward), mark read, and archive — a move
+ * into the account's Archive mailbox. There is no delete, star, snooze or
+ * label anywhere behind this bar, so none is drawn — not even greyed out.
  */
 export function ReaderActionBar({
   message,
@@ -47,6 +48,7 @@ export function ReaderActionBar({
   onReplyAll,
   onForward,
   onToggleRead,
+  onArchive,
   onPrevious,
   onNext,
 }: {
@@ -59,6 +61,7 @@ export function ReaderActionBar({
   onReplyAll: () => void;
   onForward: () => void;
   onToggleRead: () => void;
+  onArchive: () => void;
   onPrevious: () => void;
   onNext: () => void;
 }) {
@@ -142,6 +145,22 @@ export function ReaderActionBar({
         <TooltipContent>{seen ? "Mark unread" : "Mark read"}</TooltipContent>
       </Tooltip>
 
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Archive"
+            disabled={disabled}
+            onClick={onArchive}
+          >
+            <Archive className="size-4" strokeWidth={1.5} />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Archive (e)</TooltipContent>
+      </Tooltip>
+
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
@@ -215,7 +234,7 @@ export function ReaderActionBar({
             </DialogTitle>
             <DialogDescription>
               {source === "html"
-                ? "Shown as escaped text. Boxaide never renders sender HTML."
+                ? "The raw source, shown as escaped text. The reader renders it sanitised in a sandboxed frame."
                 : "The bodyText the server returned, verbatim."}
             </DialogDescription>
           </DialogHeader>

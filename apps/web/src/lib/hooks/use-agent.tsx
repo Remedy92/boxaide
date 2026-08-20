@@ -12,8 +12,11 @@ import {
   renameAgentChat,
   selectAgentChat,
   sendAgentMessage,
+  stopAgentTurn,
   streamAgent,
+  undoAgentArchiveSweep,
   type AgentApproval,
+  type AgentArchiveSweep,
 } from "@/lib/api/endpoints";
 import { ApiError } from "@/lib/api/client";
 import { friendlyError } from "@/lib/api/errors";
@@ -100,6 +103,15 @@ export type AgentConversation = {
   error: string | null;
   sending: boolean;
   send: (text: string) => Promise<void>;
+  /**
+   * Ends the message the agent is answering, named by its seq.
+   *
+   * The caller names it rather than this reading `presence.working`, so what is
+   * stopped is the run the user was looking at when they pressed the button and
+   * not whatever was claimed by the time the request landed.
+   */
+  stop: (seq: number) => Promise<void>;
+  stopping: boolean;
   clear: () => Promise<void>;
   /** Live chats, newest message first. Archived ones are fetched separately. */
   chats: AgentChat[];
@@ -120,6 +132,14 @@ export type AgentConversation = {
   approvals: AgentApproval[];
   /** Carries the action out, or drops it. Rejects with the reason it failed. */
   decideApproval: (id: string, decision: "approve" | "deny") => Promise<void>;
+  /**
+   * What launched agents archived, newest run first. Archiving is the one mail
+   * write an agent makes unasked, on the grounds that it is reversible; this
+   * is where reversing it is offered at the size the sweep actually was.
+   */
+  archiveSweeps: AgentArchiveSweep[];
+  /** Moves one sweep back. Resolves with what actually made it. */
+  undoArchiveSweep: (id: number) => Promise<{ restored: number; failed: number }>;
 };
 
 /**
@@ -202,10 +222,14 @@ function AgentSession({
   );
   const [error, setError] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
+  const [stopping, setStopping] = React.useState(false);
   const [chats, setChats] = React.useState<AgentChat[]>([]);
   const [chat, setChat] = React.useState<AgentChat | null>(null);
   const [storage, setStorage] = React.useState<AgentChatStorage>(NO_STORAGE);
   const [approvals, setApprovals] = React.useState<AgentApproval[]>([]);
+  const [archiveSweeps, setArchiveSweeps] = React.useState<AgentArchiveSweep[]>(
+    [],
+  );
   const claimed = React.useMemo(() => {
     const seqs = new Set<number>(claimedIn(turns, presence));
     return seqs;
@@ -237,6 +261,7 @@ function AgentSession({
       setTurns(state.turns);
       setPresence(normalise(state.presence));
       setApprovals(state.approvals ?? []);
+      setArchiveSweeps(state.archiveSweeps ?? []);
     },
     [ctx],
   );
@@ -266,6 +291,7 @@ function AgentSession({
           setTurns((prev) => merge(prev, state.turns));
           setPresence(normalise(state.presence));
           setApprovals(state.approvals ?? []);
+          setArchiveSweeps(state.archiveSweeps ?? []);
           setConnection("live");
           attempt = 0;
           // Not awaited: the conversation must paint whether or not the rail's
@@ -382,6 +408,37 @@ function AgentSession({
     [ctx],
   );
 
+  /**
+   * The presence in the reply is applied rather than waited for.
+   *
+   * The stream sends the same thing a moment later, but the button the user
+   * pressed has to stop looking live on the click that pressed it — a Stop that
+   * spins on for another frame reads as one that did not take.
+   *
+   * Only over the run it stopped, though. The killed turn frees the loop to
+   * claim the next queued message, and that presence frame can arrive on the
+   * stream before this reply is even parsed; writing this older snapshot over
+   * it would paint an idle pane while an agent is genuinely working, until
+   * whenever the next frame happens to arrive.
+   */
+  const stop = React.useCallback(
+    async (seq: number) => {
+      setStopping(true);
+      setError(null);
+      try {
+        const result = await stopAgentTurn(seq, ctx);
+        setPresence((prev) =>
+          prev.working?.seq === seq ? normalise(result.presence) : prev,
+        );
+      } catch (err) {
+        setError(friendlyError(err instanceof Error ? err.message : String(err)));
+      } finally {
+        setStopping(false);
+      }
+    },
+    [ctx],
+  );
+
   const clear = React.useCallback(async () => {
     setError(null);
     try {
@@ -478,6 +535,15 @@ function AgentSession({
     [ctx],
   );
 
+  const undoArchiveSweep = React.useCallback(
+    async (id: number) => {
+      const result = await undoAgentArchiveSweep(id, ctx);
+      setArchiveSweeps(result.sweeps);
+      return { restored: result.restored, failed: result.failed };
+    },
+    [ctx],
+  );
+
   const value = React.useMemo<AgentConversation>(
     () => ({
       turns,
@@ -487,6 +553,8 @@ function AgentSession({
       error,
       sending,
       send,
+      stop,
+      stopping,
       clear,
       chats,
       chat,
@@ -498,6 +566,8 @@ function AgentSession({
       removeChat,
       approvals,
       decideApproval,
+      archiveSweeps,
+      undoArchiveSweep,
     }),
     [
       turns,
@@ -507,6 +577,8 @@ function AgentSession({
       error,
       sending,
       send,
+      stop,
+      stopping,
       clear,
       chats,
       chat,
@@ -518,6 +590,8 @@ function AgentSession({
       removeChat,
       approvals,
       decideApproval,
+      archiveSweeps,
+      undoArchiveSweep,
     ],
   );
 
