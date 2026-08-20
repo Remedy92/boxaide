@@ -43,6 +43,13 @@ export const APPROVAL_TOOL_NAMES: ReadonlySet<string> = new Set([
   "message_send",
   "meeting_create",
   "meeting_cancel",
+  // The odd one out: nobody else sees a move, so it is not here for the
+  // stranger's sake. It is here because the destination is a free-text folder
+  // and Trash is a folder — a move is the only way an agent can make mail
+  // disappear, and on Gmail the server empties Trash 30 days later. Archiving
+  // is not queued: it files into one mailbox the account itself names, and
+  // moving it back is the undo.
+  "message_move",
 ]);
 
 export function needsApproval(tool: string): boolean {
@@ -113,6 +120,8 @@ export class ApprovalQueue {
       id: randomUUID(),
       tool: input.tool,
       args: input.args,
+      // Captured now, while the message is still where the agent found it.
+      context: this.contextFor(input.tool, input.args),
       profile: input.profile,
       agent: input.agent,
       chatId: input.chatId,
@@ -211,6 +220,24 @@ export class ApprovalQueue {
       });
       return;
     }
+    if (row.tool === "message_move") {
+      const result = await this.deps.mail.moveMessage(
+        String(args.account),
+        String(args.messageId),
+        String(args.folder),
+      );
+      // A queued move is carried out whenever the user gets to it, which may
+      // be hours after it was asked for. By then the message may have been
+      // moved by hand in another client, and `moveMessage` reports that by
+      // returning rather than throwing. Say so: a card that reads "Done." for
+      // a move that did not happen is the one lie this queue must not tell.
+      if (!result.moved) {
+        throw new Error(
+          `the message is no longer in ${result.fromFolder}, so nothing was moved`,
+        );
+      }
+      return;
+    }
     if (CALENDAR_SEND_TOOL_NAMES.has(row.tool)) {
       if (!this.deps.platform) {
         throw new Error(`${row.tool} is not available on this server`);
@@ -235,6 +262,27 @@ export class ApprovalQueue {
     this.store.db
       .prepare(`UPDATE agent_approvals SET state = ?, outcome = ?, decided_at = ? WHERE id = ?`)
       .run(state, outcome, at, id);
+  }
+
+  /**
+   * What the card needs beyond the arguments, per tool.
+   *
+   * Only message_move has any: it names its message by an opaque
+   * accountId:folder:uid id, and nobody can judge "move this to Trash" from
+   * one. Read from the local index, so an unindexed message simply yields
+   * nothing and the card falls back to the id.
+   */
+  private contextFor(
+    tool: string,
+    args: Record<string, unknown>,
+  ): StoredApproval["context"] {
+    if (tool !== "message_move") return null;
+    const account = args.account;
+    const messageId = args.messageId;
+    if (typeof account !== "string" || typeof messageId !== "string") {
+      return null;
+    }
+    return this.deps.mail.describeMessage(account, messageId);
   }
 
   /* ---- watching --------------------------------------------------------- */
@@ -317,6 +365,23 @@ export function describe(row: StoredApproval): ApprovalView {
     push(fields, "Invites", attendees.join(", ") || null);
     push(fields, "Location", text("location"));
     body = text("description");
+  } else if (row.tool === "message_move") {
+    const folder = text("folder") ?? "(no folder named)";
+    // The subject when the agent asked, not the id. A card the user cannot
+    // read is a click they cannot make responsibly, and this one can end with
+    // mail in Trash.
+    const subject = row.context?.subject?.trim();
+    title = subject
+      ? `Move “${subject}” to ${folder}`
+      : `Move a message to ${folder}`;
+    push(fields, "Account", text("account"));
+    push(fields, "From", row.context?.from ?? null);
+    push(fields, "Subject", subject ?? null);
+    push(fields, "Now in", row.context?.folder ?? null);
+    push(fields, "Into", folder);
+    // Only when there was nothing better to say: an id is not something a
+    // person reads, but it beats naming no message at all.
+    if (!subject) push(fields, "Message", text("messageId"));
   } else if (row.tool === "meeting_cancel") {
     title = "Cancel a meeting and tell everyone invited";
     push(fields, "Meeting", text("meetingId"));

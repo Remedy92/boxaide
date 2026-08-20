@@ -96,6 +96,11 @@ export class MailIndexStore {
       );
       CREATE INDEX IF NOT EXISTS message_summaries_account_folder_date
         ON message_summaries (account_id, folder, date DESC);
+      -- The primary key is (account_id, folder, uid), so every lookup that
+      -- knows only the message id — mark read, and now the delete an archive
+      -- leaves behind — scans the account's whole index without this.
+      CREATE INDEX IF NOT EXISTS message_summaries_account_id
+        ON message_summaries (account_id, id);
       DROP INDEX IF EXISTS message_summaries_date;
     `);
     // Columns added after the first release. SQLite has no ADD COLUMN IF NOT
@@ -246,6 +251,28 @@ export class MailIndexStore {
     return summaries;
   }
 
+  /**
+   * One indexed summary by its message id, or null when the message was never
+   * indexed. Reads the (account_id, id) index rather than the primary key,
+   * because the caller knows the id and not the folder it sits in.
+   *
+   * The approval card is the caller that matters: it has to say which message
+   * an agent wants to move, and a local read is the only way to say it without
+   * an IMAP round trip per card.
+   */
+  getSummary(accountId: string, messageId: string): MailMessageSummary | null {
+    const row = this.db
+      .prepare(
+        `SELECT account_id as accountId, folder, uid, id, message_id_enc as messageIdEnc,
+                from_enc as fromEnc, to_enc as toEnc, subject_enc as subjectEnc,
+                snippet_enc as snippetEnc, date, internal_date as internalDate,
+                seen, has_attachments as hasAttachments
+         FROM message_summaries WHERE account_id = ? AND id = ?`,
+      )
+      .get(accountId, messageId) as SummaryRow | undefined;
+    return row ? this.toSummary(row) : null;
+  }
+
   listUids(accountId: string, folder: string): number[] {
     const rows = this.db
       .prepare(
@@ -307,6 +334,43 @@ export class MailIndexStore {
         `UPDATE message_summaries SET seen = ? WHERE account_id = ? AND id = ?`,
       )
       .run(seen ? 1 : 0, accountId, messageId);
+  }
+
+  /**
+   * Drop one indexed row after it was moved out of its folder, and keep that
+   * folder's EXISTS honest.
+   *
+   * Both halves matter. Without the delete the archived message keeps painting
+   * in the list it just left; without the EXISTS decrement the next read sees
+   * fewer rows than the server claims to hold and pays a blocking IMAP refill
+   * for a folder that is in fact up to date. `dirty` then folds the real state
+   * in on the next background pass.
+   *
+   * Returns the folder the row was in, or null when it was not indexed.
+   */
+  removeMessage(accountId: string, messageId: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT folder FROM message_summaries WHERE account_id = ? AND id = ?`,
+      )
+      .get(accountId, messageId) as { folder: string } | undefined;
+    if (!row) return null;
+    const run = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `DELETE FROM message_summaries WHERE account_id = ? AND id = ?`,
+        )
+        .run(accountId, messageId);
+      this.db
+        .prepare(
+          `UPDATE mailbox_state
+           SET exists_count = MAX(exists_count - 1, 0), dirty = 1
+           WHERE account_id = ? AND folder = ?`,
+        )
+        .run(accountId, row.folder);
+    });
+    run();
+    return row.folder;
   }
 
   upsertSummary(msg: MailMessageSummary): void {

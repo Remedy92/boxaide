@@ -144,6 +144,27 @@ export type ConnectionTestResult = {
 };
 
 /**
+ * Where a moved message came from and where it landed.
+ *
+ * `moved: false` means the uid was no longer in the source folder — another
+ * client got there first — and nothing was written. Callers must not report
+ * an archive that did not happen.
+ */
+export type MoveResult = {
+  moved: boolean;
+  /** Mailbox it came from. An undo moves it back here. */
+  fromFolder: string;
+  /** Mailbox it landed in. */
+  toFolder: string;
+  /**
+   * The message's new `accountId:folder:uid` id. Only a server with UIDPLUS
+   * names the new uid, so without it the mail is still in `toFolder` — there
+   * is just no id to address it by, and an undo has nothing to move back.
+   */
+  id?: string;
+};
+
+/**
  * Fields of a draft. Every one is optional on purpose: a draft is allowed to
  * be half-written, which is the whole reason it is not a SendMessageInput.
  */
@@ -263,6 +284,27 @@ export interface MailProvider {
     account: ProviderAccount,
     input: SendMessageInput,
   ): Promise<SendResult>;
+  /**
+   * Move one message into another mailbox. Throws when the id cannot be parsed
+   * or the message already sits in `folder`; returns `moved: false` when the
+   * uid is no longer in the source folder.
+   */
+  moveMessage(
+    account: ProviderAccount,
+    messageId: string,
+    folder: string,
+  ): Promise<MoveResult>;
+  /**
+   * Move one message into the account's Archive mailbox. Which mailbox that is
+   * is the provider's to resolve, because servers name it differently, and a
+   * server with no Archive mailbox at all throws rather than guessing one:
+   * filing mail somewhere the user's own client will never look for it is
+   * worse than not filing it.
+   */
+  archiveMessage(
+    account: ProviderAccount,
+    messageId: string,
+  ): Promise<MoveResult>;
   /** Set or clear the \Seen flag. Returns false when the message is gone. */
   markRead(
     account: ProviderAccount,
