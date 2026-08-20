@@ -158,8 +158,8 @@ Implementation: `src/agent/approvals.ts` (queue, replay, card text),
 
 ## MVP surface
 
-- Web: connect accounts, unified inbox, read, compose/send
-- MCP tools: mail (`accounts_list`, `messages_list`, `messages_search`, `message_get`, `message_mark_read`, `folders_list`, drafts, `message_send`), chat (`chat_*`), plus CRM, automation and outreach groups
+- Web: connect accounts, unified inbox, read, archive, compose/send
+- MCP tools: mail (`accounts_list`, `messages_list`, `messages_search`, `message_get`, `message_mark_read`, `message_archive`, `message_move`, `folders_list`, drafts, `message_send`), chat (`chat_*`), plus CRM, automation and outreach groups
 - CLI: `boxaide serve` | `boxaide mcp`
 
 ## Rejected for v0

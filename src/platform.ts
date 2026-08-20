@@ -11,6 +11,8 @@
  */
 import type Database from "better-sqlite3";
 import type { MailService } from "./mail/service.js";
+import type { Store } from "./db/store.js";
+import { ArchiveLog } from "./agent/archive-log.js";
 import type { AgentLauncher } from "./agent/launcher.js";
 import { CrmStore } from "./crm/store.js";
 import { CrmService } from "./crm/service.js";
@@ -46,6 +48,12 @@ export type Platform = {
   calendarStore: CalendarStore;
   /** Agenda, free slots, and the meeting write path. No timers of its own. */
   calendarService: CalendarService;
+  /**
+   * What launched agents archived, and the sweep-sized undo for it. Null on a
+   * platform built without a Store — the stdio and test graphs that only need
+   * the tool modules.
+   */
+  archiveLog: ArchiveLog | null;
   /** Start CRM sync, automation scheduler, and outreach engine timers. */
   start: () => void;
   /** Stop every timer and any in-flight automation run. */
@@ -57,9 +65,15 @@ export function createPlatform(opts: {
   masterKey: Buffer;
   mail: MailService;
   launcher: AgentLauncher;
+  /**
+   * Needed only by the archive log, which writes its own table. Optional so
+   * the graphs that build a platform from a bare database keep working.
+   */
+  store?: Store;
   /** Path to the macOS calendar helper, when the shell knows one. */
   calendarHelperPath?: string;
 }): Platform {
+  const archiveLog = opts.store ? new ArchiveLog(opts.store, opts.mail) : null;
   const crmStore = new CrmStore(opts.db, opts.masterKey);
   const crmService = new CrmService(crmStore, opts.mail);
   const automationStore = new AutomationStore(opts.db, opts.masterKey);
@@ -109,6 +123,7 @@ export function createPlatform(opts: {
     engine,
     calendarStore,
     calendarService,
+    archiveLog,
     start: () => {
       crmService.start();
       scheduler.start();

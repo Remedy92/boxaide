@@ -3,6 +3,7 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  Archive,
   ArrowUpCircle,
   CalendarDays,
   ChevronRight,
@@ -48,6 +49,7 @@ import {
 import { DialogBody } from "@/components/ui/dialog";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useApp } from "@/lib/hooks/use-app-state";
+import { useArchive } from "@/lib/hooks/use-archive";
 import { useFolders } from "@/lib/hooks/use-folders";
 import { useMarkRead } from "@/lib/hooks/use-mark-read";
 import { useMcpTools } from "@/lib/hooks/use-mcp-tools";
@@ -60,9 +62,9 @@ import { copyToClipboard } from "@/lib/utils";
 type Page = "root" | "folders" | "remove";
 
 /**
- * §6.8. Every command is backed by a real call. There is no Archive, Delete,
- * Snooze, Label, Move, Star or Undo row, because there is no endpoint behind
- * any of them.
+ * §6.8. Every command is backed by a real call. Archive is here because it has
+ * an endpoint; there is no Delete, Snooze, Label, Star or Undo row, because
+ * there is none behind any of those.
  */
 export function CommandPalette({
   open,
@@ -94,6 +96,7 @@ function Palette({
   const folders = useFolders(app.account);
   const nav = useMessageNavigation();
   const markRead = useMarkRead();
+  const archive = useArchive();
   const mcp = useMcpTools();
   const queryClient = useQueryClient();
   const { theme, setTheme } = useTheme();
@@ -202,6 +205,22 @@ function Palette({
           accountId: selected.accountId,
           messageId: selected.id,
           seen: !selected.seen,
+        });
+      },
+    },
+    {
+      id: "archive",
+      group: "Mail",
+      label: "Archive",
+      icon: <Archive />,
+      hint: "e",
+      disabled: !selected,
+      reason: "Open a message first",
+      action: () => {
+        if (!selected) return;
+        archive.mutate({
+          accountId: selected.accountId,
+          messageId: selected.id,
         });
       },
     },

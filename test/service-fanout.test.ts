@@ -14,6 +14,7 @@ import type {
   MailMessage,
   MailMessageSummary,
   MailProvider,
+  MoveResult,
   ProviderAccount,
   SearchMessagesOpts,
   SendMessageInput,
@@ -106,6 +107,15 @@ class FlakyProvider implements MailProvider {
 
   async markRead(): Promise<boolean> {
     return false;
+  }
+
+  // A move is per-account too, for the same reason as the drafts below.
+  async moveMessage(): Promise<MoveResult> {
+    throw new Error("not used");
+  }
+
+  async archiveMessage(): Promise<MoveResult> {
+    throw new Error("not used");
   }
 
   async listFolders(): Promise<MailFolder[]> {

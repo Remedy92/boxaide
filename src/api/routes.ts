@@ -9,6 +9,7 @@ import { streamSSE } from "hono/streaming";
 import type { AgentChannel, Turn } from "../agent/channel.js";
 import { LaunchError, type AgentLauncher } from "../agent/launcher.js";
 import { ApprovalError, type ApprovalQueue } from "../agent/approvals.js";
+import type { ArchiveLog } from "../agent/archive-log.js";
 import type { MailService } from "../mail/service.js";
 import type { Platform } from "../platform.js";
 import { registerCrmRoutes } from "../crm/routes.js";
@@ -544,6 +545,55 @@ export function createApi(
     }
   });
 
+  /**
+   * Archive one message: a move into the account's Archive mailbox, never a
+   * delete. The response names both mailboxes, so the caller can offer an undo
+   * that puts the message back where it came from.
+   *
+   * 404 means the uid was already gone from the source folder — another client
+   * moved it first — and nothing was written.
+   */
+  app.post("/api/messages/:accountId/:messageId/archive", async (c) => {
+    try {
+      const result = await mail.archiveMessage(
+        c.req.param("accountId"),
+        decodeURIComponent(c.req.param("messageId")),
+      );
+      if (!result.moved) return c.json({ error: "not found" }, 404);
+      return c.json(result);
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
+    }
+  });
+
+  /**
+   * Move one message to a named mailbox. This is what an archive's Undo posts,
+   * with the `fromFolder` the archive handed back.
+   */
+  app.post("/api/messages/:accountId/:messageId/move", async (c) => {
+    try {
+      const body = await c.req.json<{ folder?: unknown }>();
+      if (typeof body.folder !== "string" || !body.folder.trim()) {
+        return c.json({ error: "folder must be a non-empty string" }, 400);
+      }
+      const result = await mail.moveMessage(
+        c.req.param("accountId"),
+        decodeURIComponent(c.req.param("messageId")),
+        body.folder,
+      );
+      if (!result.moved) return c.json({ error: "not found" }, 404);
+      return c.json(result);
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
+    }
+  });
+
   app.get("/api/drafts", async (c) => {
     const account = c.req.query("account") ?? "";
     if (!account || account === "all") {
@@ -663,7 +713,8 @@ export function createApi(
      404 rather than 500, and the UI's own capability check is the same
      question: does this server have an agent channel at all?
      --------------------------------------------------------------------- */
-  if (channel) registerAgentRoutes(app, channel, approvals, launcher);
+  if (channel)
+    registerAgentRoutes(app, channel, approvals, launcher, platform?.archiveLog);
   if (approvals) registerApprovalRoutes(app, approvals);
   if (launcher) registerLauncherRoutes(app, launcher);
   // Agent platform routes (CRM, automations, outreach). Registered inside
@@ -735,7 +786,32 @@ function registerAgentRoutes(
   channel: AgentChannel,
   approvals?: ApprovalQueue,
   launcher?: AgentLauncher,
+  archiveLog?: ArchiveLog | null,
 ): void {
+  /**
+   * Put back everything one agent sweep archived.
+   *
+   * The per-message Undo lives on a toast, in a window nobody watches while an
+   * agent works through an inbox. This is the same undo at the size the sweep
+   * actually was. Partial success is normal and is reported as counts: the
+   * mail has been sitting in the Archive mailbox where any other client could
+   * have moved it.
+   */
+  app.post("/api/agent/archives/:id/undo", async (c) => {
+    if (!archiveLog) return c.json({ error: "not available" }, 404);
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id)) return c.json({ error: "bad sweep id" }, 400);
+    try {
+      const result = await archiveLog.undo(id);
+      return c.json({ ...result, sweeps: archiveLog.sweeps() });
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        404,
+      );
+    }
+  });
+
   app.get("/api/agent/state", (c) => {
     const after = c.req.query("after");
     const afterSeq = after !== undefined && /^\d+$/.test(after) ? Number(after) : undefined;
@@ -752,6 +828,9 @@ function registerAgentRoutes(
       presence: channel.presence(),
       chat: shown,
       approvals: approvals?.pending() ?? [],
+      // Rides on state for the same reason the approvals do: it is drawn in
+      // the conversation, and a second poll would let the two disagree.
+      archiveSweeps: archiveLog?.sweeps() ?? [],
     });
   });
 

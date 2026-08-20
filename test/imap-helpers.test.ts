@@ -10,8 +10,12 @@ import {
   mailboxNeedsFullResync,
   indexedUidRange,
   draftsMailboxPath,
+  archiveMailboxPath,
+  accountMailboxPaths,
+  moveUid,
   draftFromImapSource,
 } from "../src/provider/imap-smtp.js";
+import type { ImapFlow } from "imapflow";
 import type { AccountCredentials } from "../src/provider/types.js";
 
 describe("parseId (imap message id round-trip)", () => {
@@ -159,6 +163,213 @@ describe("draftsMailboxPath (where a draft gets appended)", () => {
         { name: "Trash", path: "Trash", specialUse: "\\Trash" },
       ]),
     ).toBeNull();
+  });
+});
+
+describe("archiveMailboxPath (where an archived message lands)", () => {
+  it("prefers the SPECIAL-USE \\Archive mailbox over any name", () => {
+    expect(
+      archiveMailboxPath([
+        { name: "Archive", path: "Archive" },
+        { name: "Arkiv", path: "Arkiv", specialUse: "\\Archive" },
+      ]),
+    ).toBe("Arkiv");
+  });
+
+  it("archives to All Mail on Gmail, which is what archiving means there", () => {
+    expect(
+      archiveMailboxPath([
+        { name: "INBOX", path: "INBOX" },
+        { name: "All Mail", path: "[Gmail]/All Mail", specialUse: "\\All" },
+      ]),
+    ).toBe("[Gmail]/All Mail");
+  });
+
+  it("finds Gmail's All Mail by path when no SPECIAL-USE is advertised", () => {
+    expect(
+      archiveMailboxPath([
+        { name: "INBOX", path: "INBOX" },
+        { name: "All Mail", path: "[Gmail]/All Mail" },
+      ]),
+    ).toBe("[Gmail]/All Mail");
+  });
+
+  it("falls back to a common name, case-insensitively", () => {
+    expect(
+      archiveMailboxPath([
+        { name: "INBOX", path: "INBOX" },
+        { name: "ARCHIVE", path: "INBOX.ARCHIVE" },
+      ]),
+    ).toBe("INBOX.ARCHIVE");
+    expect(archiveMailboxPath([{ name: "Arquivo", path: "Arquivo" }])).toBe(
+      "Arquivo",
+    );
+    expect(archiveMailboxPath([{ name: "Archiwum", path: "Archiwum" }])).toBe(
+      "Archiwum",
+    );
+  });
+
+  it("returns null rather than filing mail into Trash or Sent", () => {
+    // A wrong guess here is a move the user can only undo in another client,
+    // so no match must stay no match.
+    expect(
+      archiveMailboxPath([
+        { name: "Sent", path: "Sent", specialUse: "\\Sent" },
+        { name: "Trash", path: "Trash", specialUse: "\\Trash" },
+        { name: "Junk", path: "Junk", specialUse: "\\Junk" },
+      ]),
+    ).toBeNull();
+  });
+});
+
+/**
+ * A hand-rolled ImapFlow double: just the members moveUid touches. This is
+ * the only exercise the uidMap/COPYUID handling gets without a live server,
+ * which is exactly why moveUid is exported.
+ */
+function fakeImap(opts: {
+  uids?: number[];
+  uidMap?: Map<number, number> | null;
+  capabilities?: string[];
+  moveResult?: false;
+}) {
+  const calls: string[] = [];
+  const client = {
+    capabilities: new Map(
+      (opts.capabilities ?? ["UIDPLUS"]).map((c) => [c, true as const]),
+    ),
+    getMailboxLock: async (path: string) => {
+      calls.push(`lock:${path}`);
+      return { release: () => calls.push("release") };
+    },
+    search: async () => {
+      calls.push("search");
+      return opts.uids ?? [];
+    },
+    messageMove: async (_range: string, destination: string) => {
+      calls.push(`move:${destination}`);
+      if (opts.moveResult === false) return false;
+      return {
+        path: "INBOX",
+        destination,
+        ...(opts.uidMap === null ? {} : { uidMap: opts.uidMap }),
+      };
+    },
+  };
+  return { client: client as unknown as ImapFlow, calls };
+}
+
+describe("moveUid (the MOVE round trip, on a fake client)", () => {
+  const source = { folder: "INBOX", uid: 7 };
+
+  it("names the new id from the COPYUID uidMap", async () => {
+    const { client, calls } = fakeImap({ uids: [7], uidMap: new Map([[7, 91]]) });
+    const res = await moveUid(client, "acct", source, "Archive");
+    expect(res).toEqual({
+      moved: true,
+      fromFolder: "INBOX",
+      toFolder: "Archive",
+      id: "acct:Archive:91",
+    });
+    // The lock is taken on the SOURCE folder and always released.
+    expect(calls[0]).toBe("lock:INBOX");
+    expect(calls[calls.length - 1]).toBe("release");
+  });
+
+  it("reports gone when the uid is no longer in the folder", async () => {
+    const { client, calls } = fakeImap({ uids: [] });
+    const res = await moveUid(client, "acct", source, "Archive");
+    expect(res.moved).toBe(false);
+    // No MOVE was issued for a message that is not there.
+    expect(calls).not.toContain("move:Archive");
+  });
+
+  it("treats a missing COPYUID on a UIDPLUS server as the race being lost", async () => {
+    // Another client moved the uid between the SEARCH and the MOVE: the MOVE
+    // succeeds as a no-op and returns no uidMap. RFC 6851 §4.3 makes COPYUID a
+    // SHOULD, so this is the likelier reading rather than a proof, and it is
+    // the conservative one: claiming the move would name a destination the
+    // message may never have reached.
+    const { client } = fakeImap({ uids: [7], uidMap: null });
+    const res = await moveUid(client, "acct", source, "Archive");
+    expect(res.moved).toBe(false);
+  });
+
+  it("reports a move without an id on a server without UIDPLUS", async () => {
+    const { client } = fakeImap({ uids: [7], uidMap: null, capabilities: [] });
+    const res = await moveUid(client, "acct", source, "Archive");
+    expect(res).toEqual({ moved: true, fromFolder: "INBOX", toFolder: "Archive" });
+  });
+
+  it("refuses a move into the folder the message is already in", async () => {
+    const { client, calls } = fakeImap({ uids: [7] });
+    await expect(moveUid(client, "acct", source, "INBOX")).rejects.toThrow(
+      /already in INBOX/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it("encodes the destination folder into the new id", async () => {
+    const { client } = fakeImap({ uids: [7], uidMap: new Map([[7, 5]]) });
+    const res = await moveUid(client, "acct", source, "[Gmail]/All Mail");
+    expect(res.id).toBe(`acct:${encodeURIComponent("[Gmail]/All Mail")}:5`);
+  });
+});
+
+describe("accountMailboxPaths (the per-account LIST cache)", () => {
+  function lister(boxes: { name: string; path: string; specialUse?: string }[]) {
+    let lists = 0;
+    return {
+      client: {
+        list: async () => {
+          lists += 1;
+          return boxes;
+        },
+      },
+      count: () => lists,
+    };
+  }
+  const withArchive = [
+    { name: "INBOX", path: "INBOX" },
+    { name: "Archive", path: "Archive", specialUse: "\\Archive" },
+    { name: "Drafts", path: "Drafts", specialUse: "\\Drafts" },
+  ];
+
+  it("pays one LIST and serves the second read from cache", async () => {
+    const { client, count } = lister(withArchive);
+    const a = await accountMailboxPaths(client, "cache-1", { now: 1_000 });
+    const b = await accountMailboxPaths(client, "cache-1", { now: 2_000 });
+    expect(a).toEqual({ archive: "Archive", drafts: "Drafts", at: 1_000 });
+    expect(b).toBe(a);
+    expect(count()).toBe(1);
+  });
+
+  it("re-LISTs after the TTL and on force", async () => {
+    const { client, count } = lister(withArchive);
+    await accountMailboxPaths(client, "cache-2", { now: 0 });
+    await accountMailboxPaths(client, "cache-2", { now: 6 * 60_000 });
+    expect(count()).toBe(2);
+    await accountMailboxPaths(client, "cache-2", {
+      now: 6 * 60_000,
+      force: true,
+    });
+    expect(count()).toBe(3);
+  });
+
+  it("never remembers a missing Archive mailbox", async () => {
+    // The error tells the user to create the folder; the very next archive
+    // must see it, not wait out a TTL.
+    const { client, count } = lister([{ name: "INBOX", path: "INBOX" }]);
+    const first = await accountMailboxPaths(client, "cache-3", {
+      now: 0,
+      needArchive: true,
+    });
+    expect(first.archive).toBeNull();
+    await accountMailboxPaths(client, "cache-3", { now: 1, needArchive: true });
+    expect(count()).toBe(2);
+    // A caller that does not need Archive keeps reading the cached entry.
+    await accountMailboxPaths(client, "cache-3", { now: 2 });
+    expect(count()).toBe(2);
   });
 });
 
