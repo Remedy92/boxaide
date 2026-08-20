@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { Code } from "lucide-react";
 import { toast } from "sonner";
 import { Kbd, Spinner, TechnicalDetails } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,12 @@ export type Draft = {
   bcc: string;
   subject: string;
   text: string;
+  /**
+   * Forward only: the sanitised HTML twin of `text`, built by buildReplySeed.
+   * Not editable here and deliberately not retained in `drafts` alongside the
+   * text: the retained draft is what the user typed, and this is not.
+   */
+  html?: string;
 };
 
 export type ReplyMode = Exclude<ComposeMode, "new">;
@@ -79,6 +86,7 @@ export function InlineReply({
     bcc: initial.bcc,
     subject: initial.subject,
     text: saved?.text ?? initial.text,
+    html: initial.html,
   }));
   const [showCc, setShowCc] = React.useState(initial.cc.length > 0);
   const [invalid, setInvalid] = React.useState<{
@@ -98,6 +106,7 @@ export function InlineReply({
       bcc: seed.bcc,
       subject: seed.subject,
       text: drafts.current.get(message.id)?.text ?? seed.text,
+      html: seed.html,
     });
     setShowCc(seed.cc.length > 0);
     requestAnimationFrame(() => textareaRef.current?.focus());
@@ -112,6 +121,13 @@ export function InlineReply({
       drafts.current.set(message.id, next);
       return next;
     });
+  };
+
+  /* One click, no confirmation, no way back except reopening the forward:
+     dropping formatting is a decision about a message that has not been sent,
+     and re-pressing f rebuilds it. */
+  const dropHtml = () => {
+    setDraft((value) => ({ ...value, html: undefined }));
   };
 
   const submit = () => {
@@ -138,6 +154,7 @@ export function InlineReply({
         to: draft.to,
         subject: draft.subject,
         text: draft.text,
+        html: draft.html,
         cc: draft.cc || undefined,
         bcc: draft.bcc || undefined,
         inReplyTo: initial.inReplyTo,
@@ -273,6 +290,23 @@ export function InlineReply({
           }}
           className="max-h-[26rem] min-h-[7.5rem] resize-y"
         />
+
+        {/* The formatted copy rides along unedited, so the composer says so
+            rather than letting the recipient discover it. Only forwards ever
+            carry one. */}
+        {draft.html && (
+          <p className="flex items-center gap-1.5 text-[12px] leading-4 text-fg-tertiary">
+            <Code aria-hidden="true" className="size-3" strokeWidth={1.5} />
+            The original formatting and images go too, above your text.
+            <button
+              type="button"
+              className="cursor-pointer underline underline-offset-2 hover:text-fg"
+              onClick={dropHtml}
+            >
+              Send as plain text
+            </button>
+          </p>
+        )}
       </div>
 
       {invalid && (

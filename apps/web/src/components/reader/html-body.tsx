@@ -1,9 +1,13 @@
 "use client";
 
 import * as React from "react";
-import DOMPurify, { type Config as DOMPurifyConfig } from "dompurify";
 import { ImageOff } from "lucide-react";
 import { BodyText } from "@/components/reader/body-text";
+import {
+  MAX_RENDERED_MARKUP_CHARS,
+  markupLength,
+  sanitizeMailHtml,
+} from "@/lib/mail/sanitize";
 
 /**
  * §6.4.6. Renders `bodyHtml` - sanitised, framed, and fenced.
@@ -44,25 +48,6 @@ import { BodyText } from "@/components/reader/body-text";
  */
 
 /**
- * Sanitising is synchronous and lands on the render path, and the HTML
- * parser's misnesting recovery is superlinear: 250 000 chars of `<b>` soup
- * measures over six seconds of blocked main thread, which anyone who can send
- * you mail can do for free. Markup past this point falls back to the text
- * reader with an explicit opt-in, so the cost is never paid without a click.
- *
- * Inlined `data:` payloads are excluded from the measurement. A photo is
- * megabytes of base64 that the parser walks in one pass; it is the tag count
- * that is expensive, not the byte count.
- */
-const MAX_RENDERED_MARKUP_CHARS = 100_000;
-
-const DATA_URI_PAYLOAD = /data:[a-z0-9.+-]+\/[a-z0-9.+-]*;base64,[a-z0-9+/=]+/gi;
-
-function markupLength(html: string): number {
-  return html.replace(DATA_URI_PAYLOAD, "").length;
-}
-
-/**
  * Everything the frame may fetch. `default-src 'none'` already implies the
  * rest; script-src, object-src, frame-src, base-uri and form-action are spelt
  * out so a loosening shows up in a diff as the removal of a 'none', not the
@@ -79,63 +64,6 @@ const CSP_IMG_BLOCKED = "img-src data:";
  * and a widening the header would refuse is a widening that cannot work.
  */
 const CSP_IMG_ALLOWED = "img-src data: https:";
-
-const SANITIZE_CONFIG = {
-  // HTML only: mail needs no inline SVG or MathML, and both are recurring
-  // sources of sanitiser bypasses. SVG *images* still render - a data: or
-  // remote URI in <img src> is an image load, not markup.
-  USE_PROFILES: { html: true },
-  // On top of the profile: no interactive or document-level tags. Forms
-  // cannot submit in the sandbox anyway; removing them keeps dead controls
-  // out of the reading pane. <input type="image"> fetches its src even with
-  // scripting off. <meta>/<base>/<link> could redefine CSP, targets, or
-  // fetch styles - the frame builds its own head.
-  FORBID_TAGS: [
-    "form",
-    "input",
-    "button",
-    "select",
-    "option",
-    "textarea",
-    "meta",
-    "base",
-    "link",
-    "dialog",
-  ],
-  FORBID_ATTR: ["action", "formaction", "ping", "usemap", "ismap"],
-  // Mail is a document, not an app: no ARIA needed from the sender, and
-  // data-* attributes have no consumer inside the frame.
-  ALLOW_ARIA_ATTR: false,
-  ALLOW_DATA_ATTR: false,
-} satisfies DOMPurifyConfig;
-
-/**
- * A private DOMPurify instance, not the module singleton. The anchor hook
- * below is the only thing keeping `rel` and `target` on mail links, and on the
- * shared instance any future consumer calling `removeAllHooks()` would strip
- * it with no test failing. Built lazily because `DOMPurify(window)` needs a
- * DOM: Next prerenders this module at build time, where there is no window and
- * no message data to sanitise either.
- */
-let purifier: ReturnType<typeof DOMPurify> | null = null;
-
-function getPurifier(): ReturnType<typeof DOMPurify> | null {
-  if (typeof window === "undefined") return null;
-  if (!purifier) {
-    const instance = DOMPurify(window);
-    if (!instance.isSupported) return null;
-    /* Every anchor opens a fresh, opener-less, referrer-less tab via its own
-       attributes: the only navigation the sandbox permits. */
-    instance.addHook("afterSanitizeAttributes", (node) => {
-      if (node.tagName === "A") {
-        node.setAttribute("target", "_blank");
-        node.setAttribute("rel", "noopener noreferrer nofollow");
-      }
-    });
-    purifier = instance;
-  }
-  return purifier;
-}
 
 /**
  * True when the sanitised markup references something fetched over the
@@ -185,11 +113,9 @@ export function HtmlBody({ html, text }: { html: string; text: string }) {
 
   const sanitized = React.useMemo(() => {
     if (skipped) return "";
-    const instance = getPurifier();
-    /* No instance means no DOM or an unsupported browser, and DOMPurify's own
-       unsupported path returns the input unchanged. Falling back to text is
+    /* null means no DOM or an unsupported browser. Falling back to text is
        the only answer that cannot hand the frame un-sanitised markup. */
-    return instance ? instance.sanitize(html, SANITIZE_CONFIG) : "";
+    return sanitizeMailHtml(html) ?? "";
   }, [html, skipped]);
 
   const hasRemote = React.useMemo(
