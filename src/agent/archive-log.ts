@@ -122,8 +122,10 @@ export class ArchiveLog {
    * Every message is attempted, and one that cannot be moved does not stop the
    * rest: by the time somebody clicks this, the mail has been sitting in the
    * Archive mailbox where any other client could have touched it. The counts
-   * are what actually happened, and rows that came back are forgotten so the
-   * sweep cannot be undone twice.
+   * are what actually happened. A row is forgotten once there is nothing left
+   * to do with it — moved back, moved elsewhere by somebody, or archived with
+   * no id to move back to — so the sweep cannot be undone twice and cannot
+   * leave behind a card whose only button does nothing.
    */
   async undo(sweepId: number): Promise<{ restored: number; failed: number }> {
     const rows = this.store.listAgentArchives();
@@ -140,7 +142,12 @@ export class ArchiveLog {
     const done: number[] = [];
     for (const row of sweep) {
       if (!row.messageId) {
+        // Never had an id to move back to, and never will: the server did not
+        // name one when it moved the message. Counted as failed and forgotten,
+        // because leaving it would keep drawing a card whose only button does
+        // nothing.
         failed += 1;
+        done.push(row.id);
         continue;
       }
       try {
@@ -159,6 +166,9 @@ export class ArchiveLog {
           done.push(row.id);
         }
       } catch {
+        // Kept, unlike the two cases above: a move that threw may have thrown
+        // because the server was briefly unreachable, and that is worth
+        // offering again.
         failed += 1;
       }
     }

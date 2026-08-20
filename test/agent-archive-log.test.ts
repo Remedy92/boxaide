@@ -234,6 +234,30 @@ describe("the archive log", () => {
     rt.store.close();
   });
 
+  it("forgets a sweep it can never act on again, so no dead card is left", async () => {
+    // Two halves of one sweep: one that comes back, one the server never named
+    // an id for. After the click there is nothing left to do with either, and
+    // a card whose only button does nothing is worse than no card.
+    const inbox = await mail.listMessages("personal", { limit: 5 });
+    await call("message_archive", {
+      account: "personal",
+      messageId: inbox.messages[0].id,
+    });
+    log.record({
+      accountId: mail.accountId("personal"),
+      messageId: null,
+      fromFolder: "INBOX",
+      toFolder: "Archive",
+      agent: null,
+      chatId: null,
+    });
+
+    const [sweep] = log.sweeps();
+    expect(sweep).toMatchObject({ count: 2, undoable: 1 });
+    expect(await log.undo(sweep.id)).toEqual({ restored: 1, failed: 1 });
+    expect(log.sweeps()).toHaveLength(0);
+  });
+
   it("counts an archive it cannot reverse, and says so", () => {
     // No id: a server without UIDPLUS archived the message without naming
     // where it landed. The count is the truth about what happened; `undoable`

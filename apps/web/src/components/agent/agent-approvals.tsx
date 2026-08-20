@@ -58,11 +58,19 @@ function SweepCard({ sweep }: { sweep: AgentArchiveSweep }) {
   const agent = useAgent();
   const [busy, setBusy] = React.useState(false);
 
+  // Nothing to move back means the button is not an undo any more. It still
+  // has a job: clearing a card the user has read, which the same call does by
+  // forgetting rows that can never be acted on.
+  const dismissing = sweep.undoable === 0;
+
   const undo = async () => {
     setBusy(true);
     try {
       const { restored, failed } = await agent.undoArchiveSweep(sweep.id);
-      if (restored === 0) {
+      if (dismissing) {
+        // No claim about mail: the user was told at the outset that these
+        // could not come back.
+      } else if (restored === 0) {
         toast.error("Nothing could be moved back");
       } else if (failed > 0) {
         // Never rounded up: the ones that did not come back are messages the
@@ -97,8 +105,9 @@ function SweepCard({ sweep }: { sweep: AgentArchiveSweep }) {
           </p>
           {sweep.undoable < sweep.count && (
             <p className="mt-0.5 text-[12px] leading-4 text-fg-tertiary">
-              {sweep.undoable} of them can be moved back. Your server did not
-              say where the rest landed, so they stay filed.
+              {dismissing
+                ? "None of them can be moved back: your server did not say where they landed, so they stay filed."
+                : `${sweep.undoable} of them can be moved back. Your server did not say where the rest landed, so they stay filed.`}
             </p>
           )}
         </div>
@@ -109,11 +118,11 @@ function SweepCard({ sweep }: { sweep: AgentArchiveSweep }) {
           variant="secondary"
           size="sm"
           className="h-6 px-2 text-[12px]"
-          disabled={busy || sweep.undoable === 0}
+          disabled={busy}
           onClick={() => void undo()}
         >
           {busy && <Spinner />}
-          Move them back
+          {dismissing ? "Dismiss" : "Move them back"}
         </Button>
       </div>
     </div>
