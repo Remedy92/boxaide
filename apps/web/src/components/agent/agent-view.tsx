@@ -344,6 +344,11 @@ export function AgentView({
             stopping={agent.stopping}
             disabled={agent.connection === "unsupported"}
             autoFocus={!app.narrow}
+            /* "Start conversation about this email" seeds the box from the
+               message list and switches to this view. The composer clears the
+               seed once it has it, so coming back here later opens empty. */
+            seed={app.agentSeed}
+            onSeedTaken={app.clearAgentSeed}
           />
         </div>
       </div>

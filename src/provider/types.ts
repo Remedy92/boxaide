@@ -305,6 +305,17 @@ export interface MailProvider {
     account: ProviderAccount,
     messageId: string,
   ): Promise<MoveResult>;
+  /**
+   * Move one message into the account's Trash mailbox. Deleting in this app is
+   * a move, never an IMAP expunge: the message stays where the user's own
+   * client will find it, and the result names the folder it left so the move
+   * can be undone. A server with no Trash mailbox throws rather than guessing
+   * one, exactly as archiveMessage does.
+   */
+  trashMessage(
+    account: ProviderAccount,
+    messageId: string,
+  ): Promise<MoveResult>;
   /** Set or clear the \Seen flag. Returns false when the message is gone. */
   markRead(
     account: ProviderAccount,

@@ -346,6 +346,30 @@ export function archiveMessage(
   );
 }
 
+/**
+ * Delete one message: a move into the account's Trash mailbox, never an IMAP
+ * expunge. Like archive, the result names the folder it left, which is what
+ * `moveMessage` below needs to put it back.
+ *
+ * 404 means the message had already left that folder. 400 means this account's
+ * server has no Trash mailbox at all; the message text says so.
+ */
+export function trashMessage(
+  accountId: string,
+  messageId: string,
+  ctx: Ctx,
+): Promise<MoveResult> {
+  return request<MoveResult>(
+    `/api/messages/${encodeURIComponent(accountId)}/${encodeURIComponent(messageId)}/trash`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
 /** Move one message to a named mailbox. The undo of an archive posts here. */
 export function moveMessage(
   accountId: string,

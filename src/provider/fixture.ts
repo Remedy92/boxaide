@@ -33,6 +33,9 @@ const DRAFTS_FOLDER = "Drafts";
 /** Mirrors a server that advertises SPECIAL-USE \\Archive. */
 const ARCHIVE_FOLDER = "Archive";
 
+/** Mirrors a server that advertises SPECIAL-USE \\Trash. */
+const TRASH_FOLDER = "Trash";
+
 function nowIso(offsetMs = 0): string {
   return new Date(Date.now() + offsetMs).toISOString();
 }
@@ -358,6 +361,19 @@ export class FixtureProvider implements MailProvider {
     return parts.length >= 3 ? decodeURIComponent(parts[1]) : "INBOX";
   }
 
+  async trashMessage(
+    account: ProviderAccount,
+    messageId: string,
+  ): Promise<MoveResult> {
+    const found = this.find(account, messageId);
+    if (found?.folder === DRAFTS_FOLDER) {
+      throw new Error(
+        "a draft is not deleted from here. Discard it with the draft tools",
+      );
+    }
+    return this.move(account, messageId, TRASH_FOLDER);
+  }
+
   async markRead(
     account: ProviderAccount,
     messageId: string,
@@ -479,6 +495,7 @@ function specialUseOf(name: string): string | undefined {
   if (name === "Sent") return "\\Sent";
   if (name === DRAFTS_FOLDER) return "\\Drafts";
   if (name === ARCHIVE_FOLDER) return "\\Archive";
+  if (name === TRASH_FOLDER) return "\\Trash";
   return undefined;
 }
 

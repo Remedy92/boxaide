@@ -39,6 +39,8 @@ export function AgentComposer({
   stopping,
   disabled,
   autoFocus,
+  seed,
+  onSeedTaken,
 }: {
   onSend: (text: string) => void;
   sending: boolean;
@@ -49,6 +51,12 @@ export function AgentComposer({
   stopping?: boolean;
   disabled?: boolean;
   autoFocus?: boolean;
+  /**
+   * An opening line put here by something else, currently only "Start
+   * conversation about this email". It replaces whatever is in the box.
+   */
+  seed?: { nonce: number; text: string } | null;
+  onSeedTaken?: () => void;
 }) {
   const [text, setText] = React.useState("");
   const ref = React.useRef<HTMLTextAreaElement | null>(null);
@@ -83,6 +91,32 @@ export function AgentComposer({
       live = false;
     };
   }, [resize]);
+
+  /**
+   * Take a seeded opening line.
+   *
+   * The mail composer is keyed on its seed's nonce and needs no effect for
+   * this. That works there because the seed IS the form: a compose dialog with
+   * no seed is not on screen. This box is on screen the whole time, so keying
+   * it would remount a live composer, and the caret still has to be placed by
+   * hand afterwards. One effect does both, and the nonce is what makes the same
+   * sentence seeded twice in a row still arrive twice.
+   *
+   * The caret goes to the end, not over the text: the point of prefilling is
+   * that the user types their own question after it.
+   */
+  const takenNonce = React.useRef<number | null>(null);
+  React.useEffect(() => {
+    if (!seed || takenNonce.current === seed.nonce) return;
+    takenNonce.current = seed.nonce;
+    setText(seed.text);
+    const node = ref.current;
+    if (node) {
+      node.focus();
+      node.setSelectionRange(seed.text.length, seed.text.length);
+    }
+    onSeedTaken?.();
+  }, [onSeedTaken, seed]);
 
   const submit = () => {
     const value = text.trim();
