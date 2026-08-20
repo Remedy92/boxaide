@@ -558,6 +558,57 @@ describe("OpenCodeDriver", () => {
     await driver.done;
   });
 
+  it("stops the prompt in flight and stays up for the next message", async () => {
+    let attempts = 0;
+    const fake = await startFake((call) => {
+      if (!call.path.includes("/message")) return { status: 200, body: {} };
+      if (isNaming(call)) {
+        return { status: 200, body: { parts: [{ type: "text", text: "Stop test" }] } };
+      }
+      attempts += 1;
+      // The first turn is taken and never answered: a prompt genuinely in
+      // flight, which is the only state Stop has anything to do in.
+      if (attempts === 1) return null;
+      return { status: 200, body: { parts: [{ type: "text", text: "still here" }] } };
+    });
+    cleanup.push(fake.close);
+    const { store, channel } = make();
+    const driver = new OpenCodeDriver({
+      channel,
+      agent: "opencode",
+      baseUrl: fake.url,
+      directory: "/tmp/boxaide-agent",
+      waitMs: 1_000,
+      retryBaseMs: 10,
+    }).start();
+    cleanup.push(() => driver.stop());
+
+    const user = channel.post({ role: "user", text: "answer me" });
+    await until(() => attempts === 1 && channel.presence().working !== null);
+
+    // The route's own order: close the message, then end the prompt.
+    expect(channel.cancelWork(user.seq)?.seq).toBe(user.seq);
+    expect(driver.interrupt(user.seq)).toBe(true);
+
+    await until(() => channel.presence().working === null);
+    const stopped = channel.history().find((t) => t.role === "agent")!;
+    expect(stopped.text).toBe("Stopped.");
+    expect(stopped.replyTo).toBe(user.seq);
+    // Answered, so nothing hands it over again and nothing is owed a warning.
+    expect(store.listDroppedUserSeqs()).toEqual([]);
+
+    // The loop is still running: the next message is taken and answered.
+    const next = channel.post({ role: "user", text: "what about now?" });
+    await until(() => channel.history().filter((t) => t.role === "agent").length === 2);
+    const answer = channel.history().filter((t) => t.role === "agent")[1];
+    expect(answer.text).toBe("still here");
+    expect(answer.replyTo).toBe(next.seq);
+    expect(attempts).toBe(2);
+
+    driver.stop();
+    await driver.done;
+  });
+
   it("does not let a server heartbeat stand in for progress on the turn", async () => {
     let attempts = 0;
     const fake = await startFake((call) => {

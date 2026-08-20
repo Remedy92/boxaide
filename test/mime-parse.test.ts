@@ -165,7 +165,7 @@ describe("parseRfc822 (shipped MIME path)", () => {
     ).rejects.toThrow(/safety limit/);
   });
 
-  it("caps raw HTML retained for source viewing", async () => {
+  it("caps raw HTML, cutting on a tag boundary", async () => {
     const html = `<p>${"x".repeat(MAX_BODY_HTML_CHARS + 100)}</p>`;
     const raw = [
       "From: a@example.com",
@@ -177,7 +177,31 @@ describe("parseRfc822 (shipped MIME path)", () => {
       html,
     ].join("\r\n");
     const parsed = await parseRfc822(raw);
-    expect(parsed.bodyHtml?.length).toBe(MAX_BODY_HTML_CHARS);
+    /* Cut at the last `<`, so never longer than the cap and never severed
+       mid-tag: the trailing `</p>` is gone and nothing partial replaces it. */
+    expect(parsed.bodyHtml!.length).toBeLessThanOrEqual(MAX_BODY_HTML_CHARS);
+    expect(parsed.bodyHtml!.length).toBeGreaterThan(MAX_BODY_HTML_CHARS - 100);
+    expect(parsed.bodyHtml!.endsWith("<")).toBe(false);
+    expect(parsed.bodyHtml).not.toMatch(/<[a-z/][^>]*$/i);
+  });
+
+  it("keeps a message whose bulk is an inlined cid: image", async () => {
+    /* mailparser rewrites cid: to a data: URI before this sees the html, so
+       an ordinary photo dwarfs the markup around it. The old cap severed the
+       document; the body after the image has to survive. */
+    const image = "A".repeat(400_000);
+    const html = `<p>before</p><img src="data:image/png;base64,${image}"><p>after</p>`;
+    const raw = [
+      "From: a@example.com",
+      "To: b@example.com",
+      "Subject: inline image",
+      "MIME-Version: 1.0",
+      "Content-Type: text/html; charset=utf-8",
+      "",
+      html,
+    ].join("\r\n");
+    const parsed = await parseRfc822(raw);
+    expect(parsed.bodyHtml).toContain("<p>after</p>");
   });
 });
 

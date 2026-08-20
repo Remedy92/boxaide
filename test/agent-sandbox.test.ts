@@ -39,6 +39,34 @@ import {
 
 const HOME = "/Users/someone";
 
+/**
+ * Waits for the probe's answer instead of guessing how long it takes.
+ *
+ * The probe is a real spawned process: it has to be scheduled, run a shell,
+ * run `cat`, and flush. A fixed sleep prices that at whatever the machine cost
+ * on the day it was written. On a loaded CI runner it came back short:
+ * the read then failed with ENOENT on a file the probe was about to write.
+ * Polling for the file the assertion actually needs is both faster in the
+ * normal case and honest about the slow one.
+ */
+async function readWhenWritten(path: string, ms = 10_000): Promise<string> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    // Non-empty, not merely present: the probe creates the file by redirecting
+    // into it, so it exists for a moment before anything has been written.
+    try {
+      const seen = readFileSync(path, "utf8");
+      if (seen.length > 0) return seen;
+    } catch {
+      // Not created yet.
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`probe wrote nothing to ${path} within ${ms}ms`);
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
 describe("agent access levels", () => {
   it("names the two levels there are", () => {
     expect(AGENT_ACCESS_LEVELS).toEqual(["workspace", "full"]);
@@ -404,8 +432,7 @@ describe.runIf(sandboxSupported() && !sandboxUnavailable())(
         // Reported, so the pane can say what this launch actually got rather
         // than what it asked for.
         expect(running.access).toBe("workspace");
-        await new Promise((r) => setTimeout(r, 1_200));
-        const seen = readFileSync(out, "utf8");
+        const seen = await readWhenWritten(out);
         expect(seen).not.toContain("master-credential");
         expect(seen).toMatch(/not permitted|No such file/i);
       } finally {
@@ -444,9 +471,8 @@ describe.runIf(sandboxSupported() && !sandboxUnavailable())(
         // Unconfined and reported as such. An unconfined launch that presents
         // as a confined one is the failure the whole module exists to prevent.
         expect(running.accessNotice).toContain("full access");
-        await new Promise((r) => setTimeout(r, 1_200));
         // The level does what it says, or the notice is theatre.
-        expect(readFileSync(out, "utf8")).toContain("master-credential");
+        expect(await readWhenWritten(out)).toContain("master-credential");
       } finally {
         launcher.close();
       }

@@ -30,6 +30,7 @@ import {
   DRIVEN_SYSTEM,
   RETRY_BASE_MS,
   runDrivenLoop,
+  STOPPED_BY_USER,
   TITLE_PROMPT,
   watchdogTickMs,
   WATCHDOG_MS,
@@ -115,6 +116,14 @@ export class OpenCodeDriver implements AgentDriver {
   private lastSessionEvent = 0;
   /** The naming call for the last answered turn, while it is still running. */
   private naming: Promise<void> | null = null;
+  /**
+   * The user turn being prompted for, while one is. Null covers the naming
+   * calls and the gaps between turns, which Stop must never mistake for the
+   * message it was pressed on.
+   */
+  private runningSeq: number | null = null;
+  /** A user turn the user stopped. Never handed to the model. */
+  private cancelledSeq: number | null = null;
   /** Resolves when the loop has left `run`. Tests await it; production does not. */
   readonly done: Promise<void>;
   private release!: () => void;
@@ -149,6 +158,32 @@ export class OpenCodeDriver implements AgentDriver {
     this.promptAbort?.abort();
   }
 
+  /**
+   * Ends the turn `seq` belongs to, and only that.
+   *
+   * The prompt POST has its own controller, which is exactly the scope Stop
+   * wants: aborting it ends that request, `prompt`'s catch tells the server to
+   * abort the session and drops it, and the loop goes back to waiting. The
+   * driver's own signal — the one that would end the loop — is untouched.
+   *
+   * Aborted only when the POST in flight is this seq's. A claimed turn that has
+   * not been prompted for yet has no POST of its own, and the controller held
+   * then belongs to the previous chat's naming call — aborting that would cost
+   * a chat its name and leave the stopped question to be asked anyway.
+   * Recording the seq is what stops it: `prompt` refuses to send it.
+   */
+  interrupt(seq: number): boolean {
+    if (this.stopped) return false;
+    this.cancelledSeq = seq;
+    if (this.runningSeq === seq) this.promptAbort?.abort();
+    return true;
+  }
+
+  /** Whether `seq` is a turn Stop has already closed. Null is never one. */
+  private isCancelled(seq: number | null): boolean {
+    return seq !== null && this.cancelledSeq === seq;
+  }
+
   private async run(): Promise<void> {
     let base: string;
     try {
@@ -179,7 +214,12 @@ export class OpenCodeDriver implements AgentDriver {
           });
         },
       },
-      (turn) => this.prompt(base, turn.chatId, turn.text),
+      (turn) => {
+        this.runningSeq = turn.seq;
+        return this.prompt(base, turn.chatId, turn.text).finally(() => {
+          this.runningSeq = null;
+        });
+      },
     );
   }
 
@@ -227,6 +267,12 @@ export class OpenCodeDriver implements AgentDriver {
     text: string,
     options: { background?: boolean } = {},
   ): Promise<string> {
+    // Stopped while the loop was still finishing the previous chat's naming
+    // call: the question is already answered, and sending it would answer it
+    // twice. A background call is not the user's turn and is never this.
+    if (!options.background && this.isCancelled(this.runningSeq)) {
+      throw new Error(STOPPED_BY_USER);
+    }
     const session = await this.ensureSession(base, chatId);
     this.inFlight.add(session);
     // Armed across the body read too, not just the headers: a server that
