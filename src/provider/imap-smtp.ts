@@ -691,20 +691,25 @@ export function archiveMailboxPath(
   const byPath = boxes.find((b) => /^\[gmail\]\/all mail$/i.test(b.path));
   if (byPath) return byPath.path;
   const byName = boxes.find((b) =>
-    /^(archive|archives|archiv|archivio|archivo|archief|arkiv)$/i.test(b.name),
+    /^(archive|archives|archiv|archivio|archivo|archief|arkiv|arquivo|archiwum|arkisto)$/i.test(b.name),
   );
   return byName?.path ?? null;
 }
 
 /**
- * MOVE one uid out of its folder, on an already-connected client.
+ * MOVE one uid out of its folder, on an already-connected client. Exported for
+ * tests: nothing else exercises the uidMap handling without a live server.
  *
- * The uid is looked up first, because a MOVE of a uid the server no longer
- * holds is a perfectly successful no-op: without this check every archive of
- * an already-moved message would report success and the row would vanish from
- * a list it is in fact still in.
+ * A MOVE of a uid the server no longer holds is a perfectly successful no-op,
+ * so "gone" has to be detected, not assumed: the SEARCH first answers it
+ * outright, and after the MOVE the COPYUID response answers it again — a
+ * UIDPLUS server that moved anything MUST return one (RFC 4315), so its
+ * absence means another client won the race inside the one round trip the
+ * SEARCH cannot cover. Only a server without UIDPLUS leaves that window
+ * genuinely undecidable, and there the move is reported without an id rather
+ * than invented.
  */
-async function moveUid(
+export async function moveUid(
   client: ImapFlow,
   accountId: string,
   source: { folder: string; uid: number },
@@ -713,24 +718,23 @@ async function moveUid(
   if (source.folder === destination) {
     throw new Error(`message is already in ${destination}`);
   }
+  const gone: MoveResult = {
+    moved: false,
+    fromFolder: source.folder,
+    toFolder: destination,
+  };
   // Writable lock: MOVE expunges from the source, which needs read-write.
   const lock = await client.getMailboxLock(source.folder);
   try {
     const present = await client.search({ uid: String(source.uid) }, { uid: true });
-    if (!present || present.length === 0) {
-      return { moved: false, fromFolder: source.folder, toFolder: destination };
-    }
+    if (!present || present.length === 0) return gone;
     const res = await client.messageMove(String(source.uid), destination, {
       uid: true,
     });
-    if (!res) {
-      return { moved: false, fromFolder: source.folder, toFolder: destination };
-    }
-    // uidMap is UIDPLUS-only. Without it the mail is in `destination` all the
-    // same; there is simply no id to hand back, and an undo has nothing to
-    // address — which is why the id is optional rather than fabricated.
+    if (!res) return gone;
     const newUid =
       typeof res === "object" ? res.uidMap?.get(source.uid) : undefined;
+    if (newUid == null && client.capabilities.has("UIDPLUS")) return gone;
     return {
       moved: true,
       fromFolder: source.folder,
@@ -740,6 +744,57 @@ async function moveUid(
   } finally {
     lock.release();
   }
+}
+
+/** How long a resolved Archive/Drafts location is trusted before LIST reruns. */
+const MAILBOX_PATH_TTL_MS = 5 * 60_000;
+
+type CachedMailboxPaths = {
+  archive: string | null;
+  drafts: string | null;
+  at: number;
+};
+
+/**
+ * Keyed by account id. Entries for removed accounts are never cleared — ids
+ * are random and never reused, so a stale entry can only ever go unread, and
+ * the TTL bounds how long a rename made in another client goes unnoticed.
+ */
+const mailboxPathCache = new Map<string, CachedMailboxPaths>();
+
+/**
+ * Where this account's Archive and Drafts mailboxes live, from cache when it
+ * is fresh. One LIST resolves both, so an archive after the first costs MOVE
+ * alone instead of paying a full folder LIST every time.
+ *
+ * A missing Archive mailbox is deliberately not remembered: the fix the error
+ * tells the user to make — create one — must be picked up on the very next
+ * archive, not when a TTL runs out. Exported for tests, which is also why
+ * `now` is injectable.
+ */
+export async function accountMailboxPaths(
+  client: Pick<ImapFlow, "list">,
+  accountId: string,
+  opts: { force?: boolean; needArchive?: boolean; now?: number } = {},
+): Promise<CachedMailboxPaths> {
+  const now = opts.now ?? Date.now();
+  const hit = mailboxPathCache.get(accountId);
+  if (
+    !opts.force &&
+    hit &&
+    now - hit.at <= MAILBOX_PATH_TTL_MS &&
+    !(opts.needArchive === true && hit.archive == null)
+  ) {
+    return hit;
+  }
+  const boxes = await client.list();
+  const fresh: CachedMailboxPaths = {
+    archive: archiveMailboxPath(boxes),
+    drafts: draftsMailboxPath(boxes),
+    at: now,
+  };
+  mailboxPathCache.set(accountId, fresh);
+  return fresh;
 }
 
 /**
@@ -1410,9 +1465,26 @@ export class ImapSmtpProvider implements MailProvider {
   ): Promise<MoveResult> {
     const parsed = parseId(messageId, account.id);
     if (!parsed) throw new Error(`invalid message id: ${messageId}`);
-    return withImap(account.id, account.creds, async (client) =>
-      moveUid(client, account.id, parsed, folder),
-    );
+    return withImap(account.id, account.creds, async (client) => {
+      // The Drafts mailbox is off limits in both directions. Its contents
+      // have their own lifecycle (draft_create/update/delete): a draft moved
+      // out is text no draft tool can see any more, and delivered mail moved
+      // in looks editable when it is not. Paths compare exactly because the
+      // destination is meant to come from listFolders, which hands back the
+      // same spellings LIST does.
+      const paths = await accountMailboxPaths(client, account.id);
+      if (paths.drafts && parsed.folder === paths.drafts) {
+        throw new Error(
+          `refusing to move a draft out of ${paths.drafts} — drafts are managed by the draft tools`,
+        );
+      }
+      if (paths.drafts && folder === paths.drafts) {
+        throw new Error(
+          `refusing to move a message into ${paths.drafts} — drafts are managed by the draft tools`,
+        );
+      }
+      return moveUid(client, account.id, parsed, folder);
+    });
   }
 
   async archiveMessage(
@@ -1422,13 +1494,32 @@ export class ImapSmtpProvider implements MailProvider {
     const parsed = parseId(messageId, account.id);
     if (!parsed) throw new Error(`invalid message id: ${messageId}`);
     return withImap(account.id, account.creds, async (client) => {
-      const path = archiveMailboxPath(await client.list());
-      if (!path) {
+      const paths = await accountMailboxPaths(client, account.id, {
+        needArchive: true,
+      });
+      if (!paths.archive) {
         throw new Error(
           "no Archive mailbox found on this account — create one named Archive in your mail provider",
         );
       }
-      return moveUid(client, account.id, parsed, path);
+      if (paths.drafts && parsed.folder === paths.drafts) {
+        throw new Error(
+          "a draft is not archived — edit or discard it with the draft tools",
+        );
+      }
+      try {
+        return await moveUid(client, account.id, parsed, paths.archive);
+      } catch (err) {
+        // The cached location can outlive the mailbox: renamed or deleted in
+        // another client inside the TTL. One fresh LIST decides whether that
+        // is what happened; any other failure re-throws unchanged.
+        const fresh = await accountMailboxPaths(client, account.id, {
+          force: true,
+          needArchive: true,
+        });
+        if (!fresh.archive || fresh.archive === paths.archive) throw err;
+        return moveUid(client, account.id, parsed, fresh.archive);
+      }
     });
   }
 

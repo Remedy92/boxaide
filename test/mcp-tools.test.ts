@@ -3,7 +3,8 @@ import { randomBytes } from "node:crypto";
 import { Store } from "../src/db/store.js";
 import { FixtureProvider } from "../src/provider/fixture.js";
 import { MailService } from "../src/mail/service.js";
-import { handleMcpJsonRpc, PLATFORM_TOOLS, TOOLS } from "../src/mcp/server.js";
+import { readFileSync } from "node:fs";
+import { CHAT_TOOLS, handleMcpJsonRpc, PLATFORM_TOOLS, TOOLS } from "../src/mcp/server.js";
 import { createPlatform } from "../src/platform.js";
 import type { AgentLauncher } from "../src/agent/launcher.js";
 
@@ -242,11 +243,19 @@ describe("MCP tool surface", () => {
     );
   });
 
-  it("refuses to archive a message that is already in Archive", async () => {
-    await call(mail, "message_archive", { account: "personal", messageId });
+  it("treats the old id as gone after an archive, and refuses re-archiving the new one", async () => {
+    const archived = payloadOf(
+      await call(mail, "message_archive", { account: "personal", messageId }),
+    ).result;
+    // The move retired the old id — a second archive of it moved nothing.
+    const stale = payloadOf(
+      await call(mail, "message_archive", { account: "personal", messageId }),
+    ).result;
+    expect(stale.moved).toBe(false);
+    // The live id really is in Archive, and archiving it again says so.
     const res = (await call(mail, "message_archive", {
       account: "personal",
-      messageId,
+      messageId: archived.id,
     })) as ToolResult & { result: { isError?: boolean } };
     expect(res.result.isError).toBe(true);
     expect(payloadOf(res).error).toMatch(/already in Archive/i);
@@ -265,6 +274,10 @@ describe("MCP tool surface", () => {
     const archived = payloadOf(
       await call(mail, "message_archive", { account: "personal", messageId }),
     ).result;
+    // A MOVE gives the message a NEW id — the old one is dead, exactly as on
+    // a UIDPLUS server. The undo must run on the id the archive handed back.
+    expect(archived.id).toBeTruthy();
+    expect(archived.id).not.toBe(messageId);
     const res = await call(mail, "message_move", {
       account: "personal",
       messageId: archived.id,
@@ -287,6 +300,57 @@ describe("MCP tool surface", () => {
     })) as ToolResult & { result: { isError?: boolean } };
     expect(res.result.isError).toBe(true);
     expect(payloadOf(res).error).toMatch(/already in INBOX/i);
+  });
+
+  it("refuses a destination folder carrying control characters", async () => {
+    // ImapFlow would refuse it too, but with a wire-level error; the service
+    // fails first with a sentence the toast can show.
+    const res = (await call(mail, "message_move", {
+      account: "personal",
+      messageId,
+      folder: "Archive\r\nX DELETE INBOX",
+    })) as ToolResult & { result: { isError?: boolean } };
+    expect(res.result.isError).toBe(true);
+    expect(payloadOf(res).error).toMatch(/control characters/i);
+  });
+
+  it("refuses message_move in and out of the Drafts mailbox", async () => {
+    const draft = payloadOf(
+      await call(mail, "draft_create", {
+        account: "personal",
+        subject: "half-written",
+      }),
+    ).draft;
+    const out = (await call(mail, "message_move", {
+      account: "personal",
+      messageId: draft.id,
+      folder: "INBOX",
+    })) as ToolResult & { result: { isError?: boolean } };
+    expect(out.result.isError).toBe(true);
+    expect(payloadOf(out).error).toMatch(/draft tools/i);
+
+    const into = (await call(mail, "message_move", {
+      account: "personal",
+      messageId,
+      folder: "Drafts",
+    })) as ToolResult & { result: { isError?: boolean } };
+    expect(into.result.isError).toBe(true);
+    expect(payloadOf(into).error).toMatch(/draft tools/i);
+  });
+
+  it("refuses to archive a draft", async () => {
+    const draft = payloadOf(
+      await call(mail, "draft_create", {
+        account: "personal",
+        subject: "half-written",
+      }),
+    ).draft;
+    const res = (await call(mail, "message_archive", {
+      account: "personal",
+      messageId: draft.id,
+    })) as ToolResult & { result: { isError?: boolean } };
+    expect(res.result.isError).toBe(true);
+    expect(payloadOf(res).error).toMatch(/draft/i);
   });
 
   it("drafts a reply through draft_create without sending it", async () => {
@@ -404,5 +468,23 @@ describe("MCP tool surface", () => {
       params: { protocolVersion: "2025-06-18" },
     })) as { result: { protocolVersion: string } };
     expect(res.result.protocolVersion).toBe("2025-06-18");
+  });
+});
+
+describe("web capability disclosure", () => {
+  it("lists exactly the mail and chat tools the server declares", () => {
+    // The dialog's array is a hand copy — the same drift the mcpb snapshot
+    // test guards against on the connector side. This pins the web side.
+    const src = readFileSync(
+      new URL(
+        "../apps/web/src/components/dialogs/capabilities-dialog.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const block = src.match(/const TOOLS = \[([^\]]+)\]/);
+    expect(block).toBeTruthy();
+    const listed = [...block![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    expect(listed).toEqual([...TOOLS, ...CHAT_TOOLS].map((t) => t.name));
   });
 });

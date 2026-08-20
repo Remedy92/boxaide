@@ -343,6 +343,12 @@ export class MailService {
     folder: string,
   ): Promise<MoveResult> {
     if (!folder.trim()) throw new Error("folder is required");
+    // ImapFlow's compiler already refuses CR/LF/NUL in a mailbox name, but
+    // with a wire-level "Unquotable character" error. Refuse here with a
+    // sentence the toast can show.
+    if (/[\0\r\n]/.test(folder)) {
+      throw new Error("folder name contains control characters");
+    }
     const account = this.resolve(accountRef);
     const result = await this.provider.moveMessage(account, messageId, folder);
     this.applyMove(account.id, messageId, result);

@@ -37,8 +37,9 @@ function nowIso(offsetMs = 0): string {
   return new Date(Date.now() + offsetMs).toISOString();
 }
 
-function makeId(accountId: string, uid: number): string {
-  return `${accountId}:${uid}`;
+/** Same accountId:folder:uid shape as the IMAP provider, folder encoded. */
+function makeId(accountId: string, folder: string, uid: number): string {
+  return `${accountId}:${encodeURIComponent(folder)}:${uid}`;
 }
 
 /** Mirrors the IMAP provider's since filter so the two agree in tests. */
@@ -71,7 +72,7 @@ export class FixtureProvider implements MailProvider {
     const list: Stored[] = [];
     let uid = 1;
     for (const m of messages) {
-      const id = makeId(accountId, uid);
+      const id = makeId(accountId, m.folder ?? "INBOX", uid);
       list.push({
         id,
         accountId,
@@ -262,7 +263,7 @@ export class FixtureProvider implements MailProvider {
     this.nextUid.set(account.id, uid + 1);
     const box = this.ensureBox(account.id, account.email);
     box.push({
-      id: makeId(account.id, uid),
+      id: makeId(account.id, "Sent", uid),
       accountId: account.id,
       uid,
       messageId,
@@ -300,12 +301,20 @@ export class FixtureProvider implements MailProvider {
     account: ProviderAccount,
     messageId: string,
   ): Promise<MoveResult> {
+    const found = this.find(account, messageId);
+    if (found?.folder === DRAFTS_FOLDER) {
+      throw new Error(
+        "a draft is not archived — edit or discard it with the draft tools",
+      );
+    }
     return this.move(account, messageId, ARCHIVE_FOLDER);
   }
 
   /**
-   * A move keeps the uid, exactly like a server without UIDPLUS would not —
-   * the fixture DOES name the new id, so the undo path is exercised by tests.
+   * Mirrors a UIDPLUS server: the message gets a NEW uid in the destination
+   * and the result names the new id. Keeping the old uid would let tests pass
+   * with ids the IMAP provider never preserves across a MOVE — the undo path
+   * must be exercised with an id that changed.
    */
   private move(
     account: ProviderAccount,
@@ -322,8 +331,24 @@ export class FixtureProvider implements MailProvider {
     if (found.folder === folder) {
       throw new Error(`message is already in ${folder}`);
     }
+    // Same rule as the IMAP provider: the Drafts mailbox belongs to the draft
+    // tools, in both directions.
+    if (found.folder === DRAFTS_FOLDER) {
+      throw new Error(
+        `refusing to move a draft out of ${DRAFTS_FOLDER} — drafts are managed by the draft tools`,
+      );
+    }
+    if (folder === DRAFTS_FOLDER) {
+      throw new Error(
+        `refusing to move a message into ${DRAFTS_FOLDER} — drafts are managed by the draft tools`,
+      );
+    }
     const fromFolder = found.folder;
+    const uid = this.nextUid.get(account.id) ?? 1;
+    this.nextUid.set(account.id, uid + 1);
     found.folder = folder;
+    found.uid = uid;
+    found.id = makeId(account.id, folder, uid);
     return { moved: true, fromFolder, toFolder: folder, id: found.id };
   }
 
@@ -365,7 +390,7 @@ export class FixtureProvider implements MailProvider {
     const messageId = `<${randomBytes(8).toString("hex")}@fixture.local>`;
     const text = input.text ?? "";
     box.push({
-      id: makeId(account.id, uid),
+      id: makeId(account.id, DRAFTS_FOLDER, uid),
       accountId: account.id,
       uid,
       messageId,
@@ -388,7 +413,7 @@ export class FixtureProvider implements MailProvider {
       accountEmail: account.email,
     });
     return {
-      id: makeId(account.id, uid),
+      id: makeId(account.id, DRAFTS_FOLDER, uid),
       accountId: account.id,
       uid,
       folder: DRAFTS_FOLDER,

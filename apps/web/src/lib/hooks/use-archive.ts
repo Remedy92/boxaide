@@ -12,12 +12,23 @@ import type { MessageListResponse } from "@/lib/types";
 /**
  * "Archived to Archive" is a sentence nobody writes. Name the mailbox only
  * when it is not simply called Archive — on Gmail it is [Gmail]/All Mail, and
- * there the destination is worth saying out loud.
+ * there the destination is worth saying out loud. Both "/" and "." split the
+ * leaf off: Dovecot- and Courier-style servers spell the same mailbox
+ * INBOX.Archive.
  */
 function archivedLabel(folder: string): string {
-  const leaf = folder.split("/").pop() ?? folder;
+  const leaf = folder.split(/[/.]/).pop() ?? folder;
   return /^archive(s)?$/i.test(leaf) ? "Archived" : `Archived to ${folder}`;
 }
+
+/**
+ * Message ids with an archive request in flight, shared by every mount of
+ * this hook — the reader, the shell's `e` handler and the palette each hold
+ * their own mutation instance. Without this a double-pressed `e` sends the
+ * same archive twice: the second finds the uid already gone, comes back 404,
+ * and the user is shown an error for an archive that in fact worked.
+ */
+const inflight = new Set<string>();
 
 export type ArchiveInput = {
   accountId: string;
@@ -136,5 +147,14 @@ export function useArchive() {
     },
   });
 
-  return archive;
+  return {
+    ...archive,
+    mutate: (input: ArchiveInput) => {
+      if (inflight.has(input.messageId)) return;
+      inflight.add(input.messageId);
+      archive.mutate(input, {
+        onSettled: () => inflight.delete(input.messageId),
+      });
+    },
+  };
 }

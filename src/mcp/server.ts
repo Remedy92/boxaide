@@ -210,7 +210,7 @@ export const TOOLS = [
   {
     name: "message_move",
     description:
-      "Move one message into another mailbox of the same account. Use a path from folders_list. Nothing is deleted and nothing is sent. Returns { moved: false } when the message had already left its folder.",
+      "Move one message into another mailbox of the same account. Use a path from folders_list. Nothing is deleted and nothing is sent. The Drafts mailbox is off limits in both directions — drafts have their own tools. Returns { moved: false } when the message had already left its folder.",
     inputSchema: {
       type: "object" as const,
       properties: {

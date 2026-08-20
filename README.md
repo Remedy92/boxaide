@@ -41,7 +41,8 @@ move (no UIDPLUS) shows no Undo at all, rather than one that would fail.
 
 A mailbox whose server has no Archive folder says so instead of guessing:
 create one named `Archive` in your mail provider and it is picked up on the
-next archive.
+next archive. Archiving is one message per request — there is no bulk archive
+yet.
 
 ### Production-ish start
 
