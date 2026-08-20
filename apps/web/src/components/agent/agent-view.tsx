@@ -100,34 +100,31 @@ export function AgentView({
   }, []);
 
   /* Opening this view is also a start, so the agent is up before the first
-     question rather than after it. One attempt per mount: a start that fails
-     is not retried in a loop, and a send still starts one below.
+     question rather than after it. One attempt per mount; a send still starts
+     one below if this one fails.
 
-     Two things gate it. The launcher's list has to have answered, because
-     `ensureAgent` does nothing while nothing is picked and that query is still
-     in flight on the first render: a start on mount would spend the one attempt
-     on a call that could not have started anything. And the pane has to still be
-     here after START_SETTLE_MS, which is what keeps a launch that passes through on
-     its way to mail from spawning a CLI.
-
-     Kept off `ensureAgent` in the dependency list on purpose: it is rebuilt on
-     every render, so an effect keyed on it would clear and re-arm the timer
-     forever while a run is streaming. */
+     Mounted is not on screen, and not every gate here is obvious:
+     `ensureAgent` does nothing until the launcher's list has answered, the
+     settle keeps a launch that only passes through on its way to mail from
+     spawning anything, and the wizard renders OVER this pane, where a spawn
+     would tell its last step an agent had been paired. `ensureAgent` is held
+     in a ref because it is rebuilt every render and would re-arm the timer
+     forever while a run streams. */
   const { picked } = usePickedAgent();
   const ensure = React.useRef(ensureAgent);
   React.useEffect(() => {
     ensure.current = ensureAgent;
   });
   const started = React.useRef(false);
-  const pickedAgent = picked !== null;
+  const ready = picked !== null && !app.wizardOpen;
   React.useEffect(() => {
-    if (!pickedAgent || started.current) return;
+    if (!ready || started.current) return;
     const timer = window.setTimeout(() => {
       started.current = true;
       void ensure.current();
     }, START_SETTLE_MS);
     return () => window.clearTimeout(timer);
-  }, [pickedAgent]);
+  }, [ready]);
 
   /* A send is also a start. The agent is picked in the composer now, not
      started from the sidebar, so the first message on a quiet machine has to
