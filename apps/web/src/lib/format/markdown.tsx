@@ -5,8 +5,8 @@ import { linkifyToElements } from "@/lib/format/linkify";
  * A deliberately small Markdown subset, rendered to React elements.
  *
  * No library and no HTML string. Every other renderer either takes an HTML
- * detour — which this app forbids everywhere, see linkify and the reader's
- * refusal to touch bodyHtml — or ships a parser and a sanitiser to audit. The
+ * detour, which this app takes nowhere but the mail frame, see linkify and
+ * HtmlBody, or ships a parser and a sanitiser to audit. The
  * agent writes prose about email, so the grammar it actually uses is short:
  *
  *   # heading            fenced code       ```
