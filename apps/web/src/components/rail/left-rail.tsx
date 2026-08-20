@@ -96,6 +96,37 @@ export function LeftRail({
     return { loaded, total };
   }, [app.account, errors.length, hasResponse, list.length]);
 
+  /* The collapsed rail's views popover is controlled so that navigating from
+     inside it can close it. Radix only dismisses on an outside click, and every
+     row in there is an inside one. */
+  const [viewsOpen, setViewsOpen] = React.useState(false);
+
+  /* The rail is shown in three surfaces that sit above the workspace: the sheet
+     below 760px, the overlay at the medium breakpoint, and this popover. A row
+     that changes the view has to drop whichever one it was clicked in, or the
+     pane it just opened stays hidden behind it. */
+  const dismiss = React.useCallback(() => {
+    setViewsOpen(false);
+    app.setRailSheetOpen(false);
+    app.setRailOverlay(false);
+  }, [app]);
+
+  /* Wraps every row that lands the workspace somewhere — a view, a folder, a
+     mailbox, the settings page. Rows that open a dialog are NOT wrapped: the
+     dialog stacks above the rail, closing both in one commit leaves focus on
+     nothing, and a composer dismissed with Escape should come back to the
+     sidebar it was started from. The all-chats dialog is the one exception —
+     it drops the rail itself, on the way out, because picking a chat there IS
+     a navigation. */
+  const go = React.useCallback(
+    <A extends unknown[]>(navigate: (...args: A) => void) =>
+      (...args: A) => {
+        dismiss();
+        navigate(...args);
+      },
+    [dismiss],
+  );
+
   const inMail = app.view === "mail";
   const pending = badge.data?.pending ?? 0;
   const sections = useRailSections();
@@ -148,7 +179,7 @@ export function LeftRail({
           icon={Sparkle}
           label="Agent"
           active={app.view === "agent"}
-          onClick={() => app.setView("agent")}
+          onClick={go(() => app.setView("agent"))}
           trailing={
             agent.presence.working ? (
               <span className="flex items-center pr-0.5">
@@ -170,7 +201,10 @@ export function LeftRail({
         onToggle={() => toggle("chats")}
         summary={foldedCount(chatCount)}
       >
-        <ChatsSection onOpenAll={() => app.openDialog("chats")} />
+        <ChatsSection
+          onOpenAll={() => app.openDialog("chats")}
+          onNavigate={dismiss}
+        />
       </RailSection>
 
       {/* Unlabelled, like the Agent row above: a calendar is neither mail nor
@@ -182,7 +216,7 @@ export function LeftRail({
           icon={CalendarDays}
           label="Calendar"
           active={app.view === "calendar"}
-          onClick={() => app.setView("calendar")}
+          onClick={go(() => app.setView("calendar"))}
         />
       </div>
 
@@ -199,20 +233,20 @@ export function LeftRail({
           icon={Inbox}
           label="Inbox"
           active={inMail && app.account === "all" && !app.unreadOnly && !app.folder}
-          onClick={() => {
+          onClick={go(() => {
             app.setView("mail");
             app.setAccount("all");
             app.setUnreadOnly(false);
-          }}
+          })}
         />
         <NavItem
           icon={MailOpen}
           label="Unread"
           active={inMail && app.unreadOnly}
-          onClick={() => {
+          onClick={go(() => {
             app.setView("mail");
             app.setUnreadOnly(!app.unreadOnly);
-          }}
+          })}
         />
         {/* Writing a mail by hand is a mail action, so it sits with the other
             mail actions rather than as the loudest control in the rail.
@@ -233,7 +267,7 @@ export function LeftRail({
           icon={FilePen}
           label="Drafts"
           active={app.view === "drafts"}
-          onClick={() => app.setView("drafts")}
+          onClick={go(() => app.setView("drafts"))}
         />
         {/* Under Mail, and it stays in a mail-only install: an automation is a
             rule that runs over messages, which is exactly what somebody who
@@ -242,7 +276,7 @@ export function LeftRail({
           icon={Timer}
           label="Automations"
           active={app.view === "automations"}
-          onClick={() => app.setView("automations")}
+          onClick={go(() => app.setView("automations"))}
         />
 
         {/* Mail and Drafts only. Folders scope the MESSAGE list; in a
@@ -255,10 +289,10 @@ export function LeftRail({
             accountRef={app.account}
             activeFolder={app.folder}
             disabled={app.view === "drafts"}
-            onSelect={(path) => {
+            onSelect={go((path: string | undefined) => {
               app.setView("mail");
               app.setFolder(path);
-            }}
+            })}
           />
         )}
       </RailSection>
@@ -291,13 +325,13 @@ export function LeftRail({
             icon={Users}
             label="People"
             active={app.view === "people"}
-            onClick={() => app.setView("people")}
+            onClick={go(() => app.setView("people"))}
           />
           <NavItem
             icon={Columns3}
             label="Pipeline"
             active={app.view === "pipeline"}
-            onClick={() => app.setView("pipeline")}
+            onClick={go(() => app.setView("pipeline"))}
           />
           {/* The one count in this rail, and the one the spec asks for: emails
               an agent wrote that nobody has decided on. It is a number the
@@ -309,7 +343,7 @@ export function LeftRail({
             icon={Send}
             label="Outreach"
             active={app.view === "outreach"}
-            onClick={() => app.setView("outreach")}
+            onClick={go(() => app.setView("outreach"))}
             ariaLabel={
               pending > 0
                 ? `Outreach, ${pending} waiting for approval`
@@ -343,7 +377,7 @@ export function LeftRail({
             answers mail through a conversation, and the button that starts one
             has to be reachable at any scroll position. */}
         <div className="pb-3">
-          <NewChatButton collapsed={collapsed} />
+          <NewChatButton collapsed={collapsed} onNavigate={dismiss} />
         </div>
       </div>
 
@@ -353,7 +387,7 @@ export function LeftRail({
         }`}
       >
         {collapsed ? (
-          <Popover>
+          <Popover open={viewsOpen} onOpenChange={setViewsOpen}>
             <Tooltip>
               <TooltipTrigger asChild>
                 <PopoverTrigger asChild>
@@ -405,9 +439,9 @@ export function LeftRail({
                 selected={app.account === account.alias}
                 compact={app.density === "compact"}
                 collapsed
-                onSelect={(alias) =>
-                  app.setAccount(app.account === alias ? "all" : alias)
-                }
+                onSelect={go((alias: string) =>
+                  app.setAccount(app.account === alias ? "all" : alias),
+                )}
               />
             ))}
             <Tooltip>
@@ -467,9 +501,9 @@ export function LeftRail({
                 health={healthFor(account)}
                 selected={app.account === account.alias}
                 compact={app.density === "compact"}
-                onSelect={(alias) =>
-                  app.setAccount(app.account === alias ? "all" : alias)
-                }
+                onSelect={go((alias: string) =>
+                  app.setAccount(app.account === alias ? "all" : alias),
+                )}
               />
             ))}
           </RailSection>
@@ -513,7 +547,7 @@ export function LeftRail({
         density={app.density}
         collapsed={collapsed}
         gPending={gPending}
-        onOpenSettings={() => app.openSettings()}
+        onOpenSettings={go(() => app.openSettings())}
         onToggleDensity={app.toggleDensity}
       />
     </div>

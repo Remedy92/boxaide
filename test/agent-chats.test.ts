@@ -26,6 +26,17 @@ function make(): { store: Store; channel: AgentChannel } {
   return { store, channel };
 }
 
+/** Saves a session the way a driver does: on the epoch it just read. */
+function save(
+  channel: AgentChannel,
+  chatId: string,
+  agent: string,
+  sessionId: string,
+): void {
+  const { epoch } = channel.chatSession(chatId, agent);
+  channel.saveChatSession(chatId, agent, sessionId, epoch);
+}
+
 afterEach(() => {
   for (const channel of channels.splice(0)) channel.close();
   for (const store of stores.splice(0)) store.close();
@@ -125,6 +136,63 @@ describe("chats", () => {
     expect(title.length).toBeLessThanOrEqual(61);
     expect(title).not.toContain("\n");
     expect(title.endsWith("…")).toBe(true);
+  });
+
+  it("keeps a CLI session per chat, and hands it only to the agent that made it", () => {
+    const { channel } = make();
+    const first = channel.activeChat().id;
+    const second = channel.createChat().id;
+    save(channel, first, "claude-code", "ses-a");
+    save(channel, second, "claude-code", "ses-b");
+
+    expect(channel.chatSession(first, "claude-code").id).toBe("ses-a");
+    expect(channel.chatSession(second, "claude-code").id).toBe("ses-b");
+    // A session id means nothing to a CLI that did not issue it, so the chat
+    // starts a fresh one rather than failing every turn on a stranger's id.
+    expect(channel.chatSession(first, "opencode").id).toBeNull();
+    // A chat that changed agents keeps only the last session it was given.
+    save(channel, first, "opencode", "ses-oc");
+    expect(channel.chatSession(first, "opencode").id).toBe("ses-oc");
+    expect(channel.chatSession(first, "claude-code").id).toBeNull();
+  });
+
+  it("drops a chat's session when its messages go, and leaves the others alone", () => {
+    const { channel } = make();
+    const first = channel.activeChat().id;
+    const second = channel.createChat().id;
+    channel.post({ role: "user", text: "hello", chatId: first });
+    save(channel, first, "claude-code", "ses-a");
+    save(channel, second, "claude-code", "ses-b");
+
+    channel.clear(first);
+    // A model resuming a transcript the pane no longer shows would answer from
+    // history the user has just emptied.
+    expect(channel.chatSession(first, "claude-code").id).toBeNull();
+    expect(channel.chatSession(second, "claude-code").id).toBe("ses-b");
+
+    channel.deleteChat(second);
+    expect(channel.chatSession(second, "claude-code").id).toBeNull();
+  });
+
+  it("refuses a session saved by a turn that started before the chat was cleared", () => {
+    const { channel } = make();
+    const chat = channel.activeChat().id;
+    channel.post({ role: "user", text: "hello", chatId: chat });
+    // What a driver reads when it takes the turn.
+    const before = channel.chatSession(chat, "claude-code").epoch;
+
+    // The user empties the chat while the model is still working on it.
+    channel.clear(chat);
+    // The answer lands afterwards and tries to save the session it ran in.
+    channel.saveChatSession(chat, "claude-code", "ses-stale", before);
+
+    // Refused. Resuming it would answer the next message from the history the
+    // user has just emptied.
+    expect(channel.chatSession(chat, "claude-code").id).toBeNull();
+
+    // The turn after the clear reads the new epoch and saves normally.
+    save(channel, chat, "claude-code", "ses-fresh");
+    expect(channel.chatSession(chat, "claude-code").id).toBe("ses-fresh");
   });
 
   it("writes new messages to the chat the user selected", () => {

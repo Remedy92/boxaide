@@ -37,6 +37,13 @@ export type Settings = {
    */
   agentModel: string;
   /**
+   * Agent CLI the composer's picker points at, and the one a send starts when
+   * nothing is running. Empty means nothing has been picked yet. It is checked
+   * against the server's list before every use: the CLI can be uninstalled
+   * between two visits, and a stored id must not outlive it.
+   */
+  agentId: string;
+  /**
    * Whether this browser shows the CRM at all: People, Pipeline and Outreach.
    *
    * It is a choice about what the app IS, not a filter over what it shows.
@@ -95,6 +102,9 @@ export const SETTINGS_KEYS = {
  */
 export const CRM_KEY = "boxaide.crm";
 
+/** Same story as CRM_KEY: post-rename, so readString and not readPref. */
+export const AGENT_ID_KEY = "boxaide.agentId";
+
 export const DEFAULT_SETTINGS: Settings = {
   baseUrl: DEFAULT_API_BASE,
   token: "",
@@ -103,6 +113,7 @@ export const DEFAULT_SETTINGS: Settings = {
   recentCommands: [],
   onboarded: false,
   agentModel: "",
+  agentId: "",
   /* On, so an upgrade does not silently take the CRM away from somebody who is
      already using it. The wizard asks; nobody who skips the wizard loses a
      view they had yesterday. */
@@ -233,6 +244,7 @@ export function readSettings(): Settings {
       readPref("onboarded") === "1" ||
       (token ?? "").length > 0,
     agentModel: readPref("agentModel") ?? "",
+    agentId: readString(AGENT_ID_KEY) ?? "",
     /* Absent means never asked, which is the upgrade case and the default: on.
        Only an explicit "0" turns it off. */
     crm: readString(CRM_KEY) !== "0",
@@ -264,6 +276,9 @@ export function writeSettings(patch: Partial<Settings>): Settings {
   }
   if (patch.agentModel !== undefined) {
     writeString(SETTINGS_KEYS.agentModel, patch.agentModel);
+  }
+  if (patch.agentId !== undefined) {
+    writeString(AGENT_ID_KEY, patch.agentId);
   }
   if (patch.crm !== undefined) {
     writeString(CRM_KEY, patch.crm ? "1" : "0");

@@ -1,4 +1,8 @@
+import { spawn } from "node:child_process";
 import { timingSafeEqual } from "node:crypto";
+import { mkdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -1018,4 +1022,185 @@ function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
     launcher.stop();
     return c.json({ stopping: true });
   });
+
+  // One watcher per server, so pressing the button twice does not leave two
+  // relaunches racing for the chat slot. Held here rather than at module scope
+  // because every runtime gets its own routes and its own launcher.
+  let watching: (() => void) | null = null;
+
+  /**
+   * Opens a terminal on `claude /login`, and relaunches the agent when the
+   * login lands.
+   *
+   * Signing in cannot happen inside Boxaide: it is an interactive OAuth flow
+   * with a browser and a paste-back, and `claude` runs it in its own terminal
+   * UI. What Boxaide can do is start that terminal for the user and then stop
+   * making them come back — the agent they were talking to gets restarted for
+   * them, on the model they had picked, and the messages the signed-out run
+   * dropped are requeued by the launch itself (AgentChannel.requeueDropped).
+   *
+   * macOS only, and it says so instead of pretending. There is no portable
+   * "open a terminal here": the Linux answer is a guess among a dozen terminal
+   * emulators, and a wrong guess is a button that silently does nothing.
+   */
+  app.post("/api/agents/claude-code/signin", (c) => {
+    if (process.platform !== "darwin") {
+      return c.json(
+        {
+          error:
+            "opening a terminal is only wired up on macOS: run `claude /login` yourself, then press Start",
+        },
+        501,
+      );
+    }
+    const bin = launcher.binFor("claude-code");
+    if (!bin) {
+      return c.json({ error: "claude-code is not installed (no claude on PATH)" }, 400);
+    }
+    // The login must run against the SAME isolated home the launches use. On
+    // macOS the CLI keys its keychain entry to the config directory, so a
+    // plain `claude /login` signs the user's terminal in and leaves every
+    // launch exactly as signed out as before — a button that "works" forever.
+    const home = launcher.claudeConfigHome();
+    try {
+      // A first sign-in can predate the first launch; the CLI needs the
+      // directory to exist before it can write a login into it.
+      mkdirSync(home, { recursive: true });
+      openClaudeLogin(bin, home);
+    } catch (err) {
+      return c.json(
+        { error: `could not open Terminal: ${err instanceof Error ? err.message : String(err)}` },
+        500,
+      );
+    }
+    // A second press replaces the watch rather than stacking one: the user is
+    // signing in once, in one terminal, and the fresh window is the one to wait
+    // on.
+    watching?.();
+    watching = watchForClaudeSignIn(launcher, claudeSignInFiles(home));
+    return c.json({ opened: true, watching: true, watchMs: SIGNIN_WATCH_MS });
+  });
+}
+
+/** How often the sign-in watch looks. A login is minutes of typing, not ms. */
+const SIGNIN_POLL_MS = 2_000;
+
+/**
+ * How long it keeps looking before giving the terminal up as abandoned.
+ *
+ * Long enough for an OAuth round trip through a browser and a paste-back;
+ * short enough that a window the user closed does not leave a timer that
+ * relaunches their agent an hour later, out of nowhere.
+ */
+const SIGNIN_WATCH_MS = 5 * 60 * 1000;
+
+/**
+ * The files a finished `claude /login` writes.
+ *
+ * The isolated home's pair first — that terminal runs with CLAUDE_CONFIG_DIR
+ * set there, and its `.claude.json` account record is rewritten on every
+ * login, including when the token itself went to the macOS keychain and no
+ * credentials file exists at all. The user's own pair is still watched too:
+ * someone who closes the opened terminal and runs a plain `claude /login`
+ * instead has file-backed logins propagated into the launch by prepare's
+ * credential copy, and their landing should relaunch the agent all the same.
+ */
+function claudeSignInFiles(home: string): string[] {
+  return [
+    join(home, ".credentials.json"),
+    join(home, ".claude.json"),
+    join(homedir(), ".claude", ".credentials.json"),
+    join(homedir(), ".claude.json"),
+  ];
+}
+
+/**
+ * The AppleScript that puts `claude /login` in front of the user — pointed at
+ * the launch's isolated home, because that is the only place a login is worth
+ * anything to the agent (see the sign-in route).
+ *
+ * Two levels of quoting, both of which have to survive a path with a space in
+ * it — `/Users/Ada Byron/.local/bin/claude` is an ordinary install: the shell
+ * inside `do script`, and the AppleScript string literal around that. Pure and
+ * exported so both are actually tested rather than eyeballed.
+ */
+export function claudeLoginScript(bin: string, configDir: string): string {
+  const shell = `CLAUDE_CONFIG_DIR=${shellQuote(configDir)} ${shellQuote(bin)} /login`;
+  const applescript = shell.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `tell application "Terminal"\nactivate\ndo script "${applescript}"\nend tell`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Runs that script. Detached: the terminal outlives the request that opened it. */
+function openClaudeLogin(bin: string, configDir: string): void {
+  const child = spawn("osascript", ["-e", claudeLoginScript(bin, configDir)], {
+    stdio: "ignore",
+    detached: true,
+  });
+  child.unref();
+  // osascript failing is asynchronous and there is nobody left to tell; the
+  // watch below simply times out, which is the same outcome as a user who
+  // closed the window.
+  child.on("error", () => {});
+}
+
+/** What the watch needs of the launcher. Stated so a test can stand in for it. */
+type SignInLauncher = {
+  chatBusy(): boolean;
+  lastModelFor(id: string): string | null;
+  start(id: string, model?: string): Promise<unknown>;
+};
+
+/**
+ * Watches for a login landing, and starts the agent when one does.
+ *
+ * Polls mtimes rather than fs.watch: the two paths may not exist yet — that is
+ * the whole point of a first sign-in — and watching a directory for a file that
+ * arrives, on two platforms' worth of atomic-rename behaviour, is more moving
+ * parts than looking twice a second at two numbers.
+ *
+ * Returns a cancel. The timer is unref'd, so a watch nobody cancels cannot hold
+ * the process open at shutdown.
+ */
+export function watchForClaudeSignIn(
+  launcher: SignInLauncher,
+  files: string[],
+  opts: { pollMs?: number; windowMs?: number } = {},
+): () => void {
+  const before = files.map(mtimeOrNull);
+  const deadline = Date.now() + (opts.windowMs ?? SIGNIN_WATCH_MS);
+  const timer = setInterval(() => {
+    const landed = files.some((file, i) => mtimeOrNull(file) !== before[i]);
+    if (!landed && Date.now() < deadline) return;
+    cancel();
+    if (!landed) return;
+    // The user may have pressed Start themselves while the terminal was open.
+    // Checked here and enforced by the launcher, which refuses a second chat
+    // launch outright — this only keeps the refusal out of the logs.
+    if (launcher.chatBusy()) return;
+    const model = launcher.lastModelFor("claude-code");
+    void Promise.resolve(launcher.start("claude-code", model ?? undefined)).catch(() => {
+      // A relaunch that will not start — the CLI moved, another one is already
+      // running — is not worth an unhandled rejection. Start is still there.
+    });
+  }, opts.pollMs ?? SIGNIN_POLL_MS);
+  timer.unref?.();
+  let done = false;
+  function cancel(): void {
+    if (done) return;
+    done = true;
+    clearInterval(timer);
+  }
+  return cancel;
+}
+
+function mtimeOrNull(path: string): number | null {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
 }

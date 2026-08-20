@@ -19,10 +19,16 @@
  * to quit early. A turn either produces a result event or it fails, and a
  * failure gives the lease back so the message is handed over again.
  *
+ * One session per chat, not per agent: a single running agent answers every
+ * chat, and one shared session would feed every conversation into the same
+ * transcript. The ids live beside the chats in the store, so an agent that is
+ * stopped and started again resumes where each conversation left off — the
+ * workdir is stable, so the transcripts are still on disk.
+ *
  * The one thing that can be lost is memory. If a resume is refused — a pruned
- * transcript, a different home directory — the driver drops the session id and
- * starts a fresh one rather than failing the turn: an amnesiac agent beats a
- * dead one, and the user's next message still gets answered.
+ * transcript, a different home directory — the driver drops that chat's session
+ * id and starts a fresh one rather than failing the turn: an amnesiac agent
+ * beats a dead one, and the user's next message still gets answered.
  *
  * The loop's own chat tools are absent from a driven session's allowlist (see
  * `drivenPreapprovedToolNames` in launcher.ts). Two askers on one channel is
@@ -31,7 +37,12 @@
  * session that lost its transcript reads back what was already said.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { claudeTurnReader, type ClaudeTurnOutcome } from "./agent-stream.js";
+import {
+  claudeAuthFailed,
+  claudeTurnReader,
+  CLAUDE_EMPTY_SUCCESS,
+  type ClaudeTurnOutcome,
+} from "./agent-stream.js";
 import {
   DRIVEN_SYSTEM,
   runDrivenLoop,
@@ -40,6 +51,7 @@ import {
   WATCHDOG_MS,
   type AgentDriver,
   type DriverChannel,
+  type StopCause,
 } from "./driver.js";
 import { MAX_DELIVERIES } from "../db/store.js";
 
@@ -101,11 +113,22 @@ export type ClaudeDriverOptions = {
   /** The full child environment, exactly as a launcher spawn would build it. */
   env: NodeJS.ProcessEnv;
   /**
+   * Repairs this launch's copied credential and says whether anything changed.
+   *
+   * The driver knows a turn failed for authentication; it does not know where
+   * the launch keeps its isolated home, and it must not: the launcher owns
+   * every path a launch touches. So the repair itself is passed in, and all
+   * this file decides is when one is worth spending. False means nothing moved,
+   * which is the launcher saying a retry would fail identically.
+   */
+  healAuth?: () => boolean;
+  /**
    * The loop's end: null when it was stopped, a message when it gave up. The
    * launcher has no child exit to watch for a driven agent, so this is the only
-   * exit there is.
+   * exit there is. The cause carries what the pane cannot read off that message
+   * — today, whether the CLI is signed out.
    */
-  onStop?: (error: string | null) => void;
+  onStop?: (error: string | null, cause: StopCause) => void;
   /** Overridable for tests. */
   waitMs?: number;
   retryBaseMs?: number;
@@ -117,12 +140,26 @@ export type ClaudeDriverOptions = {
 export class ClaudeDriver implements AgentDriver {
   private abort = new AbortController();
   private stopped = false;
-  /** The session the next turn resumes. Null starts a fresh one. */
-  private sessionId: string | null = null;
   /** The turn's process, so stop() and the watchdog can end it. */
   private child: ChildProcess | null = null;
   /** Why the loop gave up, reported once through onStop. */
   private giveUp: string | null = null;
+  /**
+   * A turn ended on a sign-in failure that the one repair did not fix. Sticky
+   * for the rest of the run: it is what the exit record is stamped with, and by
+   * the time the loop gives up the failing turn is several backoffs behind.
+   */
+  private authRequired = false;
+  /**
+   * The one silent credential repair this run gets.
+   *
+   * Once, because the repair's whole premise is that the copied credential went
+   * stale while the machine's own login is fine. If a turn is still signed out
+   * after a fresh copy, the user is signed out — and retrying the repair every
+   * turn would spend the whole delivery budget re-copying a file that is not
+   * the problem, then report a timeout instead of the sign-out.
+   */
+  private healed = false;
   /** The naming call for the last answered turn, while it is still running. */
   private naming: Promise<void> | null = null;
   /** Resolves when the loop has left `run`. Tests await it; production does not. */
@@ -160,7 +197,7 @@ export class ClaudeDriver implements AgentDriver {
     // The chat tools go back to the MCP tier.
     this.opts.channel.setDriven(false);
     try {
-      this.opts.onStop?.(this.giveUp);
+      this.opts.onStop?.(this.giveUp, { authRequired: this.authRequired });
     } catch {
       // The launcher's own bookkeeping, which at shutdown reads a store that may
       // already be closed. The loop is over either way, and a throw here would
@@ -186,7 +223,7 @@ export class ClaudeDriver implements AgentDriver {
           });
         },
       },
-      (text) => this.prompt(text),
+      (turn) => this.prompt(turn.chatId, turn.text),
     );
   }
 
@@ -201,16 +238,61 @@ export class ClaudeDriver implements AgentDriver {
     try {
       if (this.stopped) return;
       if (!this.opts.channel.needsTitle(chatId)) return;
-      const raw = await this.prompt(TITLE_PROMPT);
+      const raw = await this.prompt(chatId, TITLE_PROMPT);
       this.opts.channel.nameChat(chatId, raw);
     } catch {
       // No name is a fine outcome. The answer is already posted.
     }
   }
 
-  /** One turn: spawn, read, answer. Throws on any failure. */
-  private async prompt(text: string): Promise<string> {
-    const resuming = this.sessionId;
+  /**
+   * One turn of one chat, plus the one repair a signed-out CLI is allowed to
+   * cost.
+   *
+   * The launch copies the user's credential into an isolated home, and on macOS
+   * the real login usually lives in the keychain — so that copy can be a stale
+   * file shadowing a perfectly good sign-in, and every turn of the run then
+   * reports "Not logged in" until the message is dropped. The repair deletes
+   * the copy and takes a fresh one, which costs a few milliseconds and fixes
+   * the whole class silently. Anything still signed out after that is a real
+   * sign-out, and the user has to be told rather than retried at.
+   *
+   * Throws on any failure, including this one: an unanswerable turn gives the
+   * lease back, which is what puts the message in front of the next attempt.
+   */
+  private async prompt(chatId: string, text: string): Promise<string> {
+    let outcome = await this.takeTurn(chatId, text);
+    if (claudeAuthFailed(outcome)) {
+      if (!this.healed) {
+        this.healed = true;
+        // A repair that moved nothing means the retry would meet the same
+        // credential, so it is not worth a second process.
+        if (this.opts.healAuth?.()) outcome = await this.takeTurn(chatId, text);
+      }
+      if (claudeAuthFailed(outcome)) {
+        this.authRequired = true;
+        throw new Error(signedOutMessage(outcome));
+      }
+    }
+    if (outcome.text) return outcome.text;
+    // An empty answer is a failed turn. Posting nothing would end the lease with
+    // a blank reply in the pane; throwing re-queues the message instead.
+    throw new Error(outcome.error ?? "claude produced no answer");
+  }
+
+  /**
+   * One `claude -p` process, with the session bookkeeping its outcome implies.
+   *
+   * The session is looked up per chat rather than held for the driver. One
+   * running agent answers every chat, and a shared session would pour every
+   * conversation into a single transcript — each chat asking the model to
+   * continue whatever some other chat was talking about.
+   */
+  private async takeTurn(chatId: string, text: string): Promise<ClaudeTurnOutcome> {
+    const { id: resuming, epoch } = this.opts.channel.chatSession(
+      chatId,
+      this.opts.agent,
+    );
     const outcome = await this.runTurn({
       prompt: text,
       system: DRIVEN_SYSTEM,
@@ -219,15 +301,26 @@ export class ClaudeDriver implements AgentDriver {
     // The id is taken from a failed turn too: a fresh session that failed
     // mid-work still exists, and resuming it is how the retry keeps whatever
     // the model already did.
-    if (outcome.sessionId) this.sessionId = outcome.sessionId;
-    if (outcome.text) return outcome.text;
+    //
+    // Handed back with the epoch this turn started on, so a chat the user
+    // cleared while the model was working stays cleared: the save is refused
+    // rather than resurrecting the transcript they just emptied.
+    if (outcome.sessionId) {
+      this.opts.channel.saveChatSession(
+        chatId,
+        this.opts.agent,
+        outcome.sessionId,
+        epoch,
+      );
+    }
     // A resume the CLI could not find will never be found: the transcript is
     // gone. Keeping the id would fail every later turn the same way, so drop it
     // and let the retry start a session — losing context, not the conversation.
-    if (resuming && resumeRefused(outcome.error, resuming)) this.sessionId = null;
-    // An empty answer is a failed turn. Posting nothing would end the lease with
-    // a blank reply in the pane; throwing re-queues the message instead.
-    throw new Error(outcome.error ?? "claude produced no answer");
+    // Only this chat's: every other chat's transcript is still there.
+    if (!outcome.text && resuming && resumeRefused(outcome.error, resuming)) {
+      this.opts.channel.clearChatSession(chatId);
+    }
+    return outcome;
   }
 
   /**
@@ -354,6 +447,27 @@ function turnError(ctx: {
   const reported = ctx.found.error ?? ctx.stderr.trim().split("\n").pop() ?? "";
   if (reported) return reported;
   return `claude exited ${ctx.code ?? "on a signal"} without an answer`;
+}
+
+/**
+ * What the pane is told when the CLI has no sign-in.
+ *
+ * The CLI's own words when it wrote any: they name the account and the command,
+ * which is more than this file knows. The empty-success case wrote nothing a
+ * person could act on, so it states the conclusion instead of repeating
+ * "claude: success" at somebody who is trying to find out why their agent
+ * stopped answering.
+ */
+function signedOutMessage(outcome: ClaudeTurnOutcome): string {
+  const said = (outcome.text ?? outcome.error ?? "").trim();
+  // No `claude /login` instruction here: on macOS a login run in the user's
+  // own terminal lands in a keychain slot the launch cannot see, and telling
+  // them to do that is what kept the sign-out loop turning. The Sign in
+  // button runs the login against the launch's own home.
+  if (!said || said === CLAUDE_EMPTY_SUCCESS) {
+    return "claude is not signed in: use the Sign in button";
+  }
+  return `claude is not signed in: ${said}`;
 }
 
 /**

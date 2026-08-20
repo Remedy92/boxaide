@@ -142,11 +142,36 @@ function toTitleSource(raw: string | null): TitleSource {
 export type UnclaimResult = "released" | "dead_lettered" | "acked" | "missing";
 
 /**
+ * A chat's CLI session, as the driver about to prompt sees it.
+ *
+ * `id` is null when there is no session for this agent yet. `epoch` is the
+ * chat's session generation, and it comes back either way: the driver hands it
+ * to `saveChatSession`, which refuses a write from a turn that started before
+ * somebody dropped the session it was using.
+ */
+export type ChatSession = { id: string | null; epoch: number };
+
+/**
  * Times a user turn may be leased without an answer. The next expiry after
  * this dead-letters it. One is what used to drop the message on the first
  * hiccup; this is "a few tries", then the same warning as before.
  */
 export const MAX_DELIVERIES = 3;
+
+/**
+ * How long a queued user message stays worth answering.
+ *
+ * A message waits on the queue until an agent asks for one, and nothing used to
+ * put a floor under that wait. Start an agent the next morning and it was
+ * handed last night's question first, ahead of the one the user had just typed
+ * — and because a launch requeues dropped messages, the same backlog came back
+ * every time. The window is what makes a quiet evening cost one evening.
+ *
+ * Twelve hours, so it never cuts across a working session. An agent can hold a
+ * single message for a long tool run, and a user can leave a question queued
+ * over lunch; both stay inside this. What falls outside it is yesterday.
+ */
+export const USER_TURN_TTL_MS = 12 * 60 * 60 * 1000;
 
 type TurnRow = {
   seq: number;
@@ -320,7 +345,10 @@ export class Store {
         archived_at TEXT,
         trimmed INTEGER NOT NULL DEFAULT 0,
         active INTEGER NOT NULL DEFAULT 0,
-        title_source TEXT NOT NULL DEFAULT 'auto'
+        title_source TEXT NOT NULL DEFAULT 'auto',
+        session_agent TEXT,
+        session_id TEXT,
+        session_epoch INTEGER NOT NULL DEFAULT 0
       );
     `);
     // Chats that predate title_source. A name already on screen is left alone —
@@ -354,6 +382,31 @@ export class Store {
             .run(row.id);
         }
       })();
+    }
+    // The CLI session each chat resumes. Two columns rather than one, because a
+    // session id only means anything to the CLI that issued it: an id Claude
+    // Code wrote is not one OpenCode can resume, and handing it over would fail
+    // every turn of that chat until somebody cleared it.
+    //
+    // Plain text, unlike the title beside it. A session id is the CLI's own
+    // identifier for a transcript it already holds on disk; it carries no user
+    // content, and encrypting it would only make the column unreadable to the
+    // process that has to hand it back verbatim.
+    //
+    // `session_epoch` is what makes a save safe to land late. A turn reads the
+    // epoch when it starts and hands it back when it saves; anything that drops
+    // the session in between bumps it, and the save is refused. Without it a
+    // chat cleared while the agent was still answering would have its old
+    // session written straight back, and the next message would resume the
+    // history the user had just emptied.
+    if (!chatCols.some((c) => c.name === "session_id")) {
+      this.db.exec(`ALTER TABLE agent_chats ADD COLUMN session_agent TEXT`);
+      this.db.exec(`ALTER TABLE agent_chats ADD COLUMN session_id TEXT`);
+    }
+    if (!chatCols.some((c) => c.name === "session_epoch")) {
+      this.db.exec(
+        `ALTER TABLE agent_chats ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0`,
+      );
     }
     if (!turnCols.some((c) => c.name === "chat_id")) {
       this.db.exec(`ALTER TABLE agent_turns ADD COLUMN chat_id TEXT`);
@@ -587,6 +640,87 @@ export class Store {
     })();
   }
 
+  /**
+   * Whether a user turn is still there to be answered.
+   *
+   * False once the chat was emptied or deleted under the agent that was working
+   * on it. A turn takes minutes, and the user is free to clear the conversation
+   * inside that window — the question the answer belongs to is simply gone.
+   */
+  answerable(seq: number, chatId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 as hit FROM agent_turns
+         WHERE seq = ? AND chat_id = ? AND role = 'user'`,
+      )
+      .get(seq, chatId) as { hit: number } | undefined;
+    return row !== undefined;
+  }
+
+  /**
+   * The CLI session this chat resumes, for the agent that is asking, and the
+   * epoch that answer is good for.
+   *
+   * A null id for another agent's session: the id would be meaningless to this
+   * CLI, and a chat switched from one agent to another has to start a session
+   * rather than fail every turn on one it cannot find. The epoch is returned
+   * either way — the caller needs it to save whatever session it does end up
+   * using, and it belongs to the chat rather than to any one agent's id.
+   */
+  chatSession(chatId: string, agent: string): ChatSession {
+    const row = this.db
+      .prepare(
+        `SELECT session_agent as sessionAgent, session_id as sessionId,
+                session_epoch as epoch
+         FROM agent_chats WHERE id = ?`,
+      )
+      .get(chatId) as
+      | { sessionAgent: string | null; sessionId: string | null; epoch: number }
+      | undefined;
+    if (!row) return { id: null, epoch: 0 };
+    return {
+      id: row.sessionAgent === agent ? (row.sessionId ?? null) : null,
+      epoch: row.epoch,
+    };
+  }
+
+  /**
+   * Remembers which session a chat is living in. On disk, not in the driver:
+   * the agent workdir is stable, so the CLI's transcript outlives the process
+   * that made it, and a restarted agent that forgot the id would answer the
+   * next message as a stranger.
+   *
+   * `epoch` is the one read when the turn started. A turn can be minutes long,
+   * and anything that dropped this chat's session while it ran — the user
+   * clearing the chat, a refused resume — moved the epoch on. Saving then would
+   * undo that, so the write is refused instead. Silently: the session is gone
+   * because somebody meant it to be gone, and the next turn starts a fresh one.
+   */
+  saveChatSession(
+    chatId: string,
+    agent: string,
+    sessionId: string,
+    epoch: number,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE agent_chats SET session_agent = ?, session_id = ?
+         WHERE id = ? AND session_epoch = ?`,
+      )
+      .run(agent, sessionId, chatId, epoch);
+  }
+
+  clearChatSession(chatId: string): void {
+    this.db
+      .prepare(
+        `UPDATE agent_chats
+         SET session_agent = NULL, session_id = NULL,
+             session_epoch = session_epoch + 1
+         WHERE id = ?`,
+      )
+      .run(chatId);
+  }
+
   /** Bytes of encrypted turn text across every chat. What the budget counts. */
   chatBytes(): number {
     const row = this.db
@@ -718,25 +852,104 @@ export class Store {
   }
 
   /**
-   * The oldest user turn no agent is holding, marked as held in the same
+   * Puts every dropped user message back on the queue, and returns how many.
+   *
+   * Dropping used to be final. It was written for the message an agent cannot
+   * answer — the one that makes it fall over three times running — and for that
+   * message it is right: retrying forever is a loop nobody can stop.
+   *
+   * But the commonest reason a message is dropped has nothing to do with the
+   * message. It is an agent that could not run at all: signed out, out of
+   * quota, pointed at a model that no longer exists. Every delivery of every
+   * queued message burns against that, and what the user sees is their question
+   * marked "never answered" by an agent that never read it. So when a NEW agent
+   * starts, the count is reset and the question is asked again, instead of
+   * asking the user to retype what they already typed.
+   *
+   * To zero, not down by one: the three deliveries were spent on a process that
+   * no longer exists, and the agent replacing it deserves its own three. The
+   * cap still holds for the case it was written for — an agent that keeps
+   * failing on the same message drops it again, without a relaunch in between.
+   */
+  requeueDroppedUserTurns(now: number = Date.now()): number {
+    // Never back past the freshness window. Without this the requeue is what
+    // keeps a stale backlog alive: every launch would hand yesterday's
+    // questions back to the queue, including the ones expiry had just retired,
+    // and the two would trade the same rows for the life of the install.
+    const cutoff = new Date(now - USER_TURN_TTL_MS).toISOString();
+    const res = this.db
+      .prepare(
+        `UPDATE agent_turns SET delivered = 0, delivery_count = 0
+         WHERE role = 'user' AND delivered = 1 AND at >= ?
+           AND COALESCE(delivery_count, 0) >= ?
+           AND seq NOT IN (
+             SELECT reply_to FROM agent_turns
+             WHERE role = 'agent' AND reply_to IS NOT NULL
+           )`,
+      )
+      .run(cutoff, Store.MAX_DELIVERIES);
+    return res.changes;
+  }
+
+  /**
+   * Retires every queued user message that has gone stale, and says how many.
+   *
+   * A message with nobody listening waits on the queue, and until this existed
+   * it waited without end: start an agent a day later and the first thing it
+   * was handed was yesterday's question, in a chat the user had moved on from,
+   * while the message they had just typed sat behind it. The backlog survived
+   * every restart — dropping it only marked it, and the next launch requeued
+   * it — so one quiet evening poisoned every session after it.
+   *
+   * Retired, not deleted: the row is marked exactly as a dropped one is, so the
+   * pane already has the words for it — this was never picked up, send it again
+   * — and the user decides whether it still matters. Nothing an agent answered
+   * is touched, and neither is anything inside the window.
+   */
+  expireStaleUserTurns(now: number = Date.now()): number {
+    const cutoff = new Date(now - USER_TURN_TTL_MS).toISOString();
+    const res = this.db
+      .prepare(
+        `UPDATE agent_turns
+         SET delivered = 1, delivery_count = ?
+         WHERE role = 'user' AND delivered = 0 AND at < ?`,
+      )
+      .run(Store.MAX_DELIVERIES, cutoff);
+    return res.changes;
+  }
+
+  /**
+   * The next user turn no agent is holding, marked as held in the same
    * transaction. Returns null when there is nothing waiting.
    *
    * The claim has to be atomic. Two agents polling the same channel would
    * otherwise both read the same row and both answer it. It is a lease: the
    * holder is exclusive until they answer, vanish, or hit the delivery cap.
+   *
+   * `activeChatId` is the conversation the user is looking at, and it is served
+   * before any other. Plain oldest-first is right within one chat and wrong
+   * across several: an agent would work another chat's backlog while the pane
+   * in front of the user said nothing was listening, which reads as an agent
+   * that does not work at all. Ordering by the chat on screen first costs the
+   * other chats nothing — every message is still delivered, and still oldest
+   * first among its peers.
+   *
+   * Stale messages are retired first, in the same transaction, so a claim can
+   * never hand over one this store would refuse to keep queued.
    */
-  claimNextUserTurn(): StoredTurn | null {
+  claimNextUserTurn(activeChatId?: string | null): StoredTurn | null {
     const claim = this.db.transaction((): StoredTurn | null => {
+      this.expireStaleUserTurns();
       const row = this.db
         .prepare(
           `SELECT seq, at, chat_id as chatId, role, text_enc as textEnc, agent,
                   reply_to as replyTo, COALESCE(delivery_count, 0) as deliveryCount
            FROM agent_turns
            WHERE role = 'user' AND delivered = 0
-           ORDER BY seq ASC
+           ORDER BY (chat_id IS NOT NULL AND chat_id = ?) DESC, seq ASC
            LIMIT 1`,
         )
-        .get() as TurnRow | undefined;
+        .get(activeChatId ?? null) as TurnRow | undefined;
       if (!row) return null;
       this.db
         .prepare(
@@ -820,7 +1033,18 @@ export class Store {
     this.db.prepare(`DELETE FROM agent_turns WHERE chat_id = ?`).run(chatId);
     // A cleared chat is not a trimmed one: the user asked for this, and the
     // banner explaining an automatic loss would be a lie about their own click.
-    this.db.prepare(`UPDATE agent_chats SET trimmed = 0 WHERE id = ?`).run(chatId);
+    // The session goes with the messages: a model still resuming a transcript
+    // the pane no longer shows would answer from history the user just emptied.
+    // The epoch moves with it, so a turn still running in this chat cannot save
+    // the session it started with once the answer lands.
+    this.db
+      .prepare(
+        `UPDATE agent_chats
+         SET trimmed = 0, session_agent = NULL, session_id = NULL,
+             session_epoch = session_epoch + 1
+         WHERE id = ?`,
+      )
+      .run(chatId);
   }
 
   /**

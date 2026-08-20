@@ -9,7 +9,7 @@
  * so the lease protocol cannot drift between them.
  */
 import { MAX_WAIT_MS } from "./channel.js";
-import type { UnclaimResult } from "../db/store.js";
+import type { ChatSession, UnclaimResult } from "../db/store.js";
 
 /**
  * What a driver needs from the conversation channel.
@@ -25,7 +25,17 @@ export type DriverChannel = {
     agent?: string | null;
     signal?: AbortSignal;
   }): Promise<DrivenTurn | null>;
-  post(input: { role: "agent" | "activity"; text: string; agent?: string | null }): unknown;
+  /**
+   * Posts the answer to the turn it answers. False means the question is gone
+   * — the user emptied or deleted the chat while the model was working — and
+   * the answer was dropped rather than left somewhere nobody asked it.
+   */
+  answer(input: {
+    seq: number;
+    chatId: string;
+    text: string;
+    agent?: string | null;
+  }): boolean;
   /**
    * Gives an unanswered lease back. The result matters: `dead_lettered` is the
    * channel saying this message will never be handed over again, which is the
@@ -39,10 +49,48 @@ export type DriverChannel = {
   needsTitle(chatId: string): boolean;
   /** Offers the model's name for the chat. Refused if the user named it. */
   nameChat(chatId: string, title: string): boolean;
+  /**
+   * The CLI session this chat continues in, and the epoch it is good for.
+   *
+   * A session per chat, not per agent: one running agent answers every chat,
+   * and a single shared session would feed every conversation's messages into
+   * one transcript. `agent` scopes the answer because a session id only means
+   * something to the CLI that issued it.
+   */
+  chatSession(chatId: string, agent: string): ChatSession;
+  /**
+   * Remembers the session a chat is living in, across agent restarts.
+   *
+   * `epoch` is the one read when the turn started, and the write is refused if
+   * the chat's session was dropped while that turn ran. A turn takes minutes; a
+   * user clearing the chat under it must not have their clear undone by the
+   * answer arriving afterwards.
+   */
+  saveChatSession(
+    chatId: string,
+    agent: string,
+    sessionId: string,
+    epoch: number,
+  ): void;
+  /** Forgets one chat's session. The next turn there starts a fresh one. */
+  clearChatSession(chatId: string): void;
 };
 
 /** A running driver, from the launcher's side. Stopping is idempotent. */
 export type AgentDriver = { stop(): void };
+
+/**
+ * What a loop's end was, beyond the sentence explaining it.
+ *
+ * The reason string is written for a person to read in the pane. This is what
+ * the UI can act on: a run that ended because the CLI has no sign-in is the one
+ * failure the user can fix in one click, and telling it apart from a crash by
+ * grepping the reason would break the first time the CLI reworded itself.
+ */
+export type StopCause = {
+  /** The CLI is signed out. Nothing will run on it until a login lands. */
+  authRequired: boolean;
+};
 
 /** Backoff after a failed turn: doubles, capped, so a dead CLI is cheap. */
 export const RETRY_BASE_MS = 1_000;
@@ -166,7 +214,9 @@ export type DrivenLoopOptions = {
  */
 export async function runDrivenLoop(
   loop: DrivenLoopOptions,
-  takeTurn: (text: string) => Promise<string>,
+  // The whole turn, not just its text: which chat a message came from decides
+  // which session answers it.
+  takeTurn: (turn: DrivenTurn) => Promise<string>,
 ): Promise<string | null> {
   let failures = 0;
   while (!loop.stopped()) {
@@ -200,11 +250,19 @@ export async function runDrivenLoop(
         release(loop, turn.seq, { revertAttempt: true });
         return null;
       }
-      const reply = await takeTurn(turn.text);
-      loop.channel.post({ role: "agent", text: reply, agent: loop.agent });
+      const reply = await takeTurn(turn);
+      const posted = loop.channel.answer({
+        seq: turn.seq,
+        chatId: turn.chatId,
+        text: reply,
+        agent: loop.agent,
+      });
+      // The model answered, so the turn worked. Whether the user still wanted
+      // it is a different question and not a failure of this loop.
       failures = 0;
       try {
-        loop.afterReply?.(turn.chatId);
+        // Nothing to name when the exchange it would be named from is gone.
+        if (posted) loop.afterReply?.(turn.chatId);
       } catch {
         // Naming is best effort. The answer is already posted.
       }
