@@ -286,8 +286,10 @@ describe("moveUid (the MOVE round trip, on a fake client)", () => {
 
   it("treats a missing COPYUID on a UIDPLUS server as the race being lost", async () => {
     // Another client moved the uid between the SEARCH and the MOVE: the MOVE
-    // succeeds as a no-op and returns no uidMap. UIDPLUS makes that
-    // distinguishable from a real move, so nothing may be reported moved.
+    // succeeds as a no-op and returns no uidMap. RFC 6851 §4.3 makes COPYUID a
+    // SHOULD, so this is the likelier reading rather than a proof, and it is
+    // the conservative one: claiming the move would name a destination the
+    // message may never have reached.
     const { client } = fakeImap({ uids: [7], uidMap: null });
     const res = await moveUid(client, "acct", source, "Archive");
     expect(res.moved).toBe(false);

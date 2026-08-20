@@ -30,7 +30,7 @@ const CAN = [
 
 const CANNOT = [
   "Answer you by itself — Boxaide runs no model and never calls one",
-  "Delete messages. Archiving moves them, it never removes them",
+  "Delete a message outright. Moving one to Trash is the closest it gets, and there the server empties Trash on its own schedule",
   "Star, flag, label, or tag",
   "Snooze or remind",
   "Group messages into conversations",

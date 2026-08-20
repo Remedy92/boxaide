@@ -701,13 +701,22 @@ export function archiveMailboxPath(
  * tests: nothing else exercises the uidMap handling without a live server.
  *
  * A MOVE of a uid the server no longer holds is a perfectly successful no-op,
- * so "gone" has to be detected, not assumed: the SEARCH first answers it
- * outright, and after the MOVE the COPYUID response answers it again — a
- * UIDPLUS server that moved anything MUST return one (RFC 4315), so its
- * absence means another client won the race inside the one round trip the
- * SEARCH cannot cover. Only a server without UIDPLUS leaves that window
- * genuinely undecidable, and there the move is reported without an id rather
- * than invented.
+ * so "gone" has to be detected, not assumed. The SEARCH before the MOVE
+ * settles the common case, and COPYUID settles it again while naming the new
+ * uid.
+ *
+ * When a UIDPLUS server sends no COPYUID, the window is genuinely undecidable
+ * and this reports `moved: false`. Note what that is and is not: RFC 6851 §4.3
+ * says such a server SHOULD send COPYUID for a UID MOVE, not MUST, so a
+ * missing one is not proof the race was lost — it is only the more likely of
+ * two readings. A second SEARCH cannot separate them either: a message another
+ * client moved first and a message this MOVE moved are both absent from the
+ * source afterwards. Reporting `moved: false` is the conservative half of the
+ * pair, because the alternative claims the message reached `toFolder` when it
+ * may have been filed somewhere else entirely. The cost is a successful
+ * archive occasionally reported as a lost race, which the callers already
+ * survive: the API answers 404, the web UI keeps its optimistic removal and
+ * refetches, and the next list corrects the index.
  */
 export async function moveUid(
   client: ImapFlow,

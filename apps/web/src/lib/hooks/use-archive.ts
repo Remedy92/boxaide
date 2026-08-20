@@ -27,6 +27,13 @@ function archivedLabel(folder: string): string {
  * their own mutation instance. Without this a double-pressed `e` sends the
  * same archive twice: the second finds the uid already gone, comes back 404,
  * and the user is shown an error for an archive that in fact worked.
+ *
+ * Released in the mutation's own onSettled, never in a per-call one. The
+ * palette closes before it runs its action, so the component that fired the
+ * archive is unmounted by the time the request answers, and query-core skips
+ * per-call callbacks once the observer has no listeners
+ * (`this.#mutateOptions && this.hasListeners()`). A guard released there
+ * would leak the id and make `e` a dead key for that message until reload.
  */
 const inflight = new Set<string>();
 
@@ -137,6 +144,10 @@ export function useArchive() {
       });
     },
 
+    onSettled: (_result, _error, input) => {
+      inflight.delete(input.messageId);
+    },
+
     onSuccess: (result, input) => {
       void queryClient.invalidateQueries({ queryKey: ["messages"] });
       toast.success(archivedLabel(result.toFolder), {
@@ -161,9 +172,7 @@ export function useArchive() {
     mutate: (input: ArchiveInput) => {
       if (inflight.has(input.messageId)) return;
       inflight.add(input.messageId);
-      archive.mutate(input, {
-        onSettled: () => inflight.delete(input.messageId),
-      });
+      archive.mutate(input);
     },
   };
 }

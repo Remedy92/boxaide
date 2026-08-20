@@ -287,11 +287,17 @@ function Shell() {
       },
       archive: () => {
         if (!inMail) return;
-        const current = nav.current;
+        // The selection, not nav.current. They differ whenever the open
+        // message has dropped out of the visible list — the unread filter
+        // refetching after the message was auto-marked read is the everyday
+        // way that happens — and the reader still shows it, with a working
+        // Archive button. `e` has to archive the message on screen, or it is
+        // a dead key with nothing to explain itself.
+        const current = nav.current ?? app.selected;
         if (!current) return;
         archive.mutate({
           accountId: current.accountId,
-          messageId: current.id,
+          messageId: "id" in current ? current.id : current.messageId,
         });
       },
       reply: () => (inMail ? app.requestReply("reply") : undefined),
