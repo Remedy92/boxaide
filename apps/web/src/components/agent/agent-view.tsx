@@ -12,7 +12,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useAgent } from "@/lib/hooks/use-agent";
 import { useApp } from "@/lib/hooks/use-app-state";
-import { useEnsureAgentRunning } from "@/lib/hooks/use-local-agents";
+import {
+  useEnsureAgentRunning,
+  usePickedAgent,
+} from "@/lib/hooks/use-local-agents";
 
 /**
  * The agent conversation — the app's first screen.
@@ -33,6 +36,15 @@ import { useEnsureAgentRunning } from "@/lib/hooks/use-local-agents";
 function gapFromBottom(node: HTMLElement) {
   return node.scrollHeight - node.scrollTop - node.clientHeight;
 }
+
+/**
+ * How long this view has to stay on screen before it starts an agent.
+ *
+ * Boxaide opens on the conversation, so this pane mounts on every launch,
+ * including the launches that head straight for mail. The wait is what tells
+ * those two apart: a pane that is gone before it elapses spawns nothing.
+ */
+const START_SETTLE_MS = 1_500;
 
 const SUGGESTIONS = [
   "What came in today that needs a reply?",
@@ -86,6 +98,36 @@ export function AgentView({
     const node = scroller.current;
     if (node) node.scrollTop = node.scrollHeight;
   }, []);
+
+  /* Opening this view is also a start, so the agent is up before the first
+     question rather than after it. One attempt per mount: a start that fails
+     is not retried in a loop, and a send still starts one below.
+
+     Two things gate it. The launcher's list has to have answered, because
+     `ensureAgent` does nothing while nothing is picked and that query is still
+     in flight on the first render: a start on mount would spend the one attempt
+     on a call that could not have started anything. And the pane has to still be
+     here after START_SETTLE_MS, which is what keeps a launch that passes through on
+     its way to mail from spawning a CLI.
+
+     Kept off `ensureAgent` in the dependency list on purpose: it is rebuilt on
+     every render, so an effect keyed on it would clear and re-arm the timer
+     forever while a run is streaming. */
+  const { picked } = usePickedAgent();
+  const ensure = React.useRef(ensureAgent);
+  React.useEffect(() => {
+    ensure.current = ensureAgent;
+  });
+  const started = React.useRef(false);
+  const pickedAgent = picked !== null;
+  React.useEffect(() => {
+    if (!pickedAgent || started.current) return;
+    const timer = window.setTimeout(() => {
+      started.current = true;
+      void ensure.current();
+    }, START_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [pickedAgent]);
 
   /* A send is also a start. The agent is picked in the composer now, not
      started from the sidebar, so the first message on a quiet machine has to
