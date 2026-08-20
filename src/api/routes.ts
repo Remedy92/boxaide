@@ -712,7 +712,7 @@ export function createApi(
      404 rather than 500, and the UI's own capability check is the same
      question: does this server have an agent channel at all?
      --------------------------------------------------------------------- */
-  if (channel) registerAgentRoutes(app, channel, approvals);
+  if (channel) registerAgentRoutes(app, channel, approvals, launcher);
   if (approvals) registerApprovalRoutes(app, approvals);
   if (launcher) registerLauncherRoutes(app, launcher);
   // Agent platform routes (CRM, automations, outreach). Registered inside
@@ -783,6 +783,7 @@ function registerAgentRoutes(
   app: Hono,
   channel: AgentChannel,
   approvals?: ApprovalQueue,
+  launcher?: AgentLauncher,
 ): void {
   app.get("/api/agent/state", (c) => {
     const after = c.req.query("after");
@@ -880,6 +881,40 @@ function registerAgentRoutes(
     // The presence that ships with the write is what the composer uses to say
     // "no agent is listening" the moment a message lands unheard.
     return c.json({ turn, presence: channel.presence() }, 201);
+  });
+
+  /**
+   * Stop the message being answered right now.
+   *
+   * The channel goes first and the CLI second. Closing the message is what
+   * makes this a stop rather than a restart: a lease given back is handed
+   * straight to the agent that was just killed, so the run the user stopped
+   * would begin again a moment later. With the question answered, the killed
+   * turn's release is a no-op and the loop goes back to waiting.
+   *
+   * `stopped` is false when the message named by `seq` is not the one in
+   * flight: the answer landed while the button was being pressed, and the next
+   * message was claimed behind it. Stopping that one instead would kill a run
+   * in a conversation the user never looked at.
+   *
+   * `stopped` is otherwise whether anything was in flight, not whether a CLI
+   * was killed.
+   * An agent that connected over MCP is another process's to interrupt — the
+   * message is closed here either way, so the pane stops waiting on an answer
+   * that is no longer coming.
+   */
+  app.post("/api/agent/stop", async (c) => {
+    // A body is optional, and `seq` in it is the message the pane was showing
+    // Stop for. Without it this stops whatever is in flight, which is what a
+    // client that cannot name one has to mean.
+    const body = await c.req.json<{ seq?: unknown }>().catch(() => ({}) as { seq?: unknown });
+    if (body.seq !== undefined && typeof body.seq !== "number") {
+      return c.json({ error: "seq must be a number" }, 400);
+    }
+    const seq = typeof body.seq === "number" ? body.seq : undefined;
+    const work = channel.cancelWork(seq);
+    if (work) launcher?.interrupt(work.seq);
+    return c.json({ stopped: work !== null, presence: channel.presence() });
   });
 
   app.post("/api/agent/clear", async (c) => {
