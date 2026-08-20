@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
   AgentLauncher,
   KNOWN_AGENTS,
@@ -31,6 +31,7 @@ import {
   oneShotSilentNote,
   type AgentSpec,
   type DriveOptions,
+  type OneShotResult,
 } from "../src/agent/launcher.js";
 import { renderClaudeRunLine } from "../src/agent/agent-stream.js";
 import { DRIVEN_SYSTEM, type DriverChannel } from "../src/agent/driver.js";
@@ -81,10 +82,34 @@ function fakeBinDir(
   return dir;
 }
 
+/**
+ * This file's own agent tree, and the reason it is not `:memory:`.
+ *
+ * `:memory:` sends every launcher in the process to one fixed path,
+ * `$TMPDIR/boxaide-agent`, so a run named "r1" here and a run named "r1" in
+ * test/automation.test.ts are literally the same directory. Vitest runs those
+ * two files in parallel workers, and `runOnce` removes its working directory
+ * when the run ends. One file's finished run deleted the other file's
+ * directory between `mkdir` and `spawn`, the child got ENOENT for its cwd, and
+ * a run that should have been 'ok' came back 'error'. That is the whole of the
+ * flake this suite kept showing in CI.
+ *
+ * Production cannot hit it: a run id is a UUID from the run row, so no two
+ * runs ever name the same directory. Only these tests reuse "r1", and only a
+ * shared root lets them reach each other.
+ */
+const AGENT_DATA_DIR = mkdtempSync(join(tmpdir(), "mailmux-launcher-data-"));
+afterAll(() => {
+  rmSync(AGENT_DATA_DIR, { recursive: true, force: true });
+  // The launcher hangs the agent tree off a sibling path, `<dataDir>-agents`,
+  // so removing the data directory alone would leave it behind.
+  rmSync(`${AGENT_DATA_DIR}-agents`, { recursive: true, force: true });
+});
+
 const CTX = {
   mcpUrl: "http://127.0.0.1:0/mcp",
   bearerToken: "t",
-  dataDir: ":memory:",
+  dataDir: AGENT_DATA_DIR,
   // "full" so the suite describes launching, not confining, and runs the same
   // on every platform — a workspace launch is refused off macOS by design.
   // Confinement has its own file: test/agent-sandbox.test.ts.
@@ -128,6 +153,21 @@ async function until(check: () => boolean, ms = 3_000): Promise<void> {
     if (Date.now() > deadline) throw new Error("condition never became true");
     await new Promise((r) => setTimeout(r, 25));
   }
+}
+
+/**
+ * Assert a run's status, and carry its log into the failure message.
+ *
+ * "expected 'error' to be 'ok'" on its own is unreproducible: the launcher
+ * writes the spawn error, the watchdog note and the deadline note into the run
+ * log, so the log is the only thing that says which of them happened. A CI
+ * failure that cannot be read costs a day; printing it costs nothing.
+ */
+function expectStatus(
+  result: OneShotResult,
+  status: OneShotResult["status"],
+): void {
+  expect(result.status, result.log).toBe(status);
 }
 
 describe("AgentLauncher", () => {
@@ -824,7 +864,7 @@ exec /bin/sleep 60
       prompt: "do the thing",
       closeGraceMs: 200,
     });
-    expect(result.status).toBe("ok");
+    expectStatus(result, "ok");
     expect(minted).toEqual(["run"]);
     expect(sawToken).not.toBe(CTX.bearerToken);
     expect(tokens.resolve(sawToken!)).toBeNull();
@@ -1263,7 +1303,7 @@ printf '{"type":"result","subtype":"success","result":"filed two threads"}\\n'
 `,
     );
     const result = await launcher.runOnce({ runId: "r1", prompt: "do the thing" });
-    expect(result.status).toBe("ok");
+    expectStatus(result, "ok");
     expect(result.log).toContain("[claude] session started (model claude-opus-5)");
     expect(result.log).toContain("[tool] messages_list");
     expect(result.log).toContain("[claude] result: filed two threads");
@@ -1279,36 +1319,47 @@ printf '{"type":"result","subtype":"success","result":"filed two threads"}\\n'
       firstOutputTimeoutMs: 200,
     });
     // 'error', not 'killed': a run that never spoke did not start.
-    expect(result.status).toBe("error");
+    expectStatus(result, "error");
     expect(result.log).toContain(oneShotSilentNote(200));
   });
 
   it("lets a run that already spoke wait for the deadline", async () => {
     // First stdout disarms the watchdog. A quiet stretch after that is a long
     // tool, not a hang; only the deadline may stop it.
+    //
+    // The watchdog window has to be long enough that spawning a shell and
+    // getting one line back through a pipe fits inside it whatever else the
+    // machine is doing, or the test measures the runner's load instead of the
+    // launcher's behaviour. It still has to be shorter than the deadline, or
+    // the watchdog could not have fired and the last assertion is vacuous.
     const launcher = runner("#!/bin/sh\necho working\nexec /bin/sleep 30\n");
     const result = await launcher.runOnce({
       runId: "r1",
       prompt: "do the thing",
-      firstOutputTimeoutMs: 400,
-      timeoutMs: 900,
+      firstOutputTimeoutMs: 1_000,
+      timeoutMs: 1_800,
     });
-    expect(result.status).toBe("killed");
+    expectStatus(result, "killed");
     expect(result.log).toContain("working");
-    expect(result.log).toContain(oneShotDeadlineNote(900));
-    expect(result.log).not.toContain(oneShotSilentNote(400));
+    expect(result.log).toContain(oneShotDeadlineNote(1_800));
+    expect(result.log).not.toContain(oneShotSilentNote(1_000));
   });
 
   it("leaves a run that spoke once alone, even when it then goes quiet", async () => {
+    // The quiet stretch must outlast the watchdog window or the run would have
+    // survived anyway and this proves nothing. Both numbers are scaled up from
+    // the 400ms they were: a window that small is inside the spread of how
+    // long a loaded machine takes to spawn a shell and deliver one line, which
+    // made a passing run depend on the runner rather than on the launcher.
     const launcher = runner(
-      "#!/bin/sh\necho working\n/bin/sleep 0.8\necho done\n",
+      "#!/bin/sh\necho working\n/bin/sleep 1.4\necho done\n",
     );
     const result = await launcher.runOnce({
       runId: "r1",
       prompt: "do the thing",
-      firstOutputTimeoutMs: 400,
+      firstOutputTimeoutMs: 1_000,
     });
-    expect(result.status).toBe("ok");
+    expectStatus(result, "ok");
     expect(result.log).toContain("working");
     expect(result.log).toContain("done");
     expect(result.log).not.toContain("[boxaide] stopped");
@@ -1323,7 +1374,7 @@ printf '{"type":"result","subtype":"success","result":"filed two threads"}\\n'
       prompt: "do the thing",
       firstOutputTimeoutMs: 200,
     });
-    expect(result.status).toBe("ok");
+    expectStatus(result, "ok");
     expect(result.log).toContain("done");
     expect(result.log).not.toContain("[boxaide] stopped");
   });
@@ -1345,7 +1396,7 @@ exec /bin/sleep 30
       firstOutputTimeoutMs: 300,
       closeGraceMs: 300,
     });
-    expect(result.status).toBe("error");
+    expectStatus(result, "error");
     expect(result.log).toContain(oneShotSilentNote(300));
     // The kill lands while the noise is still flowing. Elapsed is the whole
     // assertion: a timer fed by stderr would instead run out the 2.5s of it.
@@ -1355,17 +1406,32 @@ exec /bin/sleep 30
   it("keeps a killed run's unfinished last line in the log", async () => {
     // No trailing newline, so the splitter is still holding it when the kill
     // lands. It is the best evidence of what the run was doing when it died.
+    //
+    // The kill is asked for, not waited for. This used to run on a 400ms
+    // deadline and so raced the child for the write: on a loaded machine the
+    // deadline won, the log held nothing but the kill note, and the test that
+    // exists to prove the partial line survives proved nothing. The flag file
+    // says the line has been written, so the kill can happen after it rather
+    // than at a guessed moment. The deadline path has its own test below.
+    const spoke = join(tempDir(), "spoke");
     const launcher = runner(
-      "#!/bin/sh\nprintf 'halfway through a thought'\nexec /bin/sleep 30\n",
+      `#!/bin/sh
+printf 'halfway through a thought'
+: > "${spoke}"
+exec /bin/sleep 30
+`,
     );
-    const result = await launcher.runOnce({
+    const result = launcher.runOnce({
       runId: "r1",
       prompt: "do the thing",
-      timeoutMs: 400,
-      firstOutputTimeoutMs: 10_000,
+      timeoutMs: 30_000,
+      firstOutputTimeoutMs: 30_000,
     });
-    expect(result.status).toBe("killed");
-    expect(result.log).toContain("halfway through a thought");
+    await until(() => existsSync(spoke), 10_000);
+    launcher.killRun("r1");
+    const done = await result;
+    expectStatus(done, "killed");
+    expect(done.log).toContain("halfway through a thought");
   });
 
   it("explains a deadline kill in the log with the deadline it actually used", async () => {
@@ -1376,7 +1442,7 @@ exec /bin/sleep 30
       timeoutMs: 200,
       firstOutputTimeoutMs: 10_000,
     });
-    expect(result.status).toBe("killed");
+    expectStatus(result, "killed");
     expect(result.log).toContain(oneShotDeadlineNote(200));
     // The note states the real window, not a hardcoded 15 minutes.
     expect(result.log).toContain("0.2-second");
@@ -1393,7 +1459,7 @@ exec /bin/sleep 30
       prompt: "do the thing",
       closeGraceMs: 200,
     });
-    expect(result.status).toBe("ok");
+    expectStatus(result, "ok");
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 });
