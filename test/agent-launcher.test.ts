@@ -1205,6 +1205,70 @@ exec /bin/sleep 60
     expect(grok.args!(CTX)).toContain("--disable-web-search");
   });
 
+  it("hands a CLI back its own web tools when no search connector is set", () => {
+    // With no Exa or Parallel key there is no boxaide web_search to prefer, so
+    // stripping the CLI's index would leave the agent unable to look anything
+    // up at all.
+    const none = { ...CTX, searchConfigured: () => false };
+    const some = { ...CTX, searchConfigured: () => true };
+
+    const claude = KNOWN_AGENTS.find((s) => s.id === "claude-code")!;
+    const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
+
+    const turn = { prompt: "hi", system: "s", sessionId: null };
+    const chatOff = claudeTurnArgs(none, turn);
+    const chatAllowed = chatOff[chatOff.indexOf("--allowedTools") + 1];
+    expect(chatAllowed).toContain("WebSearch");
+    // WebFetch stays out even here: it has none of safe-url.ts's address
+    // checks, so it would hand a hostile URL a path to loopback services.
+    expect(chatAllowed).not.toContain("WebFetch");
+    // The allowlist is still exhaustive: Bash and the file tools stay out.
+    expect(chatOff).toContain("--allowedTools");
+    expect(chatAllowed).toContain("mcp__boxaide__draft_create");
+    expect(chatAllowed).not.toContain("Bash");
+
+    const runOff = claude.runArgs!(none, "do the thing", "/tmp/run-dir");
+    const runAllowed = runOff[runOff.indexOf("--allowedTools") + 1];
+    expect(runAllowed).toContain("WebSearch");
+    expect(runAllowed).not.toContain("WebFetch");
+
+    expect(grok.args!(none)).not.toContain("--disable-web-search");
+    // A run was already at the CLI's defaults and stays there.
+    expect(grok.runArgs!(none, "do the thing", "/tmp/run-dir")).not.toContain(
+      "--disable-web-search",
+    );
+
+    // Configured is today's behavior, unchanged.
+    const chatOn = claudeTurnArgs(some, turn);
+    const chatOnAllowed = chatOn[chatOn.indexOf("--allowedTools") + 1];
+    expect(chatOnAllowed).not.toContain("WebSearch");
+    expect(chatOnAllowed).not.toContain("WebFetch");
+    const runOn = claude.runArgs!(some, "do the thing", "/tmp/run-dir");
+    expect(runOn[runOn.indexOf("--allowedTools") + 1]).not.toContain("WebSearch");
+    expect(grok.args!(some)).toContain("--disable-web-search");
+
+    // Antigravity, OpenCode and Codex never stripped web tools, so nothing
+    // about them changes with the connector.
+    for (const id of ["antigravity", "opencode", "codex"]) {
+      const spec = KNOWN_AGENTS.find((s) => s.id === id)!;
+      expect(spec.args!(none)).toEqual(spec.args!(some));
+      expect(spec.runArgs!(none, "do the thing", "/tmp/run-dir")).toEqual(
+        spec.runArgs!(some, "do the thing", "/tmp/run-dir"),
+      );
+    }
+  });
+
+  it("reads the search check at launch, so a saved key needs no restart", () => {
+    // One context, one launcher, answer changed under it: this is the claim
+    // that a connector saved mid-session reaches the next launch.
+    let configured = true;
+    const ctx = { ...CTX, searchConfigured: () => configured };
+    const grok = KNOWN_AGENTS.find((s) => s.id === "grok")!;
+    expect(grok.args!(ctx)).toContain("--disable-web-search");
+    configured = false;
+    expect(grok.args!(ctx)).not.toContain("--disable-web-search");
+  });
+
   it("launches Grok with an isolated config and a boxaide-only allowlist", () => {
     const grok = KNOWN_AGENTS.find((s) => s.id === "grok");
     expect(grok?.args).toBeTypeOf("function");

@@ -346,6 +346,7 @@ describe("HTTP security surface (shipped app)", () => {
       "/api/automations",
       "/api/outreach/outbox",
       "/api/outreach/badge",
+      "/api/connectors",
     ];
     for (const route of routes) {
       const anon = await runtime.app.request(route);
@@ -355,6 +356,22 @@ describe("HTTP security surface (shipped app)", () => {
       });
       expect(authed.status, route).toBe(200);
     }
+  });
+
+  it("gates the connector key check behind the same token", async () => {
+    // The one route here that calls a third party with the operator's key.
+    // Anything on localhost that could reach it could spend their credits and
+    // learn which providers they pay for.
+    const route = "/api/connectors/exa/check";
+    const anon = await runtime.app.request(route, { method: "POST" });
+    expect(anon.status).toBe(401);
+    const authed = await runtime.app.request(route, {
+      method: "POST",
+      headers: authHeaders,
+    });
+    // No key is set in this runtime, so the answer is "nothing to check",
+    // which is still proof the token got past the gate.
+    expect(authed.status).toBe(400);
   });
 });
 

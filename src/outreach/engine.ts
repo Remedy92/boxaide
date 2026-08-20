@@ -37,6 +37,20 @@ export type EngineDeps = {
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
   dailyCap?: () => number;
+  /**
+   * Deliverability check run once per row, just before the send. Wiring in
+   * src/platform.ts supplies it; the engine deliberately does not know who
+   * answers, so no third party is named in this module. Answering null means
+   * "nobody can tell", which is also what an unconfigured install answers,
+   * and a null never blocks a send.
+   */
+  verifyRecipient?: (email: string) => Promise<RecipientVerdict | null>;
+};
+
+/** What a verifier says about one address. Mirrors the enrichment result. */
+export type RecipientVerdict = {
+  status: "valid" | "risky" | "unknown" | "invalid";
+  confidence: number;
 };
 
 /** {{name}} / {{email}} / {{org}} substitution. Unknown fields stay as-is. */
@@ -72,6 +86,7 @@ export class OutreachEngine {
       // Read from the environment per call, not at construction: the cap is
       // an operator knob and a serve process should not need a restart.
       dailyCap: deps.dailyCap ?? readDailyCapFromEnv,
+      verifyRecipient: deps.verifyRecipient ?? (async () => null),
     };
   }
 
@@ -264,6 +279,20 @@ export class OutreachEngine {
         continue;
       }
 
+      // A dead address is the cheapest way to lose a sending domain, so the
+      // last thing before the send is a deliverability check. Only a verdict
+      // of 'invalid' stops the row: 'risky' means a catch-all domain that
+      // answers yes to everything, which is unproven rather than bad, and a
+      // human already approved this body for this person.
+      const verdict = await this.verifyRecipient(row.to);
+      if (verdict?.status === "invalid") {
+        this.store.markFailed(
+          row.id,
+          `recipient address did not verify: ${row.to} was reported invalid. Correct the address on the contact and queue a new draft.`,
+        );
+        continue;
+      }
+
       await this.waitForGap();
       try {
         // No overrideSuppression: only a human at the REST send route may
@@ -286,6 +315,20 @@ export class OutreachEngine {
       this.lastSendMs = this.deps.now().getTime();
     }
     return sent;
+  }
+
+  /**
+   * Ask the verifier, and treat any failure as no answer. A vendor outage or
+   * an exhausted quota must not hold an approved queue hostage: the check is
+   * there to catch a bad address, not to become a second thing that has to be
+   * up before mail can leave.
+   */
+  private async verifyRecipient(email: string): Promise<RecipientVerdict | null> {
+    try {
+      return await this.deps.verifyRecipient(email);
+    } catch {
+      return null;
+    }
   }
 
   private async waitForGap(): Promise<void> {

@@ -242,6 +242,9 @@ The platform modules add their own tools. Full list in [Agent work platform](#ag
 | CRM | `crm_sync`, `crm_contacts_search`, `crm_contact_get`, `crm_contact_upsert`, `crm_contact_delete`, `crm_note_add`, `crm_org_upsert`, `crm_orgs_list`, `crm_interactions_list`, `crm_pipeline_get`, `crm_deal_upsert`, `crm_deal_move`, `crm_deal_delete` |
 | Automations | `automation_create`, `automation_update`, `automation_delete`, `automations_list`, `automation_run_now`, `automation_runs_list` |
 | Outreach | `campaign_create`, `campaign_update`, `campaigns_list`, `campaign_add_contacts`, `outbox_queue_draft`, `outbox_list`, `suppression_add`, `suppression_list` |
+| Enrichment | `enrich_find_email`, `enrich_verify_email`, `crm_contacts_import` |
+| Research | `web_search`, `web_fetch` |
+| Prospecting | `prospect_find_companies`, `prospect_find_people`. Find companies and the people who work at them, by title, seniority, location, headcount and keyword. Needs an Apollo key. |
 
 There is **no tool that approves, rejects or sends an outbox row**. That is a human action in the web UI.
 
@@ -437,6 +440,17 @@ Each `BOXAIDE_*` name is preferred. Then `SLEY_*`, then `MAILMUX_*`.
 | `BOXAIDE_SEND_DAILY_CAP` | `50` | Approved outreach sends per account per UTC day |
 | `BOXAIDE_GOOGLE_CLIENT_ID` | empty | OAuth client for Google Calendar — see below |
 | `BOXAIDE_GOOGLE_CLIENT_SECRET` | empty | Secret for that client |
+| `BOXAIDE_HUNTER_API_KEY` | empty | Hunter key. Finds and verifies work email addresses, and checks a recipient before an approved send |
+| `BOXAIDE_PROSPEO_API_KEY` | empty | Prospeo key, tried after Hunter |
+| `BOXAIDE_EXA_API_KEY` | empty | Exa key. Lets an agent search the web and read a page |
+| `BOXAIDE_PARALLEL_API_KEY` | empty | Parallel key, used when Exa is not set |
+| `BOXAIDE_APOLLO_API_KEY` | empty | Apollo key. Lets an agent find companies and people it does not know yet |
+
+Those last five are also settable in Settings > Connectors, which stores them
+encrypted on the server and takes effect without a restart. A key saved there
+beats the environment variable, and the screen only ever shows the last four
+characters. Set no search key at all, in either place, and a launched agent
+keeps its own CLI's web search instead of Boxaide's.
 
 ### Bind address (`BOXAIDE_HOST`)
 

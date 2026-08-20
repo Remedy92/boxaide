@@ -468,6 +468,52 @@ export type SuppressionRow = {
 export type OutreachBadge = { pending: number };
 
 /**
+ * Which capability a connector's key switches on: finding new prospects,
+ * looking up an email address, or searching the web.
+ */
+export type ConnectorKind = "prospecting" | "enrichment" | "search";
+
+/**
+ * GET /api/connectors, and the body of PUT /api/connectors/:id.
+ *
+ * The server never returns a full key. `maskedKey` is the last four characters
+ * of whichever source won, and `source` says which one that was: a key saved
+ * here beats one in the server's environment, and clearing the saved key falls
+ * back to the environment rather than to nothing.
+ */
+export type Connector = {
+  id: string;
+  label: string;
+  kind: ConnectorKind;
+  configured: boolean;
+  source: "settings" | "env" | null;
+  maskedKey: string | null;
+};
+
+/**
+ * What the provider said when Boxaide last asked it about the key.
+ *
+ * Three answers, and the third is the one that stops a lie: "unreachable" is
+ * the vendor being down or slow, which says nothing at all about the key.
+ * `maskedKey` names the key the answer was about, so a verdict is dropped the
+ * moment the key it judged is replaced.
+ */
+export type ConnectorCheckVerdict = "works" | "rejected" | "unreachable";
+
+export type ConnectorCheck = {
+  verdict: ConnectorCheckVerdict;
+  reason: string | null;
+  checkedAt: string;
+  maskedKey: string;
+};
+
+/** GET /api/connectors: every connector, plus the verdicts still in force. */
+export type ConnectorsSnapshot = {
+  connectors: Connector[];
+  checks: Record<string, ConnectorCheck>;
+};
+
+/**
  * GET /api/update — the whole updater state, in one object.
  *
  * Every command returns this same shape, so the rail never derives a state of

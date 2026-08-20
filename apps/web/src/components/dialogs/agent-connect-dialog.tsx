@@ -50,7 +50,31 @@ call chat_await_message again. Keep going until I tell you to stop.
 Everything I read appears in the Boxaide window, so every answer must go through
 chat_say — do not answer here. A chat_await_message that returns no message is
 normal; call it again. Use chat_activity for anything slow. Draft rather than
-send unless I ask you to send.`;
+send unless I ask you to send.
+
+Outreach chain: 1 find prospects with the prospect_ tools, or import a list with
+crm_contacts_import. 2 save the company with crm_org_upsert. 3 get the address:
+on a prospect_find_people hit pass reveal true, and use enrich_find_email only
+when the reveal comes back with emailStatus 'locked' or 'absent', using the
+enrichFindEmail arguments the hit carries. 4 now save the person with
+crm_contact_upsert, which is keyed by the address and cannot be called before
+you hold one, then check it with enrich_verify_email. 5 read up on the person
+with web_search and web_fetch so the first line is about them. 6 queue with
+outbox_queue_draft or a campaign, and a human approves every send.
+
+Before you pay to look one named person up, call crm_contacts_search: buying
+again what the CRM already holds is wasted credit. The prospect_ searches are
+the exception, because you cannot search the CRM for somebody you have not found
+yet; run those first, then check the CRM before you reveal or enrich.
+
+Before you queue anything, call crm_outreach_state on the contacts and queue only
+those where contactable is true. It is the only correct source for that: never
+decide from tags. Having an address is not permission to mail it.
+
+Cold outreach never goes through message_send or draft_create, whatever I have
+said about sending: those are for mail in a conversation that already exists.
+Anything to somebody who has not written to us goes through outbox_queue_draft or
+a campaign, which add the opt-out footer and honour the suppression list.`;
 
 export function AgentConnectDialog({
   open,

@@ -15,6 +15,7 @@ import type { Platform } from "../platform.js";
 import { registerCrmRoutes } from "../crm/routes.js";
 import { registerAutomationRoutes } from "../automation/routes.js";
 import { registerOutreachRoutes } from "../outreach/routes.js";
+import { registerConnectorRoutes } from "../connectors/routes.js";
 import {
   registerCalendarRoutes,
   type CalendarRouteConfig,
@@ -200,7 +201,9 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
 // PATCH is here because the web UI edits automations and outreach campaigns
 // with it (/api/automations/:id, /api/outreach/campaigns/:id); an allowlisted
 // hosted origin cannot reach those routes if the preflight omits the method.
-const CORS_METHODS = "GET, POST, PATCH, DELETE, OPTIONS";
+// PUT is here for the same reason: the Connectors panel saves provider API
+// keys with PUT /api/connectors/:id.
+const CORS_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 const CORS_HEADERS = "authorization, content-type";
 const CORS_MAX_AGE = "600";
 
@@ -723,6 +726,7 @@ export function createApi(
     registerCrmRoutes(app, platform);
     registerAutomationRoutes(app, platform);
     registerOutreachRoutes(app, platform);
+    registerConnectorRoutes(app, platform);
     registerCalendarRoutes(app, platform, address ?? { host: "127.0.0.1", port: 8787 });
   }
   // Absent in an embedder that builds its own API (tests, `boxaide mcp`), so

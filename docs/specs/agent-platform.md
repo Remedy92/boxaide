@@ -90,7 +90,48 @@ src/outreach/store.ts     OutreachStore(db, masterKey)
 src/outreach/engine.ts    OutreachEngine               follow-ups, opt-out detection, approved-send
 src/outreach/tools.ts     OUTREACH_TOOLS + dispatchOutreachTool
 src/outreach/routes.ts    registerOutreachRoutes(app, deps)
+src/enrichment/service.ts EnrichmentService            provider waterfall, cache, CSV import
+src/enrichment/tools.ts   ENRICHMENT_TOOLS + dispatchEnrichmentTool
+src/research/service.ts   ResearchService              web search and one-page reads
+src/research/tools.ts     RESEARCH_TOOLS + dispatchResearchTool
+src/prospecting/service.ts ProspectingService          Apollo people and company search
+src/prospecting/tools.ts  PROSPECTING_TOOLS + dispatchProspectingTool
 ```
+
+Enrichment finds and checks work email addresses through a paid provider
+waterfall, Hunter first and Prospeo second, and imports contacts from CSV text.
+It owns no table: an answer is held in memory for a day so a repeated lookup is
+not billed twice, and nothing it holds is message-derived, so it needs no
+master key. It never imports the CRM. Wiring in `src/platform.ts` hands it one
+callback that writes a contact, which is the whole of its reach into another
+module. Finding an address grants nothing: outreach still owns the queue, the
+suppression list, and the human approval step.
+
+Research searches the public web through Exa or Parallel and reads one page at
+a time as text. It stores nothing, sends nothing, and has no timers, so both of
+its tools are reads by construction and no approval step applies. `web_fetch`
+refuses private and loopback addresses, follows at most three redirects with the
+same check on every hop, and caps what it returns. The check is the request's
+own DNS lookup (`vettingLookup` in `src/research/safe-url.ts`, carried by the
+node transport in `src/research/node-fetch.ts`), so the address that passes the
+check is the address the socket connects to and a name cannot rebind in
+between. No dependency was added for it: node:https already has the hook.
+
+Prospecting answers the question enrichment cannot: who to approach when no
+name is known yet. It searches Apollo for people by title, seniority, location
+and employer domain, and for companies by keyword, headcount, location and
+employee count, and it can open one of those people into a real record. It stores
+nothing and owns no table, so it needs no master key and no timers. It reads
+its key per call through the same connectors seam as enrichment and research.
+
+Two facts shape its tools rather than being hidden by them. People search is
+free but returns an obfuscated last name and no address, so a search result is
+a lead and not a contact; opening one is a second, credited call. Company search
+costs a credit per page whether or not the page has rows, and Apollo can return
+fewer records than the filters imply or suppress EU records entirely, so the
+truthful count and those flags are passed back rather than smoothed over.
+Prospecting grants nothing either: outreach still owns the queue, the
+suppression list, and the human approval step.
 
 Seams (wired by the architect, present in the skeleton):
 - `src/app.ts` constructs the three stores, `CrmService`, `AutomationScheduler`,
@@ -299,6 +340,9 @@ Scheduler (`AutomationScheduler`):
   MCP tools, then exit. You cannot talk to the user: do not call chat tools;
   write nothing to the user. Never send email: queue outreach with
   outbox_queue_draft or save with draft_create and a human will review."
+  The shared outreach chain (`OUTREACH_CHAIN` in `src/agent/guidance.ts`) is
+  appended to it, and to `DRIVEN_SYSTEM` and `KICKOFF`, so every agent gets the
+  same five-step order and the same four rules whoever started it.
 - Tools for runs: the `run` scope in `src/mcp/scope.ts` — mail reads and
   drafts, all CRM tools, automation *read* tools (`automations_list`,
   `automation_runs_list`), outreach tools, calendar reads, and no chat tool at
@@ -499,6 +543,90 @@ Outreach (`src/outreach/tools.ts`):
 - `suppression_list` {}
 
 Deliberately absent: outbox approve/reject/send tools (invariant 1).
+
+Enrichment (`src/enrichment/tools.ts`):
+- `enrich_find_email` { orgDomain, fullName? | firstName? + lastName? } — one
+  paid lookup; returns address, confidence 0 to 100, status and provider.
+- `enrich_verify_email` { email } — same shape, for an address already held.
+- `crm_contacts_import` { csv } — header line plus at most 500 rows; every
+  skipped row comes back with its line number and reason. Contacts nobody.
+
+Research (`src/research/tools.ts`):
+- `web_search` { query, numResults=5, provider? } — ranked results with
+  snippets, not page text.
+- `web_fetch` { url } — one public http or https page as text.
+
+Prospecting (`src/prospecting/tools.ts`):
+- `prospect_find_companies` { keywords?, name?, domains?, locations?,
+  excludeLocations?, minEmployees?, maxEmployees?, limit=25 }. One page, so one
+  Apollo credit per call whatever comes back. Returns name, `domain`, industry,
+  headcount, location, linkedinUrl and `apolloOrgId`.
+- `prospect_find_people` { orgDomains?, organizationIds?, titles?, exactTitles?,
+  seniorities?, locations?, keywords?, reveal=false, limit=25 }. The free
+  search returns a first name, a title and an employer and nothing else, with
+  `fullName` null and `revealed` false. `reveal: true` is the credited half and
+  is capped at 10 people per call, which also pulls the search page down to 10.
+
+Both refuse an unfiltered search before any HTTP: Apollo answers one with the
+whole database, which is a credit spent on nothing. There is no separate reveal
+tool, because revealing is a parameter of the search that produced the ids.
+
+A search result is a lead, not a contact. A revealed person with a real address
+carries `crmContact`, which is exactly the crm_contact_upsert arguments; one
+whose address is locked or absent carries `crmContactPendingEmail` and
+`enrichFindEmail` instead, so the address arrives through enrich_find_email and
+the contact is a spread rather than four renames done by hand.
+
+Keys come from Settings > Connectors, stored encrypted in the `connectors`
+table (`src/connectors/`). The environment stays as the fallback for a headless
+install: `BOXAIDE_HUNTER_API_KEY` and `BOXAIDE_PROSPEO_API_KEY` for enrichment,
+`BOXAIDE_EXA_API_KEY` and `BOXAIDE_PARALLEL_API_KEY` for research, and
+`BOXAIDE_APOLLO_API_KEY` for prospecting. Settings beat
+the environment, and nothing is cached, so a key saved in the UI takes effect on
+the next call with no restart. With none of a module's keys set, its tools refuse
+with a message naming the screen and the variables.
+
+Apollo is its own connector kind, `prospecting`, so it sits under its own
+heading in Settings and stays out of the Hunter-then-Prospeo waterfall, which
+it is no part of.
+
+`GET /api/connectors` lists all five with a masked key and a source of
+`settings`, `env` or null, plus `checks`: the last verdict each provider gave
+about the key in force. `PUT /api/connectors/:id` takes `{ apiKey }` and clears
+on an empty value. A full key never leaves the server.
+
+`POST /api/connectors/:id/check` asks the provider whether the key in force
+works, whether that key came from settings or from the environment, and stores
+the answer (`src/connectors/probe.ts`, `probes.ts`, and one probe per adapter).
+The verdict is `works`, `rejected` with the provider's own reason, or
+`unreachable` for a timeout, a network failure, a 429 or a 5xx, which are never
+reported as a bad key. The probe deadline is five seconds, because somebody is
+watching the row it fills in. Each probe is the cheapest authenticated call that
+provider offers: Apollo's free people search at one row per page, Hunter's
+`/v2/account`, Prospeo's `/account-information`, and, because neither has a free
+way to test a key, a one-result search at Exa and at Parallel, which the
+Connectors screen says out loud before it spends anything. Saving a key runs the
+check by itself, so the operator still presses Enter once, and saving a new key
+drops the old verdict rather than letting it stand.
+
+With no search connector at all, a launched CLI keeps its own web search and
+fetch instead (`LaunchContext.searchConfigured` in `src/agent/launcher.ts`).
+Configure Exa or Parallel and the launcher goes back to stripping those tools,
+so agents search through Boxaide.
+
+Scope (`src/mcp/scope.ts`): `web_search`, `web_fetch`, `enrich_find_email` and
+`enrich_verify_email` are in all three profiles. `crm_contacts_import` is not in
+`run`, which has no person to hand it a file. `prospect_find_companies` and
+`prospect_find_people` are in all three profiles, a scheduled run included: a
+run told to watch a market cannot do it without asking who is in that market.
+Scope is by tool name and revealing is a parameter, so what bounds the spend is
+the per-call cap, not the profile.
+
+Pre-send verification: when an enrichment provider is configured, the outreach
+engine verifies each approved recipient immediately before the send. A verdict
+of `invalid` fails the row with the address in the error and it leaves the
+queue; `risky`, `unknown` and a verifier that is down do not block anything.
+The day-long cache means a row held back by the daily cap is not billed twice.
 
 ## REST surface (all inside `createApi` after auth)
 

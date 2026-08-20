@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   ArrowUpCircle,
   Info,
+  KeyRound,
   Menu,
   Palette,
   Plug,
@@ -19,6 +20,7 @@ import {
   ConnectionPanel,
   GeneralPanel,
 } from "@/components/settings/settings-panels";
+import { ConnectorsPanel } from "@/components/settings/connectors-panel";
 import { UpdatesPanel } from "@/components/settings/updates-panel";
 import { Button } from "@/components/ui/button";
 import {
@@ -48,6 +50,7 @@ const ROWS: Record<SettingsSection, Row> = {
   general: { id: "general", label: "General", icon: SlidersHorizontal },
   connection: { id: "connection", label: "Connection", icon: Server },
   agents: { id: "agents", label: "Agents", icon: Plug },
+  connectors: { id: "connectors", label: "Connectors", icon: KeyRound },
   appearance: { id: "appearance", label: "Appearance", icon: Palette },
   updates: { id: "updates", label: "Updates", icon: ArrowUpCircle },
   about: { id: "about", label: "About", icon: Info },
@@ -193,6 +196,8 @@ function Panel({
       return <ConnectionPanel focus={focus} autoTest={autoTest} />;
     case "agents":
       return <AgentsPanel />;
+    case "connectors":
+      return <ConnectorsPanel />;
     case "appearance":
       return <AppearancePanel />;
     case "updates":

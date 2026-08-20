@@ -27,6 +27,9 @@ import type {
   AutomationRun,
   CalendarAccount,
   CalendarAccountsResponse,
+  Connector,
+  ConnectorCheck,
+  ConnectorsSnapshot,
   ConnectionTestResult,
   CreatedAccount,
   CrmContact,
@@ -1183,6 +1186,63 @@ export function getOutreachBadge(ctx: Ctx): Promise<OutreachBadge> {
     token: ctx.token,
     signal: ctx.signal,
   });
+}
+
+/* -------------------------------------------------------------------------- */
+/* connectors: /api/connectors                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Metadata only: every key is masked to its last four characters. `checks`
+ * carries the last verdict each provider gave, so a reload shows what is
+ * working without asking any provider again.
+ */
+export function listConnectors(ctx: Ctx): Promise<ConnectorsSnapshot> {
+  return request<ConnectorsSnapshot>("/api/connectors", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * Asks the provider whether the key in force actually works. It checks an
+ * environment key as readily as a saved one, and answers with a verdict, never
+ * with the key.
+ */
+export function checkConnector(
+  id: string,
+  ctx: Ctx,
+): Promise<{ connector: Connector; check: ConnectorCheck }> {
+  return request<{ connector: Connector; check: ConnectorCheck }>(
+    `/api/connectors/${encodeURIComponent(id)}/check`,
+    {
+      method: "POST",
+      body: {},
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
+/** An empty `apiKey` clears the saved key, leaving any environment key in place. */
+export async function setConnectorKey(
+  id: string,
+  apiKey: string,
+  ctx: Ctx,
+): Promise<Connector> {
+  const data = await request<{ connector: Connector }>(
+    `/api/connectors/${encodeURIComponent(id)}`,
+    {
+      method: "PUT",
+      body: { apiKey },
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.connector;
 }
 
 /* -------------------------------------------------------------------------- */
