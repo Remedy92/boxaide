@@ -18,18 +18,37 @@ Boxaide runs on your machine and holds live mail credentials. The threat model i
 | The bearer token | Compared in constant time. Accepted only in an `Authorization` header, never a query string. |
 | The API | Bound to `127.0.0.1` by default. Every browser origin is denied except loopback and entries you add to `BOXAIDE_ALLOWED_ORIGINS`. |
 | `/api/local-bootstrap` | Hands out the token, so it answers `404` unless the server's own bind address is loopback. `Host` must be loopback. A missing `Origin` is allowed (curl, MCP); a present `Origin` must be loopback. Sends `Cache-Control: no-store`, and carries no CORS headers. |
-| Message bodies | Sender HTML renders only after DOMPurify, only inside an `<iframe srcdoc>` whose `sandbox` omits both `allow-scripts` and `allow-same-origin`, and whose own CSP is `default-src 'none'`. Four independent layers: sanitised, script-forbidden, opaque-origin (no app DOM, no `localStorage`, no token even for script that cannot run), and fetch-fenced. Remote images are blocked per message until the user opts in; tracking pixels load nothing by default. It never enters the React tree: `react/no-danger` is an ESLint error, and the one `dangerouslySetInnerHTML` in `apps/web` is a fixed desktop UA marker in `layout.tsx`, not mail. |
+| Message bodies | Sender HTML renders only after DOMPurify, only inside a sandboxed `<iframe srcdoc>` that can neither run script nor speak for the app origin. Four layers, stated once in [HTML mail rendering](#html-mail-rendering) below. |
 | Forwarded HTML | A forward carries the source message's HTML part only after the same DOMPurify pass the reader uses, and only as an addition: the plain-text body is always built and always sent. What this client refuses to run, it refuses to relay. One click drops it. |
 | Links in messages | Only `https://`, `http://` and `mailto:` are linkified, so a `javascript:` URL stays inert text. Every link carries `rel="noopener noreferrer nofollow"`. |
 | Every response | CSP with `frame-ancestors 'none'`, `base-uri 'none'` and `object-src 'none'`, plus `nosniff`, `Referrer-Policy: no-referrer` and a `Permissions-Policy` that denies camera, microphone, geolocation, payment, USB and `interest-cohort`. |
+
+## HTML mail rendering
+
+This is the canonical statement of how sender HTML reaches the screen. Code and docs across the tree point here, historically by the citation **§6.4.6**; that citation means this section. Change the design here first, then the pointers.
+
+Sender HTML is hostile input. Four independent layers stand between it and the app origin, and no single failure is enough to breach them:
+
+1. **Sanitised.** DOMPurify strips scripts, event handlers, forms and document-level tags while the markup is still a string, never a DOM the app owns.
+2. **Script-forbidden.** The frame's `sandbox` omits `allow-scripts`, so the browser refuses to execute script inside it whatever survived layer 1.
+3. **Opaque origin.** The `sandbox` also omits `allow-same-origin`. Script running there, which layer 2 forbids, would find no app DOM, no `localStorage`, no bearer token, and no origin to speak from.
+4. **Fetch-fenced.** A `<meta>` CSP of `default-src 'none'` inside the frame blocks every fetch the document can still express, and intersects with the page CSP that a `srcdoc` document inherits.
+
+Sender HTML never enters the React tree. `react/no-danger` is an ESLint error, and the one `dangerouslySetInnerHTML` in `apps/web` is a fixed desktop UA marker in `layout.tsx`, not mail. The same DOMPurify config guards the forward path, which has no sandbox to fall back on: what this client refuses to run, it refuses to relay.
+
+Remote images stay blocked until the user asks for them on that message, so a tracking pixel is a read receipt nobody granted. `cid:` images arrive as `data:` URIs and always render. The consent is per message and is never persisted.
+
+The opaque origin has a price paid on purpose: the parent cannot read the frame's document, so the frame cannot size itself to its content. It takes the height the reading pane has left and scrolls internally. Height measurement is not worth a same-origin frame one browser bug away from the bearer token.
+
+Where it lives: `apps/web/src/components/reader/html-body.tsx` (the frame, its CSP, the image consent), `apps/web/src/lib/mail/sanitize.ts` (the one DOMPurify config), `src/api/security-headers.ts` (the page CSP the frame inherits).
 
 ## Known limits
 
 These are deliberate. Report them only if you can show more impact than described.
 
-- **`script-src` allows `'unsafe-inline'`.** The UI is a Next.js static export; its hydration bootstrap is inline and a static export cannot mint a per-response nonce. The origin restriction still holds, and the control that stops sender-controlled markup is that HTML bodies render only sanitised inside a script-disabled sandboxed frame.
+- **`script-src` allows `'unsafe-inline'`.** The UI is a Next.js static export; its hydration bootstrap is inline and a static export cannot mint a per-response nonce. The origin restriction still holds, and the control that stops sender-controlled markup is the four-layer fence in [HTML mail rendering](#html-mail-rendering), not this directive.
 - **`img-src` allows `https:`.** A srcdoc frame inherits the page policy, so a header that banned remote images would overrule the reader's per-message "Load images" choice. The default block lives in the frame's own `<meta>` CSP (`img-src data:`), which widens only when the user asks. Plain `http:` to a remote host stays blocked, so mail that hot-links images over plaintext shows nothing.
-- **DOMPurify sits on the path that sender HTML takes.** Rendering HTML at all means trusting a third-party parser, and its bypass history is not empty. It is layer one of four: a bypass still lands in a frame that cannot run script, has no origin, and can fetch nothing. The dependency is pinned in `apps/web/package-lock.json` and is worth watching.
+- **DOMPurify sits on the path that sender HTML takes.** Rendering HTML at all means trusting a third-party parser, and its bypass history is not empty. It is layer one of the four in [HTML mail rendering](#html-mail-rendering): a bypass still lands in a frame that cannot run script, has no origin, and can fetch nothing. The dependency is pinned in `apps/web/package-lock.json` and is worth watching.
 - **Printing an HTML message captures only what is on screen.** The frame is an opaque origin, so the parent cannot measure its content height and cannot expand it for print. Fixing it means a same-origin frame, which is the trade this design refuses.
 - **Rendered HTML mail makes convincing phishing possible.** A plain-text reader structurally cannot show a sender's forged letterhead. This one can. No sanitiser addresses that, and no layer here does either. Judge the sender, not the rendering.
 - **`connect-src` allows loopback on any port and any `https:` origin.** The Server URL is yours to configure, so the policy has to permit what you configure. Plain `http:` to a remote host stays blocked.

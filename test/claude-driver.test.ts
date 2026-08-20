@@ -294,6 +294,121 @@ describe("ClaudeDriver", () => {
     await driver.done;
   });
 
+  it("stops the turn in flight and stays up for the next message", async () => {
+    const fake = fakeCli([
+      { session: "ses-a", answer: "never arrives", slow: true },
+      { session: "ses-b", answer: "still here" },
+    ]);
+    const { store, channel } = make();
+    const driver = drive(channel, fake);
+
+    const question = channel.post({ role: "user", text: "read everything" });
+    await until(() => fake.started());
+    expect(channel.presence().working?.seq).toBe(question.seq);
+
+    // The route's own order: close the message first, then kill the turn. The
+    // other way round hands the message straight back to the agent that is
+    // being stopped.
+    expect(channel.cancelWork(question.seq)?.seq).toBe(question.seq);
+    expect(driver.interrupt(question.seq)).toBe(true);
+
+    // The run is over on the pane, and the transcript says so where the answer
+    // would have been.
+    await until(() => !channel.presence().working);
+    const stopped = channel.history().find((t) => t.role === "agent")!;
+    expect(stopped.text).toBe("Stopped.");
+    expect(stopped.replyTo).toBe(question.seq);
+    // Stopped, not dropped: the message was answered, so nothing re-delivers it
+    // and no warning is owed about it.
+    expect(store.listDroppedUserSeqs()).toEqual([]);
+
+    // The agent is still running: the next message is taken, and the killed
+    // turn was not handed over a second time.
+    channel.post({ role: "user", text: "what about now?" });
+    await until(() => channel.history().filter((t) => t.role === "agent").length === 2);
+    const answer = channel.history().filter((t) => t.role === "agent")[1];
+    expect(answer.text).toBe("still here");
+    const asked = userCalls(fake).map((argv) => argv[argv.indexOf("-p") + 1]);
+    expect(asked).toEqual(["read everything", "what about now?"]);
+
+    driver.stop();
+    await driver.done;
+  });
+
+  it("has nothing to stop when no turn is running", async () => {
+    const fake = fakeCli([{ answer: "done" }]);
+    const { channel } = make();
+    const driver = drive(channel, fake);
+
+    expect(channel.cancelWork(1)).toBeNull();
+    expect(channel.cancelWork()).toBeNull();
+
+    driver.stop();
+    await driver.done;
+  });
+
+  it("does not stop a message other than the one asked for", async () => {
+    const fake = fakeCli([{ answer: "the long answer", slow: true }]);
+    const { channel } = make();
+    const driver = drive(channel, fake);
+
+    const question = channel.post({ role: "user", text: "read everything" });
+    await until(() => fake.started());
+
+    // The pane was showing Stop for a run that has since finished; the seq it
+    // names is not the one in flight. Nothing is stopped and nothing is said.
+    expect(channel.cancelWork(question.seq - 1)).toBeNull();
+    expect(channel.presence().working?.seq).toBe(question.seq);
+    expect(channel.history().some((t) => t.role === "agent")).toBe(false);
+
+    fake.release();
+    await until(() => channel.history().some((t) => t.role === "agent"));
+    expect(channel.history().find((t) => t.role === "agent")!.text).toBe("the long answer");
+
+    driver.stop();
+    await driver.done;
+  });
+
+  it("does not prompt for a turn stopped while the naming call was still running", async () => {
+    const fake = fakeCli([
+      // The first turn answers, which starts the naming call — and that call is
+      // the one left holding the CLI while the next message is claimed.
+      { session: "ses-a", answer: "first answer" },
+      { session: "ses-a", answer: "First question", slow: true },
+      { session: "ses-a", answer: "must never be asked" },
+    ]);
+    const { store, channel } = make();
+    const driver = drive(channel, fake);
+
+    channel.post({ role: "user", text: "first question" });
+    await until(() => channel.history().some((t) => t.role === "agent"));
+    // The naming call is in flight and holding the only child there is.
+    await until(() => fake.started());
+
+    // The next message is claimed while the loop waits on that naming call: the
+    // pane shows Stop, and there is no process for this turn to kill yet.
+    const stopped = channel.post({ role: "user", text: "read everything" });
+    await until(() => channel.presence().working?.seq === stopped.seq);
+    expect(channel.cancelWork(stopped.seq)?.seq).toBe(stopped.seq);
+    expect(driver.interrupt(stopped.seq)).toBe(true);
+
+    // Let the naming call finish. The loop reaches the stopped turn and must
+    // refuse to ask it: three invocations would mean the CLI was prompted for a
+    // question the user had already stopped.
+    fake.release();
+    await until(() => !channel.presence().working);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(userCalls(fake)).toHaveLength(1);
+    expect(channel.history().filter((t) => t.role === "agent").map((t) => t.text)).toEqual([
+      "first answer",
+      "Stopped.",
+    ]);
+    expect(store.listDroppedUserSeqs()).toEqual([]);
+
+    driver.stop();
+    await driver.done;
+  });
+
   it("releases the lease and retries when a turn fails", async () => {
     const fake = fakeCli([
       { errors: ["Overloaded"] },
