@@ -175,7 +175,14 @@ export function Reader() {
               /* HTML mail renders sanitised in a sandboxed frame (§6.4.6);
                  text-only mail keeps the plain-text reader. */
               full.bodyHtml ? (
-                <HtmlBody html={full.bodyHtml} text={full.bodyText} />
+                /* Keyed: without it React keeps the instance across a
+                   selection change and the "Load images" consent leaks into
+                   the next sender's mail. */
+                <HtmlBody
+                  key={full.id}
+                  html={full.bodyHtml}
+                  text={full.bodyText}
+                />
               ) : (
                 <BodyText text={full.bodyText} hasHtml={false} />
               )

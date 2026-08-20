@@ -40,7 +40,7 @@ export type ReplyMode = Exclude<ComposeMode, "new">;
  *
  * There is no From picker: the server forces `from` to the account's own stored
  * address. No attachment control and no rich-text toggle either — no upload
- * path exists, and this client refuses to render HTML.
+ * path exists, and this client composes plain text only.
  */
 export function InlineReply({
   message,

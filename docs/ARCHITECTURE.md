@@ -182,6 +182,7 @@ Calendar, Superhuman polish, multi-tenant SaaS, agent-owned domains, Gmail OAuth
 Two directives are deliberately looser than they look, and `SECURITY.md` states both as known limits:
 
 - `script-src` allows `'unsafe-inline'`. A Next.js static export bootstraps hydration from an inline script and has no server to mint a per-response nonce. The origin restriction still holds. The control that actually stops sender-controlled markup is that `bodyHtml` renders only through DOMPurify inside a script-disabled sandboxed frame, and `react/no-danger` is an ESLint error.
+- `img-src` allows `https:`, because a srcdoc frame inherits the page policy and the reader's per-message "Load images" choice has to be expressible. The gate is the frame's own `<meta>` CSP, not this header. Plain `http:` stays blocked, the same line `connect-src` holds.
 - `connect-src` allows loopback on any port plus `https:`. The Server URL is user-configurable — the page ships pointing at `127.0.0.1:8787` and is reachable on whatever port you launched. `'self'` alone blocks the app's own health check whenever those differ, which is a real failure caught in a browser, not a hypothetical. Plain `http:` to a remote host stays blocked.
 
 The static deployment gets the same set from `apps/web/vercel.json`. Its `connect-src` is the same, since talking to your machine is the point.

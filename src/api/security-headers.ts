@@ -20,18 +20,19 @@ import type { Context, MiddlewareHandler } from "hono";
  * script-disabled sandboxed frame (§6.4.6), and `react/no-danger` is an
  * ESLint error.
  *
- * `img-src` allows `http:`/`https:` because mail carries remote images and a
+ * `img-src` allows `https:` because mail carries remote images and a
  * srcdoc frame inherits this policy — a header that bans remote images would
  * overrule the reader's per-message "Load images" choice. The actual gate is
  * the frame's own `<meta>` CSP, which starts at `img-src data:` and widens
  * only when the user asks. Tightest-policy-wins keeps this header the outer
- * bound, not the gate.
+ * bound, not the gate. Plain `http:` to a remote host stays blocked here, the
+ * same line `connect-src` holds.
  */
 const CSP_DIRECTIVES = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: http: https:",
+  "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
   "connect-src 'self' http://127.0.0.1:* http://localhost:* http://[::1]:* https:",
   // Mail bodies render in a same-document srcdoc frame (§6.4.6). No frame

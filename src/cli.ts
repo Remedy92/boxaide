@@ -128,7 +128,7 @@ async function seedFixtureDemo(
       seen: false,
     },
     {
-      subject: "Weekly digest — now with pictures",
+      subject: "Weekly digest with pictures",
       from: "newsletter@example.com",
       bodyText: "Your weekly digest. View this mail in an HTML client to see the charts.",
       // Exercises the HTML reading path: an inline data: image (renders
