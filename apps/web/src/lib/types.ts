@@ -40,7 +40,7 @@ export type MailMessageSummary = {
 /** GET /api/messages/:accountId/:messageId → { message: MailMessage } */
 export type MailMessage = MailMessageSummary & {
   bodyText: string; // always present, may be "", truncated at 50 000 chars
-  bodyHtml?: string; // RAW UNSANITISED SENDER HTML. Render ONLY via <HtmlBody> (DOMPurify + sandboxed frame, §6.4.6). NEVER dangerouslySetInnerHTML.
+  bodyHtml?: string; // RAW UNSANITISED SENDER HTML. Hostile input. Render ONLY via <HtmlBody> (DOMPurify + sandboxed frame). NEVER dangerouslySetInnerHTML. Why: SECURITY.md, "HTML mail rendering" (§6.4.6).
   cc?: string;
   bcc?: string; // declared but never populated on the read path — always undefined in practice
   references?: string; // space-separated Message-ID chain

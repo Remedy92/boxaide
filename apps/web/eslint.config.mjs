@@ -7,10 +7,12 @@ const eslintConfig = defineConfig([
   ...nextTs,
   {
     rules: {
-      // bodyHtml is raw unsanitised sender HTML. It renders only through
-      // HtmlBody's sandboxed frame (§6.4.6), never through the React tree.
-      // Making this an error keeps that rule mechanical rather than
-      // remembered (§6.4).
+      // bodyHtml is raw unsanitised sender HTML and renders only through
+      // HtmlBody's sandboxed frame, never through the React tree. An error,
+      // not a warning, keeps that mechanical rather than remembered: the
+      // sandbox is layer 2 of 4 and this rule is what stops markup skipping
+      // straight past all four. Design: SECURITY.md, "HTML mail rendering"
+      // (cited in the tree as §6.4.6).
       "react/no-danger": "error",
     },
   },

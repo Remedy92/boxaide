@@ -186,8 +186,10 @@ export function Reader() {
             <IdentityBlock message={shown} alias={account?.alias ?? null} />
 
             {full ? (
-              /* HTML mail renders sanitised in a sandboxed frame (§6.4.6);
-                 text-only mail keeps the plain-text reader. */
+              /* HTML mail renders sanitised in a sandboxed frame (SECURITY.md,
+                 "HTML mail rendering"); text-only mail keeps the plain-text
+                 reader, which is the only branch where there is no HTML at
+                 all and so nothing to point the reader at. */
               full.bodyHtml ? (
                 /* Keyed: without it React keeps the instance across a
                    selection change and the "Load images" consent leaks into
@@ -198,7 +200,7 @@ export function Reader() {
                   text={full.bodyText}
                 />
               ) : (
-                <BodyText text={full.bodyText} hasHtml={false} />
+                <BodyText text={full.bodyText} />
               )
             ) : (
               <div className="mt-5 space-y-2">
