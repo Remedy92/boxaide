@@ -7,34 +7,21 @@ import { splitQuotedTail } from "@/lib/format/quote";
 const TRUNCATION_LIMIT = 50_000;
 
 /**
- * §6.4.6. Renders `bodyText` and only `bodyText`.
+ * Renders `bodyText` and only `bodyText`. No HTML string is ever built here:
+ * links come back from `linkifyToElements` as React elements.
  *
- * `bodyHtml` is raw, unsanitised sender HTML. It renders only through
- * `HtmlBody` — DOMPurify plus a script-disabled sandboxed frame — never
- * through the React tree. `react/no-danger` is an ESLint error. The only
- * `dangerouslySetInnerHTML` in apps/web is the desktop UA marker in
- * layout.tsx, not mail. Links come back from linkifyToElements as React
- * elements; no HTML string is ever built here.
+ * Sender HTML never reaches this component. `bodyHtml` renders only through
+ * `HtmlBody`, behind the four layers in SECURITY.md, "HTML mail rendering"
+ * (cited in the tree as §6.4.6). Callers with HTML in hand fall back to this
+ * component for the *text*, and own any notice about the HTML they still
+ * hold, because only they know it exists.
  */
-export function BodyText({
-  text,
-  hasHtml,
-}: {
-  text: string;
-  hasHtml: boolean;
-}) {
+export function BodyText({ text }: { text: string }) {
   if (!text) {
     return (
-      <div className="mt-5 space-y-1">
-        <p className="text-[13px] leading-[18px] text-fg-tertiary">
-          This message has no plain-text body.
-        </p>
-        {hasHtml && (
-          <p className="text-[13px] leading-[18px] text-fg-tertiary">
-            It has an HTML body. Open “View HTML source” to read it as text.
-          </p>
-        )}
-      </div>
+      <p className="mt-5 text-[13px] leading-[18px] text-fg-tertiary">
+        This message has no plain-text body.
+      </p>
     );
   }
 

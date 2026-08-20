@@ -3,8 +3,9 @@
 import DOMPurify, { type Config as DOMPurifyConfig } from "dompurify";
 
 /**
- * §6.4.6. The one sanitiser in apps/web, and the only way sender HTML is
- * allowed to leave a string.
+ * The one sanitiser in apps/web, and the only way sender HTML is allowed to
+ * leave a string. It is layer 1 of the four in SECURITY.md, "HTML mail
+ * rendering" (cited in the tree as §6.4.6).
  *
  * Two callers, both of which hand sender markup to something that will parse
  * it: `HtmlBody` renders it in the sandboxed frame, and the forward path puts
