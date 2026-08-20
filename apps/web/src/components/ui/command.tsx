@@ -68,17 +68,20 @@ function CommandInput({
   return (
     <div
       data-slot="command-input-wrapper"
-      className="flex h-9 items-center gap-2 border-b px-3"
+      className="flex h-9 items-center gap-2 border-b border-border-subtle px-3"
     >
       <SearchIcon className="size-4 shrink-0 opacity-50" />
-      {/* No `outline-hidden` here. It is unconditional, lives in the utility
-          layer and so beats globals.css's `:focus-visible` rule — which would
-          leave the palette's primary, default-focused control with no focus
-          indicator at all (2.4.7). */}
+      {/* The outline from globals.css is suppressed here, and only here. This
+          input is focused the moment its list opens and holds focus for as
+          long as it is on screen, so a ring marks nothing a caret does not
+          already say — while a box drawn around a row that is itself the top
+          of the surface reads as a rendering fault (2.4.7 is carried by the
+          caret in a text field). It fills the wrapper rather than setting its
+          own height, so the row cannot outgrow the border it sits above. */}
       <CommandPrimitive.Input
         data-slot="command-input"
         className={cn(
-          "flex h-10 w-full rounded-md bg-transparent py-3 text-sm placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
+          "flex h-full w-full bg-transparent py-0 text-sm placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
           className
         )}
         {...props}
@@ -104,6 +107,7 @@ function CommandList({
 }
 
 function CommandEmpty({
+  className,
   ...props
 }: React.ComponentProps<typeof CommandPrimitive.Empty>) {
   return (
@@ -113,7 +117,7 @@ function CommandEmpty({
     <CommandPrimitive.Empty
       data-slot="command-empty"
       role="status"
-      className="py-6 text-center text-sm"
+      className={cn("py-6 text-center text-sm", className)}
       {...props}
     />
   )
