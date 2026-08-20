@@ -46,6 +46,7 @@ import {
 import {
   DRIVEN_SYSTEM,
   runDrivenLoop,
+  STOPPED_BY_USER,
   TITLE_PROMPT,
   watchdogTickMs,
   WATCHDOG_MS,
@@ -162,6 +163,14 @@ export class ClaudeDriver implements AgentDriver {
   private healed = false;
   /** The naming call for the last answered turn, while it is still running. */
   private naming: Promise<void> | null = null;
+  /**
+   * The user turn being prompted for, while one is. Null covers the naming
+   * calls and the gaps between turns, which Stop must never mistake for the
+   * message it was pressed on.
+   */
+  private runningSeq: number | null = null;
+  /** A user turn the user stopped. Never handed to the model. */
+  private cancelledSeq: number | null = null;
   /** Resolves when the loop has left `run`. Tests await it; production does not. */
   readonly done: Promise<void>;
   private release!: () => void;
@@ -190,6 +199,33 @@ export class ClaudeDriver implements AgentDriver {
     // The turn in flight is ended by the abort listener runTurn registers, which
     // escalates SIGTERM to SIGKILL on its own.
     this.abort.abort();
+  }
+
+  /**
+   * Ends the turn `seq` belongs to, and only that.
+   *
+   * The driver's own signal is left alone: aborting it would end the loop as
+   * well, and Stop is meant to leave the agent up for the next message. Killing
+   * the child makes the turn fail, and the loop's failure path hands the message
+   * back — where the channel has already answered it, so it is not re-delivered
+   * and the failure is not counted.
+   *
+   * The child is killed only when it belongs to this seq. A turn that has been
+   * claimed but not yet prompted for has no child of its own, and the one that
+   * is running then is the previous chat's naming call — killing that would
+   * cost a chat its name and leave the stopped question to be asked anyway.
+   * Recording the seq is what stops it: `takeTurn` refuses to spawn for it.
+   */
+  interrupt(seq: number): boolean {
+    if (this.stopped) return false;
+    this.cancelledSeq = seq;
+    if (this.runningSeq === seq && this.child) this.endChild(this.child);
+    return true;
+  }
+
+  /** Whether `seq` is a turn Stop has already closed. Null is never one. */
+  private isCancelled(seq: number | null): boolean {
+    return seq !== null && this.cancelledSeq === seq;
   }
 
   /** Runs once, however the loop ended. */
@@ -223,7 +259,12 @@ export class ClaudeDriver implements AgentDriver {
           });
         },
       },
-      (turn) => this.prompt(turn.chatId, turn.text),
+      (turn) => {
+        this.runningSeq = turn.seq;
+        return this.prompt(turn.chatId, turn.text).finally(() => {
+          this.runningSeq = null;
+        });
+      },
     );
   }
 
@@ -289,6 +330,12 @@ export class ClaudeDriver implements AgentDriver {
    * continue whatever some other chat was talking about.
    */
   private async takeTurn(chatId: string, text: string): Promise<ClaudeTurnOutcome> {
+    // Stopped before this process was spawned: while the loop was finishing the
+    // previous chat's naming call, or in the gap the heal retry opens. Either
+    // way the question is already answered, and asking it would answer it twice.
+    if (this.isCancelled(this.runningSeq)) {
+      return { text: null, sessionId: null, error: STOPPED_BY_USER };
+    }
     const { id: resuming, epoch } = this.opts.channel.chatSession(
       chatId,
       this.opts.agent,

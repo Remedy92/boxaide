@@ -12,6 +12,7 @@ import {
   renameAgentChat,
   selectAgentChat,
   sendAgentMessage,
+  stopAgentTurn,
   streamAgent,
   type AgentApproval,
 } from "@/lib/api/endpoints";
@@ -100,6 +101,15 @@ export type AgentConversation = {
   error: string | null;
   sending: boolean;
   send: (text: string) => Promise<void>;
+  /**
+   * Ends the message the agent is answering, named by its seq.
+   *
+   * The caller names it rather than this reading `presence.working`, so what is
+   * stopped is the run the user was looking at when they pressed the button and
+   * not whatever was claimed by the time the request landed.
+   */
+  stop: (seq: number) => Promise<void>;
+  stopping: boolean;
   clear: () => Promise<void>;
   /** Live chats, newest message first. Archived ones are fetched separately. */
   chats: AgentChat[];
@@ -202,6 +212,7 @@ function AgentSession({
   );
   const [error, setError] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
+  const [stopping, setStopping] = React.useState(false);
   const [chats, setChats] = React.useState<AgentChat[]>([]);
   const [chat, setChat] = React.useState<AgentChat | null>(null);
   const [storage, setStorage] = React.useState<AgentChatStorage>(NO_STORAGE);
@@ -382,6 +393,37 @@ function AgentSession({
     [ctx],
   );
 
+  /**
+   * The presence in the reply is applied rather than waited for.
+   *
+   * The stream sends the same thing a moment later, but the button the user
+   * pressed has to stop looking live on the click that pressed it — a Stop that
+   * spins on for another frame reads as one that did not take.
+   *
+   * Only over the run it stopped, though. The killed turn frees the loop to
+   * claim the next queued message, and that presence frame can arrive on the
+   * stream before this reply is even parsed; writing this older snapshot over
+   * it would paint an idle pane while an agent is genuinely working, until
+   * whenever the next frame happens to arrive.
+   */
+  const stop = React.useCallback(
+    async (seq: number) => {
+      setStopping(true);
+      setError(null);
+      try {
+        const result = await stopAgentTurn(seq, ctx);
+        setPresence((prev) =>
+          prev.working?.seq === seq ? normalise(result.presence) : prev,
+        );
+      } catch (err) {
+        setError(friendlyError(err instanceof Error ? err.message : String(err)));
+      } finally {
+        setStopping(false);
+      }
+    },
+    [ctx],
+  );
+
   const clear = React.useCallback(async () => {
     setError(null);
     try {
@@ -487,6 +529,8 @@ function AgentSession({
       error,
       sending,
       send,
+      stop,
+      stopping,
       clear,
       chats,
       chat,
@@ -507,6 +551,8 @@ function AgentSession({
       error,
       sending,
       send,
+      stop,
+      stopping,
       clear,
       chats,
       chat,
