@@ -324,6 +324,9 @@ export type SendMessageBody = {
   to: string;
   subject: string;
   text: string;
+  /** Forwarded HTML, already sanitised client-side. The reader never relays
+      what it would not run: see lib/mail/sanitize. */
+  html?: string;
   cc?: string;
   bcc?: string;
   inReplyTo?: string;
@@ -550,6 +553,27 @@ export function sendAgentMessage(
   return request<{ turn: AgentTurn; presence: AgentPresence }>("/api/agent/messages", {
     method: "POST",
     body: chat ? { text, chat } : { text },
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * Stops the message the agent is answering right now.
+ *
+ * `seq` is the message the button was showing, and the server checks it: the
+ * run can end and the next one be claimed between the paint and the click, and
+ * `stopped` comes back false rather than killing that one instead. No `chat`
+ * argument — a seq names one message across every conversation.
+ */
+export function stopAgentTurn(
+  seq: number,
+  ctx: Ctx,
+): Promise<{ stopped: boolean; presence: AgentPresence }> {
+  return request<{ stopped: boolean; presence: AgentPresence }>("/api/agent/stop", {
+    method: "POST",
+    body: { seq },
     baseUrl: ctx.baseUrl,
     token: ctx.token,
     signal: ctx.signal,
