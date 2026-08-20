@@ -238,9 +238,22 @@ export function parallelProvider(deps: ProviderDeps = {}): SearchProvider {
  * Every provider, in preference order, whether or not it has a key. Order is
  * the tie-break for an unspecified provider, so it is stated once here rather
  * than being an accident of how a Map iterated.
+ *
+ * Parallel first, and the reason is price. Both adapters below ask for the same
+ * thing, a ranked list of hits with SNIPPET_CHARS of page text each, and both
+ * answer it. Parallel charges $1 per 1,000 search requests with 5,000 a month
+ * free; Exa charges $7 per 1,000 with $10 of credit a month. So an operator who
+ * has pasted both keys and named neither was being billed seven times over for
+ * the same job, which is not a preference anybody expressed. Exa stays second
+ * rather than being dropped: its index finds pages Parallel's does not, and
+ * naming it in the tool call still reaches it.
+ *
+ * Both figures were read off the vendors' own pricing pages on 20 August 2026,
+ * and the same two numbers are quoted to the operator in
+ * apps/web/src/lib/connector-catalog.ts. If one moves, move both.
  */
 export function allProviders(deps: ProviderDeps = {}): SearchProvider[] {
-  return [exaProvider(deps), parallelProvider(deps)];
+  return [parallelProvider(deps), exaProvider(deps)];
 }
 
 /**

@@ -254,13 +254,13 @@ describe("services read keys live", () => {
     const service = new ConnectorsService(newStore(), envFrom({}));
     const research = new ResearchService({ getKey: (id) => service.getKey(id) });
     expect(research.listProviders()).toEqual([
-      { id: "exa", configured: false },
       { id: "parallel", configured: false },
+      { id: "exa", configured: false },
     ]);
     service.setKey("parallel", "parallel-key-1234");
     expect(research.listProviders()).toEqual([
-      { id: "exa", configured: false },
       { id: "parallel", configured: true },
+      { id: "exa", configured: false },
     ]);
     expect(research.select().id).toBe("parallel");
   });

@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
+  allProviders,
   exaProvider,
   parallelProvider,
   EXA_ENV_KEY,
@@ -227,8 +228,26 @@ describe("provider selection", () => {
       providers: [fakeProvider("exa", false), fakeProvider("parallel", false)],
     });
     await expect(service.search({ query: "q" })).rejects.toThrow(
-      new RegExp(`${EXA_ENV_KEY}[\\s\\S]*${PARALLEL_ENV_KEY}`),
+      new RegExp(`${PARALLEL_ENV_KEY}[\\s\\S]*${EXA_ENV_KEY}`),
     );
+  });
+
+  /**
+   * The default order is a price decision, not a detail. Parallel does the same
+   * search as Exa for a seventh of the money, so an operator who pasted both
+   * keys and named neither must not be billed through the dearer one. See
+   * allProviders() in src/research/providers.js for the figures.
+   */
+  it("prefers Parallel over Exa when a search names no provider", () => {
+    expect(allProviders().map((provider) => provider.id)).toEqual(["parallel", "exa"]);
+  });
+
+  it("still reaches Exa when a search names it", async () => {
+    const service = new ResearchService({
+      providers: [fakeProvider("parallel", true), fakeProvider("exa", true)],
+    });
+    expect(service.select().id).toBe("parallel");
+    expect(service.select("exa").id).toBe("exa");
   });
 
   it("reports which providers have a key", () => {
@@ -267,7 +286,9 @@ describe("the two fetch seams", () => {
     });
 
     await service.search({ query: "anvils" });
-    expect(provider).toEqual(["https://api.exa.ai/search"]);
+    // Parallel, because it is first in allProviders() and this search names
+    // nobody. The assertion is that ONE seam was used, not which vendor.
+    expect(provider).toEqual(["https://api.parallel.ai/v1beta/search"]);
     expect(page).toEqual([]);
   });
 

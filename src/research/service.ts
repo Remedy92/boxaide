@@ -121,8 +121,8 @@ export class ResearchService {
  * the user which variable to set, which is the actual fix.
  */
 export const NO_PROVIDER_MESSAGE =
-  `no search provider is configured. Add a key under Settings > Connectors, or set ${EXA_ENV_KEY} for Exa ` +
-  `or ${PARALLEL_ENV_KEY} for Parallel in the environment of the Boxaide server, and search again. Tell the ` +
+  `no search provider is configured. Add a key under Settings > Connectors, or set ${PARALLEL_ENV_KEY} for ` +
+  `Parallel or ${EXA_ENV_KEY} for Exa in the environment of the Boxaide server, and search again. Tell the ` +
   `user this; there is no other way to search from here.`;
 
 function envKeyFor(id: string): string {
