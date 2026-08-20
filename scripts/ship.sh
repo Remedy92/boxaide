@@ -139,7 +139,20 @@ DMG="apps/desktop/release/boxaide-mac.dmg"
 # says nothing about it.
 ZIP="apps/desktop/release/boxaide-mac.zip"
 FEED="apps/desktop/release/latest-mac.yml"
-NOTES="$(git log --format='- %s' "${TAG}..HEAD")"
+# The release body is what the app shows under "What is new", so it is written
+# for whoever is deciding whether to restart, not for whoever wrote the commit.
+# Three things go before it is one:
+#   - merges, which name a branch and no change;
+#   - the "Cut 0.2.24" commit, which is this script's own bookkeeping;
+#   - the "(#84)" a squash-merge appends, which GitHub then expands into an
+#     anchor tag in the updater feed.
+# What is left is one sentence per change, in the words of the commit subject.
+# That makes the subject the release note: write it for a user, in the present
+# tense, saying what the app now does.
+NOTES="$(git log --no-merges --format='- %s' "${TAG}..HEAD" \
+  | grep -v -E '^- Cut [0-9]+\.[0-9]+\.[0-9]+' \
+  | sed -E 's/ *\(#[0-9]+\)$//')"
+[ -n "$NOTES" ] || NOTES="- Fixes and refinements."
 
 printf 'ship %s\n' "$VER"
 printf 'from %s (%s)\n' "$TAG" "$(git rev-parse --short "$SHIPPED")"

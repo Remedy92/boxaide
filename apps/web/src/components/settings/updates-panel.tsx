@@ -181,9 +181,9 @@ function Panel({
           <h3 className="text-[13px] font-medium text-fg">
             What is new in {state.latestVersion}
           </h3>
-          {/* The release body as written, not rendered: it is somebody's
-              markdown, and rendering it would be a second markdown pipeline
-              in the app for one paragraph of changelog. */}
+          {/* Plain text by the time it arrives: src/update/notes.ts flattens
+              the release body, so no markdown pipeline is needed for one
+              paragraph of changelog. */}
           <div className="pane-scroll max-h-64 overflow-y-auto rounded-[var(--radius-md)] border border-border-subtle p-3">
             <p className="text-[13px] leading-[18px] whitespace-pre-wrap text-fg-secondary">
               {state.notes}
