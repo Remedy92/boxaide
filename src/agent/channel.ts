@@ -56,11 +56,11 @@ export { MAX_DELIVERIES };
 const HISTORY_LIMIT = 500;
 
 /**
- * Bytes of conversation text kept before old chats are archived.
+ * Bytes of conversation text kept before old chats are trimmed.
  *
  * Chat text is small — this is tens of thousands of messages, not a disk
  * pressure valve. It is here so the store cannot grow without a number the
- * user can see, and so archiving is a rule rather than a surprise.
+ * user can see, and so trimming is a rule rather than a surprise.
  */
 const DEFAULT_BUDGET_BYTES = 50 * 1024 * 1024;
 
@@ -456,19 +456,22 @@ export class AgentChannel {
   }
 
   /**
-   * Archives the oldest chats until the store is back inside its budget.
+   * Takes the messages off old chats until the store is back inside its budget.
    *
-   * Oldest first, active chat never, and the record always kept. The user is
+   * Archived chats go first and the oldest go first within each group, the
+   * active chat is never touched, and the record is always kept. The user is
    * told after the fact rather than asked beforehand: a prompt that appears
-   * because of a byte count is a prompt somebody dismisses without reading.
+   * because of a byte count is a prompt somebody dismisses without reading. A
+   * chat that was archived and is now trimmed stays archived: the user put it
+   * away, and the budget taking its messages does not take that back.
    */
   private enforceBudget(): void {
     const budget = budgetBytes();
     let bytes = this.store.chatBytes();
     if (bytes <= budget) return;
-    for (const candidate of this.store.archiveCandidates()) {
+    for (const candidate of this.store.trimCandidates()) {
       if (bytes <= budget) break;
-      if (this.store.archiveChat(candidate.id)) bytes -= candidate.bytes;
+      if (this.store.trimChat(candidate.id)) bytes -= candidate.bytes;
     }
   }
 
@@ -503,9 +506,15 @@ export class AgentChannel {
   }
 
   /**
-   * Whether a chat may be written to. An archived chat is a record, not a
-   * conversation, so it is not one. Routes ask this to answer 404 before they
-   * hand an id to `post` or `clear`.
+   * Whether a chat may be written to. Routes ask this to answer 404 before
+   * they hand an id to `post` or `clear`.
+   *
+   * An archived chat is not writable, and it keeps every message it had. Those
+   * two go together on purpose: a chat somebody is typing into is not one they
+   * have put away, so the way to write to an archived chat is to open it,
+   * which unarchives it. The alternative, a third read-only state, would
+   * have to be understood by every write path in the app to buy nothing the
+   * user asked for.
    */
   writable(id: string): boolean {
     const chat = this.store.getChat(id);
@@ -585,9 +594,26 @@ export class AgentChannel {
     this.store.clearChatSession(chatId);
   }
 
+  /**
+   * Puts a chat away with its messages intact, and undoes that.
+   *
+   * Archiving is treated like a removal by everything downstream: the row
+   * leaves the live list, so an agent holding a question in it has nothing to
+   * answer any more and the user must not be left looking at it. Unarchiving
+   * only puts the row back, and leaves the pane where it is.
+   */
   archiveChat(id: string): boolean {
     const ok = this.store.archiveChat(id);
     if (ok) this.afterChatRemoved(id);
+    return ok;
+  }
+
+  unarchiveChat(id: string): boolean {
+    const ok = this.store.unarchiveChat(id);
+    if (ok) {
+      this.emitChats();
+      this.emitPresence();
+    }
     return ok;
   }
 
@@ -598,8 +624,9 @@ export class AgentChannel {
   }
 
   /**
-   * A chat just lost its messages. If an agent was answering one of them,
-   * that lease is over — the question it was holding no longer exists.
+   * A chat just left the live list, or lost its messages. If an agent was
+   * answering one of them, that lease is over: the question it was holding
+   * is no longer one this app will let anybody answer.
    */
   private afterChatRemoved(id: string): void {
     if (this.work?.chatId === id) this.work = null;

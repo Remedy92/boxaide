@@ -1,4 +1,5 @@
 import { describe, expect, it, afterEach } from "vitest";
+import Database from "better-sqlite3";
 import { randomBytes } from "node:crypto";
 import { existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -288,6 +289,82 @@ describe("chats", () => {
   });
 });
 
+describe("archiving", () => {
+  it("keeps every message, and gives them all back on unarchive", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "the March invoices" });
+    channel.post({ role: "agent", text: "chased" });
+    const chat = channel.chats()[0];
+    channel.createChat();
+
+    expect(channel.archiveChat(chat.id)).toBe(true);
+    // Out of the list the rail draws, and out of the way of the composer.
+    expect(channel.chats().some((row) => row.id === chat.id)).toBe(false);
+    expect(channel.writable(chat.id)).toBe(false);
+
+    // Nothing was dropped. This is the whole difference from the old archive,
+    // which deleted every turn behind the row it kept.
+    const archived = channel
+      .chats({ includeArchived: true })
+      .find((row) => row.id === chat.id);
+    expect(archived?.archivedAt).not.toBeNull();
+    expect(archived?.trimmedAt).toBeNull();
+    expect(archived?.turns).toBe(2);
+    expect(channel.history(undefined, chat.id).map((t) => t.text)).toEqual([
+      "the March invoices",
+      "chased",
+    ]);
+
+    expect(channel.unarchiveChat(chat.id)).toBe(true);
+    const back = channel.chats().find((row) => row.id === chat.id);
+    expect(back?.archivedAt).toBeNull();
+    expect(back?.turns).toBe(2);
+    // Put back where it was, not opened: the user may be tidying the archive.
+    expect(channel.activeChat().id).not.toBe(chat.id);
+  });
+
+  it("counts an archived chat separately from a live one", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "first" });
+    const first = channel.chats()[0];
+    channel.createChat();
+
+    expect(channel.storage()).toMatchObject({ chats: 2, archived: 0 });
+    channel.archiveChat(first.id);
+    expect(channel.storage()).toMatchObject({ chats: 1, archived: 1 });
+  });
+
+  it("opens an archived chat by taking it back out of the archive", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "still relevant" });
+    const chat = channel.chats()[0];
+    channel.createChat();
+    channel.archiveChat(chat.id);
+
+    // Reading a conversation and typing into it are the same act here, so the
+    // one that was put away comes back rather than opening read-only.
+    expect(channel.selectChat(chat.id)).toBe(true);
+    expect(channel.activeChat().id).toBe(chat.id);
+    expect(channel.writable(chat.id)).toBe(true);
+    expect(channel.chats().find((row) => row.id === chat.id)?.archivedAt).toBeNull();
+    expect(channel.history(undefined, chat.id)).toHaveLength(1);
+  });
+
+  it("says no to archiving twice and to unarchiving what is not archived", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "first" });
+    const chat = channel.chats()[0];
+    channel.createChat();
+
+    expect(channel.unarchiveChat(chat.id)).toBe(false);
+    expect(channel.archiveChat(chat.id)).toBe(true);
+    expect(channel.archiveChat(chat.id)).toBe(false);
+    expect(channel.unarchiveChat(chat.id)).toBe(true);
+    expect(channel.unarchiveChat("c_nope")).toBe(false);
+  });
+
+});
+
 describe("limits", () => {
   it("trims a chat to its own limit and says so from then on", () => {
     const { channel, store } = make();
@@ -298,7 +375,7 @@ describe("limits", () => {
     const turns = store.listTurns({ chatId: chat.id, limit: 1000 });
     expect(turns).toHaveLength(500);
     expect(turns[0].text).toBe("message 20");
-    expect(channel.chats()[0].trimmed).toBe(true);
+    expect(channel.chats()[0].trimmedAt).not.toBeNull();
   });
 
   it("trims each chat separately", () => {
@@ -319,12 +396,12 @@ describe("limits", () => {
     for (let i = 0; i < 505; i += 1) {
       channel.post({ role: "user", text: `message ${i}` });
     }
-    expect(channel.chats()[0].trimmed).toBe(true);
+    expect(channel.chats()[0].trimmedAt).not.toBeNull();
     channel.clear();
-    expect(channel.chats()[0].trimmed).toBe(false);
+    expect(channel.chats()[0].trimmedAt).toBeNull();
   });
 
-  it("archives the oldest chats when the budget is passed, keeping their records", () => {
+  it("trims the oldest chats when the budget is passed, keeping their records", () => {
     // Small enough that a handful of messages passes it.
     process.env.BOXAIDE_CHAT_BUDGET_MB = "0.001";
     const { channel } = make();
@@ -337,21 +414,51 @@ describe("limits", () => {
     channel.createChat();
     channel.post({ role: "user", text: "z".repeat(400) });
 
+    // The record survives, in the list, where the user left it. That is the
+    // whole difference from deletion, and from archiving, which is the user's
+    // own decision and never the budget's.
     const live = channel.chats();
-    expect(live.some((chat) => chat.id === oldest.id)).toBe(false);
-
-    // The record survives. That is the whole difference from deletion.
-    const all = channel.chats({ includeArchived: true });
-    const archived = all.find((chat) => chat.id === oldest.id);
-    expect(archived?.archivedAt).not.toBeNull();
-    expect(archived?.turns).toBe(0);
-    expect(archived?.title).toBe("x".repeat(60) + "…");
-    expect(channel.storage().archived).toBeGreaterThanOrEqual(1);
-    // The chat being written to is never the one archived.
+    const trimmed = live.find((chat) => chat.id === oldest.id);
+    expect(trimmed?.trimmedAt).not.toBeNull();
+    expect(trimmed?.archivedAt).toBeNull();
+    expect(trimmed?.turns).toBe(0);
+    expect(trimmed?.title).toBe("x".repeat(60) + "…");
+    expect(channel.storage().chats).toBe(3);
+    expect(channel.storage().archived).toBe(0);
+    // The chat being written to is never the one trimmed.
     expect(live.some((chat) => chat.id === middle.id || chat.active)).toBe(true);
   });
 
-  it("never archives the chat being written to", () => {
+  it("takes the messages off archived chats before live ones", () => {
+    process.env.BOXAIDE_CHAT_BUDGET_MB = "0.001";
+    const { channel } = make();
+
+    // Three messages pass the budget and dropping one brings it back under, so
+    // exactly one chat pays. The archived chat is the NEWER of the two
+    // candidates, so oldest-first alone would have taken the live one: the user
+    // saying they are done with a conversation outranks the date.
+    // Named from the turns rather than read off the list: two chats written to
+    // in the same millisecond sort against each other however SQLite likes.
+    const liveOld = channel.post({ role: "user", text: "l".repeat(300) }).chatId;
+    channel.createChat();
+    const putAway = channel.post({ role: "user", text: "a".repeat(300) }).chatId;
+    expect(channel.archiveChat(putAway)).toBe(true);
+
+    channel.createChat();
+    channel.post({ role: "user", text: "n".repeat(300) });
+
+    const all = channel.chats({ includeArchived: true });
+    const archived = all.find((chat) => chat.id === putAway);
+    expect(archived?.turns).toBe(0);
+    expect(archived?.trimmedAt).not.toBeNull();
+    // Still archived, and still offered as one: the budget taking the messages
+    // does not take back what the user decided about the row.
+    expect(archived?.archivedAt).not.toBeNull();
+    // The live chat kept everything, because the archived one paid first.
+    expect(all.find((chat) => chat.id === liveOld)?.turns).toBe(1);
+  });
+
+  it("never trims the chat being written to", () => {
     process.env.BOXAIDE_CHAT_BUDGET_MB = "0.0001";
     const { channel } = make();
     const only = channel.activeChat();
@@ -432,6 +539,93 @@ describe("migration", () => {
       ]);
     } finally {
       after.close();
+      for (const suffix of ["", "-wal", "-shm"]) {
+        if (existsSync(`${path}${suffix}`)) unlinkSync(`${path}${suffix}`);
+      }
+    }
+  });
+
+  /**
+   * Every row archived by a shipped build was archived by the destructive path:
+   * it stamped archived_at and deleted every turn. So the upgrade has to read
+   * those rows as trimmed, or the pane would offer a conversation with nothing
+   * in it and no explanation.
+   */
+  it("reads a row the old destructive archive left behind as trimmed", () => {
+    const key = randomBytes(32);
+    const path = join(tmpdir(), `boxaide-archive-${randomBytes(6).toString("hex")}.db`);
+
+    // The table exactly as the previous build wrote it: a `trimmed` flag and
+    // no trimmed_at at all.
+    const old = new Database(path);
+    old.exec(`
+      CREATE TABLE agent_chats (
+        id TEXT PRIMARY KEY,
+        title_enc TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        archived_at TEXT,
+        trimmed INTEGER NOT NULL DEFAULT 0,
+        active INTEGER NOT NULL DEFAULT 0,
+        title_source TEXT NOT NULL DEFAULT 'auto',
+        session_agent TEXT,
+        session_id TEXT,
+        session_epoch INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    const insert = old.prepare(
+      `INSERT INTO agent_chats
+         (id, title_enc, created_at, updated_at, archived_at, trimmed, active)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    insert.run(
+      "c_swept",
+      encryptSecret(key, "Swept away"),
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-02T00:00:00.000Z",
+      "2026-01-03T00:00:00.000Z",
+      0,
+      0,
+    );
+    insert.run(
+      "c_capped",
+      encryptSecret(key, "Long one"),
+      "2026-02-01T00:00:00.000Z",
+      "2026-02-02T00:00:00.000Z",
+      null,
+      1,
+      1,
+    );
+    insert.run(
+      "c_whole",
+      encryptSecret(key, "Untouched"),
+      "2026-03-01T00:00:00.000Z",
+      "2026-03-02T00:00:00.000Z",
+      null,
+      0,
+      0,
+    );
+    old.close();
+
+    const store = new Store(key, path);
+    try {
+      const byId = new Map(
+        store.listChats({ includeArchived: true }).map((chat) => [chat.id, chat]),
+      );
+
+      // Its messages went when it was archived, so that is when it was
+      // trimmed. It stays archived too: the row holds nothing to come back to,
+      // and the user has been reading it under Archived ever since.
+      expect(byId.get("c_swept")?.trimmedAt).toBe("2026-01-03T00:00:00.000Z");
+      expect(byId.get("c_swept")?.archivedAt).toBe("2026-01-03T00:00:00.000Z");
+      // The per-chat cap left no date behind, so the last thing written to the
+      // chat is the closest the row can be honest about.
+      expect(byId.get("c_capped")?.trimmedAt).toBe("2026-02-02T00:00:00.000Z");
+      expect(byId.get("c_capped")?.archivedAt).toBeNull();
+      // A chat that lost nothing to a limit says so.
+      expect(byId.get("c_whole")?.trimmedAt).toBeNull();
+    } finally {
+      store.close();
       for (const suffix of ["", "-wal", "-shm"]) {
         if (existsSync(`${path}${suffix}`)) unlinkSync(`${path}${suffix}`);
       }

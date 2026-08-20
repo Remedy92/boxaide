@@ -878,11 +878,22 @@ function registerAgentRoutes(
     return c.json({ renamed: true });
   });
 
+  /* Archiving keeps every message and Unarchive is its undo, so both are plain
+     state changes on the row rather than anything that touches the turns. A
+     chat that is already in the state being asked for answers 404: the caller
+     is working from a list that has moved on. */
   app.post("/api/agent/chats/:id/archive", (c) => {
     if (!channel.archiveChat(c.req.param("id"))) {
       return c.json({ error: "no such chat" }, 404);
     }
     return c.json({ archived: true, storage: channel.storage() });
+  });
+
+  app.post("/api/agent/chats/:id/unarchive", (c) => {
+    if (!channel.unarchiveChat(c.req.param("id"))) {
+      return c.json({ error: "no such chat" }, 404);
+    }
+    return c.json({ archived: false, storage: channel.storage() });
   });
 
   app.delete("/api/agent/chats/:id", (c) => {

@@ -14,6 +14,7 @@ import {
   sendAgentMessage,
   stopAgentTurn,
   streamAgent,
+  unarchiveAgentChat,
   undoAgentArchiveSweep,
   type AgentApproval,
   type AgentArchiveSweep,
@@ -122,7 +123,10 @@ export type AgentConversation = {
   openChat: (id: string) => Promise<void>;
   newChat: () => Promise<void>;
   renameChat: (id: string, title: string) => Promise<void>;
+  /** Puts a chat away with its messages. `unarchiveChat` is the undo. */
   archiveChat: (id: string) => Promise<void>;
+  unarchiveChat: (id: string) => Promise<void>;
+  /** Permanent, for a live chat or an archived one. Nothing undoes this. */
   removeChat: (id: string) => Promise<void>;
   /**
    * Actions an agent asked for and nobody has answered yet. Server-wide, not
@@ -336,10 +340,11 @@ function AgentSession({
                   );
                   return;
                 }
-                // The chat on screen is no longer a live chat: the budget
-                // archived it, or another window deleted it. Its messages are
-                // already gone on the server, so showing them here would be a
-                // conversation that does not exist. Fall back to the active one.
+                // The chat on screen is no longer a live chat: another window
+                // archived or deleted it. Either way this pane is showing a
+                // conversation the list no longer has, and the archived one
+                // is read from the dialog rather than left open here. Fall
+                // back to the active one.
                 if (shown.current !== null) {
                   void refresh(null).catch(() => {
                     // The next frame, or the reconnect, asks again.
@@ -356,8 +361,8 @@ function AgentSession({
           if (stopped || abort.signal.aborted) return;
           if (err instanceof ApiError && err.status === 404) {
             // The chat this pane was showing is gone — deleted in another
-            // window, or archived by the budget. Fall back to the active one
-            // rather than declaring the whole channel missing.
+            // window. Fall back to the active one rather than declaring the
+            // whole channel missing.
             if (shown.current !== null) {
               shown.current = null;
               setTurns([]);
@@ -495,11 +500,19 @@ function AgentSession({
     (id: string) =>
       withChats(async () => {
         await archiveAgentChat(id, ctx);
-        // Archiving the chat on screen leaves nothing to read. The server has
-        // already moved on to another one; ask it which.
+        // The messages are still there, but a chat the user has just put away
+        // is not one to leave them staring at. The server has already moved on
+        // to another one; ask it which.
         if (shown.current === id) await refresh(null);
       }),
     [ctx, refresh, withChats],
+  );
+
+  /* No refresh: unarchiving only puts the row back in the list, and the pane
+     stays wherever the user left it. Opening the chat is a separate click. */
+  const unarchiveChat = React.useCallback(
+    (id: string) => withChats(() => unarchiveAgentChat(id, ctx).then(() => undefined)),
+    [ctx, withChats],
   );
 
   const removeChat = React.useCallback(
@@ -563,6 +576,7 @@ function AgentSession({
       newChat,
       renameChat,
       archiveChat,
+      unarchiveChat,
       removeChat,
       approvals,
       decideApproval,
@@ -587,6 +601,7 @@ function AgentSession({
       newChat,
       renameChat,
       archiveChat,
+      unarchiveChat,
       removeChat,
       approvals,
       decideApproval,

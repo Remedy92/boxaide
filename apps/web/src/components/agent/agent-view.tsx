@@ -274,7 +274,7 @@ export function AgentView({
                 {/* Said once, at the top, where the missing messages were. The
                     old behaviour dropped them silently and this conversation
                     simply began in the middle. */}
-                {agent.chat?.trimmed && (
+                {agent.chat?.trimmedAt && (
                   <p className="rounded-[var(--radius-md)] bg-surface-hover px-3 py-2 text-[12px] leading-4 text-fg-tertiary">
                     Older messages in this chat were dropped to keep it inside
                     its limit.
