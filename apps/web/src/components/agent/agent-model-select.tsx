@@ -67,9 +67,9 @@ export function AgentModelSelect({ disabled }: { disabled?: boolean } = {}) {
       </PopoverTrigger>
       <PopoverContent align="start" className="w-64 p-0">
         <Command>
-          <CommandInput placeholder="Search models..." className="h-8 text-[12px]" />
-          <CommandList className="max-h-64">
-            <CommandEmpty>No model matches.</CommandEmpty>
+          <CommandInput placeholder="Search models..." className="text-[12px]" />
+          <CommandList className="max-h-64 p-1">
+            <CommandEmpty className="py-4 text-[12px]">No model matches.</CommandEmpty>
             <ModelRow
               label="Default model"
               selected={picked === null}

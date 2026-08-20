@@ -184,9 +184,13 @@ function PickerPopover({
       </PopoverTrigger>
       <PopoverContent align="start" className="w-64 p-0">
         <Command>
-          <CommandInput placeholder={searchPlaceholder} className="h-8 text-[12px]" />
-          <CommandList className="max-h-64">
-            <CommandEmpty>{emptyText}</CommandEmpty>
+          {/* The input takes the wrapper's height; only the type scale is ours.
+              The list carries the inset the rows need, since this picker has
+              no CommandGroup to supply one — without it a highlighted row runs
+              into the popover border. */}
+          <CommandInput placeholder={searchPlaceholder} className="text-[12px]" />
+          <CommandList className="max-h-64 p-1">
+            <CommandEmpty className="py-4 text-[12px]">{emptyText}</CommandEmpty>
             <PickerRow
               value={DEFAULT_VALUE}
               label={defaultRow.label}
