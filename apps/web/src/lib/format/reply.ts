@@ -41,7 +41,7 @@ function escapeHtml(value: string): string {
  * client has no sandbox of ours to land in. What the reader refuses to run, it
  * refuses to relay. Returns null when there is no HTML part, when the DOM is
  * unavailable, when the markup is large enough to be the sanitiser DoS the
- * reader also refuses (§6.4.6), or when sanitising empties it. The caller then
+ * reader also refuses, or when sanitising empties it. The caller then
  * forwards plain text exactly as before.
  */
 function buildForwardHtml(

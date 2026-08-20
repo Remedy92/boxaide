@@ -10,7 +10,7 @@ export const MAX_RFC822_SOURCE_BYTES = 50 * 1024 * 1024;
  * sized when this was source-view only; against inlined images it severed
  * ordinary mail mid-document. The ceiling now bounds bytes, and the cost that
  * actually scales with tag count is bounded where it is paid, on the render
- * path in `HtmlBody` (§6.4.6).
+ * path in `HtmlBody` (SECURITY.md, "HTML mail rendering").
  */
 export const MAX_BODY_HTML_CHARS = 4_000_000;
 

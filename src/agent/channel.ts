@@ -208,6 +208,15 @@ const WORK_MAX_MS = 5 * 60_000;
 const ACTIVITY_EMIT_MS = 5_000;
 
 /**
+ * What the transcript says where the stopped answer would have been.
+ *
+ * Written as an agent turn rather than as a status line: it is what closes the
+ * lease (see `cancelWork`), and a run that ends on nothing at all reads as a
+ * question the agent never came back to.
+ */
+export const STOPPED_TEXT = "Stopped.";
+
+/**
  * What an agent is doing right now, when it is doing anything.
  *
  * This is the one thing about an agent's own work that Boxaide can prove. A
@@ -902,6 +911,40 @@ export class AgentChannel {
     if (result === "released") this.handOff();
     else this.emitPresence();
     return result;
+  }
+
+  /**
+   * Ends the message in flight because the user pressed Stop.
+   *
+   * The lease is closed by answering it, not by releasing it. A released row
+   * goes straight back on the queue and is handed to the very agent that was
+   * just stopped, which is the one outcome Stop must not produce. Answering it
+   * also puts a line in the transcript where the reply would have been, so the
+   * conversation says what happened rather than ending on a question.
+   *
+   * `seq` is the message the caller means, and it is checked rather than
+   * assumed: the run in flight can end and the next one be claimed between the
+   * button being painted and the click arriving, and stopping whatever happens
+   * to be running then would kill a message the user never looked at.
+   *
+   * Returns the work that was cancelled, or null when nothing was in flight —
+   * or when what is in flight is not the message asked for.
+   */
+  cancelWork(seq?: number): Work | null {
+    const work = this.work;
+    if (!work) return null;
+    if (seq !== undefined && seq !== work.seq) return null;
+    this.work = null;
+    // False means the chat was emptied or deleted under the run. Nothing to
+    // write there, and `answer` has already cleared the presence for it.
+    this.answer({
+      seq: work.seq,
+      chatId: work.chatId,
+      text: STOPPED_TEXT,
+      agent: work.agent,
+    });
+    this.emitPresence();
+    return work;
   }
 
   private releaseWork(options: { revertAttempt?: boolean } = {}): void {
