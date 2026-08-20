@@ -141,18 +141,31 @@ ZIP="apps/desktop/release/boxaide-mac.zip"
 FEED="apps/desktop/release/latest-mac.yml"
 # The release body is what the app shows under "What is new", so it is written
 # for whoever is deciding whether to restart, not for whoever wrote the commit.
-# Three things go before it is one:
+# Four things go before it is one:
 #   - merges, which name a branch and no change;
 #   - the "Cut 0.2.24" commit, which is this script's own bookkeeping;
+#   - Dependabot's "Bump lodash from 4.17.20 to 4.17.21", which is true and is
+#     not what is new to the person deciding whether to restart;
 #   - the "(#84)" a squash-merge appends, which GitHub then expands into an
 #     anchor tag in the updater feed.
 # What is left is one sentence per change, in the words of the commit subject.
 # That makes the subject the release note: write it for a user, in the present
-# tense, saying what the app now does.
+# tense, saying what the app now does. check-subject.mjs below refuses to
+# publish a body that broke that rule; AGENTS.md has the whole rule.
 NOTES="$(git log --no-merges --format='- %s' "${TAG}..HEAD" \
   | grep -v -E '^- Cut [0-9]+\.[0-9]+\.[0-9]+' \
+  | grep -v -E '^- Bump ' \
   | sed -E 's/ *\(#[0-9]+\)$//')"
 [ -n "$NOTES" ] || NOTES="- Fixes and refinements."
+
+# The same rule CI enforced on each pull request title, applied once more to
+# what is about to be published. CI cannot see a commit pushed straight to
+# master, and this script's own push bypasses branch protection, so without
+# this a jargon subject reaches the release body unread. Checked before the
+# bump and the twenty-minute notarise: a bad line costs nothing here.
+if ! printf '%s\n' "$NOTES" | node scripts/lib/check-subject.mjs; then
+  die "the release body is not user-facing copy; reword the commits above"
+fi
 
 printf 'ship %s\n' "$VER"
 printf 'from %s (%s)\n' "$TAG" "$(git rev-parse --short "$SHIPPED")"
