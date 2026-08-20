@@ -36,6 +36,11 @@ import {
   RESEARCH_TOOL_NAMES,
   dispatchResearchTool,
 } from "../research/tools.js";
+import {
+  PROSPECTING_TOOLS,
+  PROSPECTING_TOOL_NAMES,
+  dispatchProspectingTool,
+} from "../prospecting/tools.js";
 import type { DraftInput } from "../provider/types.js";
 import { MAX_LIST_LIMIT, requireListLimit } from "../input-limits.js";
 import {
@@ -56,6 +61,7 @@ export const PLATFORM_TOOLS = [
   ...CALENDAR_TOOLS,
   ...ENRICHMENT_TOOLS,
   ...RESEARCH_TOOLS,
+  ...PROSPECTING_TOOLS,
 ];
 
 const PROTOCOL_VERSION = "2024-11-05";
@@ -537,7 +543,8 @@ async function dispatch(
     OUTREACH_TOOL_NAMES.has(name) ||
     CALENDAR_TOOL_NAMES.has(name) ||
     ENRICHMENT_TOOL_NAMES.has(name) ||
-    RESEARCH_TOOL_NAMES.has(name)
+    RESEARCH_TOOL_NAMES.has(name) ||
+    PROSPECTING_TOOL_NAMES.has(name)
   ) {
     if (!platform) throw new Error(`${name} is not available on this server`);
     channel?.noteToolCall(name);
@@ -550,6 +557,9 @@ async function dispatch(
     }
     if (ENRICHMENT_TOOL_NAMES.has(name)) {
       return dispatchEnrichmentTool(platform, name, args);
+    }
+    if (PROSPECTING_TOOL_NAMES.has(name)) {
+      return dispatchProspectingTool(platform, name, args);
     }
     if (RESEARCH_TOOL_NAMES.has(name)) {
       return dispatchResearchTool(platform, name, args);

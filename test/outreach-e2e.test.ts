@@ -46,6 +46,7 @@ const KEY_SUFFIXES = [
   "PROSPEO_API_KEY",
   "EXA_API_KEY",
   "PARALLEL_API_KEY",
+  "APOLLO_API_KEY",
 ];
 const ENV_PREFIXES = ["BOXAIDE_", "SLEY_", "MAILMUX_"];
 
@@ -354,6 +355,290 @@ describe("outreach end to end, with and without connector keys", () => {
     configureKeys();
     expect(platform.hasSearchConnector()).toBe(true);
     expect(allowedTools(platform)).not.toContain("WebSearch");
+  });
+
+  /* ---- state C: discovery to approval, on a brand new prospect --------- */
+
+  /**
+   * The Apollo bodies the adapter reads, plus the Hunter ones the chain needs
+   * after them. Two people on purpose: Apollo gives one an address and locks
+   * the other, and the locked one is the case enrichment exists for.
+   */
+  function replyWithApollo(
+    verdicts: Record<string, { result: string; score: number }>,
+  ): void {
+    vendorReply = (url, body) => {
+      if (url === "https://api.apollo.io/api/v1/mixed_companies/search") {
+        return {
+          organizations: [
+            {
+              id: "org-1",
+              name: "Acme Logistics",
+              website_url: "https://www.Acme.example/about",
+              industry: "logistics",
+              estimated_num_employees: 32,
+              city: "Ghent",
+              country: "Belgium",
+              linkedin_url: "https://linkedin.com/company/acme",
+            },
+          ],
+          pagination: { total_entries: 1 },
+        };
+      }
+      if (url === "https://api.apollo.io/api/v1/mixed_people/api_search") {
+        return {
+          people: [
+            {
+              id: "p1",
+              first_name: "Ada",
+              last_name_obfuscated: "L***e",
+              title: "VP of Sales",
+              organization: { name: "Acme Logistics" },
+              has_email: true,
+            },
+            {
+              id: "p2",
+              first_name: "Grace",
+              last_name_obfuscated: "H***r",
+              title: "Head of Operations",
+              organization: { name: "Acme Logistics" },
+              has_email: true,
+            },
+          ],
+          pagination: { total_entries: 2 },
+        };
+      }
+      if (url === "https://api.apollo.io/api/v1/people/match") {
+        const id = JSON.parse(body).id;
+        const org = { name: "Acme Logistics", primary_domain: "acme.example" };
+        if (id === "p1") {
+          return {
+            person: {
+              id: "p1",
+              name: "Ada Lovelace",
+              first_name: "Ada",
+              last_name: "Lovelace",
+              title: "VP of Sales",
+              organization: org,
+              email: "Ada@Acme.example",
+              email_status: "verified",
+              linkedin_url: "https://linkedin.com/in/ada",
+            },
+          };
+        }
+        return {
+          person: {
+            id: "p2",
+            name: "Grace Hopper",
+            first_name: "Grace",
+            last_name: "Hopper",
+            title: "Head of Operations",
+            organization: org,
+            // Apollo's placeholder for an address it holds and will not show.
+            email: "email_not_unlocked@domain.com",
+          },
+        };
+      }
+      if (url.startsWith("https://api.hunter.io/v2/email-finder")) {
+        return {
+          data: { email: "grace@acme.example", result: "deliverable", score: 91 },
+        };
+      }
+      if (url.startsWith("https://api.hunter.io/v2/email-verifier")) {
+        const email = new URL(url).searchParams.get("email") ?? "";
+        const verdict = verdicts[email];
+        if (!verdict) throw new Error(`no verdict set up for ${email}`);
+        return { data: { email, result: verdict.result, score: verdict.score } };
+      }
+      throw new Error(`unexpected vendor request: ${url}`);
+    };
+  }
+
+  it("offers both prospecting tools over the JSON-RPC tool list", async () => {
+    const res = (await handleMcpJsonRpc(
+      mail,
+      { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+      undefined,
+      platform,
+    )) as { result: { tools: { name: string }[] } };
+    const names = res.result.tools.map((t) => t.name);
+    expect(names).toContain("prospect_find_companies");
+    expect(names).toContain("prospect_find_people");
+  });
+
+  it("goes from no prospect at all to an approved send, over the tool path", async () => {
+    expect(platform.connectorsService.setKey("apollo", "apollo-key").source).toBe(
+      "settings",
+    );
+    expect(platform.connectorsService.setKey("hunter", "hunter-key").source).toBe(
+      "settings",
+    );
+    replyWithApollo({
+      "ada@acme.example": { result: "deliverable", score: 95 },
+      "grace@acme.example": { result: "deliverable", score: 91 },
+    });
+
+    // 1. Who exists. Nobody named a company; the filters did.
+    const found = await callTool("prospect_find_companies", {
+      keywords: ["logistics"],
+      locations: ["Belgium"],
+      minEmployees: 10,
+      maxEmployees: 50,
+    });
+    expect(found.ok).toBe(true);
+    expect(found.payload.companies).toEqual([
+      {
+        name: "Acme Logistics",
+        domain: "acme.example",
+        industry: "logistics",
+        headcount: 32,
+        location: "Ghent, Belgium",
+        linkedinUrl: "https://linkedin.com/company/acme",
+        apolloOrgId: "org-1",
+      },
+    ]);
+    expect(found.payload.total).toBe(1);
+    const domain: string = found.payload.companies[0].domain;
+
+    // The company is worth keeping on its own, before anyone is named.
+    const org = await callTool("crm_org_upsert", {
+      name: found.payload.companies[0].name,
+      domain,
+    });
+    expect(org.ok).toBe(true);
+
+    // 2. Who works there. reveal spends credits, so it is asked for by name.
+    const people = await callTool("prospect_find_people", {
+      orgDomains: [domain],
+      titles: ["vp of sales", "head of operations"],
+      reveal: true,
+    });
+    expect(people.ok).toBe(true);
+    expect(people.payload.revealed).toBe(2);
+    const [ada, grace] = people.payload.people;
+    // No mask reaches the agent, revealed or not.
+    expect(JSON.stringify(people.payload)).not.toContain("***");
+
+    // 3. Apollo gave Ada an address, so her record is already the upsert call.
+    expect(ada.crmContact).toEqual({
+      email: "ada@acme.example",
+      name: "Ada Lovelace",
+      title: "VP of Sales",
+      org: "Acme Logistics",
+      orgDomain: "acme.example",
+    });
+    const savedAda = await callTool("crm_contact_upsert", ada.crmContact);
+    expect(savedAda.ok).toBe(true);
+    expect(savedAda.payload.contact.email).toBe("ada@acme.example");
+
+    // 4. Grace's address is behind a credit Apollo would not spend, so it is
+    // reported locked and never as the placeholder Apollo actually sent.
+    expect(grace.email).toBeNull();
+    expect(grace.emailStatus).toBe("locked");
+    expect(grace.crmContact).toBeUndefined();
+    expect(grace.crmContactPendingEmail).toEqual({
+      name: "Grace Hopper",
+      title: "Head of Operations",
+      org: "Acme Logistics",
+      orgDomain: "acme.example",
+    });
+    expect(grace.enrichFindEmail).toEqual({
+      fullName: "Grace Hopper",
+      orgDomain: "acme.example",
+    });
+
+    const address = await callTool("enrich_find_email", grace.enrichFindEmail);
+    expect(address.ok).toBe(true);
+    expect(address.payload.result.email).toBe("grace@acme.example");
+    const checked = await callTool("enrich_verify_email", {
+      email: address.payload.result.email,
+    });
+    expect(checked.ok).toBe(true);
+    expect(checked.payload.result.status).toBe("valid");
+
+    const savedGrace = await callTool("crm_contact_upsert", {
+      ...grace.crmContactPendingEmail,
+      email: address.payload.result.email,
+    });
+    expect(savedGrace.ok).toBe(true);
+    expect(savedGrace.payload.contact.name).toBe("Grace Hopper");
+
+    // 5. Both into one campaign. Nothing here sends anything.
+    const created = await callTool("campaign_create", {
+      name: "belgian logistics",
+      account: accountId,
+      steps: [{ subject: "Hi {{name}}", body: "About {{org}}." }],
+    });
+    expect(created.ok).toBe(true);
+    const campaignId = created.payload.campaign.id;
+    await callTool("campaign_update", { campaignId, status: "active" });
+    const added = await callTool("campaign_add_contacts", {
+      campaignId,
+      contactIds: [savedAda.payload.contact.id, savedGrace.payload.contact.id],
+    });
+    expect(added.payload.added).toBe(2);
+
+    await platform.engine.tick();
+    const pending = platform.outreachStore.listOutbox({ status: "pending" });
+    expect(pending).toHaveLength(2);
+    // Queued is not sent. A discovered prospect is still nobody's permission.
+    expect(provider.getSent()).toHaveLength(0);
+
+    // 6. One human decision, on one row.
+    const adaRow = pending.find((row) => row.to === "ada@acme.example")!;
+    const graceRow = pending.find((row) => row.to === "grace@acme.example")!;
+    // {{name}} is the first name by design, and the org came off the record
+    // Apollo returned, not off anything a person typed.
+    expect(adaRow.subject).toBe("Hi Ada");
+    expect(adaRow.body).toBe(`About Acme Logistics.${OPT_OUT_FOOTER}`);
+
+    expect(await approve(adaRow.id)).toBe(200);
+    await platform.engine.tick();
+
+    expect(platform.outreachStore.getOutbox(adaRow.id)?.status).toBe("sent");
+    const sent = provider.getSent();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].to).toBe("ada@acme.example");
+    // The row nobody approved did not move, and no tool exists that could.
+    expect(platform.outreachStore.getOutbox(graceRow.id)?.status).toBe("pending");
+
+    // Every vendor request the chain made, in order, and no other.
+    expect(vendorCalls.map((c) => c.url.split("?")[0])).toEqual([
+      "https://api.apollo.io/api/v1/mixed_companies/search",
+      "https://api.apollo.io/api/v1/mixed_people/api_search",
+      "https://api.apollo.io/api/v1/people/match",
+      "https://api.apollo.io/api/v1/people/match",
+      "https://api.hunter.io/v2/email-finder",
+      "https://api.hunter.io/v2/email-verifier",
+      "https://api.hunter.io/v2/email-verifier",
+    ]);
+  });
+
+  it("refuses both prospecting tools with no Apollo key, and calls nobody", async () => {
+    const companies = await callTool("prospect_find_companies", {
+      keywords: ["logistics"],
+    });
+    expect(companies.ok).toBe(false);
+    expect(companies.payload.error).toContain("BOXAIDE_APOLLO_API_KEY");
+    expect(companies.payload.error).toContain("Settings > Connectors");
+
+    const people = await callTool("prospect_find_people", {
+      orgDomains: ["acme.example"],
+    });
+    expect(people.ok).toBe(false);
+    expect(people.payload.error).toContain("BOXAIDE_APOLLO_API_KEY");
+
+    // The refusal happens before any HTTP, so an unconfigured install cannot
+    // be made to hammer a vendor by an agent that keeps trying.
+    expect(vendorCalls).toEqual([]);
+
+    // And the rest of the outreach path is untouched by Apollo being absent.
+    const rowId = await queueFirstStep("ada@acme.example", "Ada Lovelace");
+    expect(await approve(rowId)).toBe(200);
+    await platform.engine.tick();
+    expect(platform.outreachStore.getOutbox(rowId)?.status).toBe("sent");
+    expect(provider.getSent()).toHaveLength(1);
+    expect(vendorCalls).toEqual([]);
   });
 });
 

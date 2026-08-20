@@ -22,6 +22,7 @@ import { CalendarStore } from "./calendar/store.js";
 import { CalendarService } from "./calendar/service.js";
 import { EnrichmentService } from "./enrichment/service.js";
 import { ResearchService } from "./research/service.js";
+import { ProspectingService } from "./prospecting/service.js";
 import { ConnectorStore } from "./connectors/store.js";
 import { ConnectorsService } from "./connectors/service.js";
 
@@ -54,6 +55,8 @@ export type Platform = {
   enrichmentService: EnrichmentService;
   /** Web search and page reads. No store, no key of its own, no timers. */
   researchService: ResearchService;
+  /** Finding companies and people nobody named yet. Stores nothing. */
+  prospectingService: ProspectingService;
   /** Provider API keys saved in settings, encrypted. Env stays the fallback. */
   connectorStore: ConnectorStore;
   /** Which provider keys this server has, and where each one came from. */
@@ -116,6 +119,9 @@ export function createPlatform(opts: {
   // Research reaches the public web and keeps nothing, so it needs no db, no
   // master key, and no start/stop.
   const researchService = new ResearchService({ getKey });
+  // Prospecting asks a vendor who exists. Like research it keeps nothing, so
+  // it needs no db, no master key, and no start/stop.
+  const prospectingService = new ProspectingService({ getKey });
   const engine = new OutreachEngine(outreachStore, crmStore, opts.mail, {
     // Deliverability check at the send chokepoint. The engine holds no
     // opinion about who does the checking: it asks this callback, and with
@@ -173,6 +179,7 @@ export function createPlatform(opts: {
     calendarService,
     enrichmentService,
     researchService,
+    prospectingService,
     connectorStore,
     connectorsService,
     hasSearchConnector: () => connectorsService.hasSearchConnector(),

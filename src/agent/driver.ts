@@ -9,6 +9,7 @@
  * so the lease protocol cannot drift between them.
  */
 import { MAX_WAIT_MS } from "./channel.js";
+import { OUTREACH_CHAIN } from "./guidance.js";
 import type { ChatSession, UnclaimResult } from "../db/store.js";
 
 /**
@@ -121,7 +122,9 @@ Each message you receive is from me, typed in the Boxaide window. Reply with the
 answer itself — your reply text is what I read. Do not call chat_await_message,
 chat_say or chat_activity: the conversation is handled for you and those are
 refused. chat_history is yours to call whenever you need what was said earlier.
-Draft rather than send unless I ask you to send.`;
+Draft rather than send unless I ask you to send.
+
+${OUTREACH_CHAIN}`;
 
 /**
  * The one question asked purely to name a chat.

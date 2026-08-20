@@ -1381,5 +1381,136 @@
       ],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "prospect_find_companies",
+    "description": "Find companies that match a description, when you do not yet know which companies they are. Filter on keywords for the industry, on head office location, on employee count, or on a list of domains you already hold. Returns each company as name, domain, industry, headcount, location, linkedinUrl and apolloOrgId, plus a total saying how many matched before the limit. The domain is the useful part: pass it to crm_org_upsert to keep the company, or to prospect_find_people to find who works there. This is a paid search against Apollo and costs one credit per call whatever it returns, so give real filters and read the result rather than calling it again with the same ones. At most 100 companies per call, default 25; Apollo cannot page past 50,000 records, so a question like 'every company in Europe' has no answer here and needs narrowing. When 'notes' is not empty, carry it into whatever you report: it says when Apollo truncated the result or suppressed EU records, which otherwise looks like a thin answer. Never present a noted result as a complete one. Finding a prospect does not permit mailing them. Queue anything you want sent with outbox_queue_draft, which a human approves.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "keywords": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Industry or keyword tags, e.g. ['saas', 'logistics']. This is the industry filter; there is no separate one."
+        },
+        "name": {
+          "type": "string",
+          "description": "Company name, partial match. Use it to look one company up."
+        },
+        "domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Company domains such as 'acme.com', to look up companies you already hold. Bare domains, not website URLs."
+        },
+        "locations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Head office locations, e.g. ['Belgium', 'California, US']. This is where the company is, not where its staff are."
+        },
+        "excludeLocations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Head office locations to leave out."
+        },
+        "minEmployees": {
+          "type": "number",
+          "description": "Fewest employees, e.g. 10."
+        },
+        "maxEmployees": {
+          "type": "number",
+          "description": "Most employees, e.g. 50."
+        },
+        "limit": {
+          "type": "number",
+          "description": "How many companies to return. Default 25, maximum 100. Values outside that range are clamped, not refused.",
+          "default": 25
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "prospect_find_people",
+    "description": "Find the people who hold a job at companies you name, when you do not yet know who they are, such as 'the VP of Sales at acme.com'. Filter on orgDomains plus titles or seniorities. This runs in two steps and you must know which one you are getting. The search itself is free and deliberately incomplete: it gives a first name, a job title and an employer, no last name, no address and no company domain, and each such person comes back with fullName null, revealed false and emailStatus 'locked' or 'absent'. Never report one of those as a named prospect; say you found a title at a company and offer to open it. There is no way to open a result you already have. Setting reveal true is a fresh search that spends Apollo credits, one to nine per person, and returns at most 10 people who need not be the same ones a free search returned, each with fullName, orgDomain, linkedinUrl and the address. So when you already intend to write to these people, pass reveal true on the first call with the same filters, and use the free search only to check that the filters find the right kind of person. A revealed person with an address also carries 'crmContact', which is exactly the arguments crm_contact_upsert wants, so pass that object straight on rather than copying fields. When emailStatus is 'locked' or 'absent' after a reveal, the record carries 'enrichFindEmail' instead, which is exactly the arguments enrich_find_email wants, and 'crmContactPendingEmail', which is the same contact minus the address: call enrich_find_email with the first, then give crm_contact_upsert the second with the address it returned added. Never pass crmContactPendingEmail on its own, because a contact is keyed by an address and there is not one yet. At most 50 people per call without reveal, default 25; with reveal true the call is capped at 10 people, because that half is the one that bills. When 'notes' is not empty, carry it into whatever you report, and never present a noted result as a complete one: it says when Apollo truncated the result, suppressed EU records, or refused part of a paid reveal. Finding a prospect does not permit mailing them. Queue anything you want sent with outbox_queue_draft, which a human approves.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "orgDomains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Employer domains such as ['acme.com']. This is the 'at acme.com' filter. Bare domains, not website URLs and not a person's address."
+        },
+        "organizationIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Apollo organisation ids, taken from the apolloOrgId field of a prospect_find_companies result."
+        },
+        "titles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Job titles, e.g. ['sales director', 'director of sales']. Matched loosely unless exactTitles is set, so give the wordings you would accept."
+        },
+        "exactTitles": {
+          "type": "boolean",
+          "description": "Restricts titles to near-exact matches. Use it when a loose search returned the wrong department."
+        },
+        "seniorities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "founder",
+              "c_suite",
+              "partner",
+              "vp",
+              "head",
+              "director",
+              "manager",
+              "senior",
+              "entry",
+              "intern"
+            ]
+          },
+          "description": "Seniority bands. Anything outside the listed values is dropped rather than sent."
+        },
+        "locations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Where the person is, e.g. ['Belgium']. Not where their employer's head office is."
+        },
+        "keywords": {
+          "type": "string",
+          "description": "Free text matched across the person's record. The only way to reach an industry on a people search."
+        },
+        "reveal": {
+          "type": "boolean",
+          "description": "Spend Apollo credits to open the hits and get whole names and addresses. Default false. Capped at 10 people per call.",
+          "default": false
+        },
+        "limit": {
+          "type": "number",
+          "description": "How many people to return. Default 25, maximum 50, and at most 10 when reveal is true. Values outside the range are clamped, not refused.",
+          "default": 25
+        }
+      },
+      "additionalProperties": false
+    }
   }
 ]

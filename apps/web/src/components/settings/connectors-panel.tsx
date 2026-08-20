@@ -9,29 +9,70 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { friendlyError } from "@/lib/api/errors";
-import { useConnectors, useSetConnectorKey } from "@/lib/hooks/use-connectors";
-import type { Connector, ConnectorKind } from "@/lib/types";
+import { useApp } from "@/lib/hooks/use-app-state";
+import {
+  useCheckConnector,
+  useConnectors,
+  useSetConnectorKey,
+} from "@/lib/hooks/use-connectors";
+import { capabilityStatus, connectorStatus } from "@/lib/connector-check";
+import { useApiCtx } from "@/lib/hooks/use-settings";
+import type { Connector, ConnectorCheck, ConnectorKind } from "@/lib/types";
 
 /**
- * Connectors: the provider API keys Boxaide uses for prospect data and for web
- * search.
+ * Connectors: the provider API keys Boxaide uses to find prospects, to look up
+ * an email address, and to search the web.
  *
- * Two rules shape this panel. The server never returns a full key, so an input
- * cannot be pre-filled with the saved value: every field starts empty, the
- * saved key is shown masked underneath, and typing replaces it. And a key in
- * the server's environment stays underneath a saved one, so Remove says what it
- * falls back to rather than promising the connector is off.
+ * Every key is optional. Outreach already works with none of them, so the panel
+ * reads as three capabilities that are off until a key turns them on, not as a
+ * setup checklist. The summary at the top says which three have a key so nobody
+ * has to read every row to find out.
  *
- * Half-typed keys are deliberately NOT kept across a section switch. Each row
- * has its own Save and a key is pasted in one motion, so the module-scope draft
- * the Connection panel needs would only keep a secret alive in memory for no
- * gain. Leaving the section loses what was typed, like any unsaved form.
+ * The summary only ever says a capability is on when a provider has answered a
+ * real call with the key behind it. Saving is not evidence: PUT
+ * /api/connectors/:id stores the string it is given, so a typo saves exactly as
+ * happily as a real key. So saving is followed by a check: the server makes the
+ * smallest authenticated call that provider offers and the row reports what came
+ * back. A refusal is shown in the provider's own words with the next thing to
+ * try, and a provider nobody could reach is its own state, because a vendor
+ * having a bad minute says nothing about the key.
+ *
+ * The check costs the operator no extra step. It runs itself the moment a save
+ * succeeds, and the Check button exists for the one key that cannot be saved
+ * here: the one set where the server was started.
+ *
+ * Two more rules shape the rows. The server never returns a full key, so an
+ * input cannot be pre-filled with the saved value: every field starts empty, the
+ * saved key is shown masked underneath, and typing replaces it. And a key set
+ * where the server was started stays underneath a saved one, so Remove says what
+ * it falls back to rather than promising the connector is off.
+ *
+ * Each row is its own form, so a pasted key saves on Enter with no button hunt
+ * and no confirmation step. Half-typed keys are deliberately NOT kept across a
+ * section switch: a key is pasted in one motion, so the module-scope draft the
+ * Connection panel needs would only keep a secret alive in memory for no gain.
  */
 
-type Meta = { blurb: string; keysHref: string; keysLabel: string };
+type Meta = {
+  blurb: string;
+  keysHref: string;
+  keysLabel: string;
+  /**
+   * What checking this key costs, when it costs anything. Two of the five
+   * providers have no free way to test a key, and an operator is owed that
+   * before Boxaide spends their money on their behalf.
+   */
+  checkCost?: string;
+};
 
 /** Copy and key-page links, keyed by connector id. The server sends the rest. */
 const META: Record<string, Meta> = {
+  apollo: {
+    blurb:
+      "Searches for companies and for the people who work at them, so an agent can find prospects you do not have yet.",
+    keysHref: "https://app.apollo.io/#/settings/integrations/api",
+    keysLabel: "app.apollo.io API settings",
+  },
   hunter: {
     blurb: "Finds and verifies work email addresses from a name and a domain.",
     keysHref: "https://hunter.io/api-keys",
@@ -43,39 +84,117 @@ const META: Record<string, Meta> = {
     keysLabel: "prospeo.io API",
   },
   exa: {
-    blurb: "Neural web search, for research on a person or a company.",
+    blurb: "Searches the web and reads pages, for research on a person or a company.",
     keysHref: "https://dashboard.exa.ai/api-keys",
     keysLabel: "dashboard.exa.ai",
+    checkCost:
+      "Exa has no free way to test a key, so a check runs one small search. That costs a fraction of a penny.",
   },
   parallel: {
-    blurb: "An alternative web index, used when Exa is not configured.",
+    blurb: "A second web search source, used when Exa has no key.",
     keysHref: "https://platform.parallel.ai/settings/api-keys",
     keysLabel: "platform.parallel.ai",
+    checkCost:
+      "Parallel has no free way to test a key, so a check runs one small search. That costs a fraction of a penny.",
   },
 };
 
+/** The heading for each group, in the order the groups are shown. */
 const KIND_TITLE: Record<ConnectorKind, string> = {
-  enrichment: "Enrichment",
+  prospecting: "Find prospects",
+  enrichment: "Find email addresses",
   search: "Web search",
 };
 
+/** The short label the summary strip uses for the same three capabilities. */
+const KIND_SUMMARY: Record<ConnectorKind, string> = {
+  prospecting: "Prospects",
+  enrichment: "Email addresses",
+  search: "Web search",
+};
+
+const KIND_ORDER: ConnectorKind[] = ["prospecting", "enrichment", "search"];
+
+/** One plain line per group: what a key unlocks, and what happens without one. */
+function kindNote(kind: ConnectorKind, configured: boolean): string {
+  if (kind === "prospecting") {
+    return configured
+      ? "With a working key, agents can search for companies and for the people who work at them, then save what they find to the CRM."
+      : "Without a key here, agents can only work with contacts you already have.";
+  }
+  if (kind === "enrichment") {
+    return configured
+      ? "With a working key, agents can find and check a work email address from a name and a company domain."
+      : "Without a key here, agents cannot look up an address you do not already hold.";
+  }
+  return configured
+    ? "Agents search through Boxaide, so every lookup uses the key below."
+    : "Without a key here, agents use whatever web search their own tool already has, which may be none.";
+}
+
+/**
+ * What a group with no rows means. The web app and the Boxaide server are
+ * updated separately, so a page newer than its server asks for a connector the
+ * server has never heard of. Dropping the whole group leaves nothing to search
+ * for and no reason why, which is the worst answer available.
+ */
+const KIND_MISSING: Record<ConnectorKind, string> = {
+  prospecting:
+    "Your Boxaide server is older than this page and does not offer prospecting yet. Update the server to turn it on.",
+  enrichment:
+    "Your Boxaide server is older than this page and does not offer email lookups yet. Update the server to turn it on.",
+  search:
+    "Your Boxaide server is older than this page and does not offer web search yet. Update the server to turn it on.",
+};
+
 export function ConnectorsPanel() {
+  const app = useApp();
+  const ctx = useApiCtx();
+  const connected = ctx.baseUrl.length > 0 && ctx.token.length > 0;
   const connectors = useConnectors();
 
-  const rows = connectors.data ?? [];
-  const enrichment = rows.filter((row) => row.kind === "enrichment");
-  const search = rows.filter((row) => row.kind === "search");
-  const searchConfigured = search.some((row) => row.configured);
+  const rows = connectors.data?.connectors ?? [];
+  const checks = connectors.data?.checks ?? {};
+  const groups = KIND_ORDER.map((kind) => {
+    const members = rows.filter((row) => row.kind === kind);
+    return {
+      kind,
+      members,
+      configured: members.some((row) => row.configured),
+      // "Working" is a stronger claim than "configured", and it is the one the
+      // group note and the strip are allowed to make.
+      working: members.some((row) => checks[row.id]?.verdict === "works"),
+      summary: capabilityStatus(members, checks),
+    };
+  });
+  const loaded = connectors.isSuccess;
 
   return (
     <div className="space-y-5">
       <PanelHeader title="Connectors">
-        Enrichment connectors find and verify a prospect&rsquo;s email address.
-        Search connectors give your agents web search. Without a search
-        connector, a launched agent falls back to its own CLI&rsquo;s web search.
+        Outreach already works with no keys at all. Each key below switches on
+        one more thing your agents can do: find new prospects, look up an email
+        address, or search the web. Paste a key and press Enter. Boxaide then
+        asks the provider whether the key works, and the row says what it said.
       </PanelHeader>
 
-      {connectors.isPending && (
+      {/* The query is switched off without a token, so it never resolves and a
+          spinner would sit there for ever. Say what is missing, and go there. */}
+      {!connected && (
+        <div className="space-y-2">
+          <p className="text-[12px] leading-4 text-fg-secondary">
+            Connect this page to your Boxaide server before you add any keys.
+          </p>
+          <Button
+            type="button"
+            onClick={() => app.openSettingsSection("connection")}
+          >
+            Open Connection settings
+          </Button>
+        </div>
+      )}
+
+      {connected && connectors.isPending && (
         <p className="flex items-center gap-1.5 text-[12px] leading-4 text-fg-tertiary">
           <Spinner />
           Loading connectors…
@@ -105,28 +224,67 @@ export function ConnectorsPanel() {
         </div>
       )}
 
-      {enrichment.length > 0 && (
-        <ConnectorSection kind="enrichment" connectors={enrichment} />
-      )}
+      {loaded && (
+        <>
+          <ul className="flex flex-wrap gap-2" aria-label="Which keys are working">
+            {groups.map((group) => (
+              <li
+                key={group.kind}
+                className="flex items-center gap-1.5 rounded-[var(--radius-md)] border border-border-subtle px-2 py-1 text-[12px] leading-4 text-fg-secondary"
+              >
+                <StatusDot tone={group.summary.tone} />
+                {KIND_SUMMARY[group.kind]}
+                <span className="text-fg-tertiary">{group.summary.words}</span>
+              </li>
+            ))}
+          </ul>
 
-      {search.length > 0 && (
-        <ConnectorSection kind="search" connectors={search}>
-          {searchConfigured
-            ? "Agents search through Boxaide, so every lookup uses the key above."
-            : "No search connector, so a launched agent keeps its own CLI's web search and fetch."}
-        </ConnectorSection>
+          {groups.map((group) => (
+            <ConnectorSection
+              key={group.kind}
+              kind={group.kind}
+              connectors={group.members}
+              checks={checks}
+              autoFocusId={firstEmptyId(groups)}
+            >
+              {group.members.length === 0
+                ? KIND_MISSING[group.kind]
+                : kindNote(group.kind, group.working)}
+            </ConnectorSection>
+          ))}
+        </>
       )}
     </div>
   );
 }
 
+/**
+ * The row whose field opens with the caret in it: the first one with no key.
+ * When every connector already has one, nothing is focused, because returning
+ * to this panel must not drop the caret into a password field on its own.
+ */
+function firstEmptyId(
+  groups: { members: Connector[] }[],
+): string | null {
+  for (const group of groups) {
+    for (const member of group.members) {
+      if (!member.configured) return member.id;
+    }
+  }
+  return null;
+}
+
 function ConnectorSection({
   kind,
   connectors,
+  checks,
+  autoFocusId,
   children,
 }: {
   kind: ConnectorKind;
   connectors: Connector[];
+  checks: Record<string, ConnectorCheck>;
+  autoFocusId: string | null;
   children?: React.ReactNode;
 }) {
   return (
@@ -137,19 +295,45 @@ function ConnectorSection({
       )}
       <div className="space-y-3">
         {connectors.map((connector) => (
-          <ConnectorRow key={connector.id} connector={connector} />
+          <ConnectorRow
+            key={connector.id}
+            connector={connector}
+            check={checks[connector.id]}
+            autoFocus={connector.id === autoFocusId}
+          />
         ))}
       </div>
     </section>
   );
 }
 
-function ConnectorRow({ connector }: { connector: Connector }) {
+function ConnectorRow({
+  connector,
+  check,
+  autoFocus,
+}: {
+  connector: Connector;
+  check: ConnectorCheck | undefined;
+  autoFocus: boolean;
+}) {
   const save = useSetConnectorKey();
+  const probe = useCheckConnector();
   const [value, setValue] = React.useState("");
   const [reveal, setReveal] = React.useState(false);
+  const [confirmRemove, setConfirmRemove] = React.useState(false);
+  const inputRef = React.useRef<HTMLInputElement>(null);
   const meta = META[connector.id];
   const inputId = `connector-${connector.id}`;
+
+  /* Remove destroys a key the operator may have to go back to the vendor for,
+     so it asks once, inline. It is not a dialog: a dialog for a key you can
+     paste again is heavier than the mistake. It gives up after a few seconds so
+     a half-pressed Remove is never left armed. */
+  React.useEffect(() => {
+    if (!confirmRemove) return;
+    const timer = window.setTimeout(() => setConfirmRemove(false), 4_000);
+    return () => window.clearTimeout(timer);
+  }, [confirmRemove]);
 
   const write = (apiKey: string, message: string) => {
     save.mutate(
@@ -158,11 +342,30 @@ function ConnectorRow({ connector }: { connector: Connector }) {
         onSuccess: () => {
           setValue("");
           setReveal(false);
+          setConfirmRemove(false);
+          // Clearing the value disables Save, and a focused element that turns
+          // disabled hands focus back to the document, which puts the next Tab
+          // at the top of the app. The field is where they will be next anyway.
+          inputRef.current?.focus();
           toast.success(message);
+          // The check the operator would otherwise have to ask for. A saved key
+          // nobody tested is the thing this panel used to get wrong, so the save
+          // and the check are one action: paste, Enter, answer.
+          if (apiKey !== "") probe.mutate(connector.id);
         },
       },
     );
   };
+
+  /** Enter in the field is a save: one paste, one keystroke, no dialog. */
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    const key = value.trim();
+    if (key.length === 0 || save.isPending) return;
+    write(key, `${connector.label} key saved`);
+  };
+
+  const status = connectorStatus(connector, check, probe.isPending);
 
   return (
     <div className="space-y-1.5 rounded-[var(--radius-md)] border border-border-subtle p-3">
@@ -170,7 +373,13 @@ function ConnectorRow({ connector }: { connector: Connector }) {
         <span className="text-[13px] leading-[18px] font-medium text-fg">
           {connector.label}
         </span>
-        <ConnectorStatus connector={connector} />
+        <span className="flex items-center gap-1.5 text-[12px] leading-4 text-fg-secondary">
+          {status.busy ? <Spinner /> : <StatusDot tone={status.tone} />}
+          {status.headline}
+          {connector.maskedKey && (
+            <span className="font-mono text-fg-tertiary">{connector.maskedKey}</span>
+          )}
+        </span>
       </div>
 
       {meta && (
@@ -188,7 +397,7 @@ function ConnectorRow({ connector }: { connector: Connector }) {
         </p>
       )}
 
-      <div className="space-y-1">
+      <form className="space-y-1" onSubmit={submit}>
         <Label
           htmlFor={inputId}
           className="text-[12px] font-medium text-fg-secondary"
@@ -199,6 +408,8 @@ function ConnectorRow({ connector }: { connector: Connector }) {
           <div className="relative w-full max-w-[320px]">
             <Input
               id={inputId}
+              ref={inputRef}
+              autoFocus={autoFocus}
               type={reveal ? "text" : "password"}
               value={value}
               spellCheck={false}
@@ -224,45 +435,97 @@ function ConnectorRow({ connector }: { connector: Connector }) {
             </button>
           </div>
           <Button
-            type="button"
+            type="submit"
             disabled={value.trim().length === 0 || save.isPending}
             aria-busy={save.isPending || undefined}
-            onClick={() => write(value.trim(), `${connector.label} key saved`)}
           >
             {save.isPending && <Spinner />}
             Save
           </Button>
+          {/* One button for the key nobody can paste here: the one set where
+              the server was started. It is also the way back after a provider
+              could not be reached, which is nobody's fault and passes. */}
+          {connector.configured && (
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={save.isPending || probe.isPending}
+              aria-busy={probe.isPending || undefined}
+              onClick={() => probe.mutate(connector.id)}
+            >
+              {probe.isPending && <Spinner />}
+              Check
+            </Button>
+          )}
           {connector.source === "settings" && (
             <Button
               type="button"
               variant="secondary"
-              disabled={save.isPending}
-              onClick={() => write("", `${connector.label} key removed`)}
+              disabled={save.isPending || probe.isPending}
+              onClick={() => {
+                if (!confirmRemove) {
+                  setConfirmRemove(true);
+                  return;
+                }
+                write("", `${connector.label} key removed`);
+              }}
             >
-              Remove
+              {confirmRemove ? "Remove?" : "Remove"}
             </Button>
           )}
         </div>
-      </div>
+      </form>
 
       {connector.source === "settings" ? (
         <p className="text-[12px] leading-4 text-fg-tertiary">
-          Remove deletes the saved key. If the server also has one in its
-          environment, that key takes over.
+          Remove deletes the saved key. If a key was also set where the Boxaide
+          server was started, that key takes over.
         </p>
       ) : connector.source === "env" ? (
         <p className="text-[12px] leading-4 text-fg-tertiary">
-          Read from the server&rsquo;s environment. Saving a key here overrides
-          it.
+          This key was set when the Boxaide server was started, so it cannot be
+          changed here. Saving a key on this row wins over it.
         </p>
       ) : null}
 
       <div role="status" aria-live="polite">
+        {status.reason && (
+          <p className="text-[12px] leading-4 text-fg-secondary">
+            {connector.label} said: {status.reason}
+          </p>
+        )}
+        {status.hint && (
+          <p className="text-[12px] leading-4 text-fg-tertiary">{status.hint}</p>
+        )}
+        {meta?.checkCost && !status.busy && (
+          <p className="text-[12px] leading-4 text-fg-tertiary">{meta.checkCost}</p>
+        )}
+        {probe.isError && (
+          <>
+            <p className="flex items-center gap-1.5 text-[12px] leading-4 text-danger">
+              <StatusDot tone="danger" />
+              Could not ask your Boxaide server to check the key.
+            </p>
+            <p className="text-[12px] leading-4 text-fg-secondary">
+              {friendlyError(
+                probe.error instanceof Error ? probe.error.message : probe.error,
+              )}
+            </p>
+            <TechnicalDetails
+              raw={probe.error instanceof Error ? probe.error.message : probe.error}
+            />
+          </>
+        )}
         {save.isError && (
           <>
             <p className="flex items-center gap-1.5 text-[12px] leading-4 text-danger">
               <StatusDot tone="danger" />
-              The server did not accept that change.
+              Could not save the key.
+            </p>
+            <p className="text-[12px] leading-4 text-fg-secondary">
+              {friendlyError(
+                save.error instanceof Error ? save.error.message : save.error,
+              )}
             </p>
             <TechnicalDetails
               raw={
@@ -273,40 +536,5 @@ function ConnectorRow({ connector }: { connector: Connector }) {
         )}
       </div>
     </div>
-  );
-}
-
-/**
- * One line saying where the key came from. An environment key is read-only
- * here, but it is not fixed: saving a key on this row takes precedence over it.
- */
-function ConnectorStatus({ connector }: { connector: Connector }) {
-  if (connector.source === "settings") {
-    return (
-      <span className="flex items-center gap-1.5 text-[12px] leading-4 text-success">
-        <StatusDot tone="success" />
-        Configured in settings
-        {connector.maskedKey && (
-          <span className="font-mono text-fg-tertiary">{connector.maskedKey}</span>
-        )}
-      </span>
-    );
-  }
-  if (connector.source === "env") {
-    return (
-      <span className="flex items-center gap-1.5 text-[12px] leading-4 text-success">
-        <StatusDot tone="success" />
-        Configured via environment variable
-        {connector.maskedKey && (
-          <span className="font-mono text-fg-tertiary">{connector.maskedKey}</span>
-        )}
-      </span>
-    );
-  }
-  return (
-    <span className="flex items-center gap-1.5 text-[12px] leading-4 text-fg-tertiary">
-      <StatusDot tone="muted" />
-      Not configured
-    </span>
   );
 }

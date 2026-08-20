@@ -8,6 +8,12 @@
  * and "undeliverable" is a bounce waiting to happen.
  */
 import {
+  probeRequest,
+  unreachable,
+  verdictForStatus,
+  type ConnectorProbeResult,
+} from "../connectors/probe.js";
+import {
   clampScore,
   emptyResult,
   requestWithTimeout,
@@ -102,4 +108,22 @@ export class HunterProvider implements EnrichmentProvider {
       raw: body,
     };
   }
+}
+
+/**
+ * Is this Hunter key one Hunter accepts?
+ *
+ * GET /v2/account, which is Hunter's own account endpoint: it reports the plan
+ * and the requests left, spends no credits, and needs no name or domain to ask
+ * about. That makes it free in both senses, which is what a key check should
+ * be. A refused key answers 401 with the reason under errors[].details.
+ */
+export async function probeHunter(
+  apiKey: string,
+  doFetch?: typeof globalThis.fetch,
+): Promise<ConnectorProbeResult> {
+  const params = new URLSearchParams({ api_key: apiKey });
+  const reply = await probeRequest(`${API}/account?${params}`, { method: "GET" }, doFetch);
+  if (!reply.reached) return unreachable(reply.reason);
+  return verdictForStatus(reply.status, reply.body);
 }

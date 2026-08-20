@@ -76,13 +76,14 @@ describe("connector store", () => {
 });
 
 describe("connectors service", () => {
-  it("lists all four connectors with their kind", () => {
+  it("lists every connector with its kind", () => {
     const service = new ConnectorsService(newStore(), envFrom({}));
     expect(service.list().map((c) => [c.id, c.kind])).toEqual([
       ["hunter", "enrichment"],
       ["prospeo", "enrichment"],
       ["exa", "search"],
       ["parallel", "search"],
+      ["apollo", "prospecting"],
     ]);
     expect(service.list().every((c) => c.configured === false)).toBe(true);
     expect(service.list().every((c) => c.source === null)).toBe(true);
@@ -122,10 +123,22 @@ describe("connectors service", () => {
     expect(service.getKey("bing")).toBeUndefined();
   });
 
+  it("round-trips the prospecting key like any other connector", () => {
+    const service = new ConnectorsService(newStore(), envFrom({ APOLLO_API_KEY: "env-apollo-key1" }));
+    expect(service.describe("apollo").source).toBe("env");
+    service.setKey("apollo", "settings-apollo-wxyz");
+    expect(service.getKey("apollo")).toBe("settings-apollo-wxyz");
+    expect(service.describe("apollo").maskedKey).toBe("****wxyz");
+  });
+
   it("answers hasSearchConnector from search providers only", () => {
     const service = new ConnectorsService(newStore(), envFrom({}));
     expect(service.hasSearchConnector()).toBe(false);
     service.setKey("hunter", "hunter-key");
+    expect(service.hasSearchConnector()).toBe(false);
+    // A prospecting key is not a search key: a launched agent keeps its own
+    // CLI web tools until an actual search provider is configured.
+    service.setKey("apollo", "apollo-key");
     expect(service.hasSearchConnector()).toBe(false);
     service.setKey("parallel", "parallel-key");
     expect(service.hasSearchConnector()).toBe(true);

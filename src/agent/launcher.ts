@@ -62,6 +62,10 @@ import {
 } from "./agent-stream.js";
 import { ClaudeDriver, type ClaudeTurnRequest } from "./claude-driver.js";
 import type { AgentDriver, DriverChannel, StopCause } from "./driver.js";
+import {
+  OUTREACH_CHAIN,
+  OUTREACH_CHAIN_ONE_LINE,
+} from "./guidance.js";
 import { OpenCodeDriver, serveBaseUrl } from "./opencode-driver.js";
 import {
   fetchModels,
@@ -115,7 +119,7 @@ function wellKnownBinDirs(): string[] {
  * the automated version of that manual step. Mirrors
  * apps/web/src/components/dialogs/agent-connect-dialog.tsx (KICKOFF).
  */
-const KICKOFF = `You are my Boxaide inbox agent. Use the Boxaide MCP tools.
+export const KICKOFF = `You are my Boxaide inbox agent. Use the Boxaide MCP tools.
 
 Loop: call chat_await_message, do the work, post the answer with chat_say, then
 call chat_await_message again. Keep going until I tell you to stop.
@@ -123,7 +127,9 @@ call chat_await_message again. Keep going until I tell you to stop.
 Everything I read appears in the Boxaide window, so every answer must go through
 chat_say — do not answer here. A chat_await_message that returns no message is
 normal; call it again. Use chat_activity for anything slow. Draft rather than
-send unless I ask you to send.`;
+send unless I ask you to send.
+
+${OUTREACH_CHAIN}`;
 
 /**
  * Prepended verbatim to every automation prompt (spec: Scheduler / Run
@@ -132,7 +138,8 @@ send unless I ask you to send.`;
  * a draft instead of retrying the wall.
  */
 export const AUTOMATION_RUN_PREAMBLE =
-  "You are a scheduled Boxaide automation. Do the task below using the Boxaide MCP tools, then exit. You cannot talk to the user: do not call chat tools; write nothing to the user. Never send email: queue outreach with outbox_queue_draft or save with draft_create and a human will review.";
+  "You are a scheduled Boxaide automation. Do the task below using the Boxaide MCP tools, then exit. You cannot talk to the user: do not call chat tools; write nothing to the user. Never send email; the chain below says where outreach goes. " +
+  OUTREACH_CHAIN_ONE_LINE;
 
 /**
  * The allowlists a CLI is given on its command line.

@@ -15,6 +15,12 @@
  * stays as the fallback for a server nobody opens the UI on.
  */
 import { envNamed } from "../config.js";
+import {
+  probeRequest,
+  unreachable,
+  verdictForStatus,
+  type ConnectorProbeResult,
+} from "../connectors/probe.js";
 import type { SearchOptions, SearchProvider, SearchResult } from "./types.js";
 
 const EXA_ENDPOINT = "https://api.exa.ai/search";
@@ -193,4 +199,67 @@ export function parallelProvider(deps: ProviderDeps = {}): SearchProvider {
  */
 export function allProviders(deps: ProviderDeps = {}): SearchProvider[] {
   return [exaProvider(deps), parallelProvider(deps)];
+}
+
+/**
+ * The query both search probes send. It is a real query because both providers
+ * only answer real ones, and a short harmless one because whatever is sent is
+ * a search somebody pays for.
+ */
+const PROBE_QUERY = "example";
+
+/**
+ * Is this Exa key one Exa accepts?
+ *
+ * Exa publishes no free endpoint for checking a key, so the cheapest honest
+ * check is the smallest real search: one result, and no page contents, which
+ * is the part that carries the extra cost. That is a fraction of a penny per
+ * check rather than nothing, and the Connectors screen says so before the
+ * operator asks for it.
+ */
+export async function probeExa(
+  apiKey: string,
+  doFetch?: typeof globalThis.fetch,
+): Promise<ConnectorProbeResult> {
+  const reply = await probeRequest(
+    EXA_ENDPOINT,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": apiKey },
+      body: JSON.stringify({ query: PROBE_QUERY, numResults: 1 }),
+    },
+    doFetch,
+  );
+  if (!reply.reached) return unreachable(reply.reason);
+  return verdictForStatus(reply.status, reply.body);
+}
+
+/**
+ * Is this Parallel key one Parallel accepts?
+ *
+ * The same bargain as Exa: Parallel has no free key-check endpoint either, so
+ * this is one base-processor search for one result with the shortest excerpt
+ * it will return, which is the least Parallel bills for.
+ */
+export async function probeParallel(
+  apiKey: string,
+  doFetch?: typeof globalThis.fetch,
+): Promise<ConnectorProbeResult> {
+  const reply = await probeRequest(
+    PARALLEL_ENDPOINT,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": apiKey },
+      body: JSON.stringify({
+        objective: PROBE_QUERY,
+        search_queries: [PROBE_QUERY],
+        processor: "base",
+        max_results: 1,
+        max_chars_per_result: 100,
+      }),
+    },
+    doFetch,
+  );
+  if (!reply.reached) return unreachable(reply.reason);
+  return verdictForStatus(reply.status, reply.body);
 }

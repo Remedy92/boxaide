@@ -10,6 +10,15 @@
  * verdict. That is the whole reason scoreFor exists in types.ts.
  */
 import {
+  probeRequest,
+  reasonFrom,
+  rejected,
+  unreachable,
+  verdictForStatus,
+  works,
+  type ConnectorProbeResult,
+} from "../connectors/probe.js";
+import {
   emptyResult,
   requestWithTimeout,
   scoreFor,
@@ -106,4 +115,42 @@ export class ProspeoProvider implements EnrichmentProvider {
       raw: body,
     };
   }
+}
+
+/**
+ * Is this Prospeo key one Prospeo accepts?
+ *
+ * POST /account-information, Prospeo's own account endpoint: it reports the
+ * plan, the credits left and the renewal date, and it is documented as free of
+ * charge. No name, no domain and no address are needed to ask it, so it costs
+ * nothing and reveals nothing.
+ *
+ * Prospeo answers a key problem with HTTP 200 and `error: true`, exactly as it
+ * does for a lookup, so the flag is read before the status is trusted. Without
+ * that, a rejected key would be reported as a working one.
+ */
+export async function probeProspeo(
+  apiKey: string,
+  doFetch?: typeof globalThis.fetch,
+): Promise<ConnectorProbeResult> {
+  const reply = await probeRequest(
+    `${API}/account-information`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-key": apiKey },
+      body: JSON.stringify({}),
+    },
+    doFetch,
+  );
+  if (!reply.reached) return unreachable(reply.reason);
+  const verdict = verdictForStatus(reply.status, reply.body);
+  if (verdict.verdict !== "works") return verdict;
+  let body: ProspeoBody | null = null;
+  try {
+    body = JSON.parse(reply.body) as ProspeoBody;
+  } catch {
+    return unreachable("Prospeo sent an answer that is not readable.");
+  }
+  if (body?.error) return rejected(reasonFrom(reply.body));
+  return works;
 }

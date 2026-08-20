@@ -28,6 +28,8 @@ import type {
   CalendarAccount,
   CalendarAccountsResponse,
   Connector,
+  ConnectorCheck,
+  ConnectorsSnapshot,
   ConnectionTestResult,
   CreatedAccount,
   CrmContact,
@@ -1094,14 +1096,38 @@ export function getOutreachBadge(ctx: Ctx): Promise<OutreachBadge> {
 /* connectors: /api/connectors                                                */
 /* -------------------------------------------------------------------------- */
 
-/** Metadata only: every key is masked to its last four characters. */
-export async function listConnectors(ctx: Ctx): Promise<Connector[]> {
-  const data = await request<{ connectors: Connector[] }>("/api/connectors", {
+/**
+ * Metadata only: every key is masked to its last four characters. `checks`
+ * carries the last verdict each provider gave, so a reload shows what is
+ * working without asking any provider again.
+ */
+export function listConnectors(ctx: Ctx): Promise<ConnectorsSnapshot> {
+  return request<ConnectorsSnapshot>("/api/connectors", {
     baseUrl: ctx.baseUrl,
     token: ctx.token,
     signal: ctx.signal,
   });
-  return data.connectors;
+}
+
+/**
+ * Asks the provider whether the key in force actually works. It checks an
+ * environment key as readily as a saved one, and answers with a verdict, never
+ * with the key.
+ */
+export function checkConnector(
+  id: string,
+  ctx: Ctx,
+): Promise<{ connector: Connector; check: ConnectorCheck }> {
+  return request<{ connector: Connector; check: ConnectorCheck }>(
+    `/api/connectors/${encodeURIComponent(id)}/check`,
+    {
+      method: "POST",
+      body: {},
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
 }
 
 /** An empty `apiKey` clears the saved key, leaving any environment key in place. */

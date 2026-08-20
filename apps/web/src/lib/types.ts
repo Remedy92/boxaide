@@ -450,8 +450,11 @@ export type SuppressionRow = {
 /** GET /api/outreach/badge — a COUNT of pending rows and nothing else. */
 export type OutreachBadge = { pending: number };
 
-/** Which service a connector's key buys: prospect data, or a web index. */
-export type ConnectorKind = "enrichment" | "search";
+/**
+ * Which capability a connector's key switches on: finding new prospects,
+ * looking up an email address, or searching the web.
+ */
+export type ConnectorKind = "prospecting" | "enrichment" | "search";
 
 /**
  * GET /api/connectors, and the body of PUT /api/connectors/:id.
@@ -468,6 +471,29 @@ export type Connector = {
   configured: boolean;
   source: "settings" | "env" | null;
   maskedKey: string | null;
+};
+
+/**
+ * What the provider said when Boxaide last asked it about the key.
+ *
+ * Three answers, and the third is the one that stops a lie: "unreachable" is
+ * the vendor being down or slow, which says nothing at all about the key.
+ * `maskedKey` names the key the answer was about, so a verdict is dropped the
+ * moment the key it judged is replaced.
+ */
+export type ConnectorCheckVerdict = "works" | "rejected" | "unreachable";
+
+export type ConnectorCheck = {
+  verdict: ConnectorCheckVerdict;
+  reason: string | null;
+  checkedAt: string;
+  maskedKey: string;
+};
+
+/** GET /api/connectors: every connector, plus the verdicts still in force. */
+export type ConnectorsSnapshot = {
+  connectors: Connector[];
+  checks: Record<string, ConnectorCheck>;
 };
 
 /**
