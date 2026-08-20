@@ -55,6 +55,20 @@ describe("readableNotes", () => {
     ).toBe("- Fix the thing");
   });
 
+  it("drops a body that ends mid-tag rather than printing half of it", () => {
+    expect(readableNotes("<p>Real line</p><script")).toBe("Real line");
+    expect(readableNotes("<p>Real line</p><b>bold</b><img src=x onerror")).toBe(
+      "Real line\nbold",
+    );
+    expect(readableNotes("<p>Kept</p>&lt;name&gt;")).toBe("Kept\n<name>");
+  });
+
+  it("cannot be made to rebuild a tag out of overlapping ones", () => {
+    const out = readableNotes("<p><scr<x>ipt>alert(1)</scr<x>ipt></p>") ?? "";
+    expect(out).not.toMatch(/<script/i);
+    expect(out).not.toMatch(/[<>]/);
+  });
+
   it("answers null for nothing, and for markup that says nothing", () => {
     expect(readableNotes(null)).toBeNull();
     expect(readableNotes("")).toBeNull();

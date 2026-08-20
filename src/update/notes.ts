@@ -63,8 +63,13 @@ export function readableNotes(raw: unknown): string | null {
       // between two bullets.
       .replace(/\s*<li\b[^>]*>/gi, "\n- ")
       .replace(/\s*<(p|div|h[1-6]|tr|blockquote|pre)\b[^>]*>/gi, "\n")
-      .replace(BLOCK_END, "\n")
-      .replace(/<[^>]+>/g, "");
+      .replace(BLOCK_END, "\n");
+    text = stripTags(text);
+    // A lone angle bracket left over from something that was never a whole
+    // tag — "<scr<x>ipt>" — is markup debris, not a word. In a body that is
+    // HTML there is no other way to write one: prose uses &lt;, which is
+    // decoded a step later and survives.
+    text = text.replace(/[<>]/g, "");
   }
 
   text = decodeEntities(text);
@@ -86,6 +91,31 @@ export function readableNotes(raw: unknown): string | null {
 
   const out = lines.join("\n").trim();
   return out.length === 0 ? null : out;
+}
+
+/**
+ * Drop every remaining tag, in one pass over the string.
+ *
+ * Deliberately not `replace(/<[^>]+>/g, "")`. That leaves anything after an
+ * unterminated `<` — a truncated release body ends mid-tag often enough — and
+ * one pass of it can rebuild a tag out of two overlapping ones. Reading
+ * forward from each `<` to the next `>` cannot: what is not a complete tag is
+ * the tail of the body, and the tail of a body that ends mid-tag is dropped.
+ *
+ * This is extraction, not sanitization. Both surfaces render the result as
+ * text, never as HTML, and nothing downstream may assume otherwise.
+ */
+function stripTags(html: string): string {
+  let out = "";
+  let at = 0;
+  for (;;) {
+    const open = html.indexOf("<", at);
+    if (open === -1) return out + html.slice(at);
+    out += html.slice(at, open);
+    const close = html.indexOf(">", open + 1);
+    if (close === -1) return out;
+    at = close + 1;
+  }
 }
 
 /**
