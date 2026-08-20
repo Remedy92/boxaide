@@ -83,6 +83,41 @@ HEAD="$(git rev-parse HEAD)"
 ORIGIN="$(git rev-parse origin/master)"
 [ "$HEAD" = "$ORIGIN" ] || die "HEAD is not origin/master — pull or push first"
 
+# CI is the only thing that has read this code as a whole, and the push below
+# does not consult it: ship.sh commits "Cut" straight onto master, and the
+# account running it has bypass rights, so branch protection never gets a
+# vote. Ask GitHub directly instead. Every workflow run on the commit being
+# released must have finished green before anything is committed, packed or
+# uploaded. Checked here, before the twenty-minute sign-and-notarise, so a red
+# master costs nothing.
+#
+# Runs are matched on this commit, not on the branch, so a green run for an
+# older master cannot pass a newer one. Only push-triggered workflows appear
+# (CI and CodeQL); dependency-review is pull_request-only and never runs on a
+# master commit, which is why the gate checks what did run rather than a list
+# of names it expects.
+SHORT="$(git rev-parse --short HEAD)"
+COUNT="$(gh run list --branch master --limit 50 --commit "$HEAD" \
+  --json databaseId --jq 'length')" \
+  || die "could not read workflow runs for $SHORT"
+if [ "$COUNT" -eq 0 ]; then
+  die "no workflow run for $SHORT yet; wait for CI to start and finish"
+fi
+BAD="$(gh run list --branch master --limit 50 --commit "$HEAD" \
+  --json workflowName,status,conclusion \
+  --jq '.[]
+    | select(.status != "completed"
+      or (.conclusion != "success" and .conclusion != "skipped"))
+    | "  " + .workflowName + ": "
+      + (if .status == "completed" then .conclusion else .status end)')" \
+  || die "could not read workflow runs for $SHORT"
+if [ -n "$BAD" ]; then
+  die "master $SHORT is not green:
+$BAD
+nothing was built or uploaded; fix it and push before shipping"
+fi
+printf 'ci   %s green (%s runs)\n' "$SHORT" "$COUNT"
+
 TAG="$(gh release view --json tagName --jq .tagName 2>/dev/null || true)"
 [ -n "$TAG" ] || die "no GitHub release yet — create the first one by hand"
 if ! git rev-parse -q --verify "${TAG}^{commit}" >/dev/null; then
