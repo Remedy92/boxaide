@@ -556,6 +556,27 @@ export function sendAgentMessage(
   });
 }
 
+/**
+ * Stops the message the agent is answering right now.
+ *
+ * `seq` is the message the button was showing, and the server checks it: the
+ * run can end and the next one be claimed between the paint and the click, and
+ * `stopped` comes back false rather than killing that one instead. No `chat`
+ * argument — a seq names one message across every conversation.
+ */
+export function stopAgentTurn(
+  seq: number,
+  ctx: Ctx,
+): Promise<{ stopped: boolean; presence: AgentPresence }> {
+  return request<{ stopped: boolean; presence: AgentPresence }>("/api/agent/stop", {
+    method: "POST",
+    body: { seq },
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
 /** Same `chat` rule as sendAgentMessage: clear the pane's chat, not the active one. */
 export function clearAgentConversation(
   ctx: Ctx,

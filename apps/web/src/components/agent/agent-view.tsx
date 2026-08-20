@@ -295,6 +295,14 @@ export function AgentView({
           <AgentComposer
             onSend={send}
             sending={agent.sending}
+            /* This chat's run, not any run. Stop belongs under the answer the
+               reader is waiting for; a message being answered in another
+               conversation is that conversation's to stop. The seq goes with
+               the click, so what is stopped is the run this button was drawn
+               for even if another one was claimed in between. */
+            onStop={work ? () => void agent.stop(work.seq) : undefined}
+            running={work !== null && work.chatId === agent.chat?.id}
+            stopping={agent.stopping}
             disabled={agent.connection === "unsupported"}
             autoFocus={!app.narrow}
           />

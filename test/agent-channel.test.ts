@@ -1171,6 +1171,91 @@ describe("agent HTTP routes", () => {
     rt.channel.close();
   });
 
+  it("stops the message in flight, and says so when there is none", async () => {
+    const rt = build();
+    const posted = await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "read everything" }),
+    });
+    const { turn } = (await posted.json()) as { turn: { seq: number } };
+    // An agent takes it, exactly as chat_await_message would.
+    await rt.channel.awaitUserTurn({ timeoutMs: 1_000, agent: "claude-code" });
+    expect(rt.channel.presence().working?.seq).toBe(turn.seq);
+
+    const stop = await rt.app.request("/api/agent/stop", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ seq: turn.seq }),
+    });
+    expect(stop.status).toBe(200);
+    const body = (await stop.json()) as {
+      stopped: boolean;
+      presence: { working: unknown };
+    };
+    expect(body.stopped).toBe(true);
+    expect(body.presence.working).toBeNull();
+
+    // The conversation says what happened, under the question it happened to.
+    const last = rt.channel.history().at(-1)!;
+    expect(last.role).toBe("agent");
+    expect(last.text).toBe("Stopped.");
+    expect(last.replyTo).toBe(turn.seq);
+
+    // Pressing it again, with the run already over, is not an error.
+    const again = await rt.app.request("/api/agent/stop", { method: "POST", headers: auth });
+    expect(again.status).toBe(200);
+    expect(((await again.json()) as { stopped: boolean }).stopped).toBe(false);
+    rt.channel.close();
+  });
+
+  it("leaves a message alone when Stop names a different one", async () => {
+    const rt = build();
+    // The run the button was drawn for finished, and the next queued message
+    // was claimed behind it. Stopping that one would kill a run the user never
+    // looked at, in a conversation they are not reading.
+    const first = await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "the one that finished" }),
+    });
+    const { turn: finished } = (await first.json()) as { turn: { seq: number; chatId: string } };
+    await rt.channel.awaitUserTurn({ timeoutMs: 1_000, agent: "claude-code" });
+    rt.channel.answer({
+      seq: finished.seq,
+      chatId: finished.chatId,
+      text: "answered",
+      agent: "claude-code",
+    });
+    const second = await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "the one now running" }),
+    });
+    const { turn: running } = (await second.json()) as { turn: { seq: number } };
+    await rt.channel.awaitUserTurn({ timeoutMs: 1_000, agent: "claude-code" });
+    expect(rt.channel.presence().working?.seq).toBe(running.seq);
+
+    const stop = await rt.app.request("/api/agent/stop", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ seq: finished.seq }),
+    });
+    expect(stop.status).toBe(200);
+    expect(((await stop.json()) as { stopped: boolean }).stopped).toBe(false);
+    // Untouched: still being answered, and nothing was written about it.
+    expect(rt.channel.presence().working?.seq).toBe(running.seq);
+    expect(rt.channel.history().some((t) => t.text === "Stopped.")).toBe(false);
+
+    const bad = await rt.app.request("/api/agent/stop", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ seq: "1" }),
+    });
+    expect(bad.status).toBe(400);
+    rt.channel.close();
+  });
+
   it("answers 404 for a send or clear aimed at a chat that is not there", async () => {
     const rt = build();
     const posted = await rt.app.request("/api/agent/messages", {
