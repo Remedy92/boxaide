@@ -9,7 +9,15 @@
  */
 import Database from "better-sqlite3";
 import type { Hono } from "hono";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,13 +25,20 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   AgentLauncher,
   AUTOMATION_RUN_PREAMBLE,
+  RUN_WORKDIR_STALE_MS,
   LaunchError,
   runPreapprovedToolNames,
   type AgentSpec,
   type OneShotResult,
 } from "../src/agent/launcher.js";
+import { parseBulletModels } from "../src/agent/model-list.js";
 import { AutomationScheduler, type OneShotLauncher } from "../src/automation/scheduler.js";
-import { AutomationStore, nextRunAfter, RUN_STALE_MS } from "../src/automation/store.js";
+import {
+  AutomationStore,
+  MAX_AUTOMATION_PROMPT_BYTES,
+  nextRunAfter,
+  RUN_STALE_MS,
+} from "../src/automation/store.js";
 import { AUTOMATION_TOOLS, dispatchAutomationTool } from "../src/automation/tools.js";
 import type { Platform } from "../src/platform.js";
 
@@ -103,6 +118,18 @@ describe("AutomationStore", () => {
     ).toThrowError(/already exists/);
   });
 
+  it("rejects oversized persistent inputs from REST or MCP callers", () => {
+    const store = newStore();
+    expect(() =>
+      store.create({
+        name: "large",
+        cron: "0 8 * * *",
+        prompt: "x".repeat(MAX_AUTOMATION_PROMPT_BYTES + 1),
+      }),
+    ).toThrow(/prompt must be at most/);
+    expect(store.list()).toEqual([]);
+  });
+
   it("validates cron on create and on update", () => {
     const store = newStore();
     expect(() =>
@@ -153,6 +180,62 @@ describe("AutomationStore", () => {
     const a = store.create({ name: "n", cron: "0 8 * * *", prompt: "Triage." });
     expect(store.update(a.id, { prompt: "  " })?.prompt).toBe("Triage.");
     expect(store.get(a.id)?.prompt).toBe("Triage.");
+  });
+
+  it("stores an agent and a model, and drops the model when the agent changes", () => {
+    const store = newStore();
+    const a = store.create({
+      name: "n",
+      cron: "0 8 * * *",
+      prompt: "p",
+      agentId: "claude-code",
+      model: "claude-haiku-4-5-20251001",
+    });
+    expect(store.get(a.id)?.model).toBe("claude-haiku-4-5-20251001");
+
+    // Same agent, other fields: the model survives.
+    expect(store.update(a.id, { prompt: "q" })?.model).toBe(
+      "claude-haiku-4-5-20251001",
+    );
+
+    // A model id belongs to one CLI, so a bare agent switch clears it.
+    expect(store.update(a.id, { agentId: "grok" })?.model).toBeNull();
+
+    // Both at once is one decision, and both stick.
+    const both = store.update(a.id, { agentId: "claude-code", model: "claude-opus-5" });
+    expect(both?.agentId).toBe("claude-code");
+    expect(both?.model).toBe("claude-opus-5");
+
+    // Explicit null is how a caller asks for the CLI's own default.
+    expect(store.update(a.id, { model: null })?.model).toBeNull();
+  });
+
+  it("carries the model column onto a database created before it existed", () => {
+    const path = join(tempDir(), "old.db");
+    const old = new Database(path);
+    old.exec(`
+      CREATE TABLE automations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        cron TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        agent_id TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        last_run_at TEXT,
+        next_run_at TEXT
+      );
+      INSERT INTO automations (id, name, cron, prompt, agent_id, enabled, created_at)
+        VALUES ('old-1', 'Legacy', '0 8 * * *', 'p', NULL, 1, '2026-01-01T00:00:00.000Z');
+    `);
+    old.close();
+
+    const store = openStore(path);
+    // The row survives the migration and reads as "the CLI's own default".
+    expect(store.get("old-1")?.model).toBeNull();
+    expect(store.update("old-1", { model: "claude-opus-5" })?.model).toBe(
+      "claude-opus-5",
+    );
   });
 
   it("finds only enabled, due automations", () => {
@@ -253,11 +336,17 @@ describe("AutomationStore", () => {
 
 /** Records every run and can hold one open, so overlap is observable. */
 class FakeLauncher implements OneShotLauncher {
-  calls: { agentId?: string | null; prompt: string }[] = [];
+  calls: {
+    runId: string;
+    agentId?: string | null;
+    prompt: string;
+    model?: string | null;
+  }[] = [];
   inFlight = 0;
   maxInFlight = 0;
-  chatRunning = false;
   killed = 0;
+  /** Default 1 so a test that says nothing still observes serial behaviour. */
+  limit = 1;
   result: OneShotResult = { status: "ok", exitCode: 0, log: "ran" };
   throwWith: Error | null = null;
   private release: (() => void) | null = null;
@@ -276,11 +365,20 @@ class FakeLauncher implements OneShotLauncher {
     this.release = null;
   }
 
-  busy(): boolean {
-    return this.chatRunning || this.inFlight > 0;
+  runCapacity(): number {
+    return Math.max(0, this.limit - this.inFlight);
   }
 
-  async runOnce(opts: { agentId?: string | null; prompt: string }): Promise<OneShotResult> {
+  runLimit(): number {
+    return this.limit;
+  }
+
+  async runOnce(opts: {
+    runId: string;
+    agentId?: string | null;
+    prompt: string;
+    model?: string | null;
+  }): Promise<OneShotResult> {
     this.calls.push(opts);
     this.inFlight++;
     this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
@@ -293,7 +391,7 @@ class FakeLauncher implements OneShotLauncher {
     }
   }
 
-  killRun(): void {
+  killRun(_runId?: string): void {
     this.killed++;
     this.releaseAll();
   }
@@ -324,10 +422,10 @@ describe("AutomationScheduler", () => {
       expect(saved.lastRunAt).toBeTruthy();
       expect(new Date(saved.nextRunAt!).getTime()).toBeGreaterThan(Date.now());
     }
-    expect(scheduler.state()).toEqual({ active: null, queued: [] });
+    expect(scheduler.state()).toEqual({ active: [], queued: [] });
   });
 
-  it("passes the automation's agent id through to the launcher", async () => {
+  it("passes the automation's agent id and model through to the launcher", async () => {
     const store = newStore();
     const launcher = new FakeLauncher();
     const scheduler = new AutomationScheduler(store, launcher);
@@ -336,16 +434,18 @@ describe("AutomationScheduler", () => {
       cron: "0 * * * *",
       prompt: "p",
       agentId: "claude-code",
+      model: "claude-haiku-4-5-20251001",
       now: past,
     });
     await scheduler.tick(now);
     expect(launcher.calls[0].agentId).toBe("claude-code");
+    expect(launcher.calls[0].model).toBe("claude-haiku-4-5-20251001");
   });
 
-  it("waits behind an interactive chat agent instead of dropping the run", async () => {
+  it("keeps a run queued while the launcher is full, and starts it when a slot frees", async () => {
     const store = newStore();
     const launcher = new FakeLauncher();
-    launcher.chatRunning = true;
+    launcher.limit = 0;
     const scheduler = new AutomationScheduler(store, launcher);
     const a = store.create({ name: "a", cron: "0 * * * *", prompt: "p", now: past });
 
@@ -354,9 +454,42 @@ describe("AutomationScheduler", () => {
     expect(store.listRuns({ automationId: a.id })).toEqual([]);
     expect(scheduler.state().queued).toEqual([a.id]);
 
-    launcher.chatRunning = false;
+    launcher.limit = 1;
     await scheduler.tick(now);
     expect(launcher.calls).toHaveLength(1);
+  });
+
+  it("runs up to the limit at once, and no further", async () => {
+    const store = newStore();
+    const launcher = new FakeLauncher();
+    launcher.limit = 2;
+    launcher.hold();
+    const scheduler = new AutomationScheduler(store, launcher);
+    for (const name of ["a", "b", "c"]) {
+      store.create({ name, cron: "0 * * * *", prompt: name, now: past });
+    }
+
+    await scheduler.tick(now);
+    // Two started and are still held; the third is waiting for a slot.
+    expect(launcher.inFlight).toBe(2);
+    expect(scheduler.state().active).toHaveLength(2);
+    expect(scheduler.state().queued).toHaveLength(1);
+
+    launcher.releaseAll();
+    await scheduler.stopAndWait();
+    expect(launcher.maxInFlight).toBe(2);
+  });
+
+  it("never starts two runs of one automation, whichever process asks", () => {
+    const [one, two] = newSharedStores();
+    const a = one.create({ name: "a", cron: "0 * * * *", prompt: "p" });
+    const b = one.create({ name: "b", cron: "0 * * * *", prompt: "p" });
+
+    expect(one.claimRun(a.id, { limit: 2 })).not.toBeNull();
+    // The capacity is there, but this automation already has a live run.
+    expect(two.claimRun(a.id, { limit: 2 })).toBeNull();
+    // A different automation still gets the free slot.
+    expect(two.claimRun(b.id, { limit: 2 })).not.toBeNull();
   });
 
   it("never queues the same automation twice while it is still running", async () => {
@@ -416,13 +549,13 @@ describe("AutomationScheduler", () => {
     const scheduler = new AutomationScheduler(store, launcher);
     const a = store.create({ name: "a", cron: "0 * * * *", prompt: "p", now: past });
     const b = store.create({ name: "b", cron: "0 * * * *", prompt: "p", now: past });
-    launcher.chatRunning = true;
+    launcher.limit = 0;
     await scheduler.tick(now);
     expect(scheduler.state().queued).toEqual([a.id, b.id]);
 
     store.update(a.id, { enabled: false });
     store.delete(b.id);
-    launcher.chatRunning = false;
+    launcher.limit = 1;
     await scheduler.tick(now);
 
     expect(launcher.calls).toEqual([]);
@@ -474,7 +607,7 @@ describe("AutomationScheduler", () => {
 
     await scheduler.tick(now);
     expect(launcher.calls).toEqual([]);
-    expect(scheduler.state()).toEqual({ active: null, queued: [a.id] });
+    expect(scheduler.state()).toEqual({ active: [], queued: [a.id] });
 
     other.finishRun(held.id, { status: "ok", exitCode: 0 });
     await scheduler.tick(now);
@@ -595,7 +728,14 @@ describe("automation tools", () => {
 });
 
 describe("AgentLauncher.runOnce", () => {
-  const CTX = { mcpUrl: "http://127.0.0.1:0/mcp", bearerToken: "t", dataDir: ":memory:" };
+  // See test/agent-sandbox.test.ts — confinement is covered there, and off
+  // macOS a workspace launch is refused rather than silently unconfined.
+  const CTX = {
+    mcpUrl: "http://127.0.0.1:0/mcp",
+    bearerToken: "t",
+    dataDir: ":memory:",
+    access: "full" as const,
+  };
 
   function runSpecs(script: string, onPrompt?: (p: string) => void): {
     specs: AgentSpec[];
@@ -619,6 +759,18 @@ describe("AgentLauncher.runOnce", () => {
     };
   }
 
+  /** A minimal runnable registry pointing at an already-created fake binary. */
+  function specsFor(_bin: string): AgentSpec[] {
+    return [
+      {
+        id: "fake",
+        label: "Fake Agent",
+        bin: "fake-agent",
+        runArgs: () => [],
+      },
+    ];
+  }
+
   it("captures stdout and stderr, and prepends the run preamble", async () => {
     let prompt = "";
     const { specs, bin } = runSpecs(
@@ -630,14 +782,14 @@ describe("AgentLauncher.runOnce", () => {
     const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
     cleanups.push(() => launcher.close());
 
-    const result = await launcher.runOnce({ prompt: "Triage the inbox." });
+    const result = await launcher.runOnce({ runId: "r1", prompt: "Triage the inbox." });
     expect(result.status).toBe("ok");
     expect(result.exitCode).toBe(0);
     expect(result.log).toContain("read 3 messages");
     expect(result.log).toContain("a warning");
     expect(prompt.startsWith(AUTOMATION_RUN_PREAMBLE)).toBe(true);
     expect(prompt.endsWith("Triage the inbox.")).toBe(true);
-    expect(launcher.busy()).toBe(false);
+    expect(launcher.runCapacity()).toBe(launcher.runLimit());
     // A run must not be mistaken for the chat agent by /api/agents.
     expect(launcher.status().running).toBeNull();
   });
@@ -647,7 +799,7 @@ describe("AgentLauncher.runOnce", () => {
     const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
     cleanups.push(() => launcher.close());
 
-    const result = await launcher.runOnce({ prompt: "p" });
+    const result = await launcher.runOnce({ runId: "r1", prompt: "p" });
     expect(result.status).toBe("error");
     expect(result.exitCode).toBe(4);
     expect(result.log).toContain("boom");
@@ -662,29 +814,134 @@ describe("AgentLauncher.runOnce", () => {
     const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
     cleanups.push(() => launcher.close());
 
-    const result = await launcher.runOnce({ prompt: "p", timeoutMs: 100 });
+    const result = await launcher.runOnce({ runId: "r1", prompt: "p", timeoutMs: 100 });
     expect(result.status).toBe("killed");
     expect(result.exitCode).toBeNull();
-    expect(launcher.busy()).toBe(false);
+    expect(launcher.runCapacity()).toBe(launcher.runLimit());
   });
 
-  it("refuses a run while the chat agent holds the slot, and the reverse", async () => {
+  it("runs an automation while the chat agent is up, in both orders", async () => {
     // Builtins only — same reason as the timeout test above.
     const { specs, bin } = runSpecs("#!/bin/sh\nwhile :; do :; done\n");
     const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
     cleanups.push(() => launcher.close());
 
+    // Chat first: a run must not be refused just because someone is chatting.
     await launcher.start("fake");
-    expect(launcher.busy()).toBe(true);
-    await expect(launcher.runOnce({ prompt: "p" })).rejects.toThrowError(LaunchError);
+    expect(launcher.chatBusy()).toBe(true);
+    const duringChat = launcher.runOnce({ runId: "r1", prompt: "p", timeoutMs: 5_000 });
+    await until(() => launcher.runCapacity() < launcher.runLimit());
+    launcher.killRun("r1");
+    expect((await duringChat).status).toBe("killed");
     launcher.stop();
     await until(() => launcher.status().running === null);
 
-    const pending = launcher.runOnce({ prompt: "p", timeoutMs: 5_000 });
-    await until(() => launcher.busy());
-    await expect(launcher.start("fake")).rejects.toThrowError(/automation run is in progress/);
-    launcher.killRun();
+    // Run first: Start must not be refused just because the schedule is busy.
+    const pending = launcher.runOnce({ runId: "r2", prompt: "p", timeoutMs: 5_000 });
+    await until(() => launcher.runCapacity() < launcher.runLimit());
+    await expect(launcher.start("fake")).resolves.toBeTruthy();
+    launcher.killRun("r2");
     expect((await pending).status).toBe("killed");
+  });
+
+  it("refuses a run past the concurrency limit, and one that repeats a live run id", async () => {
+    const { specs, bin } = runSpecs("#!/bin/sh\nwhile :; do :; done\n");
+    const launcher = new AgentLauncher(CTX, specs, { PATH: bin }, undefined, 2);
+    cleanups.push(() => launcher.close());
+
+    const first = launcher.runOnce({ runId: "r1", prompt: "p", timeoutMs: 5_000 });
+    const second = launcher.runOnce({ runId: "r2", prompt: "p", timeoutMs: 5_000 });
+    await until(() => launcher.runCapacity() === 0);
+
+    await expect(
+      launcher.runOnce({ runId: "r3", prompt: "p" }),
+    ).rejects.toThrowError(/already running 2 automation runs/);
+    launcher.killRun("r1");
+    expect((await first).status).toBe("killed");
+    // The freed slot is reusable, but not by an id that is still live.
+    await expect(
+      launcher.runOnce({ runId: "r2", prompt: "p" }),
+    ).rejects.toThrowError(/already in progress/);
+
+    launcher.killRun("r2");
+    expect((await second).status).toBe("killed");
+    expect(launcher.runCapacity()).toBe(2);
+  });
+
+  it("sweeps run directories a crash left behind, and spares fresh ones", async () => {
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
+    const dataDir = tempDir();
+    const runs = join(`${dataDir}-agents`, "workdir", "runs");
+    mkdirSync(join(runs, "abandoned"), { recursive: true });
+    mkdirSync(join(runs, "in-flight-elsewhere"), { recursive: true });
+    // Older than the deadline plus its margin: nothing alive can own it.
+    const old = (Date.now() - RUN_WORKDIR_STALE_MS - 60_000) / 1000;
+    utimesSync(join(runs, "abandoned"), old, old);
+
+    const launcher = new AgentLauncher({ ...CTX, dataDir }, specsFor(bin), {
+      PATH: bin,
+    });
+    cleanups.push(() => launcher.close());
+
+    expect(existsSync(join(runs, "abandoned"))).toBe(false);
+    // A second Boxaide over this data directory may be running that one right
+    // now. Age is the test, not "no run of mine owns it".
+    expect(existsSync(join(runs, "in-flight-elsewhere"))).toBe(true);
+  });
+
+  it("spawns nothing once the launcher is closed", async () => {
+    const { specs, bin } = runSpecs("#!/bin/sh\nexit 0\n");
+    const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
+
+    launcher.close();
+    // Shutdown clears the chat slot, so the idle check alone would wave these
+    // through and leave a child running after everything else was killed.
+    await expect(launcher.start("fake")).rejects.toThrowError(/shut down/);
+    await expect(
+      launcher.runOnce({ runId: "r1", prompt: "p" }),
+    ).rejects.toThrowError(/shut down/);
+    expect(launcher.status().running).toBeNull();
+  });
+
+  it("refuses a run id that is not a plain identifier", async () => {
+    const { specs, bin } = runSpecs("#!/bin/sh\nexit 0\n");
+    const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
+    cleanups.push(() => launcher.close());
+
+    await expect(
+      launcher.runOnce({ runId: "../escape", prompt: "p" }),
+    ).rejects.toThrowError(/invalid run id/);
+  });
+
+  it("gives each run its own working directory and removes it afterwards", async () => {
+    const seen: string[] = [];
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
+    const dataDir = tempDir();
+    const launcher = new AgentLauncher(
+      { ...CTX, dataDir },
+      [
+        {
+          id: "fake",
+          label: "Fake Agent",
+          bin: "fake-agent",
+          runArgs: (_ctx, _prompt, workDir) => {
+            seen.push(workDir);
+            return [];
+          },
+        },
+      ],
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    await launcher.runOnce({ runId: "run-a", prompt: "p" });
+    await launcher.runOnce({ runId: "run-b", prompt: "p" });
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    expect(seen[0]).toContain("run-a");
+    // Removed on finish, so a long-lived install does not accumulate them.
+    for (const dir of seen) expect(existsSync(dir)).toBe(false);
   });
 
   it("rejects an unknown or unrunnable agent id, and finds one when none is named", async () => {
@@ -696,31 +953,110 @@ describe("AgentLauncher.runOnce", () => {
     );
     cleanups.push(() => launcher.close());
 
-    await expect(launcher.runOnce({ agentId: "ghost", prompt: "p" })).rejects.toThrowError(
+    await expect(launcher.runOnce({ runId: "r1", agentId: "ghost", prompt: "p" })).rejects.toThrowError(
       /unknown agent/,
     );
     await expect(
-      launcher.runOnce({ agentId: "chatonly", prompt: "p" }),
+      launcher.runOnce({ runId: "r1", agentId: "chatonly", prompt: "p" }),
     ).rejects.toThrowError(/cannot run automations/);
     // agentId omitted → first installed spec that can run one.
-    expect((await launcher.runOnce({ prompt: "p" })).status).toBe("ok");
+    expect((await launcher.runOnce({ runId: "r1", prompt: "p" })).status).toBe("ok");
 
     const nothing = new AgentLauncher(CTX, specs, { PATH: tempDir() });
-    await expect(nothing.runOnce({ prompt: "p" })).rejects.toThrowError(
+    await expect(nothing.runOnce({ runId: "r1", prompt: "p" })).rejects.toThrowError(
       /no agent CLI is installed/,
     );
     await expect(
-      nothing.runOnce({ agentId: "fake", prompt: "p" }),
+      nothing.runOnce({ runId: "r1", agentId: "fake", prompt: "p" }),
     ).rejects.toThrowError(/not installed/);
   });
 
-  it("pre-approves platform tools for runs, never chat tools and never message_send", () => {
+  it("passes a picked model to the CLI, and refuses one it does not offer", async () => {
+    let seen: string | undefined = "untouched";
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
+    const specs: AgentSpec[] = [
+      {
+        id: "fake",
+        label: "Fake Agent",
+        bin: "fake-agent",
+        args: () => [],
+        models: [{ id: "cheap-1", label: "Cheap 1" }],
+        runArgs: (_ctx, _prompt, _workDir, model) => {
+          seen = model;
+          return [];
+        },
+      },
+    ];
+    const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
+    cleanups.push(() => launcher.close());
+
+    expect((await launcher.runOnce({ runId: "m1", prompt: "p", model: "cheap-1" })).status).toBe("ok");
+    expect(seen).toBe("cheap-1");
+
+    // Null is how the scheduler says "no model stored", not a model id.
+    expect((await launcher.runOnce({ runId: "m2", prompt: "p", model: null })).status).toBe("ok");
+    expect(seen).toBeUndefined();
+
+    // An id the CLI never named must never reach a command line.
+    await expect(
+      launcher.runOnce({ runId: "m3", prompt: "p", model: "made-up" }),
+    ).rejects.toThrowError(/does not offer that model/);
+  });
+
+  it("holds the run slot while it validates a model, so no other run can take it", async () => {
+    // The scheduler has already claimed the run row before runOnce is called,
+    // so a slot lost while the CLI is being asked for its models is not a wait
+    // — it is a fire recorded as a failed run and skipped until next time.
+    // A chat start can no longer steal it: chat has a slot of its own. What
+    // still can is another run, so that is what this guards.
+    // One binary, two jobs: a slow `models` listing, and an instant run. The
+    // sleep is the window this test is about.
+    const bin = fakeBinDir(
+      "fake-agent",
+      "#!/bin/sh\nif [ \"$1\" = models ]; then /bin/sleep 0.4; echo 'Available models:'; echo '- slow-1'; fi\nexit 0\n",
+    );
+    const specs: AgentSpec[] = [
+      {
+        id: "fake",
+        label: "Fake Agent",
+        bin: "fake-agent",
+        args: () => [],
+        listModels: { args: ["models"], parse: parseBulletModels },
+        runArgs: () => [],
+      },
+    ];
+    // Exactly one run slot, so the second run has nowhere to go.
+    const launcher = new AgentLauncher(CTX, specs, { PATH: bin }, undefined, 1);
+    cleanups.push(() => launcher.close());
+
+    const pending = launcher.runOnce({ runId: "s1", prompt: "p", model: "slow-1" });
+    await until(() => launcher.runCapacity() === 0);
+    // The slot is held from the claim, not from the spawn.
+    await expect(
+      launcher.runOnce({ runId: "s2", prompt: "p" }),
+    ).rejects.toThrowError(/already running 1 automation run/);
+    // Chat is unaffected: it never shared this slot.
+    await expect(launcher.start("fake")).resolves.toBeTruthy();
+    launcher.stop();
+
+    expect((await pending).status).toBe("ok");
+    // A validation that failed frees the slot instead of wedging the launcher.
+    await expect(
+      launcher.runOnce({ runId: "s3", prompt: "p", model: "made-up" }),
+    ).rejects.toThrowError(/does not offer that model/);
+    expect(launcher.runCapacity()).toBe(1);
+  });
+
+  it("pre-approves platform tools for runs, and never chat tools", () => {
     const names = runPreapprovedToolNames();
     expect(names).toContain("draft_create");
     expect(names).toContain("messages_search");
     expect(names).toContain("automations_list");
     expect(names).toContain("automation_runs_list");
-    expect(names).not.toContain("message_send");
+    // A scheduled run may ASK to send; the server queues that call for a human
+    // rather than performing it, so the CLI flag lists it. See
+    // test/mcp-scope.test.ts for the half that matters.
+    expect(names).toContain("message_send");
     for (const chat of ["chat_await_message", "chat_say", "chat_activity", "chat_history"]) {
       expect(names).not.toContain(chat);
     }

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { AgentChannel, MAX_DELIVERIES } from "../src/agent/channel.js";
+import { USER_TURN_TTL_MS } from "../src/db/store.js";
 import { createRuntime } from "../src/app.js";
 import { encryptSecret } from "../src/crypto/secrets.js";
 import { Store } from "../src/db/store.js";
@@ -30,6 +31,43 @@ afterEach(() => {
 });
 
 describe("AgentChannel", () => {
+  it("puts a line about another chat in that chat, and answers nothing with it", async () => {
+    const { channel } = make();
+    const asked = channel.activeChat().id;
+    const elsewhere = channel.createChat().id;
+    // The user is looking at the chat they asked in, and the agent is working
+    // on that question.
+    channel.selectChat(asked);
+    const question = channel.post({ role: "user", text: "send it", chatId: asked });
+    await channel.awaitUserTurn({ timeoutMs: 1_000 });
+
+    // Boxaide narrating about a request that came from the other chat — an
+    // approval note is the case this exists for.
+    channel.post({
+      role: "activity",
+      text: "Approved: message_send",
+      agent: "claude-code",
+      chatId: elsewhere,
+    });
+
+    const note = channel.history(undefined, elsewhere);
+    expect(note.map((t) => t.text)).toEqual(["Approved: message_send"]);
+    // Not stamped as a reply to a question in a different pane.
+    expect(note[0].replyTo).toBeNull();
+    // The chat being worked on did not get it, and the user was not moved.
+    expect(channel.history(undefined, asked).map((t) => t.text)).toEqual(["send it"]);
+    expect(channel.activeChat().id).toBe(asked);
+    // The agent is still holding the question it was handed.
+    expect(channel.presence().working?.seq).toBe(question.seq);
+  });
+
+  it("refuses a line for a chat that is not there", () => {
+    const { channel } = make();
+    expect(() =>
+      channel.post({ role: "activity", text: "note", chatId: "nope" }),
+    ).toThrowError(/no such chat/);
+  });
+
   it("hands a queued message to the first agent that asks", async () => {
     const { channel } = make();
     channel.post({ role: "user", text: "what came in today?" });
@@ -403,6 +441,121 @@ describe("AgentChannel", () => {
     expect(channel.presence().dropped).toEqual([posted.seq]);
   });
 
+  it("retires a message nobody picked up inside the window", async () => {
+    const { store, channel } = make();
+    const stale = store.appendTurn({
+      at: new Date(Date.now() - USER_TURN_TTL_MS - 1_000).toISOString(),
+      chatId: channel.activeChat().id,
+      role: "user",
+      text: "yesterday",
+      agent: null,
+    });
+
+    // An agent starting now must not be handed last night's question.
+    const handed = await channel.awaitUserTurn({ timeoutMs: 200, agent: "grok" });
+    expect(handed).toBeNull();
+    // Marked the same way a dropped message is, so the pane already says it.
+    expect(store.listDroppedUserSeqs()).toEqual([stale.seq]);
+  });
+
+  it("does not offer a retired message again when an agent starts", async () => {
+    const { store, channel } = make();
+    const stale = store.appendTurn({
+      at: new Date(Date.now() - USER_TURN_TTL_MS - 1_000).toISOString(),
+      chatId: channel.activeChat().id,
+      role: "user",
+      text: "yesterday",
+      agent: null,
+    });
+
+    // The requeue is what used to keep a backlog alive: every launch handed
+    // the same old questions back to the queue, forever.
+    channel.setLaunchedAgent("claude-code");
+
+    expect(channel.presence().dropped).toEqual([stale.seq]);
+    expect(await channel.awaitUserTurn({ timeoutMs: 200, agent: "claude-code" })).toBeNull();
+  });
+
+  it("serves the chat on screen before another chat's backlog", async () => {
+    const { channel } = make();
+    const other = channel.activeChat().id;
+    // Older, and in a chat the user is not looking at.
+    channel.post({ role: "user", text: "older, elsewhere", chatId: other });
+
+    const onScreen = channel.createChat().id;
+    channel.selectChat(onScreen);
+    const asked = channel.post({ role: "user", text: "just typed", chatId: onScreen });
+
+    const handed = await channel.awaitUserTurn({ timeoutMs: 500, agent: "grok" });
+    expect(handed?.seq).toBe(asked.seq);
+    expect(handed?.text).toBe("just typed");
+  });
+
+  it("offers a dropped message again to the agent that just started", async () => {
+    const { store, channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    // A CLI that cannot run at all burns every delivery without reading a word
+    // of the message. That is not a verdict on the message.
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "signed-out" });
+      channel.releaseLease(posted.seq);
+    }
+    expect(channel.presence().dropped).toEqual([posted.seq]);
+
+    channel.setLaunchedAgent("claude-code");
+
+    // The warning is gone and the message is queued again, with the full three
+    // deliveries: the ones before were spent on an agent that no longer exists.
+    expect(channel.presence().dropped).toEqual([]);
+    expect(store.listDroppedUserSeqs()).toEqual([]);
+    const handed = await channel.awaitUserTurn({ timeoutMs: 500, agent: "claude-code" });
+    expect(handed?.text).toBe("once");
+    expect(handed?.deliveryCount).toBe(1);
+  });
+
+  it("hands a requeued message straight to an agent already waiting", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "signed-out" });
+      channel.releaseLease(posted.seq);
+    }
+    const parked = channel.awaitUserTurn({ timeoutMs: 60_000, agent: "claude-code" });
+    expect(channel.presence().waiting).toBe(1);
+
+    // A requeue writes no new turn, so nothing else would wake this waiter: it
+    // would sit out its whole timeout beside a message it could have had.
+    expect(channel.requeueDropped()).toBe(1);
+    expect((await parked)?.text).toBe("once");
+  });
+
+  it("leaves an answered message alone, and reports nothing to requeue", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    const held = await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    channel.post({ role: "agent", text: "answered", replyTo: held!.seq });
+    channel.releaseLease(posted.seq);
+
+    // Requeuing an answered question would have a second agent answer it, which
+    // is the hole the lease exists to close.
+    expect(channel.requeueDropped()).toBe(0);
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "b" })).toBeNull();
+  });
+
+  it("drops a message again when the same agent keeps failing on it", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "the poison pill" });
+    channel.setLaunchedAgent("claude-code");
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "claude-code" });
+      channel.releaseLease(posted.seq);
+    }
+    // No relaunch in between, so the cap still means what it meant: a message
+    // that breaks the agent is not retried forever.
+    expect(channel.presence().dropped).toEqual([posted.seq]);
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "claude-code" })).toBeNull();
+  });
+
   it("keeps the final lease out of the dropped list while it is live", async () => {
     const { channel } = make();
     const posted = channel.post({ role: "user", text: "once" });
@@ -703,6 +856,33 @@ describe("chat tools over MCP", () => {
       ["activity", "searching two mailboxes"],
       ["agent", "One invoice, unpaid."],
     ]);
+  });
+
+  it("asks for a chat name on the wait, and takes the one chat_say carries", async () => {
+    const service = mail();
+    const { channel } = make();
+
+    channel.post({ role: "user", text: "can you look at the acme thing" });
+    const awaited = payload(await call(service, channel, "chat_await_message"));
+    expect(awaited.needsTitle).toBe(true);
+    expect(awaited.hint).toContain("title");
+
+    await call(service, channel, "chat_say", {
+      text: "Their invoice is unpaid.",
+      title: "Refund for the Acme invoice",
+    });
+    expect(channel.chats()[0].title).toBe("Refund for the Acme invoice");
+
+    // Named once. The next wait does not ask again, and a title sent anyway is
+    // ignored rather than treated as a failed answer.
+    channel.post({ role: "user", text: "and the february one?" });
+    const second = payload(await call(service, channel, "chat_await_message"));
+    expect(second.needsTitle).toBe(false);
+    const said = payload(
+      await call(service, channel, "chat_say", { text: "Also unpaid.", title: "Something else" }),
+    );
+    expect(said.posted).toBe(true);
+    expect(channel.chats()[0].title).toBe("Refund for the Acme invoice");
   });
 
   it("stamps chat_say with the launched agent, not a leftover MCP name", async () => {

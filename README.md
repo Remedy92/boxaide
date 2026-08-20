@@ -222,7 +222,7 @@ Agents that speak TOML use `[mcp_servers.boxaide]`. Tool calls show up as `mcp__
 | `message_move` | Move one message to any folder (also the undo of an archive) |
 | `folders_list` | Folders on one account |
 | `draft_create` / `draft_update` / `drafts_list` / `draft_delete` | Drafts in the mailbox |
-| `message_send` | Send now (confirm in your agent). Not outreach approval. |
+| `message_send` | Send now, or — for an agent Boxaide launched — ask you first. Not outreach approval. |
 | `chat_await_message` | Wait for the user's next message in the Boxaide window |
 | `chat_say` | Answer them there |
 | `chat_activity` | Post a one-line "here is what I am doing" |
@@ -247,9 +247,12 @@ agent is a local CLI you already have — Claude Code, Grok, Codex, Cursor,
 Claude Desktop — talking MCP. The four `chat_*` tools hold the conversation in
 the Boxaide window instead of in that client's terminal.
 
-**Start** / **Stop** on the rail spawn or kill the installed CLI and feed it
-the kickoff prompt (`src/agent/launcher.ts`). You can still paste the same
-loop into a client you launched yourself:
+**Start** / **Stop** on the rail run or kill the installed CLI
+(`src/agent/launcher.ts`). For Claude Code, Boxaide holds the loop itself and
+the CLI is only asked to answer one message at a time — so the conversation
+cannot end because a model decided it was finished. The others are handed the
+kickoff prompt below and run the loop themselves. Either way you can still
+paste that loop into a client you launched yourself:
 
 ```
 You are my Boxaide inbox agent. Use the Boxaide MCP tools.
@@ -305,7 +308,8 @@ What a run may do:
 | | |
 |---|---|
 | Can | read mail, search, read and write CRM, save drafts, queue outreach into the outbox |
-| Cannot | talk to you (no chat tools — there is no one at the window), call `message_send`, approve anything |
+| Cannot | talk to you (no chat tools — there is no one at the window), send mail, create or cancel a meeting, approve anything |
+| Can ask | a run may call `message_send`, `meeting_create` or `meeting_cancel`; nothing goes out, and the request is waiting for you in the Agent view in the morning |
 | Limits | one run at a time, queued if another is going; 15-minute hard timeout, then killed |
 
 Run logs are stored encrypted, like everything else mail-derived.
@@ -330,9 +334,11 @@ with **Approve**, **Edit** or **Reject**. Approval is REST only, from the
 browser, by you. There is no MCP tool that approves, rejects or sends an
 outbox row.
 
-That is the outreach path only. An external MCP client can still call
-`message_send` and the mail leaves immediately. Agents Boxaide **launches**
-(rail Start, and every automation run) do not get `message_send`.
+That is the outreach path only. An external MCP client you wired up yourself
+can still call `message_send` and the mail leaves immediately — that client is
+you. Agents Boxaide **launches** (rail Start, and every automation run) get
+`message_send`, and calling it sends nothing: see **Your agent asks, you
+answer** below.
 
 **Edit** does not rewrite the queued row. It opens the composer with that
 text; the queued copy is rejected after you send.
@@ -347,6 +353,25 @@ text; the queued copy is rejected after you send.
 The rail badges the pending count, and the desktop app raises a notification and a dock badge when it rises. You are told about waiting drafts; you are never told after the fact about sent ones.
 
 Sending is throttled server-side even after approval: at least 60 seconds between engine sends with jitter, and at most `BOXAIDE_SEND_DAILY_CAP` (default 50) per account per UTC day. Over the cap, an approved row simply goes out the next day.
+
+### Your agent asks, you answer
+
+Sending mail, creating a meeting and cancelling one are the three things an
+agent does that another person sees straight away — and it decides to do them
+after reading mail that strangers wrote. So an agent Boxaide launched never
+does them. It asks.
+
+The call is recorded exactly as the agent made it, and a card appears above the
+composer in the Agent view: who it goes to, the subject, and the whole message,
+not a preview. **Send it** carries it out. **Don't** drops it. Nothing leaves
+the machine until you click.
+
+This is why a scheduled automation can ask too. There is nobody awake at 03:00
+to answer a prompt, but the request keeps: the run ends, and the card is waiting
+in the window in the morning.
+
+The agent is told its request is with you and told not to retry it. It cannot
+approve its own request, and there is no MCP tool that approves anything.
 
 ### Suppression is a server rule, not a checkbox
 
@@ -400,14 +425,17 @@ Each `BOXAIDE_*` name is preferred. Then `SLEY_*`, then `MAILMUX_*`.
 | `BOXAIDE_TOKEN` | auto file | API/MCP bearer |
 | `BOXAIDE_MASTER_KEY` | auto file | AES key for passwords — see below |
 | `BOXAIDE_FIXTURE` | off | Demo provider |
+| `BOXAIDE_AGENT_ACCESS` | `workspace` | `full` runs launched agents unconfined — they can read every file you can. Only set this if the sandbox is in your way. |
 | `BOXAIDE_ALLOWED_ORIGINS` | empty | Extra browser origins allowed to call the API — see below |
 | `BOXAIDE_SEND_DAILY_CAP` | `50` | Approved outreach sends per account per UTC day |
+| `BOXAIDE_GOOGLE_CLIENT_ID` | empty | OAuth client for Google Calendar — see below |
+| `BOXAIDE_GOOGLE_CLIENT_SECRET` | empty | Secret for that client |
 
 ### Bind address (`BOXAIDE_HOST`)
 
 The default binds to loopback, so only your own machine can reach the server. Change it and the server answers on the network, where the bearer token is the only thing between a stranger and your mail.
 
-One behaviour changes on a non-loopback bind: `/api/local-bootstrap`, which hands out the bearer token in plaintext, answers `404` and hands out nothing. Its `Host` and `Origin` checks are browser guards, and a remote client picks both headers itself. Paste the token in by hand instead; it is in `~/.boxaide/bearer.token`.
+One behaviour changes on a non-loopback bind: `/api/local-bootstrap`, which exchanges the desktop app's one-time capability for the bearer token, answers `404` and hands out nothing. A normal browser never receives that capability, including on loopback. Paste the token in by hand instead; it is in `~/.boxaide/bearer.token`.
 
 ### Master key (`BOXAIDE_MASTER_KEY`)
 
@@ -449,7 +477,15 @@ Rules:
 - Anyone who can serve a page at that exact hostname can reach your server **if they also have your bearer token**. On shared hosting platforms that includes preview deployments and anyone with deploy access. Prefer a custom domain you control over a platform-assigned hostname.
 - It is the only remaining barrier against a DNS-rebinding page reaching your loopback service, so the list should stay as short as you can make it.
 - The token is still required on every request. `Access-Control-Allow-Credentials` is never sent — Boxaide authenticates by header, never by cookie — so no page can ride ambient credentials.
-- `/api/local-bootstrap`, which hands out the bearer token in plaintext, is **not** widened by this variable. It stays loopback-only. A remote page must have its token pasted in by a human.
+- `/api/local-bootstrap` is **not** widened by this variable. It requires loopback plus the desktop shell's one-time capability. A browser page must have its token pasted in by a human.
+
+### Google Calendar client (`BOXAIDE_GOOGLE_CLIENT_ID`)
+
+Connecting Google Calendar needs an OAuth client. Set both variables and Boxaide uses that one for every Google connection, so the user presses a single button. Leave them unset — the default, and what this repo ships — and the connect dialog asks for a client id and secret the user creates in the [Google Cloud console](https://console.cloud.google.com/apis/credentials) themselves. Both paths store the same thing afterwards, and a client id sent with the connect request still wins over the configured pair.
+
+The redirect URI Google must accept is `http://127.0.0.1:8787/api/calendar/google/callback`, with your `BOXAIDE_HOST` and `BOXAIDE_PORT` in it. Boxaide shows the exact string in the add-calendar dialog. A client shared across installs therefore has to be a **Desktop app** client, which wildcards loopback ports; a Web client only accepts the ports you registered.
+
+No credentials are committed to this repository, and none are baked into a build.
 
 ## Architecture
 

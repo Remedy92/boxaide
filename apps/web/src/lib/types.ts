@@ -265,6 +265,11 @@ export type AgentStateResponse = {
   presence: AgentPresence;
   /** The chat those turns came from. Absent on an older server. */
   chat?: AgentChat;
+  /**
+   * Actions waiting on the user. Absent on a server built before agents could
+   * ask, which every reader treats as none.
+   */
+  approvals?: import("@/lib/api/endpoints").AgentApproval[];
 };
 
 /* -------------------------------------------------------------------------- */
@@ -370,6 +375,8 @@ export type Automation = {
   prompt: string;
   /** Launcher AgentSpec id. Null ⇒ the first available agent runs it. */
   agentId: string | null;
+  /** Model id for that agent's CLI. Null ⇒ the CLI's own default. */
+  model: string | null;
   enabled: boolean;
   createdAt: string;
   lastRunAt: string | null;
@@ -486,6 +493,193 @@ export type UpdateState = {
   error: string | null;
   canInstall: boolean;
 };
+
+/* -------------------------------------------------------------------------- */
+/* calendar — /api/calendar/*                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Three providers, and they are not symmetrical. A CalDAV account is a URL, a
+ * username and an app password, so the UI can create one outright. Google is an
+ * OAuth handshake the server finishes after the browser has left for Google, so
+ * the UI can only start it — see startGoogleCalendarAuth. `local` is the
+ * calendars macOS already holds: there are no credentials at all, only a system
+ * permission the user grants once.
+ */
+export type CalendarProvider = "caldav" | "google" | "local";
+
+export type CalendarAccount = {
+  id: string;
+  alias: string;
+  provider: CalendarProvider;
+  /** Empty for `local`: that account is every account macOS holds. */
+  email: string;
+  createdAt: string;
+};
+
+/** What macOS reports about the local path, probed without prompting anyone. */
+export type LocalCalendarStatus = {
+  available: boolean;
+  /**
+   * Why the local path cannot be used, written for a person to read. Set when
+   * `available` is false, and also when the helper answers perfectly and macOS
+   * is simply refusing — a denial no click can clear, only System Settings.
+   */
+  reason?: string;
+  access?: "notDetermined" | "restricted" | "denied" | "fullAccess" | "writeOnly" | "authorized";
+};
+
+/**
+ * GET /api/calendar/accounts.
+ *
+ * `googleRedirectUri` is the URI the SERVER hands Google, built from the
+ * address it bound to. It is here because only the server knows it: the page
+ * can be served from another origin entirely, and Google rejects the sign-in
+ * unless the registered URI matches that string character for character.
+ *
+ * `local` and `googleBuiltIn` are the same kind of fact: which ways in this
+ * machine and this build can offer. Neither is derivable from anything the page
+ * can see, and both decide what the Add-calendar dialog puts first.
+ *
+ * All three are optional: a server built before them simply omits them, and the
+ * UI falls back to the paths that have always existed.
+ */
+export type CalendarAccountsResponse = {
+  accounts: CalendarAccount[];
+  googleRedirectUri?: string;
+  googleBuiltIn?: boolean;
+  local?: LocalCalendarStatus;
+};
+
+/**
+ * A mailbox whose stored password would also open a calendar. GET
+ * /api/calendar/mailboxes. No secret is in here — the password stays server
+ * side, which is the whole point of connecting by id.
+ */
+export type ReusableMailbox = {
+  mailAccountId: string;
+  email: string;
+  /** The calendar provider's name, for the button: "iCloud", "Fastmail". */
+  provider: string;
+  serverUrl: string;
+  suggestedAlias: string;
+  /**
+   * Set to the name macOS shows for an account that looks like this same
+   * calendar, when the Mac's calendars are connected. Present means connecting
+   * this would probably duplicate an agenda, not that it is forbidden — the
+   * server asks for confirmation rather than refusing.
+   */
+  onThisMac?: string;
+};
+
+export type CalendarEventStatus = "confirmed" | "tentative" | "cancelled";
+
+/**
+ * One event as the agenda returns it. `start` and `end` are instants; the local
+ * time a person reads is this browser's, not the calendar server's.
+ */
+export type CalendarEvent = {
+  id: string;
+  accountId: string;
+  accountAlias: string;
+  calendarId: string;
+  title: string;
+  start: string;
+  end: string;
+  allDay: boolean;
+  location?: string;
+  status: CalendarEventStatus;
+  busy: boolean;
+};
+
+/**
+ * `errors` is per calendar account: one unreachable server does not empty the
+ * agenda, it appears beside the events that did load. Same contract as the
+ * message list's partial-failure array.
+ */
+export type AgendaResponse = { events: CalendarEvent[]; errors: string[] };
+
+/**
+ * GET /api/calendar/free-slots — windows nothing is booked over.
+ *
+ * A suggestion, not a hold: nothing is reserved, and the same slot can be
+ * offered to two people. `errors` follows the agenda's rule — a calendar that
+ * did not answer is named rather than silently treated as empty, which would
+ * suggest times that are in fact taken.
+ */
+export type FreeSlot = { start: string; end: string };
+
+/**
+ * `timeZone` is the zone the working hours were read in — the one this app
+ * asked for, or the server's own when it asked for none. Always echoed, so the
+ * suggestion strip can name the clock it is quoting rather than assume it.
+ */
+export type FreeSlotsResponse = {
+  slots: FreeSlot[];
+  errors: string[];
+  timeZone: string;
+};
+
+export type MeetingStatus = "scheduled" | "cancelled";
+
+/**
+ * How one invited guest answered.
+ *
+ * "needs-action" is the resting state, not a failure: it is every guest the
+ * moment the invitation goes out. The server merges two sources — a guest's
+ * reply email wins where there is one, the calendar's own attendee list fills
+ * in the rest — and `source` says which one this entry came from.
+ */
+export type RsvpStatus = "accepted" | "declined" | "tentative" | "needs-action";
+
+export type AttendeeResponse = {
+  email: string;
+  status: RsvpStatus;
+  respondedAt: string | null;
+  source: string;
+};
+
+/** A meeting BOXAIDE created — not every event on the calendar. */
+export type Meeting = {
+  id: string;
+  uid: string;
+  title: string;
+  start: string;
+  end: string;
+  attendees: string[];
+  location: string | null;
+  meetingUrl: string | null;
+  status: MeetingStatus;
+  createdAt: string;
+  /** One entry per invited guest, in `attendees` order. Never partial. */
+  attendeeStatus: AttendeeResponse[];
+};
+
+/**
+ * `refreshError` is the last background reply-scan's failure, or null. The
+ * meetings themselves come from the server's own store and are never held up
+ * by that scan, so a failure here means the responses may be behind — not that
+ * the list is wrong.
+ */
+export type MeetingsResponse = {
+  meetings: Meeting[];
+  refreshError: string | null;
+};
+
+/** What one explicit "check for replies" pass did. */
+export type RsvpRefreshResult = { updated: number; errors: string[] };
+
+/**
+ * Creating or cancelling a meeting touches a calendar AND sends invitations, so
+ * a 200 can still carry partial failure: `warnings` is what did not happen.
+ */
+export type MeetingResult = { meeting: Meeting; warnings: string[] };
+
+/**
+ * Creating adds `timeZone`: the zone the invitation text was written in.
+ * Cancelling writes no times into an email, so it echoes none.
+ */
+export type CreateMeetingResult = MeetingResult & { timeZone: string };
 
 /** Union of every error body shape the server can emit. */
 export type ErrorBody =

@@ -22,6 +22,10 @@ export function useCreateAccount() {
       void queryClient.invalidateQueries({ queryKey: ["accounts"] });
       void queryClient.invalidateQueries({ queryKey: ["folders"] });
       void queryClient.invalidateQueries({ queryKey: ["messages"] });
+      // A mailbox coming or going changes which of them can lend their stored
+      // password to a calendar, and that list is what the wizard's calendar
+      // step and the add-calendar dialog offer as one-click rows.
+      void queryClient.invalidateQueries({ queryKey: ["calendar-mailboxes"] });
     },
   });
 }
@@ -35,6 +39,10 @@ export function useDeleteAccount() {
       void queryClient.invalidateQueries({ queryKey: ["accounts"] });
       void queryClient.invalidateQueries({ queryKey: ["folders"] });
       void queryClient.invalidateQueries({ queryKey: ["messages"] });
+      // A mailbox coming or going changes which of them can lend their stored
+      // password to a calendar, and that list is what the wizard's calendar
+      // step and the add-calendar dialog offer as one-click rows.
+      void queryClient.invalidateQueries({ queryKey: ["calendar-mailboxes"] });
     },
   });
 }

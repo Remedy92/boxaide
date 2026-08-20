@@ -1,22 +1,32 @@
+import { spawn } from "node:child_process";
 import { timingSafeEqual } from "node:crypto";
+import { mkdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentChannel, Turn } from "../agent/channel.js";
 import { LaunchError, type AgentLauncher } from "../agent/launcher.js";
+import { ApprovalError, type ApprovalQueue } from "../agent/approvals.js";
 import type { MailService } from "../mail/service.js";
 import type { Platform } from "../platform.js";
 import { registerCrmRoutes } from "../crm/routes.js";
 import { registerAutomationRoutes } from "../automation/routes.js";
 import { registerOutreachRoutes } from "../outreach/routes.js";
+import {
+  registerCalendarRoutes,
+  type CalendarRouteConfig,
+} from "../calendar/routes.js";
 import { registerUpdateRoutes } from "../update/routes.js";
 import type { UpdateService } from "../update/service.js";
 import { appVersion } from "../version.js";
 import type { AccountCredentials, DraftInput } from "../provider/types.js";
 import { passwordCredentials } from "../provider/types.js";
+import { MAX_LIST_LIMIT, parseListLimit } from "../input-limits.js";
 
 /** Highest `limit` any list endpoint will accept. */
-export const MAX_LIMIT = 200;
+export const MAX_LIMIT = MAX_LIST_LIMIT;
 
 /** REST body fields for connect/test — still flat username/password for the UI. */
 type ConnectCredentialFields = {
@@ -146,10 +156,10 @@ export function isLocalHostHeader(host: string | undefined): boolean {
 /**
  * True only when the server's own bind address is loopback.
  *
- * The Host and Origin guards on /api/local-bootstrap are browser guards, and
- * a browser is not the threat here: a remote client on a `0.0.0.0` bind can
- * send `Host: localhost` and no Origin at all, and both guards pass. So the
- * bind address itself decides whether the token endpoint exists.
+ * The Host and Origin checks on /api/local-bootstrap are network guards, not
+ * identity. A remote client on a `0.0.0.0` bind can send `Host: localhost`
+ * and no Origin, so the bind address itself still decides whether the
+ * desktop-capability endpoint exists.
  *
  * Any 127.0.0.0/8 address counts, not just 127.0.0.1 — the whole block is
  * loopback-only. An empty or `*` host means "every interface" and fails.
@@ -199,8 +209,8 @@ const CORS_MAX_AGE = "600";
  * origin match from the allowlist. Requests with no Origin (curl, MCP
  * clients, stdio) pass, exactly as before.
  *
- * NOT used by /api/local-bootstrap: that route hands out the bearer token
- * and must stay loopback-only via isAllowedOrigin.
+ * NOT used by /api/local-bootstrap: that route has a narrower loopback plus
+ * one-time desktop-capability policy.
  */
 export function isApiOriginAllowed(
   origin: string | undefined,
@@ -335,11 +345,7 @@ export function authFailure(
 
 /** Returns the limit, or null when the raw value is not a usable number. */
 function parseLimit(raw: string | undefined): number | null {
-  if (raw === undefined || raw === "") return 50;
-  if (!/^\d+$/.test(raw)) return null;
-  const limit = Number(raw);
-  if (limit < 1 || limit > MAX_LIMIT) return null;
-  return limit;
+  return parseListLimit(raw, 50);
 }
 
 /**
@@ -355,6 +361,18 @@ export function createApi(
   launcher?: AgentLauncher,
   platform?: Platform,
   update?: UpdateService,
+  /**
+   * Actions an agent asked a person to authorise. Absent on a server with no
+   * conversation, where nothing can be queued in the first place.
+   */
+  approvals?: ApprovalQueue,
+  /**
+   * The address the server is actually reachable on. Only the calendar's
+   * Google OAuth flow needs it: the redirect URI it hands Google must match
+   * the one the callback later exchanges with, byte for byte. Absent, the
+   * calendar routes are registered against the loopback default.
+   */
+  address?: CalendarRouteConfig,
 ): Hono {
   const app = new Hono();
 
@@ -694,7 +712,8 @@ export function createApi(
      404 rather than 500, and the UI's own capability check is the same
      question: does this server have an agent channel at all?
      --------------------------------------------------------------------- */
-  if (channel) registerAgentRoutes(app, channel);
+  if (channel) registerAgentRoutes(app, channel, approvals);
+  if (approvals) registerApprovalRoutes(app, approvals);
   if (launcher) registerLauncherRoutes(app, launcher);
   // Agent platform routes (CRM, automations, outreach). Registered inside
   // createApi so the /api/* auth middleware above gates all of them.
@@ -702,6 +721,7 @@ export function createApi(
     registerCrmRoutes(app, platform);
     registerAutomationRoutes(app, platform);
     registerOutreachRoutes(app, platform);
+    registerCalendarRoutes(app, platform, address ?? { host: "127.0.0.1", port: 8787 });
   }
   // Absent in an embedder that builds its own API (tests, `boxaide mcp`), so
   // the UI's "is there an updater here" question is answered by a 404 rather
@@ -723,7 +743,47 @@ const MAX_CHAT_CHARS = 8_000;
  */
 const SSE_HEARTBEAT_MS = 20_000;
 
-function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
+/**
+ * Approve or drop what an agent asked for.
+ *
+ * Two routes and no list route: the pending set rides on `/api/agent/state`
+ * and on the stream beside presence, because it is drawn in the conversation
+ * and a second poll would let the card and the transcript disagree.
+ */
+function registerApprovalRoutes(app: Hono, approvals: ApprovalQueue): void {
+  app.post("/api/agent/approvals/:id", async (c) => {
+    let decision: unknown;
+    try {
+      const body = await c.req.json<{ decision?: unknown }>();
+      decision = body?.decision;
+    } catch {
+      return c.json({ error: "body must be JSON" }, 400);
+    }
+    if (decision !== "approve" && decision !== "deny") {
+      return c.json({ error: "decision must be approve or deny" }, 400);
+    }
+    try {
+      const result = await approvals.decide(c.req.param("id"), decision);
+      return c.json({ ...result, pending: approvals.pending() });
+    } catch (err) {
+      if (err instanceof ApprovalError) {
+        // 502 carries the send's own failure text. It is the one the user has
+        // to read — "could not approve" would hide the SMTP error inside it.
+        return c.json(
+          { error: err.message, pending: approvals.pending() },
+          err.status as 404 | 409 | 502,
+        );
+      }
+      throw err;
+    }
+  });
+}
+
+function registerAgentRoutes(
+  app: Hono,
+  channel: AgentChannel,
+  approvals?: ApprovalQueue,
+): void {
   app.get("/api/agent/state", (c) => {
     const after = c.req.query("after");
     const afterSeq = after !== undefined && /^\d+$/.test(after) ? Number(after) : undefined;
@@ -739,6 +799,7 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
       turns: channel.history(afterSeq, shown.id),
       presence: channel.presence(),
       chat: shown,
+      approvals: approvals?.pending() ?? [],
     });
   });
 
@@ -862,6 +923,14 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
         chatsDirty = true;
         wake?.();
       });
+      // A card appears when an agent asks and disappears when the user
+      // answers, and either can happen while nothing else in the pane moves.
+      let approvalsDirty = false;
+      const unsubscribeApprovals =
+        approvals?.subscribe(() => {
+          approvalsDirty = true;
+          wake?.();
+        }) ?? (() => {});
 
       // `onAbort` is the only close signal that fires for a client that simply
       // went away — the write below can stay pending indefinitely otherwise.
@@ -870,6 +939,7 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
         unsubscribe();
         unsubscribePresence();
         unsubscribeChats();
+        unsubscribeApprovals();
       };
       stream.onAbort(() => {
         open = false;
@@ -881,6 +951,15 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
         event: "presence",
         data: JSON.stringify(channel.presence()),
       });
+      // Sent once on attach, not only on change: a request queued overnight is
+      // waiting before this stream existed, and a client that only followed
+      // changes would show an empty pane over a pending send.
+      if (approvals) {
+        await stream.writeSSE({
+          event: "approvals",
+          data: JSON.stringify(approvals.pending()),
+        });
+      }
 
       try {
         while (open) {
@@ -888,6 +967,14 @@ function registerAgentRoutes(app: Hono, channel: AgentChannel): void {
             const turn = queue.shift() as Turn;
             await stream.writeSSE({ event: "turn", data: JSON.stringify(turn) });
             presenceDirty = true;
+          }
+          if (!open) break;
+          if (approvalsDirty && approvals) {
+            approvalsDirty = false;
+            await stream.writeSSE({
+              event: "approvals",
+              data: JSON.stringify(approvals.pending()),
+            });
           }
           if (!open) break;
           if (chatsDirty) {
@@ -953,7 +1040,10 @@ function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
 
   app.post("/api/agents/:id/start", async (c) => {
     // Body is optional: { model?: string }. The launcher validates the id
-    // against its own registry; this only rejects non-string shapes.
+    // against its own registry; this only rejects shapes it would not
+    // understand. There is no `access` field any more — how much of the disk a
+    // launch reaches is decided by the install and the machine, not by the
+    // request. See src/agent/sandbox.ts.
     let model: string | undefined;
     try {
       const body = await c.req.json<{ model?: unknown }>();
@@ -981,4 +1071,185 @@ function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
     launcher.stop();
     return c.json({ stopping: true });
   });
+
+  // One watcher per server, so pressing the button twice does not leave two
+  // relaunches racing for the chat slot. Held here rather than at module scope
+  // because every runtime gets its own routes and its own launcher.
+  let watching: (() => void) | null = null;
+
+  /**
+   * Opens a terminal on `claude /login`, and relaunches the agent when the
+   * login lands.
+   *
+   * Signing in cannot happen inside Boxaide: it is an interactive OAuth flow
+   * with a browser and a paste-back, and `claude` runs it in its own terminal
+   * UI. What Boxaide can do is start that terminal for the user and then stop
+   * making them come back — the agent they were talking to gets restarted for
+   * them, on the model they had picked, and the messages the signed-out run
+   * dropped are requeued by the launch itself (AgentChannel.requeueDropped).
+   *
+   * macOS only, and it says so instead of pretending. There is no portable
+   * "open a terminal here": the Linux answer is a guess among a dozen terminal
+   * emulators, and a wrong guess is a button that silently does nothing.
+   */
+  app.post("/api/agents/claude-code/signin", (c) => {
+    if (process.platform !== "darwin") {
+      return c.json(
+        {
+          error:
+            "opening a terminal is only wired up on macOS: run `claude /login` yourself, then press Start",
+        },
+        501,
+      );
+    }
+    const bin = launcher.binFor("claude-code");
+    if (!bin) {
+      return c.json({ error: "claude-code is not installed (no claude on PATH)" }, 400);
+    }
+    // The login must run against the SAME isolated home the launches use. On
+    // macOS the CLI keys its keychain entry to the config directory, so a
+    // plain `claude /login` signs the user's terminal in and leaves every
+    // launch exactly as signed out as before — a button that "works" forever.
+    const home = launcher.claudeConfigHome();
+    try {
+      // A first sign-in can predate the first launch; the CLI needs the
+      // directory to exist before it can write a login into it.
+      mkdirSync(home, { recursive: true });
+      openClaudeLogin(bin, home);
+    } catch (err) {
+      return c.json(
+        { error: `could not open Terminal: ${err instanceof Error ? err.message : String(err)}` },
+        500,
+      );
+    }
+    // A second press replaces the watch rather than stacking one: the user is
+    // signing in once, in one terminal, and the fresh window is the one to wait
+    // on.
+    watching?.();
+    watching = watchForClaudeSignIn(launcher, claudeSignInFiles(home));
+    return c.json({ opened: true, watching: true, watchMs: SIGNIN_WATCH_MS });
+  });
+}
+
+/** How often the sign-in watch looks. A login is minutes of typing, not ms. */
+const SIGNIN_POLL_MS = 2_000;
+
+/**
+ * How long it keeps looking before giving the terminal up as abandoned.
+ *
+ * Long enough for an OAuth round trip through a browser and a paste-back;
+ * short enough that a window the user closed does not leave a timer that
+ * relaunches their agent an hour later, out of nowhere.
+ */
+const SIGNIN_WATCH_MS = 5 * 60 * 1000;
+
+/**
+ * The files a finished `claude /login` writes.
+ *
+ * The isolated home's pair first — that terminal runs with CLAUDE_CONFIG_DIR
+ * set there, and its `.claude.json` account record is rewritten on every
+ * login, including when the token itself went to the macOS keychain and no
+ * credentials file exists at all. The user's own pair is still watched too:
+ * someone who closes the opened terminal and runs a plain `claude /login`
+ * instead has file-backed logins propagated into the launch by prepare's
+ * credential copy, and their landing should relaunch the agent all the same.
+ */
+function claudeSignInFiles(home: string): string[] {
+  return [
+    join(home, ".credentials.json"),
+    join(home, ".claude.json"),
+    join(homedir(), ".claude", ".credentials.json"),
+    join(homedir(), ".claude.json"),
+  ];
+}
+
+/**
+ * The AppleScript that puts `claude /login` in front of the user — pointed at
+ * the launch's isolated home, because that is the only place a login is worth
+ * anything to the agent (see the sign-in route).
+ *
+ * Two levels of quoting, both of which have to survive a path with a space in
+ * it — `/Users/Ada Byron/.local/bin/claude` is an ordinary install: the shell
+ * inside `do script`, and the AppleScript string literal around that. Pure and
+ * exported so both are actually tested rather than eyeballed.
+ */
+export function claudeLoginScript(bin: string, configDir: string): string {
+  const shell = `CLAUDE_CONFIG_DIR=${shellQuote(configDir)} ${shellQuote(bin)} /login`;
+  const applescript = shell.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `tell application "Terminal"\nactivate\ndo script "${applescript}"\nend tell`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Runs that script. Detached: the terminal outlives the request that opened it. */
+function openClaudeLogin(bin: string, configDir: string): void {
+  const child = spawn("osascript", ["-e", claudeLoginScript(bin, configDir)], {
+    stdio: "ignore",
+    detached: true,
+  });
+  child.unref();
+  // osascript failing is asynchronous and there is nobody left to tell; the
+  // watch below simply times out, which is the same outcome as a user who
+  // closed the window.
+  child.on("error", () => {});
+}
+
+/** What the watch needs of the launcher. Stated so a test can stand in for it. */
+type SignInLauncher = {
+  chatBusy(): boolean;
+  lastModelFor(id: string): string | null;
+  start(id: string, model?: string): Promise<unknown>;
+};
+
+/**
+ * Watches for a login landing, and starts the agent when one does.
+ *
+ * Polls mtimes rather than fs.watch: the two paths may not exist yet — that is
+ * the whole point of a first sign-in — and watching a directory for a file that
+ * arrives, on two platforms' worth of atomic-rename behaviour, is more moving
+ * parts than looking twice a second at two numbers.
+ *
+ * Returns a cancel. The timer is unref'd, so a watch nobody cancels cannot hold
+ * the process open at shutdown.
+ */
+export function watchForClaudeSignIn(
+  launcher: SignInLauncher,
+  files: string[],
+  opts: { pollMs?: number; windowMs?: number } = {},
+): () => void {
+  const before = files.map(mtimeOrNull);
+  const deadline = Date.now() + (opts.windowMs ?? SIGNIN_WATCH_MS);
+  const timer = setInterval(() => {
+    const landed = files.some((file, i) => mtimeOrNull(file) !== before[i]);
+    if (!landed && Date.now() < deadline) return;
+    cancel();
+    if (!landed) return;
+    // The user may have pressed Start themselves while the terminal was open.
+    // Checked here and enforced by the launcher, which refuses a second chat
+    // launch outright — this only keeps the refusal out of the logs.
+    if (launcher.chatBusy()) return;
+    const model = launcher.lastModelFor("claude-code");
+    void Promise.resolve(launcher.start("claude-code", model ?? undefined)).catch(() => {
+      // A relaunch that will not start — the CLI moved, another one is already
+      // running — is not worth an unhandled rejection. Start is still there.
+    });
+  }, opts.pollMs ?? SIGNIN_POLL_MS);
+  timer.unref?.();
+  let done = false;
+  function cancel(): void {
+    if (done) return;
+    done = true;
+    clearInterval(timer);
+  }
+  return cancel;
+}
+
+function mtimeOrNull(path: string): number | null {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
 }

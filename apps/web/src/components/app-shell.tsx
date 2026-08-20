@@ -3,6 +3,7 @@
 import * as React from "react";
 import { AgentView } from "@/components/agent/agent-view";
 import { AutomationsView } from "@/components/automations/automations-view";
+import { CalendarView } from "@/components/calendar/calendar-view";
 import { AgentConnectDialog } from "@/components/dialogs/agent-connect-dialog";
 import { CapabilitiesDialog } from "@/components/dialogs/capabilities-dialog";
 import { ChatsDialog } from "@/components/dialogs/chats-dialog";
@@ -74,10 +75,13 @@ function Shell() {
   const conversing = app.view === "agent";
   const boarding = app.view === "pipeline";
   const automating = app.view === "automations";
+  /** One column too: an agenda is a single list, not a list and a pane. */
+  const calendaring = app.view === "calendar";
   /* Settings is a page like the others, with its own sidebar inside the pane —
      so it takes the whole workspace and the shell drops to two tracks. */
   const settingsOpen = app.view === "settings";
-  const singlePane = conversing || boarding || automating || settingsOpen;
+  const singlePane =
+    conversing || boarding || automating || calendaring || settingsOpen;
   const drafts = useDrafts(app.account, drafting);
   /* The same query the People list issues, so j / k walk exactly the rows on
      screen. React Query dedupes it — one request, two readers. */
@@ -443,9 +447,11 @@ function Shell() {
               ? "Agent conversation"
               : automating
                 ? "Automations"
-                : settingsOpen
-                  ? "Settings"
-                  : "Pipeline"
+                : calendaring
+                  ? "Calendar"
+                  : settingsOpen
+                    ? "Settings"
+                    : "Pipeline"
           }
           tabIndex={-1}
           className="h-full min-h-0 bg-surface-2"
@@ -462,6 +468,11 @@ function Shell() {
             />
           ) : automating ? (
             <AutomationsView
+              onOpenRail={() => app.setRailSheetOpen(true)}
+              showRailButton={app.narrow}
+            />
+          ) : calendaring ? (
+            <CalendarView
               onOpenRail={() => app.setRailSheetOpen(true)}
               showRailButton={app.narrow}
             />

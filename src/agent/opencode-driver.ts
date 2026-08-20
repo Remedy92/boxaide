@@ -14,66 +14,45 @@
  * uses, so the lease, `replyTo`, history and SSE are all unchanged.
  *
  * The MCP tier is untouched and stays the fallback. Only the OpenCode launch
- * path is driven, and a driven session's own chat tools are turned off in the
- * prompt: two askers on one channel is the double-answer hole the lease exists
- * to close.
+ * path is driven, and the loop's own chat tools are turned off per session: two
+ * askers on one channel is the double-answer hole the lease exists to close.
  *
- * On any API failure the lease goes back (`releaseLease`), so the message
- * re-queues instead of dying with the request, and the loop retries with
- * backoff until the delivery cap dead-letters it.
+ * The loop itself is `runDrivenLoop` in driver.ts, shared with the Claude Code
+ * driver — including what happens on a failed turn: the lease goes back, the
+ * message re-queues instead of dying with the request, and the retry runs on
+ * backoff. This one passes no failure cap: the server may come back, and the
+ * child running it is still the process the user sees.
  */
 import type { ChildProcess } from "node:child_process";
-import { MAX_WAIT_MS } from "./channel.js";
-
-/**
- * What the driver needs from the conversation channel.
- *
- * Structural on purpose: the driver is a loop over four calls, and stating
- * only those four is what makes it testable without a database.
- */
-export type DriverChannel = {
-  awaitUserTurn(options: {
-    timeoutMs?: number;
-    agent?: string | null;
-    signal?: AbortSignal;
-  }): Promise<{ seq: number; text: string } | null>;
-  post(input: { role: "agent" | "activity"; text: string; agent?: string | null }): unknown;
-  releaseLease(seq: number, options?: { revertAttempt?: boolean }): void;
-  noteAgentActivity(tool: string | null): void;
-  /** Gates the MCP chat tools while this loop owns the conversation. */
-  setDriven(on: boolean): void;
-};
-
-/** A running driver, from the launcher's side. Stopping is idempotent. */
-export type AgentDriver = { stop(): void };
-
-/** Backoff after a failed turn: doubles, capped, so a dead server is cheap. */
-const RETRY_BASE_MS = 1_000;
-const RETRY_MAX_MS = 30_000;
+import {
+  abortablePause,
+  backoffMs,
+  DRIVEN_SYSTEM,
+  RETRY_BASE_MS,
+  runDrivenLoop,
+  TITLE_PROMPT,
+  watchdogTickMs,
+  WATCHDOG_MS,
+  type AgentDriver,
+  type DriverChannel,
+} from "./driver.js";
 
 /** How long to wait for `opencode serve` to announce its port. */
 const READY_MS = 60_000;
 
 /**
- * How long a prompt may run without a single event for its session.
- *
- * The prompt POST blocks until the turn finishes, and a turn can legitimately
- * take minutes — so time alone says nothing. Silence on the event stream does:
- * a working server reports every part it writes, so no part in three minutes is
- * a server that has stopped working on this turn. Only then is the POST worth
- * abandoning, which puts the message back on the queue instead of holding the
- * lease until the user gives up and stops the agent.
- */
-const WATCHDOG_MS = 180_000;
-
-/**
- * The chat tools, disabled for a driven session.
+ * The loop's own chat tools, disabled for a driven session.
  *
  * Boxaide's MCP server is still configured for this agent — it is how the
  * model reads mail — but the driver already holds the lease. A model that also
  * called `chat_await_message` would be a second asker: it could take the
  * message out from under the loop, and it would cost the channel the right to
  * let the child's own liveness speak for the claim.
+ *
+ * `chat_history` is deliberately not here. It takes no lease and answers the one
+ * question a driven model cannot answer any other way — what was said before the
+ * turn it is holding — which is exactly what a session that lost its transcript
+ * needs. DRIVEN_SYSTEM says so too.
  *
  * Both the bare and the OpenCode-namespaced spelling are sent. An unknown key
  * in this map is ignored, and guessing one spelling wrong is not worth it.
@@ -82,21 +61,7 @@ const DISABLED_TOOLS = [
   "chat_await_message",
   "chat_say",
   "chat_activity",
-  "chat_history",
 ].flatMap((name) => [name, `boxaide_${name}`, `boxaide*${name}`]);
-
-/**
- * What the model is told about the conversation it is in.
- *
- * The KICKOFF prompt cannot apply here: it describes a loop this code is
- * running. What is left is the part the model still has to know — that its
- * answer is read by a person in another window, and that it must not send mail.
- */
-const DRIVEN_SYSTEM = `You are my Boxaide inbox agent. Use the Boxaide MCP tools to read mail.
-
-Each message you receive is from me, typed in the Boxaide window. Reply with the
-answer itself — your reply text is what I read. Do not call any chat_ tool; the
-conversation is handled for you. Draft rather than send unless I ask you to send.`;
 
 export type OpenCodeDriverOptions = {
   channel: DriverChannel;
@@ -135,11 +100,21 @@ type ServerEvent = {
 export class OpenCodeDriver implements AgentDriver {
   private abort = new AbortController();
   private stopped = false;
-  private sessionId: string | null = null;
+  /**
+   * Sessions with a prompt in flight right now.
+   *
+   * The stream carries every session the server is running, and only the ones
+   * this driver is waiting on say anything about the turn the watchdog is
+   * guarding. A set rather than a single id because a chat's naming call can
+   * still be running when the next chat's turn starts.
+   */
+  private inFlight = new Set<string>();
   /** Aborts the prompt POST alone, when the watchdog gives up on it. */
   private promptAbort: AbortController | null = null;
   /** When this session last showed a sign of life. Only the watchdog reads it. */
   private lastSessionEvent = 0;
+  /** The naming call for the last answered turn, while it is still running. */
+  private naming: Promise<void> | null = null;
   /** Resolves when the loop has left `run`. Tests await it; production does not. */
   readonly done: Promise<void>;
   private release!: () => void;
@@ -151,11 +126,17 @@ export class OpenCodeDriver implements AgentDriver {
   /** Starts the loop. Returns immediately; failures live inside the loop. */
   start(): this {
     this.opts.channel.setDriven(true);
-    void this.run().finally(() => {
-      // However the loop ended, the chat tools go back to the MCP tier.
-      this.opts.channel.setDriven(false);
-      this.release();
-    });
+    void this.run()
+      .catch(() => {
+        // The server child's own exit is what the user is told about, so there
+        // is nothing to report here — but nothing awaits this promise either,
+        // and an unhandled rejection would end the whole Boxaide process.
+      })
+      .then(() => {
+        // However the loop ended, the chat tools go back to the MCP tier.
+        this.opts.channel.setDriven(false);
+        this.release();
+      });
     return this;
   }
 
@@ -180,46 +161,74 @@ export class OpenCodeDriver implements AgentDriver {
     // Opened once and kept for the driver's life: it is what makes a turn
     // visible while it runs, and what the watchdog listens to.
     void this.watchEvents(base);
-    let failures = 0;
-    while (!this.stopped) {
-      const turn = await this.opts.channel.awaitUserTurn({
-        timeoutMs: this.opts.waitMs ?? MAX_WAIT_MS,
+    // No failure cap: the server may come back, and the child running it is
+    // still the process the user sees. Ending this loop would leave that server
+    // up with nobody prompting it.
+    await runDrivenLoop(
+      {
+        channel: this.opts.channel,
         agent: this.opts.agent,
         signal: this.abort.signal,
-      });
-      // Null is the normal timeout, and the whole point of asking again.
-      if (!turn) continue;
-      if (this.stopped) {
-        this.opts.channel.releaseLease(turn.seq, { revertAttempt: true });
-        return;
-      }
-      try {
-        this.opts.channel.noteAgentActivity("prompt");
-        const reply = await this.prompt(base, turn.text);
-        this.opts.channel.post({
-          role: "agent",
-          text: reply,
-          agent: this.opts.agent,
-        });
-        failures = 0;
-      } catch {
-        if (this.stopped) {
-          this.opts.channel.releaseLease(turn.seq, { revertAttempt: true });
-          return;
-        }
-        // Give the message back rather than swallow it: the next attempt is
-        // handed the same turn, and the delivery cap ends it if the server
-        // stays broken.
-        this.opts.channel.releaseLease(turn.seq);
-        failures += 1;
-        await this.pause(failures);
-      }
+        stopped: () => this.stopped,
+        waitMs: this.opts.waitMs,
+        retryBaseMs: this.opts.retryBaseMs,
+        beforeTurn: () => this.naming ?? Promise.resolve(),
+        afterReply: (chatId) => {
+          this.naming = this.maybeName(base, chatId).finally(() => {
+            this.naming = null;
+          });
+        },
+      },
+      (turn) => this.prompt(base, turn.chatId, turn.text),
+    );
+  }
+
+  /**
+   * Names the chat, once, from the exchange that just happened.
+   *
+   * The MCP tier gets this for free — the agent passes a title to `chat_say`
+   * — and a driven session has no chat tools to pass it through, so the name is
+   * asked for directly. It runs on the same session, so the model is naming a
+   * conversation it has just had rather than being handed one to read.
+   *
+   * Everything here is best effort. The answer is already posted and the lease
+   * is already closed, so a failed or refused title costs the user nothing and
+   * must never reach the loop's retry path: the chat keeps the name its first
+   * message gave it.
+   */
+  private async maybeName(base: string, chatId: string): Promise<void> {
+    try {
+      if (this.stopped) return;
+      if (!this.opts.channel.needsTitle(chatId)) return;
+      const raw = await this.prompt(base, chatId, TITLE_PROMPT, { background: true });
+      this.opts.channel.nameChat(chatId, raw);
+    } catch {
+      // No name is a fine outcome. See the note above. The whole body is
+      // guarded, not just the prompt: this promise is awaited by the loop, and
+      // a throw from it would be read as a failed answer.
     }
   }
 
-  /** One prompt, blocking until the turn completes. Throws on any failure. */
-  private async prompt(base: string, text: string): Promise<string> {
-    const session = await this.ensureSession(base);
+  /**
+   * One prompt, blocking until the turn completes. Throws on any failure.
+   *
+   * `background` marks a prompt that is not the user's turn. A failed turn
+   * takes the session down with it, which is right when the message is going
+   * back on the queue to be asked again — and wrong for a naming call, where
+   * the cost of that would land on the conversation instead: the next thing
+   * the user asked would be answered by a model that had forgotten the last
+   * one, with nothing on screen to explain it. A background failure leaves the
+   * session alone. If it really did wedge the session, the next user turn
+   * fails once and resets it on the visible path, message and all.
+   */
+  private async prompt(
+    base: string,
+    chatId: string,
+    text: string,
+    options: { background?: boolean } = {},
+  ): Promise<string> {
+    const session = await this.ensureSession(base, chatId);
+    this.inFlight.add(session);
     // Armed across the body read too, not just the headers: a server that
     // flushes headers early and streams the body would otherwise spend the
     // whole turn outside the watchdog. Aborting the guard rejects the read.
@@ -244,10 +253,15 @@ export class OpenCodeDriver implements AgentDriver {
       // server may still be running the turn on this session, and the next
       // attempt on the same session would 409 into it. Tell it to stop, take a
       // fresh session next time, and let the caller re-queue the message.
-      this.sessionId = null;
-      void this.call(base, `/session/${session}/abort`, {}).catch(() => {});
+      // This chat's session only: the other chats' sessions are untouched by a
+      // turn that failed in this one.
+      if (!options.background) {
+        this.opts.channel.clearChatSession(chatId);
+        void this.call(base, `/session/${session}/abort`, {}).catch(() => {});
+      }
       throw err;
     } finally {
+      this.inFlight.delete(session);
       guard.end();
     }
     const reply = (body.parts ?? [])
@@ -262,8 +276,20 @@ export class OpenCodeDriver implements AgentDriver {
     return reply;
   }
 
-  private async ensureSession(base: string): Promise<string> {
-    if (this.sessionId) return this.sessionId;
+  /**
+   * The server session this chat's turns run in, made on first use.
+   *
+   * Per chat, not per driver: one running agent answers every chat, and a
+   * shared session would put every conversation in one transcript. The id is
+   * kept in the store, so a restarted agent picks each conversation back up —
+   * the server's directory is the stable agent workdir.
+   */
+  private async ensureSession(base: string, chatId: string): Promise<string> {
+    const { id: known, epoch } = this.opts.channel.chatSession(
+      chatId,
+      this.opts.agent,
+    );
+    if (known) return known;
     const res = await this.call(base, "/session", {
       title: "Boxaide",
       // The old chat launch ran `--auto`; this is the same grant, per session.
@@ -278,7 +304,9 @@ export class OpenCodeDriver implements AgentDriver {
     if (typeof body.id !== "string" || !body.id) {
       throw new Error("opencode session response had no id");
     }
-    this.sessionId = body.id;
+    // On the epoch read before the POST above: a chat cleared while the server
+    // was making this session must not have that session saved under it.
+    this.opts.channel.saveChatSession(chatId, this.opts.agent, body.id, epoch);
     return body.id;
   }
 
@@ -314,12 +342,9 @@ export class OpenCodeDriver implements AgentDriver {
     if (this.abort.signal.aborted) onStop();
     else this.abort.signal.addEventListener("abort", onStop, { once: true });
     this.lastSessionEvent = Date.now();
-    const timer = setInterval(
-      () => {
-        if (Date.now() - this.lastSessionEvent >= ms) controller.abort();
-      },
-      Math.max(10, Math.min(ms / 4, 5_000)),
-    );
+    const timer = setInterval(() => {
+      if (Date.now() - this.lastSessionEvent >= ms) controller.abort();
+    }, watchdogTickMs(ms));
     return {
       signal: controller.signal,
       end: () => {
@@ -392,7 +417,9 @@ export class OpenCodeDriver implements AgentDriver {
     // deliberately not proof of anything here: a live server heartbeats just as
     // steadily while the turn it is holding has stopped moving. Only the
     // session's own events say the turn is still being worked.
-    if (!props || !this.sessionId || props.sessionID !== this.sessionId) return;
+    if (typeof props?.sessionID !== "string" || !this.inFlight.has(props.sessionID)) {
+      return;
+    }
     this.lastSessionEvent = Date.now();
     if (event.type === "message.part.updated" && props.part?.type === "tool") {
       const name = props.part.tool ?? props.part.name;
@@ -424,19 +451,10 @@ export class OpenCodeDriver implements AgentDriver {
 
   /** Abortable backoff, so stop() during a wait is immediate. */
   private pause(failures: number): Promise<void> {
-    const base = this.opts.retryBaseMs ?? RETRY_BASE_MS;
-    const ms = Math.min(base * 2 ** (failures - 1), RETRY_MAX_MS);
-    return new Promise((resolve) => {
-      const timer = setTimeout(finish, ms);
-      const signal = this.abort.signal;
-      function finish() {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", finish);
-        resolve();
-      }
-      if (signal.aborted) return finish();
-      signal.addEventListener("abort", finish, { once: true });
-    });
+    return abortablePause(
+      this.abort.signal,
+      backoffMs(failures, this.opts.retryBaseMs ?? RETRY_BASE_MS),
+    );
   }
 }
 

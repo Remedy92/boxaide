@@ -4,6 +4,7 @@ import { SectionLabel } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogHeader,
@@ -68,7 +69,7 @@ export function CapabilitiesDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="pane-scroll max-h-[86vh] max-w-[560px] overflow-y-auto">
+      <DialogContent className="max-w-[560px]">
         <DialogHeader>
           <DialogTitle className="title-15">What this client can do</DialogTitle>
           <DialogDescription>
@@ -76,47 +77,49 @@ export function CapabilitiesDialog({
             actually exposes.
           </DialogDescription>
         </DialogHeader>
+      <DialogBody>
 
-        <section className="space-y-2">
-          <SectionLabel>Boxaide can</SectionLabel>
-          <ul className="space-y-1">
-            {CAN.map((line) => (
-              <li key={line} className="text-[13px] leading-[18px] text-fg-secondary">
-                {line}
-              </li>
-            ))}
-          </ul>
-        </section>
+          <section className="space-y-2">
+            <SectionLabel>Boxaide can</SectionLabel>
+            <ul className="space-y-1">
+              {CAN.map((line) => (
+                <li key={line} className="text-[13px] leading-[18px] text-fg-secondary">
+                  {line}
+                </li>
+              ))}
+            </ul>
+          </section>
 
-        <section className="space-y-2">
-          <SectionLabel>Boxaide can&rsquo;t</SectionLabel>
-          <ul className="space-y-1">
-            {CANNOT.map((line) => (
-              <li key={line} className="text-[13px] leading-[18px] text-fg-tertiary">
-                {line}
-              </li>
-            ))}
-          </ul>
-        </section>
+          <section className="space-y-2">
+            <SectionLabel>Boxaide can&rsquo;t</SectionLabel>
+            <ul className="space-y-1">
+              {CANNOT.map((line) => (
+                <li key={line} className="text-[13px] leading-[18px] text-fg-tertiary">
+                  {line}
+                </li>
+              ))}
+            </ul>
+          </section>
 
-        <section className="space-y-2">
-          <SectionLabel>Agents</SectionLabel>
-          <p className="text-[13px] leading-[18px] text-fg-secondary">
-            Anything you point at the MCP endpoint gets the same access to your
-            mail that this page has, through these eleven tools and no others.
-            Connecting and removing a mailbox is not among them. Drafting is the
-            default the tools steer towards; sending is a separate tool.
-          </p>
-          <p className="font-mono text-[11px] leading-4 text-fg-tertiary">
-            {TOOLS.join(", ")}
-          </p>
-        </section>
+          <section className="space-y-2">
+            <SectionLabel>Agents</SectionLabel>
+            <p className="text-[13px] leading-[18px] text-fg-secondary">
+              Anything you point at the MCP endpoint gets the same access to your
+              mail that this page has, through these eleven tools and no others.
+              Connecting and removing a mailbox is not among them. Drafting is the
+              default the tools steer towards; sending is a separate tool.
+            </p>
+            <p className="font-mono text-[11px] leading-4 text-fg-tertiary">
+              {TOOLS.join(", ")}
+            </p>
+          </section>
 
-        <div className="flex justify-end">
-          <Button type="button" onClick={() => onOpenChange(false)}>
-            Close
-          </Button>
-        </div>
+          <div className="flex justify-end">
+            <Button type="button" onClick={() => onOpenChange(false)}>
+              Close
+            </Button>
+          </div>
+      </DialogBody>
       </DialogContent>
     </Dialog>
   );

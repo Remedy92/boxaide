@@ -16,6 +16,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogHeader,
@@ -237,9 +238,11 @@ export function ReaderActionBar({
                 : "The bodyText the server returned, verbatim."}
             </DialogDescription>
           </DialogHeader>
-          <pre className="max-h-[60vh] overflow-auto rounded-[var(--radius-md)] bg-surface-0 p-3 font-mono text-[13px] whitespace-pre-wrap text-fg-secondary">
-            {source === "html" ? (message?.bodyHtml ?? "") : (message?.bodyText ?? "")}
-          </pre>
+          <DialogBody>
+            <pre className="rounded-[var(--radius-md)] bg-surface-0 p-3 font-mono text-[13px] whitespace-pre-wrap text-fg-secondary">
+              {source === "html" ? (message?.bodyHtml ?? "") : (message?.bodyText ?? "")}
+            </pre>
+          </DialogBody>
         </DialogContent>
       </Dialog>
     </div>

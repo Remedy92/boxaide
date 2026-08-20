@@ -95,11 +95,16 @@ export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
  * `outreach` is two-pane again: the middle column is the approval queue (or the
  * campaigns and suppression lists), and the pane is the full text of the queued
  * email a person is about to approve.
+ *
+ * `calendar` is one column for the same reason `automations` is: an agenda is a
+ * single ordered list, and a second track would be empty until a day was
+ * picked.
  */
 export type View =
   | "agent"
   | "mail"
   | "drafts"
+  | "calendar"
   | "people"
   | "pipeline"
   | "automations"

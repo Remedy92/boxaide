@@ -96,6 +96,19 @@ export class MailService {
     return this.store.listAccounts();
   }
 
+  /**
+   * One account with its stored password decrypted.
+   *
+   * Public because the calendar can reuse a mailbox's own credentials for
+   * CalDAV at the providers where the two are the same login (see
+   * src/calendar/mailbox-reuse.ts). It stays a narrow accessor rather than a
+   * handle on the Store: the caller gets one named account or an exception,
+   * never a way to walk every secret in the database.
+   */
+  accountWithCredentials(idOrAlias: string): ProviderAccount {
+    return this.resolve(idOrAlias);
+  }
+
   async connectAccount(input: ConnectAccountInput) {
     const alias = input.alias.trim().toLowerCase().replace(/\s+/g, "-");
     if (!alias) throw new Error("alias is required");

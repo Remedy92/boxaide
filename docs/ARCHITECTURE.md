@@ -31,6 +31,8 @@ Ship **Boxaide** as a single **Node 22+ / TypeScript** process:
 2. **One process** — `/` UI, `/api/*` REST, `/mcp` MCP share the same `MailService`.
 3. **Provider interface** — real IMAP and fixture implement the same contract so tests call shipped code.
 4. **Local by default** — bind `127.0.0.1`; bearer token gates API + MCP.
+5. **A launched agent holds a narrower credential than the app** — see Agent
+   scopes below.
 5. **MIT, zero paid SaaS** for core receive/send.
 
 ## The Next.js front end (`apps/web`)
@@ -47,7 +49,7 @@ Ship **Boxaide** as a single **Node 22+ / TypeScript** process:
 | **One route, selection in the URL hash** | `output: "export"` bans dynamic routes without `generateStaticParams`, and message ids are unknowable at build time. Selection is mirrored to `#/a/<accountId>/m/<messageId>` with `history.replaceState`. |
 | **Its own `package.json` and lockfile; no root `workspaces` key** | A workspace would hoist `better-sqlite3` into the front-end install and force a native build on every deploy. |
 | **`bodyHtml` is never rendered** | It is raw unsanitised sender HTML and there is no sanitiser in this codebase. The reader renders `bodyText` only; "View HTML source" shows it escaped inside a `<pre>`. `react/no-danger` is an ESLint **error**. The only `dangerouslySetInnerHTML` is a fixed desktop UA marker in `layout.tsx`. |
-| **`/api/agent-connect` is never called; `/api/local-bootstrap` only same-origin from loopback** | agent-connect embeds the token, and the MCP snippet is built client-side from `localStorage` instead. local-bootstrap exists precisely so the server's own UI needs no token copy-paste: the wizard calls it only when the page origin equals the server address and is loopback, mirroring the guard the endpoint itself enforces. A remotely hosted UI still requires a human to paste the token. |
+| **`/api/agent-connect` is never called; `/api/local-bootstrap` requires a desktop capability** | agent-connect embeds the token, and the MCP snippet is built client-side from `localStorage` instead. The Electron shell places an unguessable one-time capability in the URL fragment, which HTTP never receives; the wizard strips and exchanges it. A normal browser, local or remote, requires a human to paste the token. |
 
 Serving it from the Node process:
 
@@ -80,11 +82,79 @@ A browser page served from anywhere other than the Boxaide process itself cannot
 | **`Access-Control-Allow-Credentials` never sent** | Boxaide authenticates by header, never by cookie. Ambient credentials must stay impossible. |
 | **`Access-Control-Allow-Headers: authorization, content-type`** | Exactly what the client sends. Echoing the request's header list back would make the allowlist meaningless. |
 | **Preflight answered before the auth gate** | An `OPTIONS` preflight carries no `Authorization` by spec, so gating it on the token makes CORS impossible. The origin allowlist is the control that applies; a preflight runs no handler and returns an empty 204. |
-| **`/api/local-bootstrap` deliberately not widened** | It is unauthenticated and returns the bearer token in plaintext. It exists only while the server's own bind address is loopback — `Host` and `Origin` are browser guards, and a remote client on a `0.0.0.0` bind chooses both headers itself, so `isLoopbackBindAddress(config.host)` is checked first and the route answers `404` otherwise. Beyond that it keeps the strict loopback-only `isAllowedOrigin` plus the `Host` check, and answers `Cache-Control: no-store` + `Vary: Origin` so neither the browser nor a local proxy retains the token. A remote UI must have its token pasted in by a human. |
+| **`/api/local-bootstrap` deliberately not widened** | It returns the bearer token only when three controls hold: the server bind is loopback, Host/Origin are loopback, and the request presents the desktop shell's random one-time capability. The capability travels in a URL fragment, is stripped immediately, and is consumed on first use. Responses remain `Cache-Control: no-store` + `Vary: Origin`. A normal browser must have its token pasted in by a human. |
 
 Residual risk: allowlisting a hostname means anyone who can serve a page there — a preview deployment on a shared team, a hijacked account — can reach the server **if they also hold the token**. Prefer a custom domain over a platform-assigned hostname, and keep the list short.
 
 Implementation: `parseAllowedOrigins` / `isApiOriginAllowed` / `applyCors` / `corsPreflight` in `src/api/routes.ts`, threaded through `AppConfig.allowedOrigins` (`src/config.ts`) into `createApi`, `/mcp` and `/health` (`src/app.ts`). Covered by `test/security-http.test.ts`.
+
+## Agent scopes
+
+Boxaide launches agent CLIs. Each launch gets a credential minted for it, bound
+to a scope, accepted on `/mcp` and nowhere else, and revoked when that launch
+ends. The master bearer is never handed to a spawned process.
+
+| Decision | Why |
+| --- | --- |
+| **The scope is enforced by this server, not by the CLI** | It used to be enforced by whichever per-tool allowlist flag the CLI happened to offer, so a CLI without one could not be launched at all. Moving it here made three more CLIs launchable and made the boundary the same for all of them. |
+| **Both the tool listing and the tool call are filtered** | Hiding a tool is a hint; a model that has seen the name once will call it. `dispatch` is the single choke point every transport reaches. |
+| **A tool no scope names is denied** | The failure to design against is a tool added to the server and forgotten in `scope.ts`. Silence means no. |
+| **`message_send`, `meeting_create`, `meeting_cancel` are inside every scope, and none of them acts** | They used to be outside every scope, which also meant an inbox agent could not answer an inbox. A scoped caller reaching one now records the exact call and it is put in front of the user; Boxaide performs it when they approve it. The risk is answered by the person who reads the card, not by a name missing from a list. See the approval queue below. |
+| **Scoped tokens are rejected on `/api/*`** | A launched agent has no business reading settings, minting credentials, or starting another agent. Before scopes it held the master bearer and could do all three. |
+| **Nothing an agent is pointed at lives inside the data directory** | The data directory holds `bearer.token` and `master.key`. An agent standing in `<dataDir>/agent-workdir` could `cat ../bearer.token` and hold the credential the scope exists to withhold. Workdirs, run directories and config homes all sit under `<dataDir>-agents` instead — which is also what makes the sandbox rule below expressible: one subtree the agent owns, one it must never see, no overlap. |
+| **In memory only** | A credential that outlived the process would be one nobody can see and nobody revokes. A restart has already killed every agent. |
+| **A CLI whose config Boxaide cannot control refuses to launch** | `AgentSpec.preflight`. Antigravity reads MCP servers from a file in the user's home that overrides the one a launch writes, so a stale entry there would decide the credential. It says so and stops instead. |
+
+Implementation: `src/mcp/scope.ts` (policy), `src/mcp/scoped-tokens.ts` (mint,
+resolve, revoke), `mcpAuth` in `src/app.ts` (which credential), `dispatch` in
+`src/mcp/server.ts` (enforcement), `AgentLauncher.launchCtx` (per-launch
+credential). Covered by `test/mcp-scope.test.ts`.
+
+## Agent sandbox
+
+The scope decides what an agent may do with Boxaide's tools. It cannot decide
+what the agent does with the machine — and an agent that reads `bearer.token`
+off the disk stops being a scoped caller. So every spawn is wrapped in the
+operating system's own boundary. Same shape as the scope: one mechanism, one
+place, applied to every CLI rather than to the ones that offer a flag.
+
+| Decision | Why |
+| --- | --- |
+| **`workspace` is simply on; it is not a question the user is asked** | It shipped as a per-launch switch in the rail. That was wrong twice: whoever presses Start cannot reason about which files a CLI reads, and the switch's other position was the one where the agent could read `bearer.token`. `full` remains as an install-level escape (`BOXAIDE_AGENT_ACCESS=full`) and as what a machine with no sandbox gets. Scheduled runs are confined too — those are unattended and the mail they read was written by strangers. |
+| **The whole first path segment under `$HOME` is allowed for a binary** | Every agent CLI installs into the home and no two agree where: `~/.local/share/claude`, `~/.grok/bin`, `~/.bun/install/global`, `~/.codex/packages`, `~/.nvm/versions`. A rule tuned to those five breaks on the sixth. Coarse on purpose — `~/.ssh`, `~/Documents` and the data directory are not one directory deep under a dotted install root. |
+| **A spec declares what its CLI needs beyond that, and declares it writable** | `AgentSpec.sandbox`. OpenCode creates four directories under the home before it will run at all; grok, codex and agy keep a sign-in they rewrite on every token refresh. There used to be a read-only category for "credentials the CLI only consults" — no such CLI exists, and it is what made a confined agy start, fail to save its session, wait, and exit with nothing the user ever saw. |
+| **The driver's per-turn children are wrapped too** | Claude Code has no long-lived child — its turns *are* the agent. `DriveOptions.command` carries the wrap so a driver cannot be the one spawn site that forgets. |
+| **An unavailable sandbox runs the agent unconfined and says so** | macOS only today. `confineCommand` still refuses what it cannot deliver; the decision is made one level up in `resolveAccess`, because with the rail switch gone a refusal would mean nobody outside macOS can start an agent at all. The launch reports `accessNotice`, which the rail shows verbatim. What it must never do is stay quiet — a downgrade nobody notices is the failure this exists to prevent. |
+| **The network is open at both levels** | The agent has a model provider and Boxaide to talk to. Confining reads keeps the master credential out of its hands; this is not an exfiltration boundary and does not claim to be. |
+
+Implementation: `src/agent/sandbox.ts` (profile and command), `AgentLauncher.confine`
+(every spawn), `AgentSpec.sandbox` (per-CLI needs), `config.agentAccess` (the
+install default). Covered by `test/agent-sandbox.test.ts`, which asserts the
+pure parts everywhere and runs real confined processes on macOS.
+
+## Approval queue
+
+Sending mail, creating a meeting and cancelling one are the three things an
+agent does that another person sees at once, and it decides to do them after
+reading text strangers wrote. The first answer was to take the tools away,
+which also removed the reason to point an agent at an inbox. The answer now is
+a person: the agent asks, Boxaide acts.
+
+| Decision | Why |
+| --- | --- |
+| **The request is queued, not blocked** | A blocking prompt cannot be answered at 03:00, so a scheduled run could never ask. A stored row can: the run ends, and the request is in the window in the morning. It also means nothing depends on the asking agent still being alive. |
+| **The row holds the arguments, and approval replays them through the same dispatch** | There is no second implementation of sending that could drift from the first. It is also why the card's text is derived from the arguments every time it is drawn rather than stored beside them — what the user reads is what will happen. |
+| **`args_enc` is encrypted with the master key** | The row holds mail bodies and attendee addresses. Mail content has never been at rest in plaintext anywhere else in this product. |
+| **The claim is a guarded `UPDATE ... WHERE state = 'pending'`** | Two windows showing the same card is the normal case. A second Approve after the first has already sent must change nothing. |
+| **A failed send writes `failed` and the reason, and never leaves the row pending** | A card that still looks untouched after an SMTP error is a card whose next click sends the mail twice. |
+| **Unscoped callers still send directly** | The master bearer and the user's own desktop client are the user. The boundary is the scope, not the tool. |
+| **A cap on pending requests** | A model that misreads its instructions can call `message_send` in a loop. Past `MAX_PENDING` the tool refuses, which is also the signal the model needs: it is not being throttled, it is being told to stop. |
+
+Implementation: `src/agent/approvals.ts` (queue, replay, card text),
+`agent_approvals` in `src/db/store.ts` (the rows), `dispatch` in
+`src/mcp/server.ts` (the gate), `POST /api/agent/approvals/:id` plus the
+`approvals` SSE frame, `agent-approvals.tsx` (the card). Covered by
+`test/mcp-scope.test.ts`.
 
 ## MVP surface
 
@@ -127,7 +197,7 @@ Boxaide grows from an agentic inbox into a local agent work platform. Three modu
 | Module | Directory | Owns |
 |---|---|---|
 | CRM | `src/crm/` | contacts, orgs, tags, notes, interactions, pipeline stages, deals |
-| Automations | `src/automation/` | cron'd prompts, serialized runs, run logs |
+| Automations | `src/automation/` | cron'd prompts, concurrent runs, run logs |
 | Outreach | `src/outreach/` | campaigns, sequence steps, outbox, suppression |
 
 Each module is a store, a service or engine, a `<MODULE>_TOOLS` + dispatcher pair, and a `register*Routes`. Nothing else in the tree changes shape.
@@ -145,9 +215,10 @@ Each module is a store, a service or engine, a `<MODULE>_TOOLS` + dispatcher pai
 | **Free email providers never create an organisation** | A gmail.com "organisation" with 400 unrelated contacts is worse than no organisation. The list is explicit, in the spec. |
 | **One automation run at a time, in an in-process FIFO** | Runs are full agents with tool access to one SQLite file and one set of mailboxes. Concurrency here buys throughput nobody asked for and costs interleaved writes and duplicate outreach. |
 | **A run is a one-shot headless CLI agent, not a model call from inside Boxaide** | Boxaide runs no model. That is true of the Agent view and stays true here: an automation reuses `AgentLauncher` and the same MCP wiring, so there is still no API key and no inference in this process. |
-| **A run cannot talk to the user and cannot `message_send`** | There is no one at the window at 03:00. The fixed preamble says so, and the pre-approved tool set omits the chat tools and `message_send` so the statement is backed by the wiring. |
-| **15-minute hard timeout, then SIGKILL and status `killed`** | An agent that hangs holds the queue. A killed run with a log is more useful than a stuck one. |
-| **Automations have no create form in the web UI** | An automation is a prompt. Prompts are written by conversation and revision, and the agent that writes one is the agent that will run it. The empty state says exactly that and points at the Agent view. The UI owns everything after creation: enable, disable, next/last run, run now, log history. |
+| **A run cannot talk to the user, and cannot send — but it can ask** | There is no one at the window at 03:00, so the pre-approved tool set omits the chat tools and the preamble says so. `message_send` is different: the run may call it, nothing goes out, and the request is waiting in the pane in the morning. That is the whole reason the approval queue is a stored row rather than a blocking prompt. |
+| **Three kills: a 2-minute first-output watchdog (`error`), the 15-minute deadline (`killed`), a manual stop (`killed`) — each SIGKILL, each writing a note into the log** | An agent that hangs holds the queue, and the two hangs are not the same: one never started, so it is written off in two minutes as an error, while a run that already spoke and then overran is `killed` at the deadline. First stdout disarms the watchdog, because a healthy Claude run is silent for minutes inside one tool. A killed run with a log beats a stuck one, so every path leaves a line saying which kill it was. The run's duration is the honest one too — the launcher stops waiting 2s after the process is gone rather than on a grandchild that still holds a pipe. |
+| **The CLI runs under a config home Boxaide owns, for chat as well as runs** | `--strict-mcp-config` only isolates MCP servers; hooks, skills, output styles and subagents still load, and a scheduled run was seen picking up the user's personal set. `CLAUDE_CONFIG_DIR` (and grok's `GROK_HOME`) point at `agent-homes/` under the agent root (`<dataDir>-agents`, deliberately outside the data dir), so the only things inherited are the ones auth needs: credentials, and the `env`/`apiKeyHelper` settings keys. The isolation is about whose config runs, not which path, so the chat agent gets it too. |
+| **Automations have no create form in the web UI** | An automation is a prompt. Prompts are written by conversation and revision, and the agent that writes one is the agent that will run it. The empty state says exactly that and points at the Agent view. The UI owns everything after creation: enable, disable, next/last run, run now, log history, and which agent CLI and model carry the run. |
 | **Claude Desktop scheduled tasks are imported by the agent, not by an importer** | `~/.claude/scheduled-tasks/*/SKILL.md` carries a name, a description and a body — everything `automation_create` needs except a cron. The agent reads the files with its own file tools and calls `automation_create` per task, asking for the schedule. Writing an importer would mean shipping a parser for another product's format and pretending the two execution contexts match. They do not: a Claude Desktop task may ask the user a question and touch the whole machine, a Boxaide automation may do neither. That rewrite is judgement, so it belongs to the agent and the user, in a conversation. |
 | **Send throttling server-side: ≥60s gap with jitter, `BOXAIDE_SEND_DAILY_CAP` per account per UTC day** | Approval is per-message; deliverability is per-account. A human approving forty drafts in one sitting should not produce forty sends in one minute. Over the cap a row stays `approved` and goes the next day. |
 | **Opt-out footer on every step including the first; no tracking pixels, no click redirects** | The privacy posture is the product. Tracking is out of scope, not deferred. |

@@ -36,6 +36,19 @@ codesign --force --timestamp --options runtime --sign "$ID" \
 find "$APP/Contents/Resources/app.asar.unpacked" -name "*.node" \
   -exec codesign --force --timestamp --options runtime --sign "$ID" {} \;
 
+# The EventKit helper. Hardened runtime, no entitlements: it is not V8 and
+# needs neither JIT key, and the calendar entitlement belongs to the app rather
+# than here — macOS charges a bundle-less helper's request to the responsible
+# process and reads the entitlement from that. Signing the helper with it and
+# the app without was measured, and the permission dialog still never appeared.
+# Unsigned it fails --deep --strict below, and notarisation after that.
+# An `if`, not a `&&` chain: under `set -e` a false test is a failed command
+# and would abort the whole signing run whenever the helper is absent.
+HELPER="$APP/Contents/Resources/boxaide-calendar"
+if [ -f "$HELPER" ]; then
+  codesign --force --timestamp --options runtime --sign "$ID" "$HELPER"
+fi
+
 # A framework can carry its own helper executables, and signing the framework
 # only seals those as resources — it does not sign them as code. Squirrel's
 # updater, Resources/ShipIt, is one, and notarisation rejected the whole app
@@ -101,9 +114,9 @@ done
 # produced by the pass above; if either is missing the publish must not go
 # ahead with a dmg alone, because the running app would keep reporting the old
 # version forever and nobody would see a failure.
-for required in release/boxaide-mac.zip release/latest-mac.yml; do
+for required in release/boxaide-mac.dmg release/boxaide-mac.zip release/latest-mac.yml; do
   [ -f "$required" ] || {
-    echo "missing $required — the auto-updater feed was not built" >&2
+    echo "missing $required — required release artifact was not built" >&2
     exit 1
   }
 done

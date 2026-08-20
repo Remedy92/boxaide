@@ -26,6 +26,17 @@ function make(): { store: Store; channel: AgentChannel } {
   return { store, channel };
 }
 
+/** Saves a session the way a driver does: on the epoch it just read. */
+function save(
+  channel: AgentChannel,
+  chatId: string,
+  agent: string,
+  sessionId: string,
+): void {
+  const { epoch } = channel.chatSession(chatId, agent);
+  channel.saveChatSession(chatId, agent, sessionId, epoch);
+}
+
 afterEach(() => {
   for (const channel of channels.splice(0)) channel.close();
   for (const store of stores.splice(0)) store.close();
@@ -48,6 +59,73 @@ describe("chats", () => {
     expect(channel.chats()[0].title).toBe("chase the March invoices");
   });
 
+  it("lets the agent replace the derived name once, and only once", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "can you look at the acme thing" });
+    expect(channel.needsTitle(channel.chats()[0].id)).toBe(true);
+
+    const id = channel.chats()[0].id;
+    expect(channel.nameChat(id, "Refund for the Acme invoice")).toBe(true);
+    expect(channel.chats()[0].title).toBe("Refund for the Acme invoice");
+
+    // A second offer is refused: the row must not move under a reader who has
+    // already learned where it is.
+    expect(channel.needsTitle(id)).toBe(false);
+    expect(channel.nameChat(id, "Something else entirely")).toBe(false);
+    expect(channel.chats()[0].title).toBe("Refund for the Acme invoice");
+  });
+
+  it("never lets the agent overwrite a name the user typed", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "hello" });
+    const id = channel.chats()[0].id;
+    expect(channel.renameChat(id, "My own name")).toBe(true);
+    expect(channel.needsTitle(id)).toBe(false);
+    expect(channel.nameChat(id, "The agent's idea")).toBe(false);
+    expect(channel.chats()[0].title).toBe("My own name");
+  });
+
+  it("keeps the derived name when the agent's answer is not a name", () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "chase the March invoices" });
+    const id = channel.chats()[0].id;
+    for (const junk of ["", "   ", `Sure! ${"a".repeat(200)}`]) {
+      expect(channel.nameChat(id, junk)).toBe(false);
+    }
+    expect(channel.chats()[0].title).toBe("chase the March invoices");
+    // Refusing a bad answer leaves the chat open to a good one.
+    expect(channel.needsTitle(id)).toBe(true);
+  });
+
+  it("strips what a model puts around a title", () => {
+    const cases: Array<[string, string]> = [
+      ['"Refund for the Acme invoice"', "Refund for the Acme invoice"],
+      ["**Invoice chase**", "Invoice chase"],
+      ["Title: Invoice chase", "Invoice chase"],
+      ["# Invoice chase", "Invoice chase"],
+      ["Invoice chase.", "Invoice chase"],
+      ["Invoice chase\nand some prose after it", "Invoice chase"],
+    ];
+    for (const [raw, want] of cases) {
+      const { channel } = make();
+      channel.post({ role: "user", text: "hello" });
+      const id = channel.chats()[0].id;
+      expect(channel.nameChat(id, raw)).toBe(true);
+      expect(channel.chats()[0].title).toBe(want);
+    }
+  });
+
+  it("offers the migrated conversation a name instead of leaving it placeheld", () => {
+    const { store, channel } = make();
+    const chat = store.createChat("Conversation");
+    channel.selectChat(chat.id);
+    // The placeholder is not a name, so the first message still renames it and
+    // the agent may still improve on that.
+    channel.post({ role: "user", text: "what did stripe send yesterday" });
+    expect(channel.chats()[0].title).toBe("what did stripe send yesterday");
+    expect(channel.needsTitle(chat.id)).toBe(true);
+  });
+
   it("keeps a long first message to one readable line", () => {
     const { channel } = make();
     channel.post({
@@ -58,6 +136,63 @@ describe("chats", () => {
     expect(title.length).toBeLessThanOrEqual(61);
     expect(title).not.toContain("\n");
     expect(title.endsWith("…")).toBe(true);
+  });
+
+  it("keeps a CLI session per chat, and hands it only to the agent that made it", () => {
+    const { channel } = make();
+    const first = channel.activeChat().id;
+    const second = channel.createChat().id;
+    save(channel, first, "claude-code", "ses-a");
+    save(channel, second, "claude-code", "ses-b");
+
+    expect(channel.chatSession(first, "claude-code").id).toBe("ses-a");
+    expect(channel.chatSession(second, "claude-code").id).toBe("ses-b");
+    // A session id means nothing to a CLI that did not issue it, so the chat
+    // starts a fresh one rather than failing every turn on a stranger's id.
+    expect(channel.chatSession(first, "opencode").id).toBeNull();
+    // A chat that changed agents keeps only the last session it was given.
+    save(channel, first, "opencode", "ses-oc");
+    expect(channel.chatSession(first, "opencode").id).toBe("ses-oc");
+    expect(channel.chatSession(first, "claude-code").id).toBeNull();
+  });
+
+  it("drops a chat's session when its messages go, and leaves the others alone", () => {
+    const { channel } = make();
+    const first = channel.activeChat().id;
+    const second = channel.createChat().id;
+    channel.post({ role: "user", text: "hello", chatId: first });
+    save(channel, first, "claude-code", "ses-a");
+    save(channel, second, "claude-code", "ses-b");
+
+    channel.clear(first);
+    // A model resuming a transcript the pane no longer shows would answer from
+    // history the user has just emptied.
+    expect(channel.chatSession(first, "claude-code").id).toBeNull();
+    expect(channel.chatSession(second, "claude-code").id).toBe("ses-b");
+
+    channel.deleteChat(second);
+    expect(channel.chatSession(second, "claude-code").id).toBeNull();
+  });
+
+  it("refuses a session saved by a turn that started before the chat was cleared", () => {
+    const { channel } = make();
+    const chat = channel.activeChat().id;
+    channel.post({ role: "user", text: "hello", chatId: chat });
+    // What a driver reads when it takes the turn.
+    const before = channel.chatSession(chat, "claude-code").epoch;
+
+    // The user empties the chat while the model is still working on it.
+    channel.clear(chat);
+    // The answer lands afterwards and tries to save the session it ran in.
+    channel.saveChatSession(chat, "claude-code", "ses-stale", before);
+
+    // Refused. Resuming it would answer the next message from the history the
+    // user has just emptied.
+    expect(channel.chatSession(chat, "claude-code").id).toBeNull();
+
+    // The turn after the clear reads the new epoch and saves normally.
+    save(channel, chat, "claude-code", "ses-fresh");
+    expect(channel.chatSession(chat, "claude-code").id).toBe("ses-fresh");
   });
 
   it("writes new messages to the chat the user selected", () => {
@@ -223,6 +358,48 @@ describe("limits", () => {
     channel.post({ role: "user", text: "x".repeat(2_000) });
     expect(channel.chats().map((chat) => chat.id)).toContain(only.id);
     expect(channel.history()).toHaveLength(1);
+  });
+});
+
+describe("across processes", () => {
+  /**
+   * `boxaide mcp` names a chat; the browser is attached to `boxaide serve`.
+   * The two share a file and nothing else, and a rename writes no turn, so
+   * without the fingerprint poll the rail keeps the old name until the user
+   * types again.
+   */
+  it("tells an attached browser about a rename made by another process", async () => {
+    const key = randomBytes(32);
+    const path = join(tmpdir(), `boxaide-rename-${randomBytes(6).toString("hex")}.db`);
+    const serveStore = new Store(key, path);
+    const mcpStore = new Store(key, path);
+    const serve = new AgentChannel(serveStore);
+    const mcp = new AgentChannel(mcpStore);
+    try {
+      const chat = serve.post({ role: "user", text: "chase the March invoices" }).chatId;
+      let frames = 0;
+      // The SSE route subscribes to both; turns are what starts the poll.
+      serve.subscribe(() => {});
+      serve.subscribeChats(() => {
+        frames += 1;
+      });
+
+      expect(mcp.nameChat(chat, "March invoice chase")).toBe(true);
+      const deadline = Date.now() + 5_000;
+      while (frames === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(frames).toBeGreaterThan(0);
+      expect(serve.chats()[0].title).toBe("March invoice chase");
+    } finally {
+      serve.close();
+      mcp.close();
+      serveStore.close();
+      mcpStore.close();
+      for (const suffix of ["", "-wal", "-shm"]) {
+        if (existsSync(`${path}${suffix}`)) unlinkSync(`${path}${suffix}`);
+      }
+    }
   });
 });
 

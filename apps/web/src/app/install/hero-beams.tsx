@@ -105,6 +105,8 @@ export function HeroBeams() {
         </mask>
       </defs>
 
+      {/* The mask carries the void the icon sits in, so the field never draws
+          over the words. */}
       <g
         mask="url(#mailmux-beams)"
         fill="none"
@@ -120,6 +122,7 @@ export function HeroBeams() {
             opacity={beam.accent ? beam.accent : beam.opacity}
           />
         ))}
+
       </g>
     </svg>
   );

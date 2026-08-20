@@ -23,8 +23,12 @@ outreach engine with human approval. All free, MIT, fully local. No sync.
    (`src/crypto/secrets.ts`), suffix `_enc`. Contact identity fields (email,
    name, org name/domain) stay plaintext — they are needed for UNIQUE and
    search and are CRM data, not mail bodies.
-4. **One automation agent at a time.** Automation runs are serialized in a
-   queue. A run that is still going when the next fires makes the next wait.
+4. **Bounded concurrent automation runs.** At most `BOXAIDE_AGENT_CONCURRENCY`
+   runs are alive at once (default 2, hard cap 4), and never two of the same
+   automation — a run still going when its own cron fires makes that one wait,
+   while other automations proceed. The interactive chat agent has its own
+   slot: it neither waits for runs nor holds them up. Each run works in its own
+   directory, removed when it ends.
 5. **Send throttling is server-side.** Approved outreach sends respect a
    per-account daily cap (`BOXAIDE_SEND_DAILY_CAP`, default 50) and a minimum
    gap of 60s with jitter between engine-driven sends.
@@ -79,7 +83,7 @@ src/crm/service.ts        CrmService                   mail → contacts/interac
 src/crm/tools.ts          CRM_TOOLS + dispatchCrmTool  MCP surface
 src/crm/routes.ts         registerCrmRoutes(app, deps) REST under /api/crm/*
 src/automation/store.ts   AutomationStore(db, masterKey)
-src/automation/scheduler.ts AutomationScheduler        cron eval + serialized runs
+src/automation/scheduler.ts AutomationScheduler        cron eval + concurrent runs
 src/automation/tools.ts   AUTOMATION_TOOLS + dispatchAutomationTool
 src/automation/routes.ts  registerAutomationRoutes(app, deps)
 src/outreach/store.ts     OutreachStore(db, masterKey)
@@ -202,6 +206,7 @@ CREATE TABLE IF NOT EXISTS automations (
   cron TEXT NOT NULL,             -- 5-field cron, validated with cron-parser
   prompt TEXT NOT NULL,           -- agent instructions; user-authored, plaintext
   agent_id TEXT,                  -- launcher AgentSpec id; null = first available
+  model TEXT,                     -- model id that CLI offers; null = its own default
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   last_run_at TEXT,
@@ -214,32 +219,102 @@ CREATE TABLE IF NOT EXISTS automation_runs (
   finished_at TEXT,
   status TEXT NOT NULL,           -- 'running' | 'ok' | 'error' | 'killed'
   exit_code INTEGER,
-  log_enc TEXT                    -- captured stdout+stderr, truncated to 64 KiB
+  log_enc TEXT                    -- run log, truncated to 64 KiB, tail kept
 );
 ```
 
 Scheduler (`AutomationScheduler`):
 - `cron-parser` (add to root package.json dependencies) computes
   `next_run_at`. A 30s interval finds due enabled automations and pushes them
-  onto an in-process FIFO. One run executes at a time (invariant 4).
-- A run spawns a one-shot headless CLI agent. Extend `AgentLauncher`
-  (`src/agent/launcher.ts`) with a `runOnce` path: same binary resolution,
+  onto an in-process FIFO. The FIFO dispatches while the launcher has capacity
+  and stops when it is full; a finishing run dispatches whatever was waiting,
+  so a queue longer than the capacity keeps moving without waiting for the next
+  tick (invariant 4).
+- Two gates, both required. The FIFO orders work inside one process;
+  `AutomationStore.claimRun` holds the cross-process lock, refusing a second
+  run of the same automation outright and then refusing anything past the
+  concurrency cap. Both counts and the insert are one IMMEDIATE transaction.
+- A drain already in progress is not restarted; one more pass is chained onto
+  it so work enqueued while it was finishing is not stranded until the next
+  tick. One pass, never a loop — a run another process deferred leaves the
+  queue non-empty with slots free here, and looping on that would retry the
+  claim as fast as SQLite could answer.
+- `scheduler.idle()` resolves when nothing is running or queued, and returns
+  early when nothing is in flight and no drain is under way: what is left is
+  waiting on another process, and no amount of waiting here would free it. `tick()` and
+  `runNow()` return once runs are *started*, so anything needing a finished
+  result waits on `idle()`.
+- A run spawns a one-shot headless CLI agent. `AgentLauncher`
+  (`src/agent/launcher.ts`) owns the `runOnce` path: same binary resolution,
   same MCP wiring, but prompt = the automation's prompt plus a fixed preamble
-  (below), no chat loop, capture stdout/stderr into the run row, 15-minute
-  hard timeout then SIGKILL and status 'killed'. `runOnce` must not disturb
-  the interactive chat agent: when a chat agent is running, queue behind it.
+  (below), and no chat loop. `runOnce` takes the run row's id: it keys the live
+  run for `killRun(id)` and names the run's own working directory.
+- `close()` is final. Every spawn path checks it, including after the model
+  lookup in `start()` — shutdown clears the chat slot, so the idle check alone
+  would let a launch suspended there spawn an agent nobody owns.
+- Runs do not disturb the chat agent and are not disturbed by it. The launcher
+  keeps the chat slot and the run slots apart, so Start never fails because the
+  schedule is busy, and the schedule never stalls behind a chat session.
+- Each run gets `<dataDir>-agents/workdir/runs/<runId>`, removed when the run
+  ends and swept at startup past `RUN_WORKDIR_STALE_MS` for the ones a crash
+  left behind. Age is the sweep's test, not ownership, because a second process
+  over the same data directory may have a run in flight.
+- Grok's config home lives inside that per-run directory: its
+  `trusted_folders.toml` names the working directory, so a shared home would
+  have runs untrusting each other. Claude's `CLAUDE_CONFIG_DIR` stays shared —
+  it accumulates state the CLI owns, and an empty home would make every run a
+  first run — so every write into it is staged under a temporary name and
+  renamed, which is atomic.
+- Run log: a spec whose `runArgs` ask for an event stream (`claude` adds
+  `--output-format stream-json --verbose`) also carries a `renderRunLine`, and
+  the log stores that rendering — session start, assistant text, `[tool]`
+  lines, result and errors — plus raw stderr, which stays raw because a crash
+  writes plain text there. Specs without a stream store raw captured
+  stdout+stderr. Either way the log is truncated to 64 KiB, tail kept: a run
+  that failed says why in its last lines.
+- Three kill paths, all SIGKILL, each appending a note to the log so a killed
+  run is never empty:
+  - First-output watchdog (`ONESHOT_FIRST_OUTPUT_TIMEOUT_MS`, 2 min): a streaming run
+    that writes no stdout at all in the window never started, so it is ended
+    early with status 'error'. First stdout disarms the timer — a healthy
+    Claude session prints its start line within seconds, and a gap after that
+    is a long tool, not a hang. A wedge after startup waits for the deadline.
+    stderr does not feed it, because startup noise is not the agent speaking.
+    Non-streaming specs print nothing until the end and get no watchdog.
+  - Hard deadline (`ONESHOT_TIMEOUT_MS`, 15 min): status 'killed'.
+  - Manual stop (`killRun`, from the UI): status 'killed'.
+- Run duration is the honest one: the launcher resolves on stream close, or
+  `ONESHOT_CLOSE_GRACE_MS` (2 s) after process exit when a leftover grandchild
+  still holds a pipe open. A 15-minute timeout reports about 15 minutes.
+- The `claude` CLI runs under an isolated config home — `CLAUDE_CONFIG_DIR`
+  set to `<dataDir>-agents/agent-homes/claude` — mirroring grok's isolated
+  `GROK_HOME`. `--strict-mcp-config` only covers MCP servers; the isolated
+  home is what keeps the user's personal hooks, skills, output styles and
+  subagents out of a process Boxaide is responsible for. Credentials are
+  copied in per launch and auth-relevant settings keys (`env`, `apiKeyHelper`)
+  are carried over; hooks are not. Applies to chat and scheduled runs alike —
+  the isolation is about whose config runs, not which path.
 - Run preamble (verbatim, prepended to every automation prompt):
   "You are a scheduled Boxaide automation. Do the task below using the Boxaide
   MCP tools, then exit. You cannot talk to the user: do not call chat tools;
   write nothing to the user. Never send email: queue outreach with
   outbox_queue_draft or save with draft_create and a human will review."
-- Pre-approved tools for runs: everything in
-  `PREAPPROVED_TOOL_NAMES` (minus the four chat tools) plus all CRM tools,
-  all automation *read* tools (`automations_list`, `automation_runs_list`),
-  and outreach tools except approval (which has no tool anyway):
-  never `message_send`.
+- Tools for runs: the `run` scope in `src/mcp/scope.ts` — mail reads and
+  drafts, all CRM tools, automation *read* tools (`automations_list`,
+  `automation_runs_list`), outreach tools, calendar reads, and no chat tool at
+  all. `message_send`, `meeting_create` and `meeting_cancel` are in the scope
+  and perform nothing: a run may ask, the request is stored, and the user
+  approves it in the Agent view when they are next at the window — see
+  `src/agent/approvals.ts`. The scope is enforced by the MCP server against the
+  token the run carries, not by the CLI's flags; a CLI that offers an allowlist
+  flag is additionally given the same list.
 - Web access: the CLI's own web tools stay at the CLI's defaults; we do not
   grant or deny them (Claude's headless default allows read-only search).
+- File access: a run is confined to its own directory and its CLI's own
+  installation and credentials — `workspace` in `src/agent/sandbox.ts`. Nobody
+  is watching a scheduled run and the mail it reads was written by strangers,
+  so there is no per-run opt-out; `BOXAIDE_AGENT_ACCESS=full` turns it off for
+  the install, and a machine with no sandbox runs unconfined and reports it.
 
 ### OutreachStore
 
@@ -398,9 +473,11 @@ CRM (`src/crm/tools.ts`):
 - `crm_deal_delete` { dealId }
 
 Automations (`src/automation/tools.ts`):
-- `automation_create` { name, cron, prompt, agentId? } — description must say:
+- `automation_create` { name, cron, prompt, agentId?, model? } — description must say:
   write the prompt as instructions to a future agent run; validate cron.
-- `automation_update` { automationId, name?, cron?, prompt?, agentId?, enabled? }
+- `automation_update` { automationId, name?, cron?, prompt?, agentId?, model?,
+  enabled? } — changing `agentId` alone clears the stored model: a model id
+  belongs to one CLI.
 - `automation_delete` { automationId }
 - `automations_list` {}
 - `automation_run_now` { automationId } — enqueue immediately.

@@ -2,9 +2,10 @@
  * Boxaide desktop shell.
  *
  * The whole app is the Boxaide server started in this process plus a window
- * pointed at it. Because the window loads `http://127.0.0.1:<port>`, the page
- * is same-origin with the API: `/api/local-bootstrap` works exactly as it does
- * in a browser, so the token never has to be shown to the user.
+ * pointed at it. The window receives a one-time capability in its URL fragment
+ * and exchanges that for the server token. HTTP never receives fragments, so
+ * another local process cannot impersonate the desktop renderer merely by
+ * calling loopback.
  *
  * There is no preload script and no IPC. The renderer is the same static page
  * the browser gets, and it gets no Electron surface at all. That is also why
@@ -19,10 +20,12 @@ import {
   Menu,
   nativeImage,
   Notification,
+  powerMonitor,
   screen,
   shell,
   Tray,
 } from "electron";
+import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,6 +64,22 @@ const dockIconPng = join(here, "..", "build", "icon-dock.png");
 const webRoot = app.isPackaged
   ? join(process.resourcesPath, "web-next")
   : join(here, "..", "server", "web-next");
+
+/**
+ * The EventKit helper the server spawns to read this Mac's calendars.
+ *
+ * The server has no Electron import and so cannot know `process.resourcesPath`;
+ * the shell is the only thing that knows where its own bundle is, so the path
+ * is handed over with the rest of the configuration below. macOS only —
+ * elsewhere nothing is packed and the server reports the local calendar as
+ * unavailable, which is the truth.
+ */
+const calendarHelperPath =
+  process.platform === "darwin"
+    ? app.isPackaged
+      ? join(process.resourcesPath, "boxaide-calendar")
+      : join(here, "..", "build", "boxaide-calendar")
+    : undefined;
 
 /** @type {BrowserWindow | null} */
 let win = null;
@@ -105,6 +124,7 @@ let stagedUpdate = null;
  * @type {{
  *   check: () => Promise<void>,
  *   checkAndDownload: () => Promise<void>,
+ *   checkIfStale: (maxAgeMs?: number) => Promise<void>,
  *   state: () => { status: string, currentVersion: string, latestVersion: string | null, error: string | null },
  * } | null}
  */
@@ -128,9 +148,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("activate", () => {
-    if (serverUrl && BrowserWindow.getAllWindows().length === 0) {
-      createWindow(serverUrl);
-    }
+    if (serverUrl) openMainWindow();
   });
 
   // Quitting is held open once, long enough to close the SQLite handle and log
@@ -180,6 +198,7 @@ async function start() {
     app.dock?.setIcon(nativeImage.createFromPath(dockIconPng));
   }
   const { startServer } = await import("../server/dist/app.js");
+  const bootstrapCapability = randomBytes(32).toString("base64url");
   // host is pinned rather than read from BOXAIDE_HOST: a desktop app that binds
   // a non-loopback address would put decrypted mail credentials on the LAN.
   // Everything else — port, ~/.boxaide, the bearer token, the master key — is
@@ -196,20 +215,28 @@ async function start() {
     // compiled server inside the asar. Same number today; this is the one the
     // OS and Squirrel agree on.
     appVersion: app.getVersion(),
+    bootstrapCapability,
+    calendarHelperPath,
   });
   stopServer = started.stop;
   serverUrl = started.url;
   updateService = started.runtime.update;
   createAppMenu();
-  createWindow(started.url);
+  createWindow(
+    started.url,
+    `#bootstrap=${encodeURIComponent(bootstrapCapability)}`,
+  );
   // Menu bar presence is macOS-scoped for now: that is where "glance at your
   // mail and your agents without the window" was asked for, and where the
   // template-image rendering below is known-correct.
   if (process.platform === "darwin") createTray(started.url);
   // The token is right here in the runtime config — the same file-backed bearer
-  // token the page picks up from /api/local-bootstrap — so the main process
-  // reads it directly rather than going through the renderer.
-  if (!smoke) startBadgePoll(started.url, started.runtime.config.bearerToken);
+  // token the page obtains through its one-time bootstrap capability — so the
+  // main process reads it directly rather than going through the renderer.
+  if (!smoke) {
+    startBadgePoll(started.url, started.runtime.config.bearerToken);
+    watchForStaleUpdate();
+  }
 }
 
 /**
@@ -241,9 +268,10 @@ let notifiedReadyFor = null;
  * release. Both files must be on the release for any of this to work —
  * scripts/ship.sh uploads them beside the dmg.
  *
- * Downloading is never automatic. The update is tens of megabytes over
- * somebody's connection, and it lands as a restart; both are the user's call,
- * made in the sidebar.
+ * The service starts the download as soon as a check finds a newer build.
+ * `autoDownload` stays off so electron-updater does not start a second
+ * transfer on a re-check. Restart stays a button; quit still applies a
+ * staged build.
  */
 function createUpdateDriver() {
   autoUpdater.autoDownload = false;
@@ -299,7 +327,12 @@ function createUpdateDriver() {
       // Close both before the process is replaced, then quit for real:
       // `quitAndInstall` runs the Squirrel handoff that `app.exit` skips.
       void shutdownServer().finally(() => {
-        autoUpdater.quitAndInstall(false, true);
+        try {
+          autoUpdater.quitAndInstall(false, true);
+        } catch (err) {
+          console.error("quit and install failed", err);
+          app.exit(0);
+        }
       });
     },
   };
@@ -334,6 +367,16 @@ function announceReady(version) {
   notifiedReadyFor = version;
   if (!Notification.isSupported()) return;
   notify(`Boxaide ${version} is ready`, "Restart to finish updating.");
+}
+
+/**
+ * Sleep and Cmd-Tab are the moments a 15-minute poll is the wrong clock.
+ * The service drops a check that ran in the last minute.
+ */
+function watchForStaleUpdate() {
+  powerMonitor.on("resume", () => {
+    void updateService?.checkIfStale();
+  });
 }
 
 /* ---- approval badge ------------------------------------------------------ */
@@ -854,6 +897,11 @@ function createWindow(url, hash) {
   win.on("closed", () => {
     win = null;
   });
+  if (!smoke) {
+    win.on("focus", () => {
+      void updateService?.checkIfStale();
+    });
+  }
 
   // Mail contains links. Anything that is not this server opens in the user's
   // real browser; nothing else gets an Electron window.

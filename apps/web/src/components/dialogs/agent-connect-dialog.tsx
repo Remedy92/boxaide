@@ -6,8 +6,10 @@ import { CopyBlock, SectionLabel, Spinner, StatusDot } from "@/components/atoms"
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -76,12 +78,8 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
 
   return (
     <Dialog open onOpenChange={onOpenChange}>
-      {/* Header and footer are fixed; only the middle scrolls, so "Done" is
-          always on screen and overflowing content slides under it. The dialog's
-          own padding moves onto the three bands so the scrollbar and the footer
-          rule both span the full width. */}
-      <DialogContent className="flex max-h-[86vh] max-w-[560px] flex-col gap-0 overflow-hidden p-0">
-        <div className="flex shrink-0 flex-col gap-4 p-5 pb-0">
+      <DialogContent className="max-w-[560px]">
+        <div className="flex shrink-0 flex-col gap-4">
           <DialogHeader>
             <DialogTitle className="title-15">Connect your agent</DialogTitle>
             <DialogDescription>
@@ -95,7 +93,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
           <div
             role="tablist"
             aria-label="Agent client"
-            className="flex flex-wrap gap-1 border-b border-border-subtle pb-2"
+            className="-mx-(--dialog-px) flex flex-wrap gap-1 border-b border-border-subtle px-(--dialog-px) pb-2"
             onKeyDown={(event) => {
               const delta =
                 event.key === "ArrowRight"
@@ -145,8 +143,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
           </div>
         </div>
 
-        {/* The only scrolling element. `pane-scroll` styles its scrollbar. */}
-        <div className="pane-scroll min-h-0 flex-1 space-y-4 overflow-y-auto p-5 [&>*]:min-w-0">
+        <DialogBody>
           <div
             role="tabpanel"
             id={`agent-panel-${target.id}`}
@@ -269,11 +266,10 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
               )}
             </div>
           </div>
-        </div>
+        </DialogBody>
 
-        {/* Pinned: never scrolls away, never disabled. The matching background
-            and top rule make content visibly pass underneath it. */}
-        <div className="flex shrink-0 justify-end border-t border-border-subtle bg-surface-2 p-5">
+        {/* Never disabled: whatever else fails, the dialog can be dismissed. */}
+        <DialogFooter>
           <Button
             type="button"
             onClick={() => {
@@ -283,7 +279,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
           >
             Done
           </Button>
-        </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

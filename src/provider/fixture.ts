@@ -87,6 +87,10 @@ export class FixtureProvider implements MailProvider {
         hasAttachments: m.hasAttachments ?? false,
         bodyText: m.bodyText ?? `Body for: ${m.subject}`,
         bodyHtml: m.bodyHtml,
+        // Carried through so a seeded iMIP part survives to getMessage. The
+        // field only ever exists on a full read, which is exactly what a test
+        // exercising the RSVP scanner needs to seed.
+        calendar: m.calendar,
         accountEmail: email,
       });
       uid += 1;

@@ -3,7 +3,7 @@
  * Surface: docs/specs/agent-platform.md (REST surface).
  */
 import type { Hono } from "hono";
-import { MAX_LIMIT } from "../api/routes.js";
+import { MAX_LIST_LIMIT as MAX_LIMIT, parseListLimit } from "../input-limits.js";
 import type { Platform } from "../platform.js";
 
 /** Every write here can fail on a bad cron or a duplicate name: 400, not 500. */
@@ -12,11 +12,7 @@ function badRequest(err: unknown): string {
 }
 
 function parseLimit(raw: string | undefined): number | null {
-  if (raw === undefined || raw === "") return 20;
-  if (!/^\d+$/.test(raw)) return null;
-  const limit = Number(raw);
-  if (limit < 1 || limit > MAX_LIMIT) return null;
-  return limit;
+  return parseListLimit(raw, 20);
 }
 
 export function registerAutomationRoutes(app: Hono, platform: Platform): void {
@@ -30,6 +26,7 @@ export function registerAutomationRoutes(app: Hono, platform: Platform): void {
       cron?: string;
       prompt?: string;
       agentId?: string | null;
+      model?: string | null;
       enabled?: boolean;
     };
     try {
@@ -46,6 +43,7 @@ export function registerAutomationRoutes(app: Hono, platform: Platform): void {
         cron: body.cron,
         prompt: body.prompt,
         agentId: body.agentId ?? null,
+        model: body.model ?? null,
         enabled: body.enabled,
       });
       return c.json({ automation }, 201);
@@ -71,6 +69,14 @@ export function registerAutomationRoutes(app: Hono, platform: Platform): void {
             ? undefined
             : typeof body.agentId === "string"
               ? body.agentId
+              : null,
+        // Same three-way read as agentId: absent leaves it alone, a string
+        // sets it, and an explicit null is how a caller says "CLI default".
+        model:
+          body.model === undefined
+            ? undefined
+            : typeof body.model === "string"
+              ? body.model
               : null,
         enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
       });

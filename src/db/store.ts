@@ -23,6 +23,39 @@ export type StoredAccount = {
 };
 
 /**
+ * An action an agent asked for and a human has not answered yet.
+ *
+ * Sending mail and putting a meeting in somebody's calendar are the two things
+ * an agent does that another person sees immediately, and the agent decided to
+ * do them after reading text strangers wrote. So a launched agent never
+ * performs one: it asks, the row lands here, and Boxaide carries it out only
+ * once the user says yes. That is why `args` is stored rather than a summary —
+ * this row IS the action, and nothing re-derives it later from a description.
+ *
+ * `args_enc` holds mail content and attendee addresses, so it is encrypted
+ * with the same master key the account passwords use.
+ */
+export type StoredApproval = {
+  id: string;
+  /** The tool the agent asked for: message_send, meeting_create, meeting_cancel. */
+  tool: string;
+  /** Exactly the arguments the agent passed, replayed verbatim on approval. */
+  args: Record<string, unknown>;
+  /** Which launch asked. `chat`, `driven` or `run` — see src/mcp/scope.ts. */
+  profile: string;
+  /** MCP client name, when the caller gave one. */
+  agent: string | null;
+  /** The conversation it was asked in. Null for a scheduled run. */
+  chatId: string | null;
+  askedAt: string;
+  /** Null while it is still waiting. */
+  decidedAt: string | null;
+  state: "pending" | "approved" | "denied" | "failed";
+  /** Set once carried out or refused: what happened, in the user's words. */
+  outcome: string | null;
+};
+
+/**
  * One turn of the agent conversation.
  *
  * `activity` is the agent narrating what it is doing ("reading 12 messages in
@@ -84,10 +117,39 @@ export type StoredChat = {
   turns: number;
   /** Bytes of encrypted turn text. What the budget counts. */
   bytes: number;
+  /** Who the current title came from. See TitleSource. */
+  titleSource: TitleSource;
 };
+
+/**
+ * Where a chat's title came from, and therefore who may replace it.
+ *
+ * The three are ranked, and a title may only be replaced by one that ranks
+ * above it: "auto" < "agent" < "user". A guess made from the first line the
+ * user typed gives way to a name the agent wrote after reading the exchange;
+ * neither overwrites a name the user typed themselves.
+ */
+export type TitleSource = "auto" | "agent" | "user";
+
+const TITLE_RANK: Record<TitleSource, number> = { auto: 0, agent: 1, user: 2 };
+
+/** Reads the column back. Anything unrecognised is treated as the user's own. */
+function toTitleSource(raw: string | null): TitleSource {
+  return raw === "auto" || raw === "agent" ? raw : "user";
+}
 
 /** What unclaimUserTurn did. The channel decides what the UI should say. */
 export type UnclaimResult = "released" | "dead_lettered" | "acked" | "missing";
+
+/**
+ * A chat's CLI session, as the driver about to prompt sees it.
+ *
+ * `id` is null when there is no session for this agent yet. `epoch` is the
+ * chat's session generation, and it comes back either way: the driver hands it
+ * to `saveChatSession`, which refuses a write from a turn that started before
+ * somebody dropped the session it was using.
+ */
+export type ChatSession = { id: string | null; epoch: number };
 
 /**
  * Times a user turn may be leased without an answer. The next expiry after
@@ -95,6 +157,21 @@ export type UnclaimResult = "released" | "dead_lettered" | "acked" | "missing";
  * hiccup; this is "a few tries", then the same warning as before.
  */
 export const MAX_DELIVERIES = 3;
+
+/**
+ * How long a queued user message stays worth answering.
+ *
+ * A message waits on the queue until an agent asks for one, and nothing used to
+ * put a floor under that wait. Start an agent the next morning and it was
+ * handed last night's question first, ahead of the one the user had just typed
+ * — and because a launch requeues dropped messages, the same backlog came back
+ * every time. The window is what makes a quiet evening cost one evening.
+ *
+ * Twelve hours, so it never cuts across a working session. An agent can hold a
+ * single message for a long tool run, and a user can leave a question queued
+ * over lunch; both stay inside this. What falls outside it is yesterday.
+ */
+export const USER_TURN_TTL_MS = 12 * 60 * 60 * 1000;
 
 type TurnRow = {
   seq: number;
@@ -108,6 +185,19 @@ type TurnRow = {
   deliveryCount: number;
 };
 
+type ApprovalRow = {
+  id: string;
+  tool: string;
+  argsEnc: string;
+  profile: string;
+  agent: string | null;
+  chatId: string | null;
+  askedAt: string;
+  decidedAt: string | null;
+  state: StoredApproval["state"];
+  outcome: string | null;
+};
+
 type ChatRow = {
   id: string;
   titleEnc: string;
@@ -118,10 +208,14 @@ type ChatRow = {
   active: number;
   turns: number;
   bytes: number;
+  titleSource: string | null;
 };
 
 /** Title a chat carries until its first message renames it. */
 const UNTITLED = "New chat";
+
+/** What pre-chat history was called before chats had names of their own. */
+const MIGRATED = "Conversation";
 
 export class Store {
   static readonly MAX_DELIVERIES = MAX_DELIVERIES;
@@ -217,6 +311,28 @@ export class Store {
       );
     }
 
+    // Actions an agent asked a human to authorise. On disk, not in memory,
+    // because the case this exists for is a scheduled run at three in the
+    // morning: the agent that queued the action is long gone by the time
+    // anybody reads it, and a restart in between must not lose the request.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_approvals (
+        id TEXT PRIMARY KEY,
+        tool TEXT NOT NULL,
+        args_enc TEXT NOT NULL,
+        profile TEXT NOT NULL,
+        agent TEXT,
+        chat_id TEXT,
+        asked_at TEXT NOT NULL,
+        decided_at TEXT,
+        state TEXT NOT NULL DEFAULT 'pending',
+        outcome TEXT
+      );
+    `);
+    this.db.exec(
+      `CREATE INDEX IF NOT EXISTS agent_approvals_state ON agent_approvals (state, asked_at)`,
+    );
+
     // Chats. `seq` stays a single global sequence across all of them — it is
     // the SSE resume cursor and the lease key, and per-chat numbering would
     // make both ambiguous. A chat is a scope over that sequence, not its own.
@@ -228,9 +344,70 @@ export class Store {
         updated_at TEXT NOT NULL,
         archived_at TEXT,
         trimmed INTEGER NOT NULL DEFAULT 0,
-        active INTEGER NOT NULL DEFAULT 0
+        active INTEGER NOT NULL DEFAULT 0,
+        title_source TEXT NOT NULL DEFAULT 'auto',
+        session_agent TEXT,
+        session_id TEXT,
+        session_epoch INTEGER NOT NULL DEFAULT 0
       );
     `);
+    // Chats that predate title_source. A name already on screen is left alone —
+    // the reader has been looking at it — so those settle as the user's own.
+    // The two placeholder names are the exception: nobody chose them, and they
+    // are the whole reason an agent gets to name a chat at all.
+    const chatCols = this.db
+      .prepare(`PRAGMA table_info(agent_chats)`)
+      .all() as Array<{ name: string }>;
+    if (!chatCols.some((c) => c.name === "title_source")) {
+      this.db.transaction(() => {
+        this.db.exec(
+          `ALTER TABLE agent_chats ADD COLUMN title_source TEXT NOT NULL DEFAULT 'user'`,
+        );
+        for (const row of this.db
+          .prepare(`SELECT id, title_enc as titleEnc FROM agent_chats`)
+          .all() as Array<{ id: string; titleEnc: string }>) {
+          // A title this key cannot read is not a title anybody is reading,
+          // and a wrong key or one corrupt row must not stop the app from
+          // starting: mail does not depend on any of this. The row keeps the
+          // settled default and the migration carries on.
+          let title: string;
+          try {
+            title = decryptSecret(this.masterKey, row.titleEnc);
+          } catch {
+            continue;
+          }
+          if (title !== UNTITLED && title !== MIGRATED) continue;
+          this.db
+            .prepare(`UPDATE agent_chats SET title_source = 'auto' WHERE id = ?`)
+            .run(row.id);
+        }
+      })();
+    }
+    // The CLI session each chat resumes. Two columns rather than one, because a
+    // session id only means anything to the CLI that issued it: an id Claude
+    // Code wrote is not one OpenCode can resume, and handing it over would fail
+    // every turn of that chat until somebody cleared it.
+    //
+    // Plain text, unlike the title beside it. A session id is the CLI's own
+    // identifier for a transcript it already holds on disk; it carries no user
+    // content, and encrypting it would only make the column unreadable to the
+    // process that has to hand it back verbatim.
+    //
+    // `session_epoch` is what makes a save safe to land late. A turn reads the
+    // epoch when it starts and hands it back when it saves; anything that drops
+    // the session in between bumps it, and the save is refused. Without it a
+    // chat cleared while the agent was still answering would have its old
+    // session written straight back, and the next message would resume the
+    // history the user had just emptied.
+    if (!chatCols.some((c) => c.name === "session_id")) {
+      this.db.exec(`ALTER TABLE agent_chats ADD COLUMN session_agent TEXT`);
+      this.db.exec(`ALTER TABLE agent_chats ADD COLUMN session_id TEXT`);
+    }
+    if (!chatCols.some((c) => c.name === "session_epoch")) {
+      this.db.exec(
+        `ALTER TABLE agent_chats ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0`,
+      );
+    }
     if (!turnCols.some((c) => c.name === "chat_id")) {
       this.db.exec(`ALTER TABLE agent_turns ADD COLUMN chat_id TEXT`);
     }
@@ -249,10 +426,11 @@ export class Store {
       const at = new Date().toISOString();
       this.db
         .prepare(
-          `INSERT INTO agent_chats (id, title_enc, created_at, updated_at, active)
-           VALUES (?, ?, ?, ?, 1)`,
+          `INSERT INTO agent_chats (id, title_enc, created_at, updated_at, active,
+                                    title_source)
+           VALUES (?, ?, ?, ?, 1, 'auto')`,
         )
-        .run(id, encryptSecret(this.masterKey, "Conversation"), at, at);
+        .run(id, encryptSecret(this.masterKey, MIGRATED), at, at);
       this.db
         .prepare(`UPDATE agent_turns SET chat_id = ? WHERE chat_id IS NULL`)
         .run(id);
@@ -273,7 +451,7 @@ export class Store {
       .prepare(
         `SELECT c.id, c.title_enc as titleEnc, c.created_at as createdAt,
                 c.updated_at as updatedAt, c.archived_at as archivedAt,
-                c.trimmed, c.active,
+                c.trimmed, c.active, c.title_source as titleSource,
                 COUNT(t.seq) as turns,
                 COALESCE(SUM(LENGTH(t.text_enc)), 0) as bytes
          FROM agent_chats c
@@ -291,7 +469,7 @@ export class Store {
       .prepare(
         `SELECT c.id, c.title_enc as titleEnc, c.created_at as createdAt,
                 c.updated_at as updatedAt, c.archived_at as archivedAt,
-                c.trimmed, c.active,
+                c.trimmed, c.active, c.title_source as titleSource,
                 COUNT(t.seq) as turns,
                 COALESCE(SUM(LENGTH(t.text_enc)), 0) as bytes
          FROM agent_chats c
@@ -308,10 +486,14 @@ export class Store {
     const at = new Date().toISOString();
     this.db.transaction(() => {
       this.db.prepare(`UPDATE agent_chats SET active = 0`).run();
+      // The source is written rather than defaulted: the column's default is
+      // 'user' on databases that gained it by ALTER, and a new chat is not
+      // named by anybody.
       this.db
         .prepare(
-          `INSERT INTO agent_chats (id, title_enc, created_at, updated_at, active)
-           VALUES (?, ?, ?, ?, 1)`,
+          `INSERT INTO agent_chats (id, title_enc, created_at, updated_at, active,
+                                    title_source)
+           VALUES (?, ?, ?, ?, 1, 'auto')`,
         )
         .run(id, encryptSecret(this.masterKey, title), at, at);
     })();
@@ -360,17 +542,74 @@ export class Store {
     return true;
   }
 
-  renameChat(id: string, title: string): boolean {
+  /**
+   * Names a chat, if the caller outranks whoever named it last.
+   *
+   * False means the title stood: either the chat is gone, or a better-ranked
+   * source already named it. Callers treat that as normal — the agent offering
+   * a name for a chat the user has already named is the expected case, not an
+   * error.
+   */
+  renameChat(id: string, title: string, source: TitleSource = "user"): boolean {
+    const current = this.titleSource(id);
+    if (current === null) return false;
+    if (TITLE_RANK[source] < TITLE_RANK[current]) return false;
+    // Equal rank is a re-name by the same kind of caller. The user may do that
+    // as often as they like, and the derived title is re-derived under a guard
+    // of its own; the agent gets one go, so the list stops moving once it has
+    // a name written from the conversation.
+    if (source === "agent" && current === "agent") return false;
     const res = this.db
-      .prepare(`UPDATE agent_chats SET title_enc = ? WHERE id = ?`)
-      .run(encryptSecret(this.masterKey, title), id);
+      .prepare(`UPDATE agent_chats SET title_enc = ?, title_source = ? WHERE id = ?`)
+      .run(encryptSecret(this.masterKey, title), source, id);
     return res.changes > 0;
   }
 
-  /** True while the chat still carries the title it was created with. */
+  /**
+   * A value that changes whenever the chat list would look different.
+   *
+   * The turn stream crosses processes on its own — every turn is a row with a
+   * sequence — but a rename writes no row, so `boxaide mcp` naming a chat is
+   * invisible to the browser attached to `boxaide serve`. This is what the
+   * poll compares to notice it. `title_enc` earns its place here: encryption
+   * uses a fresh nonce every time, so re-encrypting the same title still
+   * changes the string, and a rename cannot slip past unnoticed.
+   */
+  chatsFingerprint(): string {
+    const rows = this.db
+      .prepare(
+        `SELECT id, title_enc as titleEnc, archived_at as archivedAt, active
+         FROM agent_chats ORDER BY id`,
+      )
+      .all() as Array<{
+      id: string;
+      titleEnc: string;
+      archivedAt: string | null;
+      active: number;
+    }>;
+    return rows
+      .map((r) => `${r.id}:${r.titleEnc.slice(0, 16)}:${r.archivedAt ?? ""}:${r.active}`)
+      .join("|");
+  }
+
+  /** Who named this chat, or null when there is no such chat. */
+  titleSource(id: string): TitleSource | null {
+    const row = this.db
+      .prepare(`SELECT title_source as titleSource FROM agent_chats WHERE id = ?`)
+      .get(id) as { titleSource: string | null } | undefined;
+    return row ? toTitleSource(row.titleSource) : null;
+  }
+
+  /**
+   * True while the chat carries a placeholder name rather than one of its own.
+   *
+   * "Conversation" counts. It is the name pre-chat history was migrated under,
+   * and it says as little about that history as "New chat" does.
+   */
   isUntitled(id: string): boolean {
     const chat = this.getChat(id);
-    return chat?.title === UNTITLED;
+    if (!chat) return false;
+    return chat.title === UNTITLED || chat.title === MIGRATED;
   }
 
   /**
@@ -399,6 +638,87 @@ export class Store {
       const res = this.db.prepare(`DELETE FROM agent_chats WHERE id = ?`).run(id);
       return res.changes > 0;
     })();
+  }
+
+  /**
+   * Whether a user turn is still there to be answered.
+   *
+   * False once the chat was emptied or deleted under the agent that was working
+   * on it. A turn takes minutes, and the user is free to clear the conversation
+   * inside that window — the question the answer belongs to is simply gone.
+   */
+  answerable(seq: number, chatId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 as hit FROM agent_turns
+         WHERE seq = ? AND chat_id = ? AND role = 'user'`,
+      )
+      .get(seq, chatId) as { hit: number } | undefined;
+    return row !== undefined;
+  }
+
+  /**
+   * The CLI session this chat resumes, for the agent that is asking, and the
+   * epoch that answer is good for.
+   *
+   * A null id for another agent's session: the id would be meaningless to this
+   * CLI, and a chat switched from one agent to another has to start a session
+   * rather than fail every turn on one it cannot find. The epoch is returned
+   * either way — the caller needs it to save whatever session it does end up
+   * using, and it belongs to the chat rather than to any one agent's id.
+   */
+  chatSession(chatId: string, agent: string): ChatSession {
+    const row = this.db
+      .prepare(
+        `SELECT session_agent as sessionAgent, session_id as sessionId,
+                session_epoch as epoch
+         FROM agent_chats WHERE id = ?`,
+      )
+      .get(chatId) as
+      | { sessionAgent: string | null; sessionId: string | null; epoch: number }
+      | undefined;
+    if (!row) return { id: null, epoch: 0 };
+    return {
+      id: row.sessionAgent === agent ? (row.sessionId ?? null) : null,
+      epoch: row.epoch,
+    };
+  }
+
+  /**
+   * Remembers which session a chat is living in. On disk, not in the driver:
+   * the agent workdir is stable, so the CLI's transcript outlives the process
+   * that made it, and a restarted agent that forgot the id would answer the
+   * next message as a stranger.
+   *
+   * `epoch` is the one read when the turn started. A turn can be minutes long,
+   * and anything that dropped this chat's session while it ran — the user
+   * clearing the chat, a refused resume — moved the epoch on. Saving then would
+   * undo that, so the write is refused instead. Silently: the session is gone
+   * because somebody meant it to be gone, and the next turn starts a fresh one.
+   */
+  saveChatSession(
+    chatId: string,
+    agent: string,
+    sessionId: string,
+    epoch: number,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE agent_chats SET session_agent = ?, session_id = ?
+         WHERE id = ? AND session_epoch = ?`,
+      )
+      .run(agent, sessionId, chatId, epoch);
+  }
+
+  clearChatSession(chatId: string): void {
+    this.db
+      .prepare(
+        `UPDATE agent_chats
+         SET session_agent = NULL, session_id = NULL,
+             session_epoch = session_epoch + 1
+         WHERE id = ?`,
+      )
+      .run(chatId);
   }
 
   /** Bytes of encrypted turn text across every chat. What the budget counts. */
@@ -438,6 +758,7 @@ export class Store {
       active: row.active === 1,
       turns: row.turns,
       bytes: row.bytes,
+      titleSource: toTitleSource(row.titleSource),
     };
   }
 
@@ -531,25 +852,104 @@ export class Store {
   }
 
   /**
-   * The oldest user turn no agent is holding, marked as held in the same
+   * Puts every dropped user message back on the queue, and returns how many.
+   *
+   * Dropping used to be final. It was written for the message an agent cannot
+   * answer — the one that makes it fall over three times running — and for that
+   * message it is right: retrying forever is a loop nobody can stop.
+   *
+   * But the commonest reason a message is dropped has nothing to do with the
+   * message. It is an agent that could not run at all: signed out, out of
+   * quota, pointed at a model that no longer exists. Every delivery of every
+   * queued message burns against that, and what the user sees is their question
+   * marked "never answered" by an agent that never read it. So when a NEW agent
+   * starts, the count is reset and the question is asked again, instead of
+   * asking the user to retype what they already typed.
+   *
+   * To zero, not down by one: the three deliveries were spent on a process that
+   * no longer exists, and the agent replacing it deserves its own three. The
+   * cap still holds for the case it was written for — an agent that keeps
+   * failing on the same message drops it again, without a relaunch in between.
+   */
+  requeueDroppedUserTurns(now: number = Date.now()): number {
+    // Never back past the freshness window. Without this the requeue is what
+    // keeps a stale backlog alive: every launch would hand yesterday's
+    // questions back to the queue, including the ones expiry had just retired,
+    // and the two would trade the same rows for the life of the install.
+    const cutoff = new Date(now - USER_TURN_TTL_MS).toISOString();
+    const res = this.db
+      .prepare(
+        `UPDATE agent_turns SET delivered = 0, delivery_count = 0
+         WHERE role = 'user' AND delivered = 1 AND at >= ?
+           AND COALESCE(delivery_count, 0) >= ?
+           AND seq NOT IN (
+             SELECT reply_to FROM agent_turns
+             WHERE role = 'agent' AND reply_to IS NOT NULL
+           )`,
+      )
+      .run(cutoff, Store.MAX_DELIVERIES);
+    return res.changes;
+  }
+
+  /**
+   * Retires every queued user message that has gone stale, and says how many.
+   *
+   * A message with nobody listening waits on the queue, and until this existed
+   * it waited without end: start an agent a day later and the first thing it
+   * was handed was yesterday's question, in a chat the user had moved on from,
+   * while the message they had just typed sat behind it. The backlog survived
+   * every restart — dropping it only marked it, and the next launch requeued
+   * it — so one quiet evening poisoned every session after it.
+   *
+   * Retired, not deleted: the row is marked exactly as a dropped one is, so the
+   * pane already has the words for it — this was never picked up, send it again
+   * — and the user decides whether it still matters. Nothing an agent answered
+   * is touched, and neither is anything inside the window.
+   */
+  expireStaleUserTurns(now: number = Date.now()): number {
+    const cutoff = new Date(now - USER_TURN_TTL_MS).toISOString();
+    const res = this.db
+      .prepare(
+        `UPDATE agent_turns
+         SET delivered = 1, delivery_count = ?
+         WHERE role = 'user' AND delivered = 0 AND at < ?`,
+      )
+      .run(Store.MAX_DELIVERIES, cutoff);
+    return res.changes;
+  }
+
+  /**
+   * The next user turn no agent is holding, marked as held in the same
    * transaction. Returns null when there is nothing waiting.
    *
    * The claim has to be atomic. Two agents polling the same channel would
    * otherwise both read the same row and both answer it. It is a lease: the
    * holder is exclusive until they answer, vanish, or hit the delivery cap.
+   *
+   * `activeChatId` is the conversation the user is looking at, and it is served
+   * before any other. Plain oldest-first is right within one chat and wrong
+   * across several: an agent would work another chat's backlog while the pane
+   * in front of the user said nothing was listening, which reads as an agent
+   * that does not work at all. Ordering by the chat on screen first costs the
+   * other chats nothing — every message is still delivered, and still oldest
+   * first among its peers.
+   *
+   * Stale messages are retired first, in the same transaction, so a claim can
+   * never hand over one this store would refuse to keep queued.
    */
-  claimNextUserTurn(): StoredTurn | null {
+  claimNextUserTurn(activeChatId?: string | null): StoredTurn | null {
     const claim = this.db.transaction((): StoredTurn | null => {
+      this.expireStaleUserTurns();
       const row = this.db
         .prepare(
           `SELECT seq, at, chat_id as chatId, role, text_enc as textEnc, agent,
                   reply_to as replyTo, COALESCE(delivery_count, 0) as deliveryCount
            FROM agent_turns
            WHERE role = 'user' AND delivered = 0
-           ORDER BY seq ASC
+           ORDER BY (chat_id IS NOT NULL AND chat_id = ?) DESC, seq ASC
            LIMIT 1`,
         )
-        .get() as TurnRow | undefined;
+        .get(activeChatId ?? null) as TurnRow | undefined;
       if (!row) return null;
       this.db
         .prepare(
@@ -633,7 +1033,18 @@ export class Store {
     this.db.prepare(`DELETE FROM agent_turns WHERE chat_id = ?`).run(chatId);
     // A cleared chat is not a trimmed one: the user asked for this, and the
     // banner explaining an automatic loss would be a lie about their own click.
-    this.db.prepare(`UPDATE agent_chats SET trimmed = 0 WHERE id = ?`).run(chatId);
+    // The session goes with the messages: a model still resuming a transcript
+    // the pane no longer shows would answer from history the user just emptied.
+    // The epoch moves with it, so a turn still running in this chat cannot save
+    // the session it started with once the answer lands.
+    this.db
+      .prepare(
+        `UPDATE agent_chats
+         SET trimmed = 0, session_agent = NULL, session_id = NULL,
+             session_epoch = session_epoch + 1
+         WHERE id = ?`,
+      )
+      .run(chatId);
   }
 
   /**
@@ -763,6 +1174,123 @@ export class Store {
       .prepare(`DELETE FROM accounts WHERE id = ? OR alias = ?`)
       .run(idOrAlias, idOrAlias);
     return res.changes > 0;
+  }
+
+  /* ---- approvals ---------------------------------------------------------
+     Rows in, rows out, exactly as the conversation is. What may be asked for
+     and what happens on yes lives in src/agent/approvals.ts.
+     --------------------------------------------------------------------- */
+
+  addApproval(input: {
+    id: string;
+    tool: string;
+    args: Record<string, unknown>;
+    profile: string;
+    agent: string | null;
+    chatId: string | null;
+    askedAt: string;
+  }): StoredApproval {
+    this.db
+      .prepare(
+        `INSERT INTO agent_approvals (id, tool, args_enc, profile, agent, chat_id, asked_at, state)
+         VALUES (@id, @tool, @argsEnc, @profile, @agent, @chatId, @askedAt, 'pending')`,
+      )
+      .run({
+        id: input.id,
+        tool: input.tool,
+        argsEnc: encryptSecret(this.masterKey, JSON.stringify(input.args)),
+        profile: input.profile,
+        agent: input.agent,
+        chatId: input.chatId,
+        askedAt: input.askedAt,
+      });
+    return {
+      ...input,
+      decidedAt: null,
+      state: "pending",
+      outcome: null,
+    };
+  }
+
+  /**
+   * Oldest first, and ordered on `rowid` rather than on `asked_at`: two
+   * requests written in the same millisecond are the normal case for an agent
+   * working through a list, and a timestamp cannot separate them. The newest
+   * `limit` are taken and then flipped, so a capped list keeps the recent ones.
+   */
+  listApprovals(options: { pendingOnly?: boolean; limit?: number } = {}): StoredApproval[] {
+    const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
+    const rows = this.db
+      .prepare(
+        `SELECT id, tool, args_enc as argsEnc, profile, agent, chat_id as chatId,
+                asked_at as askedAt, decided_at as decidedAt, state, outcome
+         FROM agent_approvals
+         WHERE (? = 0 OR state = 'pending')
+         ORDER BY rowid DESC
+         LIMIT ?`,
+      )
+      .all(options.pendingOnly ? 1 : 0, limit) as ApprovalRow[];
+    return rows.map((row) => this.toApproval(row)).reverse();
+  }
+
+  getApproval(id: string): StoredApproval | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, tool, args_enc as argsEnc, profile, agent, chat_id as chatId,
+                asked_at as askedAt, decided_at as decidedAt, state, outcome
+         FROM agent_approvals WHERE id = ?`,
+      )
+      .get(id) as ApprovalRow | undefined;
+    return row ? this.toApproval(row) : null;
+  }
+
+  /**
+   * Moves a request out of `pending`, and only from `pending`.
+   *
+   * The guard is in the WHERE clause rather than in a read-then-write above
+   * it: two windows showing the same request is the normal case, and a second
+   * Approve landing after the first has already sent the mail must change
+   * nothing. False means somebody else got there first.
+   */
+  settleApproval(
+    id: string,
+    state: StoredApproval["state"],
+    outcome: string | null,
+    decidedAt: string,
+  ): boolean {
+    const res = this.db
+      .prepare(
+        `UPDATE agent_approvals SET state = ?, outcome = ?, decided_at = ?
+         WHERE id = ? AND state = 'pending'`,
+      )
+      .run(state, outcome, decidedAt, id);
+    return res.changes > 0;
+  }
+
+  private toApproval(row: ApprovalRow): StoredApproval {
+    let args: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(decryptSecret(this.masterKey, row.argsEnc));
+      if (parsed && typeof parsed === "object") {
+        args = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // A row this key cannot read is a row nobody can act on. It comes back
+      // with no arguments, which every caller treats as "cannot be carried
+      // out" — the alternative is refusing to list any of them.
+    }
+    return {
+      id: row.id,
+      tool: row.tool,
+      args,
+      profile: row.profile,
+      agent: row.agent,
+      chatId: row.chatId,
+      askedAt: row.askedAt,
+      decidedAt: row.decidedAt,
+      state: row.state,
+      outcome: row.outcome,
+    };
   }
 
   close(): void {

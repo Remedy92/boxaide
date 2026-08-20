@@ -8,7 +8,11 @@ import { MailService } from "../src/mail/service.js";
 import { createPlatform, type Platform } from "../src/platform.js";
 import type { AgentLauncher } from "../src/agent/launcher.js";
 import { OutreachEngine, renderTemplate } from "../src/outreach/engine.js";
-import { OPT_OUT_FOOTER } from "../src/outreach/store.js";
+import {
+  MAX_CAMPAIGN_CONTACTS_PER_REQUEST,
+  MAX_OUTREACH_BODY_BYTES,
+  OPT_OUT_FOOTER,
+} from "../src/outreach/store.js";
 import { OPT_OUT_KEYWORD, optOutIntent } from "../src/outreach/opt-out.js";
 import { dispatchOutreachTool, OUTREACH_TOOLS } from "../src/outreach/tools.js";
 import { registerOutreachRoutes } from "../src/outreach/routes.js";
@@ -169,6 +173,27 @@ describe("outreach", () => {
     platform.outreachStore.updateCampaign(campaign.id, { status: "active" });
     return campaign;
   }
+
+  it("bounds campaign bodies and bulk contact additions", () => {
+    expect(() =>
+      platform.outreachStore.createCampaign({
+        name: "oversized",
+        accountId,
+        steps: [{ subject: "hello", body: "x".repeat(MAX_OUTREACH_BODY_BYTES + 1) }],
+      }),
+    ).toThrow(/step body must be at most/);
+
+    const campaign = makeCampaign();
+    expect(() =>
+      platform.outreachStore.addCampaignContacts(
+        campaign.id,
+        Array.from(
+          { length: MAX_CAMPAIGN_CONTACTS_PER_REQUEST + 1 },
+          (_, index) => `contact-${index}`,
+        ),
+      ),
+    ).toThrow(/contactIds must contain at most/);
+  });
 
   /* ---- lifecycle ------------------------------------------------------ */
 
@@ -562,6 +587,57 @@ describe("outreach", () => {
     expect(row.state).toBe("active");
     expect(row.currentStep).toBe(-1);
     expect(row.lastSentAt).toBeNull();
+  });
+
+  it("merges a queued draft that repeats a pending one word for word", () => {
+    const draft = {
+      accountId,
+      to: "twice@example.com",
+      subject: "Quick question",
+      body: "Hello there.",
+    };
+    const first = platform.outreachStore.queueOutbox(draft);
+    // What two overlapping automation runs reaching the same conclusion look
+    // like. The second gets the first row back, not a second row.
+    const second = platform.outreachStore.queueOutbox(draft);
+
+    expect(second.id).toBe(first.id);
+    expect(platform.outreachStore.listOutbox({}).length).toBe(1);
+  });
+
+  it("keeps a second draft that differs, however slightly", () => {
+    const base = {
+      accountId,
+      to: "twice@example.com",
+      subject: "Quick question",
+      body: "Hello there.",
+    };
+    platform.outreachStore.queueOutbox(base);
+    // A reviewer can delete a duplicate they can see; they cannot recover a
+    // draft that was never written. So anything not identical is kept.
+    platform.outreachStore.queueOutbox({ ...base, body: "Hello again." });
+    platform.outreachStore.queueOutbox({ ...base, subject: "Another thing" });
+    platform.outreachStore.queueOutbox({ ...base, to: "other@example.com" });
+    platform.outreachStore.queueOutbox({ ...base, campaignId: "c-1" });
+
+    expect(platform.outreachStore.listOutbox({}).length).toBe(5);
+  });
+
+  it("stops matching a draft once the pending row has been decided", () => {
+    const draft = {
+      accountId,
+      to: "twice@example.com",
+      subject: "Quick question",
+      body: "Hello there.",
+    };
+    const first = platform.outreachStore.queueOutbox(draft);
+    platform.outreachStore.decide(first.id, "rejected");
+    // The merge only ever speaks for rows still awaiting review. A rejected
+    // one must not silently swallow a later attempt.
+    const again = platform.outreachStore.queueOutbox(draft);
+
+    expect(again.id).not.toBe(first.id);
+    expect(platform.outreachStore.listOutbox({}).length).toBe(2);
   });
 
   it("fails an approved row whose address was suppressed after approval", async () => {

@@ -4,6 +4,7 @@ import * as React from "react";
 import { ArrowUp } from "lucide-react";
 import { Spinner } from "@/components/atoms";
 import { AgentModelSelect } from "@/components/agent/agent-model-select";
+import { AgentSelect } from "@/components/agent/agent-select";
 import { cn } from "@/lib/utils";
 
 /** Matches MAX_CHAT_CHARS on the server, which returns 400 past it. */
@@ -123,6 +124,7 @@ export function AgentComposer({
 
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
         <div className="flex min-w-0 items-center gap-2">
+          <AgentSelect disabled={disabled || sending} />
           <AgentModelSelect disabled={disabled || sending} />
           <p
             id="mailmux-agent-hint"

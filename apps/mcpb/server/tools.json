@@ -21,6 +21,8 @@
         },
         "limit": {
           "type": "number",
+          "minimum": 1,
+          "maximum": 200,
           "default": 25
         },
         "folder": {
@@ -55,6 +57,8 @@
         },
         "limit": {
           "type": "number",
+          "minimum": 1,
+          "maximum": 200,
           "default": 25
         },
         "since": {
@@ -92,7 +96,7 @@
   },
   {
     "name": "message_send",
-    "description": "Deliver an email from a connected account. This is the explicit escalation, not the default: it leaves the machine immediately and cannot be recalled, so use draft_create instead unless the user has asked for the mail to be sent. To reply in-thread, set inReplyTo and references from the Message-ID header of the message you answer. Requires explicit user confirmation in the agent client.",
+    "description": "Deliver an email from a connected account. This is the explicit escalation, not the default: use draft_create instead unless the user has asked for the mail to be sent. To reply in-thread, set inReplyTo and references from the Message-ID header of the message you answer. If Boxaide launched you, this does not send: it puts the message in front of the user, who sends it or drops it — you will be told so, and you must not call it a second time for the same message.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -312,6 +316,8 @@
         },
         "limit": {
           "type": "number",
+          "minimum": 1,
+          "maximum": 200,
           "default": 25
         }
       },
@@ -384,6 +390,10 @@
         "text": {
           "type": "string",
           "description": "What to say. Markdown is rendered."
+        },
+        "title": {
+          "type": "string",
+          "description": "A name for this conversation, four words or fewer, describing what it is about — 'Refund for the Acme invoice', not 'Email question'. Send it when the wait payload said needsTitle; it is ignored otherwise, and the name is only taken once, so write it for a list the user reads a week from now."
         }
       },
       "required": [
@@ -417,6 +427,8 @@
       "properties": {
         "limit": {
           "type": "number",
+          "minimum": 1,
+          "maximum": 200,
           "default": 50
         }
       },
@@ -791,6 +803,10 @@
         "agentId": {
           "type": "string",
           "description": "Agent CLI id from the Boxaide Agents list. Omit to use the first installed one."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model id that agent's CLI offers. Omit to use the CLI's own default. A cheap model is usually right for a run that repeats every day."
         }
       },
       "required": [
@@ -821,6 +837,9 @@
           "type": "string"
         },
         "agentId": {
+          "type": "string"
+        },
+        "model": {
           "type": "string"
         },
         "enabled": {
@@ -1117,6 +1136,190 @@
     "inputSchema": {
       "type": "object",
       "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "calendar_accounts_list",
+    "description": "List connected calendar accounts (id, alias, provider, email). Use the id for meeting_create's calendarAccountId when the user has more than one calendar and says which.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "agenda_view",
+    "description": "Read the user's agenda over a time range. Every connected calendar account is read and the results are merged into one timeline. An unreachable account does not fail the call — it contributes a string to `errors`, so check that field before telling the user their day is empty. Ask for the smallest range that answers the question — a week of events is a lot of text.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "type": "string",
+          "description": "ISO 8601 instant (e.g. 2026-03-04T09:00:00Z). Times are absolute instants, not wall clock. Defaults to now."
+        },
+        "end": {
+          "type": "string",
+          "description": "ISO 8601 instant (e.g. 2026-03-04T09:00:00Z). Times are absolute instants, not wall clock. Defaults to start plus `days`."
+        },
+        "days": {
+          "type": "number",
+          "description": "Length of the range when `end` is omitted. Default 7, max 62.",
+          "default": 7
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "calendar_free_slots",
+    "description": "Find open meeting times. Returns candidate START times that are free on every connected calendar — they are suggestions to offer the user, nothing is booked. Working hours are 09:00-17:00 by default, read as a wall clock in `timeZone`, and slots begin on the half hour. The response echoes the `timeZone` it used. Every connected calendar account is read and the results are merged into one timeline. An unreachable account does not fail the call — it contributes a string to `errors`, so check that field before telling the user their day is empty.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "type": "string",
+          "description": "ISO 8601 instant (e.g. 2026-03-04T09:00:00Z). Times are absolute instants, not wall clock. Defaults to now."
+        },
+        "end": {
+          "type": "string",
+          "description": "ISO 8601 instant (e.g. 2026-03-04T09:00:00Z). Times are absolute instants, not wall clock. Defaults to a week after start. At most 62 days after start."
+        },
+        "durationMinutes": {
+          "type": "number",
+          "description": "How long the meeting needs to be."
+        },
+        "dayStartHour": {
+          "type": "number",
+          "description": "First hour of the working day, read in `timeZone`. Default 9.",
+          "default": 9
+        },
+        "dayEndHour": {
+          "type": "number",
+          "description": "Hour the working day ends, read in `timeZone`. Default 17.",
+          "default": 17
+        },
+        "maxSlots": {
+          "type": "number",
+          "description": "How many candidates to return. Default 10."
+        },
+        "timeZone": {
+          "type": "string",
+          "description": "Zone the working hours are a wall clock in. IANA time zone id, e.g. Europe/Brussels. Defaults to the server's own zone. Pass the user's own zone when you know it."
+        }
+      },
+      "required": [
+        "durationMinutes"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "meeting_create",
+    "description": "Schedule a meeting and invite the attendees. THIS SENDS EMAIL. It mails a calendar invite to every attendee immediately, from the user's own mailbox, and writes the event to the connected calendar. There is no draft, no review step and no undo other than meeting_cancel, which mails everyone again. Call it only after the user has agreed to this exact time and this exact attendee list. To propose times, offer them in chat instead — use calendar_free_slots and say the options out loud.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Becomes the invite subject and event title."
+        },
+        "start": {
+          "type": "string",
+          "description": "ISO 8601 instant (e.g. 2026-03-04T09:00:00Z). Times are absolute instants, not wall clock."
+        },
+        "end": {
+          "type": "string",
+          "description": "ISO 8601 instant (e.g. 2026-03-04T09:00:00Z). Times are absolute instants, not wall clock. Must be after start."
+        },
+        "attendees": {
+          "type": "array",
+          "description": "Email addresses, one per attendee. Every one of them receives the invite.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": "string",
+          "description": "Agenda or notes for the invite body."
+        },
+        "location": {
+          "type": "string",
+          "description": "Physical location or a meeting URL you supply. Given, it replaces the generated video link in the event's location field."
+        },
+        "calendarAccountId": {
+          "type": "string",
+          "description": "From calendar_accounts_list. Omit to use the first connected calendar."
+        },
+        "mailAccountId": {
+          "type": "string",
+          "description": "Mail account alias or id the invite is sent from. Omit to use the first connected mailbox."
+        },
+        "includeMeetingLink": {
+          "type": "boolean",
+          "description": "A video meeting link is generated and included by default. Pass false for an in-person meeting.",
+          "default": true
+        },
+        "timeZone": {
+          "type": "string",
+          "description": "Zone the invite text is written in — the times in the email body are spelled out in it and labelled with it. IANA time zone id, e.g. Europe/Brussels. Defaults to the server's own zone. The event itself is always the absolute instants in start/end."
+        }
+      },
+      "required": [
+        "title",
+        "start",
+        "end",
+        "attendees"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "meeting_cancel",
+    "description": "Cancel a meeting created through Boxaide. THIS SENDS EMAIL: a cancellation notice goes to every attendee and the event is removed from the connected calendar. Confirm with the user first. Get meetingId from meetings_list.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "meetingId": {
+          "type": "string",
+          "description": "Id from meetings_list."
+        }
+      },
+      "required": [
+        "meetingId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "meetings_list",
+    "description": "Meetings scheduled through Boxaide, newest first, with the ids meeting_cancel needs. Each meeting carries `attendeeStatus`: one entry per invited guest with their response (accepted, declined, tentative, or needs-action for anyone who has not answered). Responses are learned by a background scan, so they can lag — call meeting_responses_refresh first when the user is asking who has replied. This is not the agenda — meetings booked elsewhere are not here; use agenda_view for those.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "number",
+          "default": 50
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "meeting_responses_refresh",
+    "description": "Look for new guest responses now: reads the inbox for reply emails and asks each connected calendar for its attendee status, then updates the stored guest lists. Sends nothing. Returns `updated` (how many responses changed) and `errors` (one string per unreachable mailbox or calendar). Follow it with meetings_list to read the results.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mailAccountId": {
+          "type": "string",
+          "description": "Mail account alias or id to scan. Omit to scan every connected mailbox."
+        },
+        "limit": {
+          "type": "number",
+          "description": "How many inbox headers to list per mailbox. Default 200, also the max."
+        }
+      },
       "additionalProperties": false
     }
   }

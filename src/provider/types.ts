@@ -76,6 +76,14 @@ export type MailMessage = MailMessageSummary & {
   bcc?: string;
   /** Space-separated References chain, for replying in-thread. */
   references?: string;
+  /**
+   * Inbound iMIP part (RFC 6047) — the invite or reply .ics that came with the
+   * mail. Optional because it only exists when the sender attached one, and
+   * because the fixture provider and index-served rows never carry it: the
+   * summary row this type extends comes from the SQLite index, which stores
+   * headers only. Reach for it after a real getMessage, not off a list.
+   */
+  calendar?: { method?: string; content: string };
 };
 
 /**
@@ -110,6 +118,12 @@ export type SendMessageInput = {
   bcc?: string;
   inReplyTo?: string;
   references?: string;
+  /**
+   * iMIP calendar part (RFC 6047). Nodemailer emits it as text/calendar with
+   * the method parameter, which is what makes Gmail/Outlook render the
+   * Accept/Decline bar instead of a dead .ics attachment.
+   */
+  icalEvent?: { method: "REQUEST" | "CANCEL"; content: string };
 };
 
 export type SendResult = {
