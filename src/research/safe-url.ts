@@ -130,11 +130,14 @@ function ipv6Bytes(ip: string): number[] | null {
  * The IPv4 address an IPv6 address carries inside it, or null when it carries
  * none.
  *
- * Four encodings, not one. ::ffff:a.b.c.d is the only form most guards check,
- * and each of the others reaches the same IPv4 address on a host configured
- * for it: ::a.b.c.d is the deprecated IPv4-compatible form, 64:ff9b::a.b.c.d
- * is the well-known NAT64 prefix, and 2002:aabb:ccdd:: is 6to4. Judging any of
- * them on its own bytes says "ordinary public IPv6" about 127.0.0.1.
+ * Three encodings, not one, and each carries its address at a fixed offset.
+ * ::ffff:a.b.c.d is the only form most guards check; ::ffff:0:a.b.c.d is the
+ * IPv4-translated form, ::a.b.c.d the deprecated IPv4-compatible one, and
+ * 2002:aabb:ccdd:: is 6to4. Judging any of them on its own bytes says
+ * "ordinary public IPv6" about 127.0.0.1.
+ *
+ * NAT64 is deliberately absent: its offset moves with the prefix length, so it
+ * cannot be unwrapped from one place. See nat64() below.
  */
 function embeddedIpv4(bytes: number[]): number[] | null {
   const zeros = (from: number, to: number) => bytes.slice(from, to).every((b) => b === 0);
@@ -145,26 +148,38 @@ function embeddedIpv4(bytes: number[]): number[] | null {
     return bytes.slice(12);
   }
   // ::a.b.c.d — IPv4-compatible, deprecated but still routable by tunnels.
-  // ::, ::1 and the other tiny reserved addresses are left to the rules below.
-  if (zeros(0, 12) && !zeros(12, 16) && bytes[12] !== 0) return bytes.slice(12);
-  // 64:ff9b::a.b.c.d and 64:ff9b:1::a.b.c.d — NAT64 well-known prefixes.
-  if (bytes[0] === 0x00 && bytes[1] === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b) {
-    return bytes.slice(12);
-  }
+  // The bytes[12] test is what leaves ::, ::1 and the other tiny reserved
+  // addresses to the rules below; it is the whole guard, not half of one.
+  if (zeros(0, 12) && bytes[12] !== 0) return bytes.slice(12);
   // 2002:aabb:ccdd:: — 6to4, which carries the address in bytes 2 to 5.
   if (bytes[0] === 0x20 && bytes[1] === 0x02) return bytes.slice(2, 6);
   return null;
 }
 
+/**
+ * NAT64, which is refused as a range rather than unwrapped.
+ *
+ * RFC 6052 puts the embedded IPv4 at a different offset for every prefix
+ * length: bytes 12 to 15 for a /96, bytes 4 to 7 for a /32, bytes 6 to 9 with
+ * byte 8 skipped for a /48, and so on. Reading one offset and judging what is
+ * there would pass any address that encodes its target at one of the others.
+ * Nothing legitimate on the public internet answers on 64:ff9b::/32 anyway, so
+ * the whole range goes rather than four guesses at where to look inside it.
+ */
+function nat64(bytes: number[]): boolean {
+  return bytes[0] === 0x00 && bytes[1] === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b;
+}
+
 function blockedIpv6(bytes: number[]): string | null {
   // An IPv4 address wearing a hat is judged as an IPv4 address, whichever hat
-  // it is wearing, or ::ffff:127.0.0.1 and its three cousins walk straight
-  // past every rule below.
+  // it is wearing, or ::ffff:127.0.0.1 and its two cousins walk straight past
+  // every rule below.
   const embedded = embeddedIpv4(bytes);
   if (embedded) {
     const reason = blockedIpv4(embedded);
     if (reason) return reason;
   }
+  if (nat64(bytes)) return "nat64";
   if (bytes.every((b) => b === 0)) return "unspecified";
   if (bytes.slice(0, 15).every((b) => b === 0) && bytes[15] === 1) return "loopback";
   if ((bytes[0] & 0xfe) === 0xfc) return "unique local";

@@ -228,8 +228,7 @@ export class EnrichmentService {
           ? lastError
           : new Error(String(lastError ?? "enrichment failed"));
       }
-      this.remember(key, best);
-      return best;
+      return this.remember(key, best);
     });
     // The queue must advance even when this call failed, or one bad lookup
     // would wedge every later one behind a rejected promise.
@@ -245,34 +244,40 @@ export class EnrichmentService {
   }
 
   /**
-   * Keep one answer, bounded.
+   * Keep one answer, bounded, and hand back the copy that was kept.
    *
-   * Two things are dropped. `raw` is a whole vendor response, kept on a result
-   * so the call that made it can be debugged; nothing reads it afterwards and
-   * holding thousands of them for a day is a leak, so the cached copy is the
-   * four normalised fields. And entries past their day go on every write, with
-   * the oldest dropped if the map is still over its cap, so a process that
-   * verifies ten thousand recipients does not carry all ten thousand for ever.
+   * `raw` is a whole vendor response, useful while the call that made it is
+   * still on the stack and a leak once thousands of them are held for a day.
+   * It is dropped here, and the lean copy is what the caller gets too: a
+   * lookup must not answer with one shape on the call that paid for it and a
+   * different shape on every cache hit for the next day.
+   *
+   * The cap is the bound that matters, so the sweep for expired entries only
+   * runs once the map is full. Below the cap an entry past its day costs four
+   * small fields and is dropped the next time its own key is asked for.
    */
-  private remember(key: string, result: EnrichmentResult): void {
+  private remember(key: string, result: EnrichmentResult): EnrichmentResult {
     const now = this.now();
-    for (const [stale, entry] of this.cache) {
-      if (now - entry.at >= CACHE_TTL_MS) this.cache.delete(stale);
+    if (this.cache.size >= MAX_CACHE_ENTRIES) {
+      for (const [stale, entry] of this.cache) {
+        if (now - entry.at >= CACHE_TTL_MS) this.cache.delete(stale);
+      }
     }
-    this.cache.set(key, {
-      at: now,
-      result: {
-        email: result.email,
-        confidence: result.confidence,
-        status: result.status,
-        provider: result.provider,
-      },
-    });
+    const lean: EnrichmentResult = {
+      email: result.email,
+      confidence: result.confidence,
+      status: result.status,
+      provider: result.provider,
+    };
+    this.cache.set(key, { at: now, result: lean });
+    // Still full after the sweep: drop by insertion order, which is write
+    // order here because waterfall deletes the key before it is written back.
     while (this.cache.size > MAX_CACHE_ENTRIES) {
       const oldest = this.cache.keys().next();
       if (oldest.done) break;
       this.cache.delete(oldest.value);
     }
+    return lean;
   }
 }
 

@@ -14,6 +14,7 @@ import type { MailService } from "./mail/service.js";
 import type { AgentLauncher } from "./agent/launcher.js";
 import { CrmStore } from "./crm/store.js";
 import { CrmService } from "./crm/service.js";
+import { resolveOrgForContact } from "./crm/tools.js";
 import { AutomationStore } from "./automation/store.js";
 import { AutomationScheduler } from "./automation/scheduler.js";
 import { OutreachStore } from "./outreach/store.js";
@@ -97,17 +98,16 @@ export function createPlatform(opts: {
   const enrichmentService = new EnrichmentService({
     getKey,
     upsertContact: (row) => {
-      // upsertOrg overwrites the stored name of whatever it matches, so it is
-      // only called when the file actually named the organisation. A row that
-      // carries a domain and no name must not rename "Acme Corporation" to
-      // "acme.com": reuse the existing org, and fall back to the domain as a
-      // name only when there is no org to reuse.
-      const org = row.org
-        ? crmStore.upsertOrg({ name: row.org, domain: row.orgDomain })
-        : row.orgDomain
-          ? (crmStore.getOrgByDomain(row.orgDomain) ??
-            crmStore.upsertOrg({ name: row.orgDomain, domain: row.orgDomain }))
-          : null;
+      // The same resolution crm_contact_upsert uses, not a second copy of it:
+      // a row that carries a domain and no name points at an org rather than
+      // naming one, so an existing org keeps its name instead of being renamed
+      // to "acme.com", and a new one gets the derived name mail sync would
+      // have given it.
+      const org = resolveOrgForContact(
+        crmStore,
+        row.org ?? undefined,
+        row.orgDomain ?? undefined,
+      );
       const contact = crmStore.upsertContact({
         email: row.email,
         name: row.name,

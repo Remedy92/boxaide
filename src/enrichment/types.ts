@@ -33,7 +33,12 @@ export type EnrichmentResult = {
   status: EnrichmentStatus;
   /** Provider id, for example "hunter". Says who to blame for a bad address. */
   provider: string;
-  /** The provider's own body, kept for debugging. Never persisted. */
+  /**
+   * The provider's own body, for debugging the call that made it. Never
+   * persisted, and never returned past EnrichmentService: the service caches
+   * and hands back the four fields above, so a result that reaches a caller
+   * has no `raw` whether it was paid for now or answered from the cache.
+   */
   raw?: unknown;
 };
 

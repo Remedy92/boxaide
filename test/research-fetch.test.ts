@@ -77,6 +77,43 @@ describe("blockedAddressReason", () => {
     expect(blockedAddressReason("::ffff:169.254.169.254")).toBe("link-local or cloud metadata");
   });
 
+  /**
+   * The four ways an IPv6 address can carry an IPv4 one. Only ::ffff: is
+   * widely checked, and each of the others reaches the same host on a machine
+   * configured for it, so judging them on their own bytes says "ordinary
+   * public IPv6" about 127.0.0.1.
+   */
+  it("blocks IPv4 smuggled inside IPv6 by every encoding, not just ::ffff:", () => {
+    // IPv4-compatible, ::a.b.c.d.
+    expect(blockedAddressReason("::127.0.0.1")).toBe("loopback");
+    expect(blockedAddressReason("::10.0.0.7")).toBe("private");
+    // IPv4-translated, ::ffff:0:a.b.c.d.
+    expect(blockedAddressReason("::ffff:0:127.0.0.1")).toBe("loopback");
+    expect(blockedAddressReason("::ffff:0:169.254.169.254")).toBe(
+      "link-local or cloud metadata",
+    );
+    // 6to4, which carries the address in the second and third hextets.
+    expect(blockedAddressReason("2002:7f00:1::")).toBe("loopback");
+    expect(blockedAddressReason("2002:a9fe:a9fe::1")).toBe("link-local or cloud metadata");
+  });
+
+  /**
+   * NAT64 goes as a range. RFC 6052 moves the embedded address with the prefix
+   * length, so reading one offset would pass anything that encoded its target
+   * at another.
+   */
+  it("blocks the whole NAT64 range rather than guessing where the address sits", () => {
+    expect(blockedAddressReason("64:ff9b::7f00:1")).toBe("nat64");
+    expect(blockedAddressReason("64:ff9b::8.8.8.8")).toBe("nat64");
+    expect(blockedAddressReason("64:ff9b:1::808:808")).toBe("nat64");
+  });
+
+  it("still allows a public address wearing one of those hats", () => {
+    expect(blockedAddressReason("::ffff:8.8.8.8")).toBeNull();
+    expect(blockedAddressReason("::8.8.8.8")).toBeNull();
+    expect(blockedAddressReason("2002:808:808::")).toBeNull();
+  });
+
   it("fails closed on anything it cannot parse", () => {
     expect(blockedAddressReason("not-an-ip")).toBe("unparseable address");
     expect(blockedAddressReason("")).toBe("unparseable address");

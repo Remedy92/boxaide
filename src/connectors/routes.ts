@@ -3,7 +3,10 @@
  *
  *   GET  /api/connectors            every connector, masked, plus the last
  *                                   verdict each provider gave about its key
- *   PUT  /api/connectors/:id        { apiKey } saves; "" or null clears
+ *   PUT  /api/connectors/:id        { apiKey } saves; "" or null clears.
+ *                                   An absent apiKey is a 400, not a
+ *                                   clear: a body that lost its payload
+ *                                   must not delete a key.
  *   POST /api/connectors/:id/check  asks the provider whether the key works
  *
  * The check is a POST because it calls out to a third party and writes the

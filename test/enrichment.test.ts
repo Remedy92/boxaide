@@ -1,3 +1,4 @@
+import { bareDomain } from "../src/domain.js";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { HunterProvider } from "../src/enrichment/hunter.js";
 import { ProspeoProvider } from "../src/enrichment/prospeo.js";
@@ -74,6 +75,31 @@ function fakeProvider(
 }
 
 const NAME = { firstName: "Jane", lastName: "Doe", domain: "acme.com" };
+
+/**
+ * One fold, shared by the CSV import and the Apollo adapter, because the CRM
+ * keys organisations by exact domain: two folds mean one company lands as two
+ * rows. These are the cases the two copies used to disagree on.
+ */
+describe("bareDomain", () => {
+  it("folds every way a domain gets written onto one host", () => {
+    expect(bareDomain("https://www.Acme.com/about?x=1#top")).toBe("acme.com");
+    expect(bareDomain("http://acme.com:8443/")).toBe("acme.com");
+    expect(bareDomain("acme.com:8443")).toBe("acme.com");
+    expect(bareDomain("  ACME.com  ")).toBe("acme.com");
+    expect(bareDomain("ftp://acme.com")).toBe("acme.com");
+    expect(bareDomain("https://user:pw@acme.com/x")).toBe("acme.com");
+    expect(bareDomain("acme.com")).toBe("acme.com");
+  });
+
+  it("refuses what is not a domain", () => {
+    expect(bareDomain("acme")).toBeNull();
+    expect(bareDomain("")).toBeNull();
+    expect(bareDomain(null)).toBeNull();
+    expect(bareDomain(undefined)).toBeNull();
+    expect(bareDomain("https://")).toBeNull();
+  });
+});
 
 describe("enrichment tool surface", () => {
   it("exposes exactly the three spec tools", () => {

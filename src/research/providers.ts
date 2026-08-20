@@ -94,14 +94,26 @@ async function searchJson(
 ): Promise<Record<string, unknown>> {
   const controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+  const timedOut = () =>
+    new Error(`${provider} search timed out after ${SEARCH_TIMEOUT_MS / 1000}s`);
   try {
-    const res = await doFetch(url, { ...init, signal: controller.signal });
-    return await readJson(provider, res);
-  } catch (err) {
-    if (controller.signal.aborted) {
-      throw new Error(`${provider} search timed out after ${SEARCH_TIMEOUT_MS / 1000}s`);
+    let res: Response;
+    try {
+      res = await doFetch(url, { ...init, signal: controller.signal });
+    } catch (err) {
+      // Nothing answered, so the deadline is the whole story.
+      throw controller.signal.aborted ? timedOut() : err;
     }
-    throw err;
+    // The body stays under the deadline, but the status is known now and the
+    // status is what an operator acts on. readJson swallows a failed body read
+    // on both paths, so an abort during a 401's error body still surfaces as
+    // that 401 rather than as a stall. Only a stalled body on a response that
+    // was otherwise fine has nothing better to report than the timeout.
+    try {
+      return await readJson(provider, res);
+    } catch (err) {
+      throw res.ok && controller.signal.aborted ? timedOut() : err;
+    }
   } finally {
     clearTimeout(deadline);
   }

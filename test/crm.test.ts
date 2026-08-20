@@ -729,4 +729,42 @@ describe("csv import wiring", () => {
 
     h.store.close();
   });
+
+  /**
+   * A row with a domain and no company name points at an organisation; it does
+   * not name one. upsertOrg renames whatever it matches, so calling it here
+   * would let a bought list rewrite the CRM's own names, and a first sighting
+   * would land as the raw domain string beside orgs the mail sync named.
+   */
+  it("points at an org by domain instead of renaming it to the domain", async () => {
+    const h = await harness();
+    const platform = createPlatform({
+      db: h.store.db,
+      masterKey: h.masterKey,
+      mail: h.mail,
+      launcher: {} as AgentLauncher,
+    });
+
+    // Domain only, org never seen: named the way mail sync would have named it.
+    platform.enrichmentService.importContacts(
+      "email,website\njane@acme.test,https://www.acme.test/about\n",
+    );
+    const created = h.crmStore.getOrgByDomain("acme.test");
+    expect(created?.name).toBe("Acme");
+
+    // A human corrects it, and a later domain-only import leaves it corrected.
+    h.crmStore.upsertOrg({ name: "Acme Corporation", domain: "acme.test" });
+    platform.enrichmentService.importContacts(
+      "email,website\nbob@acme.test,acme.test\n",
+    );
+    expect(h.crmStore.getOrgByDomain("acme.test")?.name).toBe("Acme Corporation");
+
+    // A file that does name the company is still allowed to say so.
+    platform.enrichmentService.importContacts(
+      "email,org,website\nsue@acme.test,Acme Ltd,acme.test\n",
+    );
+    expect(h.crmStore.getOrgByDomain("acme.test")?.name).toBe("Acme Ltd");
+
+    h.store.close();
+  });
 });

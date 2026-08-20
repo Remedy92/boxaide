@@ -26,6 +26,14 @@ export const MAX_PAGE_CHARS = 40_000;
 export const MAX_PAGE_BYTES = 2 * 1024 * 1024;
 /** Deadline for the whole fetch, redirects included. */
 export const FETCH_TIMEOUT_MS = 15_000;
+/** Characters of a remote-written string quoted back in an error message. */
+const MAX_QUOTED_CHARS = 200;
+
+/** One remote string, short enough to sit in an error the agent will read. */
+function clip(value: string): string {
+  const line = value.replace(/\s+/g, " ").trim();
+  return line.length > MAX_QUOTED_CHARS ? `${line.slice(0, MAX_QUOTED_CHARS)}…` : line;
+}
 /** Hops followed before we call it a loop. */
 export const MAX_REDIRECTS = 3;
 
@@ -347,8 +355,11 @@ export async function fetchPage(raw: string, deps: FetchPageDeps = {}): Promise<
       try {
         next = new URL(location, url);
       } catch {
+        // Capped like every other quoted remote string here: the header is
+        // whatever the far end chose to send, up to Node's 16KB limit, and all
+        // of it would otherwise land in the agent's context.
         throw new Error(
-          `redirect location is not a valid URL: ${location} (from ${url.toString()})`,
+          `redirect location is not a valid URL: ${clip(location)} (from ${url.toString()})`,
         );
       }
       url = parseFetchUrl(next.toString());

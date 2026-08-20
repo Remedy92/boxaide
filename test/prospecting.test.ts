@@ -170,6 +170,29 @@ describe("apollo company search", () => {
     expect(result.notes.join(" ")).toMatch(/partial results/);
     expect(result.notes.join(" ")).toMatch(/EU prospecting disabled/);
   });
+
+  /**
+   * An empty domain list is not a narrower search, it is no search filter at
+   * all, and Apollo answers that by billing a credit for a page of its whole
+   * database. So a value the normaliser refuses is sent as written: it matches
+   * nothing, which is the honest answer to a domain that is not one.
+   */
+  it("never lets a domain filter normalise away to no filter", async () => {
+    const calls = stubApollo(() => ({ body: { organizations: [], pagination: {} } }));
+    await service("k-1").findCompanies({ domains: ["acme", "ACME Corp"] });
+
+    expect(calls[0].body.q_organization_domains_list).toEqual(["acme", "acme corp"]);
+    expect(calls[0].body).toHaveProperty("q_organization_domains_list");
+  });
+
+  it("still folds a pasted URL, port and all, down to the bare host", async () => {
+    const calls = stubApollo(() => ({ body: { organizations: [], pagination: {} } }));
+    await service("k-1").findCompanies({
+      domains: ["https://www.Acme.com:8443/about?x=1", "acme.com"],
+    });
+
+    expect(calls[0].body.q_organization_domains_list).toEqual(["acme.com", "acme.com"]);
+  });
 });
 
 describe("apollo people search", () => {

@@ -10,8 +10,10 @@
  *
  * A "website" or "orgDomain" cell usually holds a URL, not a bare domain, and
  * the CRM matches organisations by exact domain. The fold onto "acme.com" is
- * bareDomain in src/domain.ts, shared with the prospecting adapter so the two
- * import paths land on one organisation row rather than two.
+ * bareDomain in src/domain.ts, shared with the prospecting adapter: prospecting
+ * writes nothing itself, but the domain it hands an agent ends up in the same
+ * organisations table through crm_org_upsert, and two folds would key one
+ * company two ways.
  */
 import { bareDomain } from "../domain.js";
 

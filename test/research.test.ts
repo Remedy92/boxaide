@@ -242,6 +242,60 @@ describe("provider selection", () => {
   });
 });
 
+/**
+ * The two HTTP seams are separate names because one of them IS the SSRF guard.
+ * ResearchDeps used to intersect two types that both called theirs `fetch`, so
+ * a stub meant for Exa silently replaced the transport behind web_fetch too.
+ * These pin that each name reaches only what it is named for.
+ */
+describe("the two fetch seams", () => {
+  it("sends searches through providerFetch and never through pageFetch", async () => {
+    const provider: string[] = [];
+    const page: string[] = [];
+    const service = new ResearchService({
+      getKey: () => "k",
+      providerFetch: (async (input: string | URL | Request) => {
+        provider.push(String(input));
+        return new Response(JSON.stringify({ results: [] }), {
+          headers: { "content-type": "application/json" },
+        });
+      }) as typeof globalThis.fetch,
+      pageFetch: (async (input: string | URL | Request) => {
+        page.push(String(input));
+        return new Response("no", { status: 500 });
+      }) as typeof globalThis.fetch,
+    });
+
+    await service.search({ query: "anvils" });
+    expect(provider).toEqual(["https://api.exa.ai/search"]);
+    expect(page).toEqual([]);
+  });
+
+  it("sends page reads through pageFetch and never through providerFetch", async () => {
+    const provider: string[] = [];
+    const page: string[] = [];
+    const service = new ResearchService({
+      getKey: () => "k",
+      resolve: async () => ["93.184.216.34"],
+      providerFetch: (async (input: string | URL | Request) => {
+        provider.push(String(input));
+        return new Response("{}", { headers: { "content-type": "application/json" } });
+      }) as typeof globalThis.fetch,
+      pageFetch: (async (input: string | URL | Request) => {
+        page.push(String(input));
+        return new Response("<p>hello</p>", {
+          headers: { "content-type": "text/html" },
+        });
+      }) as typeof globalThis.fetch,
+    });
+
+    const read = await service.fetch("https://example.com/about");
+    expect(read.text).toBe("hello");
+    expect(page).toEqual(["https://example.com/about"]);
+    expect(provider).toEqual([]);
+  });
+});
+
 describe("result count", () => {
   it("defaults and clamps instead of refusing", () => {
     expect(clampResults(undefined)).toBe(DEFAULT_NUM_RESULTS);

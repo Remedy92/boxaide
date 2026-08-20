@@ -402,14 +402,18 @@ function list(values: string[] | undefined): string[] {
   return values.map((value) => String(value).trim()).filter((value) => value !== "");
 }
 
-/** Domains are bare hosts to Apollo, so a pasted URL is trimmed down first. */
+/**
+ * Domains are bare hosts to Apollo, so a pasted URL is trimmed down first.
+ *
+ * A value bareDomain refuses is sent as written rather than dropped. An empty
+ * list means "no domain filter" at the call site, and Apollo answers a search
+ * with no filters by billing a credit for a page of the whole database, so
+ * folding `["acme"]` to `[]` would silently turn the narrowest question an
+ * agent can ask into the widest and most expensive one. A domain that is not
+ * one simply matches nothing, which is the honest answer to it.
+ */
 function domainList(values: string[] | undefined): string[] {
-  const out: string[] = [];
-  for (const value of list(values)) {
-    const domain = bareDomain(value);
-    if (domain) out.push(domain);
-  }
-  return out;
+  return list(values).map((value) => bareDomain(value) ?? value.toLowerCase());
 }
 
 function text(value: unknown): string | null {
