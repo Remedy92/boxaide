@@ -35,8 +35,9 @@ In the UI: **Connect mailbox** → pick a preset (Gmail / Fastmail / Outlook / i
 `e` in the list, or the archive button in the reader, moves the message to the
 account's **Archive** mailbox — the one your server advertises as `\Archive`,
 or Gmail's *All Mail*, which is what archiving means there. Nothing is deleted,
-and the toast's **Undo** moves the message straight back to the folder it came
-from.
+and the toast offers an **Undo** that moves the message straight back to the
+folder it came from. A server that cannot name the message's new id after a
+move (no UIDPLUS) shows no Undo at all, rather than one that would fail.
 
 A mailbox whose server has no Archive folder says so instead of guessing:
 create one named `Archive` in your mail provider and it is picked up on the
