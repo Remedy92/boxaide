@@ -10,26 +10,22 @@ import {
 } from "@/lib/mail/sanitize";
 
 /**
- * §6.4.6. Renders `bodyHtml` - sanitised, framed, and fenced.
+ * Renders `bodyHtml`: sanitised, framed, and fenced.
  *
- * Sender HTML is hostile input. Four independent layers stand between it and
- * the app origin, and no single failure is enough to breach them:
+ * The four layers that stand between hostile sender markup and the app origin
+ * are stated once in SECURITY.md, "HTML mail rendering" (cited in the tree as
+ * §6.4.6). Read it before changing anything here. This file implements three
+ * of them and must keep implementing all three:
  *
- * 1. DOMPurify strips scripts, event handlers, forms and document-level tags
- *    before the markup exists anywhere but a string.
- * 2. The iframe `sandbox` omits `allow-scripts`, so the browser refuses to
- *    execute script in the frame no matter what survived sanitisation.
- * 3. The sandbox also omits `allow-same-origin`: the frame is an opaque
- *    origin. Even script running there, which layer 2 forbids, would find no
- *    app DOM, no localStorage, no token, and no origin to speak from.
- * 4. A `<meta>` CSP of `default-src 'none'` inside the frame blocks every
- *    fetch the document could still express, and intersects with the page
- *    CSP the srcdoc document inherits.
+ * 1. `sanitizeMailHtml` runs before the markup exists anywhere but a string.
+ * 2. `sandbox` omits `allow-scripts`, so nothing in the frame executes.
+ * 3. `sandbox` also omits `allow-same-origin`, so the frame has no origin, no
+ *    app DOM and no token to reach for. Adding it back defeats layer 3 and
+ *    layer 4 at once, whatever the reason looks like at the time.
  *
- * The opaque origin has a price paid on purpose: the parent cannot read the
- * frame's document, so the frame cannot auto-size to its content and scrolls
- * internally instead. Height measurement is not worth a same-origin frame one
- * browser bug away from the bearer token.
+ * That opaque origin is why this component measures the *pane* it sits in and
+ * never the frame's content: the parent cannot read the frame's document, by
+ * design and permanently.
  *
  * Remote images are blocked by default: a tracking pixel is a read receipt the
  * sender did not ask permission for. `cid:` inline images arrive as `data:`
@@ -64,6 +60,36 @@ const CSP_IMG_BLOCKED = "img-src data:";
  * and a widening the header would refuse is a widening that cannot work.
  */
 const CSP_IMG_ALLOWED = "img-src data: https:";
+
+/**
+ * The frame is sized from the reading pane it sits in, not from the viewport
+ * and not from its content: the opaque origin makes the content unmeasurable
+ * for good, and a viewport formula has to guess at everything drawn above the
+ * frame, which is what the old `calc(100dvh - 340px)` was doing. Two
+ * constants survive, and both describe the frame rather than the chrome
+ * around it.
+ */
+/** Floor. Below roughly this the frame shows one line of a newsletter with a
+    scrollbar beside it, which is worse than overflowing the pane. */
+const MIN_FRAME_HEIGHT = 320;
+/** Breathing room under the frame, so the reply composer that follows reads as
+    the next thing rather than as a strip clipped by the fold. */
+const FRAME_BOTTOM_GUTTER = 24;
+
+/**
+ * The scrollable ancestor the frame has to fit inside. Found by computed style
+ * rather than by class name so it survives a refactor of the reader's layout:
+ * whichever element actually scrolls is the one whose height is the budget.
+ */
+function nearestScrollParent(node: HTMLElement): HTMLElement | null {
+  let parent = node.parentElement;
+  while (parent) {
+    const overflowY = getComputedStyle(parent).overflowY;
+    if (overflowY === "auto" || overflowY === "scroll") return parent;
+    parent = parent.parentElement;
+  }
+  return null;
+}
 
 /**
  * True when the sanitised markup references something fetched over the
@@ -101,9 +127,31 @@ function buildSrcDoc(sanitized: string, allowRemote: boolean): string {
 </head><body>${sanitized}</body></html>`;
 }
 
+/**
+ * The plain text, plus the one thing `BodyText` cannot know: that raw HTML is
+ * still there. Both fallbacks below reach it, and what the user needs to read
+ * differs from the reader's text-only case, where there is no HTML to open.
+ * Without this line a message whose HTML sanitised away and that carries no
+ * text reads as empty, with no hint that anything is recoverable.
+ */
+function TextFallback({ text }: { text: string }) {
+  return (
+    <>
+      <BodyText text={text} />
+      {!text && (
+        <p className="mt-1 text-[13px] leading-[18px] text-fg-tertiary">
+          It has an HTML body. Open “View HTML source” to read it as text.
+        </p>
+      )}
+    </>
+  );
+}
+
 export function HtmlBody({ html, text }: { html: string; text: string }) {
   const [allowRemote, setAllowRemote] = React.useState(false);
   const [forceRender, setForceRender] = React.useState(false);
+  const frameRef = React.useRef<HTMLIFrameElement>(null);
+  const [frameHeight, setFrameHeight] = React.useState(MIN_FRAME_HEIGHT);
 
   const oversized = React.useMemo(
     () => markupLength(html) > MAX_RENDERED_MARKUP_CHARS,
@@ -127,6 +175,46 @@ export function HtmlBody({ html, text }: { html: string; text: string }) {
     [sanitized, allowRemote],
   );
 
+  /* Both fallbacks below render text instead of a frame, so there is nothing
+     to size in those states, and the effect has to re-run when "Show HTML
+     anyway" turns one of them back into a frame. */
+  const framed = !skipped && sanitized.trim() !== "";
+
+  /* Give the frame the height the pane has left below it, so it ends where the
+     visible pane ends instead of at a guessed viewport offset. Layout, not
+     effect: the frame paints at its real height with no flash of a wrong one. */
+  React.useLayoutEffect(() => {
+    const frame = frameRef.current;
+    if (!framed || !frame) return;
+    const pane = nearestScrollParent(frame);
+    if (!pane) return;
+
+    const measure = () => {
+      /* The frame's top in the pane's *content* coordinates. Scroll position
+         cancels between the two rects and scrollTop, so scrolling cannot feed
+         back into the height. Nothing below the frame is read either, so the
+         composer growing does not resize it. */
+      const top =
+        frame.getBoundingClientRect().top -
+        pane.getBoundingClientRect().top +
+        pane.scrollTop;
+      const available = pane.clientHeight - top - FRAME_BOTTOM_GUTTER;
+      setFrameHeight(Math.max(MIN_FRAME_HEIGHT, Math.round(available)));
+    };
+
+    measure();
+    /* The pane resizes with the window and with the panes beside it; the
+       article and this component's wrapper resize when the subject wraps, the
+       identity block expands, or the blocked-images row appears above the
+       frame. Each moves the frame's top, which is the only input that counts. */
+    const observer = new ResizeObserver(measure);
+    observer.observe(pane);
+    for (const node of [frame.parentElement, frame.closest("article")]) {
+      if (node && node !== pane) observer.observe(node);
+    }
+    return () => observer.disconnect();
+  }, [framed]);
+
   if (skipped) {
     return (
       <div className="mt-5">
@@ -141,15 +229,14 @@ export function HtmlBody({ html, text }: { html: string; text: string }) {
             Show HTML anyway
           </button>
         </p>
-        <BodyText text={text} hasHtml />
+        <TextFallback text={text} />
       </div>
     );
   }
 
   /* HTML that sanitises to nothing (or was nothing) falls back to the
-     plain-text reader rather than an empty frame. hasHtml stays true: the
-     raw source exists and "View HTML source" can still show it. */
-  if (!sanitized.trim()) return <BodyText text={text} hasHtml />;
+     plain-text reader rather than an empty frame. */
+  if (!framed) return <TextFallback text={text} />;
 
   return (
     <div className="mt-5">
@@ -174,18 +261,16 @@ export function HtmlBody({ html, text }: { html: string; text: string }) {
           )}
         </p>
       )}
-      {/* The opaque origin makes the frame unmeasurable, so it takes the
-          viewport's remaining height and scrolls internally. */}
+      {/* The opaque origin makes the frame unmeasurable, so it takes the height
+          the pane has left below it and scrolls internally. */}
       <iframe
+        ref={frameRef}
         title="Message body"
         sandbox="allow-popups allow-popups-to-escape-sandbox"
         srcDoc={srcDoc}
         referrerPolicy="no-referrer"
         className="w-full rounded-[var(--radius-md)] border border-border-subtle bg-white"
-        style={{
-          height: "max(320px, calc(100dvh - 340px))",
-          colorScheme: "light",
-        }}
+        style={{ height: frameHeight, colorScheme: "light" }}
       />
     </div>
   );
