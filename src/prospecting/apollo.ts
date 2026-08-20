@@ -28,6 +28,7 @@ import {
   verdictForStatus,
   type ConnectorProbeResult,
 } from "../connectors/probe.js";
+import { bareDomain } from "../domain.js";
 import {
   apolloRequest,
   type CompanyQuery,
@@ -137,7 +138,10 @@ export class ApolloProvider {
       const opened: ProspectPerson[] = [];
       let stopped: string | null = null;
       for (const person of people) {
-        if (stopped || opened.length >= revealLimit || !person.apolloPersonId) {
+        // The cap counts reveals, not rows. Counting rows would let a run of
+        // hits with no Apollo id, which cost nothing because they cannot be
+        // opened at all, use up the credits the caller asked to spend.
+        if (stopped || revealed >= revealLimit || !person.apolloPersonId) {
           opened.push(person);
           continue;
         }
@@ -158,9 +162,9 @@ export class ApolloProvider {
         notes.push(
           `Revealed ${revealed} of ${people.length} people, then Apollo refused the rest: ${stopped} The people already revealed are in this result and were paid for, so do not run this search again to get them. The rest carry a first name and a job title and no address.`,
         );
-      } else if (rows.length > revealLimit) {
+      } else if (revealed < rows.length) {
         notes.push(
-          `Only the first ${revealLimit} of ${rows.length} hits were revealed; the rest carry a first name and a job title and no address.`,
+          `Revealed ${revealed} of ${rows.length} hits; the rest carry a first name and a job title and no address.`,
         );
       }
     }
@@ -275,7 +279,7 @@ function notesFor(payload: Record<string, unknown>): string[] {
 function normaliseCompany(row: Record<string, unknown>): ProspectCompany {
   return {
     name: text(row.name) ?? "",
-    domain: domainOf(text(row.primary_domain) ?? text(row.website_url)),
+    domain: bareDomain(text(row.primary_domain) ?? text(row.website_url)),
     industry: text(row.industry),
     headcount: numberOf(row.estimated_num_employees) ?? null,
     location: placeOf(row),
@@ -318,7 +322,7 @@ function normaliseRevealed(
   const email = realEmail(raw);
   const status = emailStatusOf(email, text(person.email_status), raw !== null);
   const orgName = text(org.name) ?? text(person.organization_name);
-  const orgDomain = domainOf(text(org.primary_domain) ?? text(org.website_url));
+  const orgDomain = bareDomain(text(org.primary_domain) ?? text(org.website_url));
   const out: ProspectPerson = {
     fullName: text(person.name) ?? joinName(first, last),
     firstName: first,
@@ -385,18 +389,6 @@ function placeOf(row: Record<string, unknown>): string | null {
   return parts.length === 0 ? null : parts.join(", ");
 }
 
-/** A bare host: "https://Acme.com/about" and "acme.com" both give "acme.com". */
-function domainOf(value: string | null): string | null {
-  if (!value) return null;
-  const bare = value
-    .trim()
-    .toLowerCase()
-    .replace(/^https?:\/\//, "")
-    .replace(/^www\./, "")
-    .split(/[/?#]/)[0];
-  return bare === "" ? null : bare;
-}
-
 /** Apollo wants headcount as one "min,max" string. */
 function employeeRange(min: number | undefined, max: number | undefined): string | null {
   if (min === undefined && max === undefined) return null;
@@ -414,7 +406,7 @@ function list(values: string[] | undefined): string[] {
 function domainList(values: string[] | undefined): string[] {
   const out: string[] = [];
   for (const value of list(values)) {
-    const domain = domainOf(value);
+    const domain = bareDomain(value);
     if (domain) out.push(domain);
   }
   return out;

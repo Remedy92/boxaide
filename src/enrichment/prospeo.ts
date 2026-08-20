@@ -91,7 +91,14 @@ export class ProspeoProvider implements EnrichmentProvider {
     if (!res.ok) {
       throw new Error(`prospeo HTTP ${res.status}: ${res.body.slice(0, 200)}`);
     }
-    const body = JSON.parse(res.body) as ProspeoBody;
+    // Same reason as hunter.ts: a proxy's HTML page must not reach the caller
+    // as an unattributed SyntaxError.
+    let body: ProspeoBody;
+    try {
+      body = JSON.parse(res.body) as ProspeoBody;
+    } catch {
+      throw new Error(`prospeo returned a body that is not JSON (HTTP ${res.status})`);
+    }
     // A quota or key problem arrives as HTTP 200 with error: true. Treating it
     // as an empty answer would burn the next provider's credits for nothing
     // and hide a broken key from the operator, so it throws like any failure.

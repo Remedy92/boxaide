@@ -87,7 +87,14 @@ export class HunterProvider implements EnrichmentProvider {
     if (!res.ok) {
       throw new Error(`hunter HTTP ${res.status}: ${res.body.slice(0, 200)}`);
     }
-    return JSON.parse(res.body) as HunterBody;
+    // A proxy or a status page answers 200 with HTML often enough that a bare
+    // SyntaxError, with no provider name and no status in it, is the worst
+    // thing an operator can be handed when deciding which key to check.
+    try {
+      return JSON.parse(res.body) as HunterBody;
+    } catch {
+      throw new Error(`hunter returned a body that is not JSON (HTTP ${res.status})`);
+    }
   }
 
   /**

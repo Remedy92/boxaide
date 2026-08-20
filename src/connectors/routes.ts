@@ -45,8 +45,20 @@ export function registerConnectorRoutes(app: Hono, platform: Platform): void {
     if (body === null || typeof body !== "object") {
       return c.json({ error: "body must be JSON" }, 400);
     }
+    // An array is JSON and is typeof "object", so it reaches the field checks
+    // below with every field absent. Refuse it here rather than let it read as
+    // an apiKey nobody sent.
+    if (Array.isArray(body)) {
+      return c.json({ error: "body must be a JSON object" }, 400);
+    }
+    // Only "" and null clear the key. An absent field is a body that lost its
+    // payload, not a request to destroy a key the operator may have to go back
+    // to the vendor for, so it is refused rather than obeyed.
+    if (!("apiKey" in body)) {
+      return c.json({ error: "apiKey is required; send \"\" or null to clear" }, 400);
+    }
     const raw = body.apiKey;
-    if (raw !== null && raw !== undefined && typeof raw !== "string") {
+    if (raw !== null && typeof raw !== "string") {
       return c.json({ error: "apiKey must be a string" }, 400);
     }
     return c.json({ connector: connectors.setKey(id, raw ?? "") });

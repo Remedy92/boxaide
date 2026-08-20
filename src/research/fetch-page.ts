@@ -339,7 +339,19 @@ export async function fetchPage(raw: string, deps: FetchPageDeps = {}): Promise<
       // Resolved against the current URL, then re-checked from scratch at the
       // top of the loop. A public host redirecting to 127.0.0.1 is the whole
       // reason redirects are followed here rather than by fetch.
-      url = parseFetchUrl(new URL(location, url).toString());
+      //
+      // The remote end writes the Location header, so it chooses what URL()
+      // is handed. An unparseable one throws a bare "Invalid URL" that names
+      // neither the header nor the page it came from; say both instead.
+      let next: URL;
+      try {
+        next = new URL(location, url);
+      } catch {
+        throw new Error(
+          `redirect location is not a valid URL: ${location} (from ${url.toString()})`,
+        );
+      }
+      url = parseFetchUrl(next.toString());
     }
     if (!res) throw new Error(`fetch failed: ${raw}`);
     if (!res.ok) {
@@ -351,7 +363,19 @@ export async function fetchPage(raw: string, deps: FetchPageDeps = {}): Promise<
       discard(res);
       throw new Error(`page is not readable text (content-type ${contentType}): ${url.toString()}`);
     }
-    const body = await readCapped(res);
+    // The deadline can land after the headers arrived, and a body can fail
+    // mid-stream on its own (a wrong content-encoding, a dropped socket). Both
+    // reach here as a raw AbortError or zlib error, so they are named the same
+    // way every other refusal in this function is.
+    let body: string;
+    try {
+      body = await readCapped(res);
+    } catch (err) {
+      if (controller.signal.aborted) {
+        throw new Error(`fetch timed out after ${FETCH_TIMEOUT_MS / 1000}s: ${url.toString()}`);
+      }
+      throw new Error(`fetch failed while reading the page: ${(err as Error).message}`);
+    }
     const full = htmlToText(body);
     const truncated = full.length > MAX_PAGE_CHARS;
     return {

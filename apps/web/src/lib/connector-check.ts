@@ -94,19 +94,21 @@ export type CapabilityView = { tone: ConnectorTone; words: string };
  * "On" needs a key that a provider answered to. Anything less says so: a key
  * that was refused, a provider nobody could reach, a key nobody has checked,
  * and no key at all are four different sentences, and none of them is "on".
+ *
+ * There is no in-flight state here. A probe is owned by the row that started
+ * it and the row says "Checking…" while it runs (see connectorStatus); the
+ * strip is a summary of settled answers. A `checking` parameter used to sit
+ * here that no caller ever passed, which made the branch unreachable and the
+ * strip's contract a claim rather than a fact.
  */
 export function capabilityStatus(
   members: Connector[],
   checks: Record<string, ConnectorCheck>,
-  checking: ReadonlySet<string> = new Set(),
 ): CapabilityView {
   if (members.length === 0) return { tone: "muted", words: "not offered" };
   const verdicts = members.map((member) => checks[member.id]?.verdict);
   if (verdicts.some((verdict) => verdict === "works")) {
     return { tone: "success", words: "on" };
-  }
-  if (members.some((member) => checking.has(member.id))) {
-    return { tone: "accent", words: "checking the key" };
   }
   if (!members.some((member) => member.configured)) {
     return { tone: "muted", words: "no key" };

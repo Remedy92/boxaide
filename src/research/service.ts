@@ -24,10 +24,28 @@ export const DEFAULT_NUM_RESULTS = 5;
  */
 export const MAX_NUM_RESULTS = 10;
 
-export type ResearchDeps = ProviderDeps &
-  FetchPageDeps & {
+/**
+ * The two HTTP seams are named apart on purpose.
+ *
+ * ProviderDeps and FetchPageDeps both call theirs `fetch`, so intersecting
+ * them gave one key that silently drove both. A caller stubbing Exa would also
+ * have replaced the transport behind web_fetch, and that transport IS the SSRF
+ * guard: fetchPage takes `deps.fetch ?? nodeFetch(resolve)`, so the stub would
+ * turn off connect-time address vetting without anybody asking it to. Two
+ * names means a stub reaches exactly what it meant to reach.
+ */
+export type ResearchDeps = Omit<ProviderDeps, "fetch"> &
+  Omit<FetchPageDeps, "fetch"> & {
     /** Overrides the built-in Exa and Parallel adapters wholesale. */
     providers?: SearchProvider[];
+    /** Injection seam for the search providers' HTTP client. Tests only. */
+    providerFetch?: typeof globalThis.fetch;
+    /**
+     * Injection seam for the page transport behind web_fetch. Tests only, and
+     * setting it removes the SSRF guard for this service: production leaves it
+     * absent so fetchPage builds the vetting transport itself.
+     */
+    pageFetch?: typeof globalThis.fetch;
   };
 
 export type SearchArgs = {
@@ -43,8 +61,8 @@ export class ResearchService {
   constructor(deps: ResearchDeps = {}) {
     this.providers =
       deps.providers ??
-      allProviders({ fetch: deps.fetch, apiKey: deps.apiKey, getKey: deps.getKey });
-    this.fetchDeps = { fetch: deps.fetch, resolve: deps.resolve };
+      allProviders({ fetch: deps.providerFetch, apiKey: deps.apiKey, getKey: deps.getKey });
+    this.fetchDeps = { fetch: deps.pageFetch, resolve: deps.resolve };
   }
 
   /** Provider ids in preference order, and whether each has a key today. */

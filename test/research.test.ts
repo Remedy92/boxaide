@@ -14,7 +14,6 @@ import {
 import {
   RESEARCH_TOOLS,
   RESEARCH_TOOL_NAMES,
-  RESEARCH_EGRESS_TOOL_NAMES,
   dispatchResearchTool,
 } from "../src/research/tools.js";
 import { extractTitle, htmlToText, MAX_PAGE_CHARS } from "../src/research/fetch-page.js";
@@ -73,12 +72,6 @@ describe("research tool surface", () => {
   it("exposes exactly the two spec tools", () => {
     expect(RESEARCH_TOOLS.map((t) => t.name).sort()).toEqual(["web_fetch", "web_search"]);
     expect([...RESEARCH_TOOL_NAMES].sort()).toEqual(["web_fetch", "web_search"]);
-  });
-
-  it("treats both tools as egress, so neither is pre-approved by accident", () => {
-    for (const name of RESEARCH_TOOL_NAMES) {
-      expect(RESEARCH_EGRESS_TOOL_NAMES.has(name)).toBe(true);
-    }
   });
 
   it("closes every input schema", () => {

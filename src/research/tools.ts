@@ -79,16 +79,12 @@ export const RESEARCH_TOOL_NAMES: ReadonlySet<string> = new Set(
   RESEARCH_TOOLS.map((t) => t.name),
 );
 
-/**
- * Both tools reach a third party, so both are listed. Nothing in this module is
- * a local read, and a future tool here will not be either: the set is written
- * out by hand so adding one forces a decision about which profiles get it,
- * the same bargain src/calendar/tools.ts makes for its send tools.
- */
-export const RESEARCH_EGRESS_TOOL_NAMES: ReadonlySet<string> = new Set([
-  "web_search",
-  "web_fetch",
-]);
+// There is deliberately no egress set here, unlike src/calendar/tools.ts.
+// That one exists because src/agent/approvals.ts and src/mcp/scope.ts read it;
+// every tool in this module reaches a third party and every profile gets all
+// of them, so a second set would name a decision nothing makes and would read
+// as a guarantee that is not enforced. Splitting the profiles here means
+// teaching scope.ts to consult a set, not writing one and hoping.
 
 export async function dispatchResearchTool(
   platform: ResearchPlatform,

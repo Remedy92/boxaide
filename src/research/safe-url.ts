@@ -126,11 +126,45 @@ function ipv6Bytes(ip: string): number[] | null {
   return bytes;
 }
 
+/**
+ * The IPv4 address an IPv6 address carries inside it, or null when it carries
+ * none.
+ *
+ * Four encodings, not one. ::ffff:a.b.c.d is the only form most guards check,
+ * and each of the others reaches the same IPv4 address on a host configured
+ * for it: ::a.b.c.d is the deprecated IPv4-compatible form, 64:ff9b::a.b.c.d
+ * is the well-known NAT64 prefix, and 2002:aabb:ccdd:: is 6to4. Judging any of
+ * them on its own bytes says "ordinary public IPv6" about 127.0.0.1.
+ */
+function embeddedIpv4(bytes: number[]): number[] | null {
+  const zeros = (from: number, to: number) => bytes.slice(from, to).every((b) => b === 0);
+  // ::ffff:a.b.c.d — IPv4-mapped.
+  if (zeros(0, 10) && bytes[10] === 0xff && bytes[11] === 0xff) return bytes.slice(12);
+  // ::ffff:0:a.b.c.d — IPv4-translated.
+  if (zeros(0, 8) && bytes[8] === 0xff && bytes[9] === 0xff && zeros(10, 12)) {
+    return bytes.slice(12);
+  }
+  // ::a.b.c.d — IPv4-compatible, deprecated but still routable by tunnels.
+  // ::, ::1 and the other tiny reserved addresses are left to the rules below.
+  if (zeros(0, 12) && !zeros(12, 16) && bytes[12] !== 0) return bytes.slice(12);
+  // 64:ff9b::a.b.c.d and 64:ff9b:1::a.b.c.d — NAT64 well-known prefixes.
+  if (bytes[0] === 0x00 && bytes[1] === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b) {
+    return bytes.slice(12);
+  }
+  // 2002:aabb:ccdd:: — 6to4, which carries the address in bytes 2 to 5.
+  if (bytes[0] === 0x20 && bytes[1] === 0x02) return bytes.slice(2, 6);
+  return null;
+}
+
 function blockedIpv6(bytes: number[]): string | null {
-  // IPv4-mapped (::ffff:a.b.c.d) is an IPv4 address wearing a hat. Judge it as
-  // one, or ::ffff:127.0.0.1 walks straight past every rule below.
-  const mapped = bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff;
-  if (mapped) return blockedIpv4(bytes.slice(12));
+  // An IPv4 address wearing a hat is judged as an IPv4 address, whichever hat
+  // it is wearing, or ::ffff:127.0.0.1 and its three cousins walk straight
+  // past every rule below.
+  const embedded = embeddedIpv4(bytes);
+  if (embedded) {
+    const reason = blockedIpv4(embedded);
+    if (reason) return reason;
+  }
   if (bytes.every((b) => b === 0)) return "unspecified";
   if (bytes.slice(0, 15).every((b) => b === 0) && bytes[15] === 1) return "loopback";
   if ((bytes[0] & 0xfe) === 0xfc) return "unique local";

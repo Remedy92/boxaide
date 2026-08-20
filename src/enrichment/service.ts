@@ -32,6 +32,13 @@ import type {
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Answers held at once. A cap rather than a TTL alone: the outreach engine now
+ * verifies every recipient before its send, so one big campaign would otherwise
+ * leave one entry per address resident until the day was up.
+ */
+const MAX_CACHE_ENTRIES = 5_000;
+
+/**
  * Confidence at or above this ends the waterfall. Below it the next provider
  * gets a turn and the best answer of the run is returned, so a catch-all
  * domain still produces something a human can judge.
@@ -83,6 +90,12 @@ export class EnrichmentService {
   private now: () => number;
   private upsertContact: UpsertContact | null;
   private cache = new Map<string, CacheEntry>();
+  /**
+   * Lookups already running, keyed the same way the cache is. The cache only
+   * answers once a call has settled, so without this two callers who ask for
+   * one address in the same tick both miss and the vendor bills twice.
+   */
+  private inFlight = new Map<string, Promise<EnrichmentResult>>();
   /** Tail of the in-flight chain, so two callers cannot overlap a vendor. */
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -187,6 +200,9 @@ export class EnrichmentService {
     const hit = this.cache.get(key);
     if (hit && this.now() - hit.at < CACHE_TTL_MS) return hit.result;
     this.cache.delete(key);
+    // The same lookup already on its way is the answer to this one too.
+    const running = this.inFlight.get(key);
+    if (running) return running;
 
     const run = this.queue.then(async () => {
       let best: EnrichmentResult | null = null;
@@ -212,13 +228,51 @@ export class EnrichmentService {
           ? lastError
           : new Error(String(lastError ?? "enrichment failed"));
       }
-      this.cache.set(key, { at: this.now(), result: best });
+      this.remember(key, best);
       return best;
     });
     // The queue must advance even when this call failed, or one bad lookup
     // would wedge every later one behind a rejected promise.
     this.queue = run.catch(() => undefined);
+    this.inFlight.set(key, run);
+    // then() with both handlers, not finally(): finally() returns a promise
+    // that rejects with nothing attached, which is an unhandled rejection.
+    void run.then(
+      () => this.inFlight.delete(key),
+      () => this.inFlight.delete(key),
+    );
     return run;
+  }
+
+  /**
+   * Keep one answer, bounded.
+   *
+   * Two things are dropped. `raw` is a whole vendor response, kept on a result
+   * so the call that made it can be debugged; nothing reads it afterwards and
+   * holding thousands of them for a day is a leak, so the cached copy is the
+   * four normalised fields. And entries past their day go on every write, with
+   * the oldest dropped if the map is still over its cap, so a process that
+   * verifies ten thousand recipients does not carry all ten thousand for ever.
+   */
+  private remember(key: string, result: EnrichmentResult): void {
+    const now = this.now();
+    for (const [stale, entry] of this.cache) {
+      if (now - entry.at >= CACHE_TTL_MS) this.cache.delete(stale);
+    }
+    this.cache.set(key, {
+      at: now,
+      result: {
+        email: result.email,
+        confidence: result.confidence,
+        status: result.status,
+        provider: result.provider,
+      },
+    });
+    while (this.cache.size > MAX_CACHE_ENTRIES) {
+      const oldest = this.cache.keys().next();
+      if (oldest.done) break;
+      this.cache.delete(oldest.value);
+    }
   }
 }
 
@@ -244,18 +298,4 @@ function outranks(candidate: EnrichmentResult, best: EnrichmentResult): boolean 
 /** The environment variable behind one provider id, minus the BOXAIDE_ prefix. */
 function envSuffixFor(id: string): string {
   return id === "hunter" ? "HUNTER_API_KEY" : "PROSPEO_API_KEY";
-}
-
-/**
- * The waterfall built from the environment alone, ignoring anything saved in
- * settings. Kept for a caller that wants the env-only view; the service
- * itself asks its getKey per call instead.
- */
-export function providersFromEnv(): EnrichmentProvider[] {
-  const providers: EnrichmentProvider[] = [];
-  const hunter = envNamed("HUNTER_API_KEY");
-  if (hunter) providers.push(new HunterProvider(hunter));
-  const prospeo = envNamed("PROSPEO_API_KEY");
-  if (prospeo) providers.push(new ProspeoProvider(prospeo));
-  return providers;
 }

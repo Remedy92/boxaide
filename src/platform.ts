@@ -97,10 +97,17 @@ export function createPlatform(opts: {
   const enrichmentService = new EnrichmentService({
     getKey,
     upsertContact: (row) => {
-      const orgName = row.org ?? row.orgDomain;
-      const org = orgName
-        ? crmStore.upsertOrg({ name: orgName, domain: row.orgDomain })
-        : null;
+      // upsertOrg overwrites the stored name of whatever it matches, so it is
+      // only called when the file actually named the organisation. A row that
+      // carries a domain and no name must not rename "Acme Corporation" to
+      // "acme.com": reuse the existing org, and fall back to the domain as a
+      // name only when there is no org to reuse.
+      const org = row.org
+        ? crmStore.upsertOrg({ name: row.org, domain: row.orgDomain })
+        : row.orgDomain
+          ? (crmStore.getOrgByDomain(row.orgDomain) ??
+            crmStore.upsertOrg({ name: row.orgDomain, domain: row.orgDomain }))
+          : null;
       const contact = crmStore.upsertContact({
         email: row.email,
         name: row.name,

@@ -75,6 +75,38 @@ function snippet(text: string): string {
   return collapsed.length > SNIPPET_CHARS ? collapsed.slice(0, SNIPPET_CHARS) : collapsed;
 }
 
+/**
+ * Deadline for one provider search, body read inside it.
+ *
+ * Without one the only limit is undici's own five-minute header timeout, so a
+ * provider that accepts the connection and then says nothing holds the whole
+ * web_search tool call for five minutes. Every other vendor call in this
+ * codebase carries a deadline; this is that one.
+ */
+export const SEARCH_TIMEOUT_MS = 15_000;
+
+/** One search request under that deadline, parsed. */
+async function searchJson(
+  provider: string,
+  doFetch: typeof globalThis.fetch,
+  url: string,
+  init: RequestInit,
+): Promise<Record<string, unknown>> {
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+  try {
+    const res = await doFetch(url, { ...init, signal: controller.signal });
+    return await readJson(provider, res);
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new Error(`${provider} search timed out after ${SEARCH_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(deadline);
+  }
+}
+
 async function readJson(provider: string, res: Response): Promise<Record<string, unknown>> {
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
@@ -113,7 +145,7 @@ export function exaProvider(deps: ProviderDeps = {}): SearchProvider {
           `exa is not configured: set ${EXA_ENV_KEY}, or add the key under Settings > Connectors.`,
         );
       }
-      const res = await doFetch(EXA_ENDPOINT, {
+      const body = await searchJson("exa", doFetch, EXA_ENDPOINT, {
         method: "POST",
         headers: { "content-type": "application/json", "x-api-key": key },
         body: JSON.stringify({
@@ -122,7 +154,6 @@ export function exaProvider(deps: ProviderDeps = {}): SearchProvider {
           contents: { text: { maxCharacters: SNIPPET_CHARS } },
         }),
       });
-      const body = await readJson("exa", res);
       const out: SearchResult[] = [];
       for (const entry of resultsArray(body)) {
         const url = textOf(entry.url);
@@ -160,7 +191,7 @@ export function parallelProvider(deps: ProviderDeps = {}): SearchProvider {
           `parallel is not configured: set ${PARALLEL_ENV_KEY}, or add the key under Settings > Connectors.`,
         );
       }
-      const res = await doFetch(PARALLEL_ENDPOINT, {
+      const body = await searchJson("parallel", doFetch, PARALLEL_ENDPOINT, {
         method: "POST",
         headers: { "content-type": "application/json", "x-api-key": key },
         body: JSON.stringify({
@@ -171,7 +202,6 @@ export function parallelProvider(deps: ProviderDeps = {}): SearchProvider {
           max_chars_per_result: SNIPPET_CHARS,
         }),
       });
-      const body = await readJson("parallel", res);
       const out: SearchResult[] = [];
       for (const entry of resultsArray(body)) {
         const url = textOf(entry.url);

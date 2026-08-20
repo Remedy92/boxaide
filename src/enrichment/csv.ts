@@ -7,7 +7,13 @@
  * no new dependencies, and the dialect that matters here is small. It handles
  * quoted fields, commas and newlines inside quotes, doubled quotes as an
  * escape, CRLF, and a UTF-8 byte order mark from Excel.
+ *
+ * A "website" or "orgDomain" cell usually holds a URL, not a bare domain, and
+ * the CRM matches organisations by exact domain. The fold onto "acme.com" is
+ * bareDomain in src/domain.ts, shared with the prospecting adapter so the two
+ * import paths land on one organisation row rather than two.
  */
+import { bareDomain } from "../domain.js";
 
 /** Highest number of data rows one import call accepts. */
 export const MAX_IMPORT_ROWS = 500;
@@ -73,22 +79,6 @@ const EMAIL_RE = /^[^\s@,;]+@[^\s@,;.]+(\.[^\s@,;.]+)+$/;
 
 export function isSyntacticEmail(value: string): boolean {
   return value.length <= 320 && EMAIL_RE.test(value);
-}
-
-/**
- * A "website" column usually holds a URL, not a bare domain, and the CRM
- * matches organisations by exact domain. Fold "https://www.acme.com/about"
- * onto "acme.com" so imported contacts land on the same org the mail sync
- * creates. Anything that still is not host-shaped is dropped to null.
- */
-function normalizeDomainCell(value: string | null): string | null {
-  if (value === null) return null;
-  let host = value.trim().toLowerCase();
-  host = host.replace(/^[a-z][a-z0-9+.-]*:\/\//, "");
-  host = host.split(/[/?#]/, 1)[0] ?? "";
-  host = host.replace(/^www\./, "").replace(/:\d+$/, "");
-  if (host === "" || !host.includes(".")) return null;
-  return host;
 }
 
 /** Split one CSV document into rows of raw cells. Empty lines are dropped. */
@@ -234,7 +224,7 @@ export function parseContactCsv(text: string): ParsedImport {
       name: pick("name"),
       title: pick("title"),
       org: pick("org"),
-      orgDomain: normalizeDomainCell(pick("orgDomain")),
+      orgDomain: bareDomain(pick("orgDomain")),
       tags,
       line: record.line,
     });
