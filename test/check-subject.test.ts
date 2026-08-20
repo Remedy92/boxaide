@@ -15,8 +15,13 @@ describe("checkSubject", () => {
   it("rejects an opener that describes the diff", () => {
     expect(checkSubject("Refactor the sweep handler").join()).toMatch(/not the app/);
     expect(checkSubject("Bump better-sqlite3").join()).toMatch(/not the app/);
-    expect(checkSubject("Updating the docs").join()).toMatch(/not the app/);
-    expect(checkSubject("Clean up dead config")).toHaveLength(1);
+    expect(checkSubject("Refactoring the docs").join()).toMatch(/not the app/);
+    expect(checkSubject("WIP on the rail").join()).toMatch(/not the app/);
+  });
+
+  it("leaves alone the two openers that block good copy", () => {
+    expect(checkSubject("Update the app in place, and say so in the rail")).toEqual([]);
+    expect(checkSubject("Clean up four leftovers from the HTML mail reader")).toEqual([]);
   });
 
   it("rejects a commit-type prefix", () => {

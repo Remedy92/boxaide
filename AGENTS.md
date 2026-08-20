@@ -42,8 +42,8 @@ is called three times:
   has been run. Weakest of the three: it never sees a pull request title.
 
 It refuses a commit-type prefix (`feat:`), a diff-word opener (refactor, bump,
-tweak, wip, cleanup, update, misc), a lowercase start, a trailing full stop, an
-em dash, and anything over 80 characters. Merges, reverts, `fixup!` and
+tweak, wip, misc), a lowercase start, a trailing full stop, an em dash, and
+anything over 80 characters. Merges, reverts, `fixup!` and
 `Cut 0.2.26` are exempt because they never reach the notes. So is Dependabot:
 its title is not ours to write, CI skips it, and `ship.sh` drops every
 "Bump ..." line from the release body, where a dependency range was never

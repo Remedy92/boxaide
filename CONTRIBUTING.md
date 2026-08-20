@@ -16,9 +16,8 @@ somebody deciding whether to restart.
 So write what the app now does, in the present tense, for a person who has
 never read this repo: "Archive mail, and give an agent's sweep one undo", not
 "refactor sweep handler". A CI check called `subject` refuses a `feat:` prefix,
-a diff-word opener (refactor, bump, tweak, wip, cleanup, update, misc), a
-lowercase start, a trailing full stop, an em dash, and anything over 80
-characters. Edit the title and it runs again.
+a diff-word opener (refactor, bump, tweak, wip, misc), a lowercase start, a
+trailing full stop, an em dash, and anything over 80 characters. Edit the title and it runs again.
 
 ## Setup
 

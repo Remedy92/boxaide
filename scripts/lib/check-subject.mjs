@@ -23,14 +23,16 @@ export const MAX_LENGTH = 80;
 
 // Openers that describe the diff instead of the app. "Refactor sweep handler"
 // is the exact failure this catches: true of the patch, meaningless in a
-// release note. Inflections included — "Updating", "Bumps" fail too.
+// release note. Inflections included: "Refactoring", "Bumps" fail too.
+// "update" and "cleanup" are deliberately absent. Both rejected sentences that
+// were already good copy: "Update the app in place, and say so in the rail",
+// "Clean up four leftovers from the HTML mail reader". A word that blocks a
+// good line is not worth the bad lines it catches.
 const DIFF_WORDS = new Set([
   "bump", "bumps", "bumped", "bumping",
-  "cleanup", "cleanups",
   "misc",
   "refactor", "refactors", "refactored", "refactoring",
   "tweak", "tweaks", "tweaked", "tweaking",
-  "update", "updates", "updated", "updating",
   "wip",
 ]);
 
@@ -72,11 +74,8 @@ export function checkSubject(raw) {
     problems.push(`starts with the commit-type prefix "${prefix[0]}"; write the sentence instead`);
   } else {
     const first = subject.split(/\s+/)[0].toLowerCase().replace(/[^a-z]+$/, "");
-    const cleanUp = /^clean\s+up\b/i.test(subject);
-    if (DIFF_WORDS.has(first) || cleanUp) {
-      problems.push(
-        `opens with "${cleanUp ? "clean up" : first}", which describes the diff, not the app`,
-      );
+    if (DIFF_WORDS.has(first)) {
+      problems.push(`opens with "${first}", which describes the diff, not the app`);
     }
     if (!/^[A-Z0-9]/.test(subject)) {
       problems.push("does not start with a capital letter");
