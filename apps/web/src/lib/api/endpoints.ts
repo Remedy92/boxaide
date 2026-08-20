@@ -368,6 +368,9 @@ export type SendMessageBody = {
   to: string;
   subject: string;
   text: string;
+  /** Forwarded HTML, already sanitised client-side. The reader never relays
+      what it would not run: see lib/mail/sanitize. */
+  html?: string;
   cc?: string;
   bcc?: string;
   inReplyTo?: string;

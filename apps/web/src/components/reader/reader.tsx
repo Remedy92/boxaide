@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { CircleAlert } from "lucide-react";
 import { BrandGlyph, TechnicalDetails } from "@/components/atoms";
 import { BodyText } from "@/components/reader/body-text";
+import { HtmlBody } from "@/components/reader/html-body";
 import { IdentityBlock } from "@/components/reader/identity-block";
 import { InlineReply, type Draft } from "@/components/reader/inline-reply";
 import { ReaderActionBar } from "@/components/reader/reader-action-bar";
@@ -185,7 +186,20 @@ export function Reader() {
             <IdentityBlock message={shown} alias={account?.alias ?? null} />
 
             {full ? (
-              <BodyText text={full.bodyText} hasHtml={!!full.bodyHtml} />
+              /* HTML mail renders sanitised in a sandboxed frame (§6.4.6);
+                 text-only mail keeps the plain-text reader. */
+              full.bodyHtml ? (
+                /* Keyed: without it React keeps the instance across a
+                   selection change and the "Load images" consent leaks into
+                   the next sender's mail. */
+                <HtmlBody
+                  key={full.id}
+                  html={full.bodyHtml}
+                  text={full.bodyText}
+                />
+              ) : (
+                <BodyText text={full.bodyText} hasHtml={false} />
+              )
             ) : (
               <div className="mt-5 space-y-2">
                 <Skeleton className="h-3 w-[90%]" />

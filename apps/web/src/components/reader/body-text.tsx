@@ -9,11 +9,12 @@ const TRUNCATION_LIMIT = 50_000;
 /**
  * §6.4.6. Renders `bodyText` and only `bodyText`.
  *
- * `bodyHtml` is raw, unsanitised sender HTML and there is no sanitiser in this
- * codebase, so it is never rendered — not here, not anywhere. `react/no-danger`
- * is an ESLint error. The only `dangerouslySetInnerHTML` in apps/web is the
- * desktop UA marker in layout.tsx, not mail. Links come back from
- * linkifyToElements as React elements; no HTML string is ever built.
+ * `bodyHtml` is raw, unsanitised sender HTML. It renders only through
+ * `HtmlBody` — DOMPurify plus a script-disabled sandboxed frame — never
+ * through the React tree. `react/no-danger` is an ESLint error. The only
+ * `dangerouslySetInnerHTML` in apps/web is the desktop UA marker in
+ * layout.tsx, not mail. Links come back from linkifyToElements as React
+ * elements; no HTML string is ever built here.
  */
 export function BodyText({
   text,

@@ -2,8 +2,17 @@ import { simpleParser } from "mailparser";
 
 /** Includes MIME encoding and attachments; checked before mailparser allocates. */
 export const MAX_RFC822_SOURCE_BYTES = 50 * 1024 * 1024;
-/** Raw sender HTML is source-view only and never needs to be unbounded. */
-export const MAX_BODY_HTML_CHARS = 250_000;
+/**
+ * Raw sender HTML, bounded so one message cannot blow up memory.
+ *
+ * mailparser inlines every `cid:` image as a `data:` URI before this sees the
+ * html, so a single photo is megabytes of base64. The old 250 000 cap was
+ * sized when this was source-view only; against inlined images it severed
+ * ordinary mail mid-document. The ceiling now bounds bytes, and the cost that
+ * actually scales with tag count is bounded where it is paid, on the render
+ * path in `HtmlBody` (§6.4.6).
+ */
+export const MAX_BODY_HTML_CHARS = 4_000_000;
 
 export type ParsedMailBody = {
   bodyText: string;
@@ -49,7 +58,7 @@ export async function parseRfc822(raw: string | Buffer): Promise<ParsedMailBody>
     "";
   const bodyHtml =
     typeof parsed.html === "string" && parsed.html.trim()
-      ? parsed.html.slice(0, MAX_BODY_HTML_CHARS)
+      ? capHtml(parsed.html)
       : undefined;
 
   return {
@@ -66,6 +75,19 @@ export async function parseRfc822(raw: string | Buffer): Promise<ParsedMailBody>
     references: formatReferences(parsed.references),
     calendar: extractCalendar(parsed),
   };
+}
+
+/**
+ * Cut at the last `<` so truncation never severs a tag or an attribute. The
+ * HTML parser drops a tag it hits EOF inside, which is safe but silently eats
+ * whatever followed on that line; cutting on a boundary keeps the loss to
+ * whole elements.
+ */
+function capHtml(html: string): string {
+  if (html.length <= MAX_BODY_HTML_CHARS) return html;
+  const cut = html.slice(0, MAX_BODY_HTML_CHARS);
+  const lastTag = cut.lastIndexOf("<");
+  return lastTag > 0 ? cut.slice(0, lastTag) : cut;
 }
 
 /**

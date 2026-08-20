@@ -12,7 +12,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useAgent } from "@/lib/hooks/use-agent";
 import { useApp } from "@/lib/hooks/use-app-state";
-import { useEnsureAgentRunning } from "@/lib/hooks/use-local-agents";
+import {
+  useEnsureAgentRunning,
+  usePickedAgent,
+} from "@/lib/hooks/use-local-agents";
 
 /**
  * The agent conversation — the app's first screen.
@@ -33,6 +36,15 @@ import { useEnsureAgentRunning } from "@/lib/hooks/use-local-agents";
 function gapFromBottom(node: HTMLElement) {
   return node.scrollHeight - node.scrollTop - node.clientHeight;
 }
+
+/**
+ * How long this view has to stay on screen before it starts an agent.
+ *
+ * Boxaide opens on the conversation, so this pane mounts on every launch,
+ * including the launches that head straight for mail. The wait is what tells
+ * those two apart: a pane that is gone before it elapses spawns nothing.
+ */
+const START_SETTLE_MS = 1_500;
 
 const SUGGESTIONS = [
   "What came in today that needs a reply?",
@@ -86,6 +98,33 @@ export function AgentView({
     const node = scroller.current;
     if (node) node.scrollTop = node.scrollHeight;
   }, []);
+
+  /* Opening this view is also a start, so the agent is up before the first
+     question rather than after it. One attempt per mount; a send still starts
+     one below if this one fails.
+
+     Mounted is not on screen, and not every gate here is obvious:
+     `ensureAgent` does nothing until the launcher's list has answered, the
+     settle keeps a launch that only passes through on its way to mail from
+     spawning anything, and the wizard renders OVER this pane, where a spawn
+     would tell its last step an agent had been paired. `ensureAgent` is held
+     in a ref because it is rebuilt every render and would re-arm the timer
+     forever while a run streams. */
+  const { picked } = usePickedAgent();
+  const ensure = React.useRef(ensureAgent);
+  React.useEffect(() => {
+    ensure.current = ensureAgent;
+  });
+  const started = React.useRef(false);
+  const ready = picked !== null && !app.wizardOpen;
+  React.useEffect(() => {
+    if (!ready || started.current) return;
+    const timer = window.setTimeout(() => {
+      started.current = true;
+      void ensure.current();
+    }, START_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [ready]);
 
   /* A send is also a start. The agent is picked in the composer now, not
      started from the sidebar, so the first message on a quiet machine has to

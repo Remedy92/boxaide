@@ -339,14 +339,13 @@ function DraftForm({
             />
           </Field>
 
-          {/* A draft can hold an HTML part written by an agent. It is never
-              rendered — the same rule the reader follows — and saving from this
-              pane sends only the plain text, which drops it. */}
+          {/* A draft can hold an HTML part written by an agent. This pane
+              never renders it, and saving from here sends only the plain text,
+              which drops it. */}
           {draft.bodyHtml && (
             <p className="text-[12px] leading-4 text-warning">
-              This draft also has an HTML part. Boxaide never renders sender
-              HTML, and saving here replaces the draft with the plain text
-              above.
+              This draft also has an HTML part. It is not shown here, and
+              saving replaces the draft with the plain text above.
             </p>
           )}
 

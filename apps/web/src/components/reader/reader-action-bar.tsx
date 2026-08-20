@@ -234,7 +234,7 @@ export function ReaderActionBar({
             </DialogTitle>
             <DialogDescription>
               {source === "html"
-                ? "Shown as escaped text. Boxaide never renders sender HTML."
+                ? "The raw source, shown as escaped text. The reader renders it sanitised in a sandboxed frame."
                 : "The bodyText the server returned, verbatim."}
             </DialogDescription>
           </DialogHeader>
