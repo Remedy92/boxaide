@@ -390,6 +390,30 @@ describe("local mail index", () => {
     expect(listed.map((m) => m.subject)).toContain("Wrong clock");
   });
 
+  it("drops an archived row from the index and keeps EXISTS honest", async () => {
+    const before = await mail.listMessages("personal", { limit: 20 });
+    const target = before.messages.find((m) => m.subject === "Secret subject")!;
+    const existsBefore = mail.index.getState(accountId, "INBOX")!.exists;
+
+    const result = await mail.archiveMessage("personal", target.id);
+    expect(result).toMatchObject({ moved: true, toFolder: "Archive" });
+
+    // The row is gone from the index straight away, without waiting for a
+    // sync, so the list cannot paint a message that has left the folder.
+    expect(mail.index.count(accountId, "INBOX")).toBe(existsBefore - 1);
+    const state = mail.index.getState(accountId, "INBOX")!;
+    expect(state.exists).toBe(existsBefore - 1);
+    expect(state.dirty).toBe(true);
+  });
+
+  it("does not touch the index when the archive moved nothing", async () => {
+    await mail.listMessages("personal", { limit: 20 });
+    const countBefore = mail.index.count(accountId, "INBOX");
+    const result = await mail.archiveMessage("personal", `${accountId}:9999`);
+    expect(result.moved).toBe(false);
+    expect(mail.index.count(accountId, "INBOX")).toBe(countBefore);
+  });
+
   it("rebuilds through listMessages when uidvalidity changes", async () => {
     await mail.listMessages("personal", { limit: 20 });
     provider.setUidValidity(accountId, 99);

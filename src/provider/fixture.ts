@@ -11,6 +11,7 @@ import type {
   MailMessage,
   MailMessageSummary,
   MailProvider,
+  MoveResult,
   ProviderAccount,
   MailboxSyncResult,
   SearchMessagesOpts,
@@ -28,6 +29,9 @@ type Stored = MailMessage & { accountEmail: string; inReplyTo?: string };
  * them there too.
  */
 const DRAFTS_FOLDER = "Drafts";
+
+/** Mirrors a server that advertises SPECIAL-USE \\Archive. */
+const ARCHIVE_FOLDER = "Archive";
 
 function nowIso(offsetMs = 0): string {
   return new Date(Date.now() + offsetMs).toISOString();
@@ -280,6 +284,51 @@ export class FixtureProvider implements MailProvider {
     };
   }
 
+  async moveMessage(
+    account: ProviderAccount,
+    messageId: string,
+    folder: string,
+  ): Promise<MoveResult> {
+    return this.move(account, messageId, folder);
+  }
+
+  async archiveMessage(
+    account: ProviderAccount,
+    messageId: string,
+  ): Promise<MoveResult> {
+    return this.move(account, messageId, ARCHIVE_FOLDER);
+  }
+
+  /**
+   * A move keeps the uid, exactly like a server without UIDPLUS would not —
+   * the fixture DOES name the new id, so the undo path is exercised by tests.
+   */
+  private move(
+    account: ProviderAccount,
+    messageId: string,
+    folder: string,
+  ): MoveResult {
+    const found = this.find(account, messageId);
+    if (!found) {
+      // The source folder is whatever the id claimed; an id that names no
+      // message names no folder either, so fall back to the id's own folder.
+      const parsed = this.parseFolder(messageId);
+      return { moved: false, fromFolder: parsed, toFolder: folder };
+    }
+    if (found.folder === folder) {
+      throw new Error(`message is already in ${folder}`);
+    }
+    const fromFolder = found.folder;
+    found.folder = folder;
+    return { moved: true, fromFolder, toFolder: folder, id: found.id };
+  }
+
+  /** Best-effort source folder for an id that matched nothing. */
+  private parseFolder(messageId: string): string {
+    const parts = messageId.split(":");
+    return parts.length >= 3 ? decodeURIComponent(parts[1]) : "INBOX";
+  }
+
   async markRead(
     account: ProviderAccount,
     messageId: string,
@@ -400,6 +449,7 @@ export class FixtureProvider implements MailProvider {
 function specialUseOf(name: string): string | undefined {
   if (name === "Sent") return "\\Sent";
   if (name === DRAFTS_FOLDER) return "\\Drafts";
+  if (name === ARCHIVE_FOLDER) return "\\Archive";
   return undefined;
 }
 

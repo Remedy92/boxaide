@@ -309,6 +309,43 @@ export class MailIndexStore {
       .run(seen ? 1 : 0, accountId, messageId);
   }
 
+  /**
+   * Drop one indexed row after it was moved out of its folder, and keep that
+   * folder's EXISTS honest.
+   *
+   * Both halves matter. Without the delete the archived message keeps painting
+   * in the list it just left; without the EXISTS decrement the next read sees
+   * fewer rows than the server claims to hold and pays a blocking IMAP refill
+   * for a folder that is in fact up to date. `dirty` then folds the real state
+   * in on the next background pass.
+   *
+   * Returns the folder the row was in, or null when it was not indexed.
+   */
+  removeMessage(accountId: string, messageId: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT folder FROM message_summaries WHERE account_id = ? AND id = ?`,
+      )
+      .get(accountId, messageId) as { folder: string } | undefined;
+    if (!row) return null;
+    const run = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `DELETE FROM message_summaries WHERE account_id = ? AND id = ?`,
+        )
+        .run(accountId, messageId);
+      this.db
+        .prepare(
+          `UPDATE mailbox_state
+           SET exists_count = MAX(exists_count - 1, 0), dirty = 1
+           WHERE account_id = ? AND folder = ?`,
+        )
+        .run(accountId, row.folder);
+    });
+    run();
+    return row.folder;
+  }
+
   upsertSummary(msg: MailMessageSummary): void {
     this.db
       .prepare(

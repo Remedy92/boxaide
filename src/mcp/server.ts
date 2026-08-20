@@ -169,6 +169,38 @@ export const TOOLS = [
     },
   },
   {
+    name: "message_archive",
+    description:
+      "File one message into the account's Archive mailbox. This is a move, not a delete: the result names the folder it came from (fromFolder) and the one it landed in (toFolder), and message_move puts it back. Returns { moved: false } when the message had already left that folder. Fails on an account whose server has no Archive mailbox.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        account: { type: "string", description: "Account alias or id." },
+        messageId: { type: "string", description: MESSAGE_ID_DESC },
+      },
+      required: ["account", "messageId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "message_move",
+    description:
+      "Move one message into another mailbox of the same account. Use a path from folders_list. Nothing is deleted and nothing is sent. Returns { moved: false } when the message had already left its folder.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        account: { type: "string", description: "Account alias or id." },
+        messageId: { type: "string", description: MESSAGE_ID_DESC },
+        folder: {
+          type: "string",
+          description: "Destination mailbox path, from folders_list.",
+        },
+      },
+      required: ["account", "messageId", "folder"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "draft_create",
     description: `Save a new draft into an account's Drafts folder. ${DRAFT_SAFETY} Every field except account is optional, so a half-written draft is fine. To draft a reply in-thread, set inReplyTo and references from the Message-ID header of the message you answer.`,
     inputSchema: {
@@ -494,6 +526,21 @@ async function dispatch(
           String(args.account),
           String(args.messageId),
           args.seen === undefined ? true : Boolean(args.seen),
+        ),
+      };
+    case "message_archive":
+      return {
+        result: await mail.archiveMessage(
+          String(args.account),
+          String(args.messageId),
+        ),
+      };
+    case "message_move":
+      return {
+        result: await mail.moveMessage(
+          String(args.account),
+          String(args.messageId),
+          String(args.folder),
         ),
       };
     case "draft_create":

@@ -10,6 +10,7 @@ import {
   mailboxNeedsFullResync,
   indexedUidRange,
   draftsMailboxPath,
+  archiveMailboxPath,
   draftFromImapSource,
 } from "../src/provider/imap-smtp.js";
 import type { AccountCredentials } from "../src/provider/types.js";
@@ -157,6 +158,56 @@ describe("draftsMailboxPath (where a draft gets appended)", () => {
       draftsMailboxPath([
         { name: "Sent", path: "Sent", specialUse: "\\Sent" },
         { name: "Trash", path: "Trash", specialUse: "\\Trash" },
+      ]),
+    ).toBeNull();
+  });
+});
+
+describe("archiveMailboxPath (where an archived message lands)", () => {
+  it("prefers the SPECIAL-USE \\Archive mailbox over any name", () => {
+    expect(
+      archiveMailboxPath([
+        { name: "Archive", path: "Archive" },
+        { name: "Arkiv", path: "Arkiv", specialUse: "\\Archive" },
+      ]),
+    ).toBe("Arkiv");
+  });
+
+  it("archives to All Mail on Gmail, which is what archiving means there", () => {
+    expect(
+      archiveMailboxPath([
+        { name: "INBOX", path: "INBOX" },
+        { name: "All Mail", path: "[Gmail]/All Mail", specialUse: "\\All" },
+      ]),
+    ).toBe("[Gmail]/All Mail");
+  });
+
+  it("finds Gmail's All Mail by path when no SPECIAL-USE is advertised", () => {
+    expect(
+      archiveMailboxPath([
+        { name: "INBOX", path: "INBOX" },
+        { name: "All Mail", path: "[Gmail]/All Mail" },
+      ]),
+    ).toBe("[Gmail]/All Mail");
+  });
+
+  it("falls back to a common name, case-insensitively", () => {
+    expect(
+      archiveMailboxPath([
+        { name: "INBOX", path: "INBOX" },
+        { name: "ARCHIVE", path: "INBOX.ARCHIVE" },
+      ]),
+    ).toBe("INBOX.ARCHIVE");
+  });
+
+  it("returns null rather than filing mail into Trash or Sent", () => {
+    // A wrong guess here is a move the user can only undo in another client,
+    // so no match must stay no match.
+    expect(
+      archiveMailboxPath([
+        { name: "Sent", path: "Sent", specialUse: "\\Sent" },
+        { name: "Trash", path: "Trash", specialUse: "\\Trash" },
+        { name: "Junk", path: "Junk", specialUse: "\\Junk" },
       ]),
     ).toBeNull();
   });

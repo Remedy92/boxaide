@@ -14,6 +14,8 @@ const ALL_TOOLS = [
   "message_get",
   "message_send",
   "message_mark_read",
+  "message_archive",
+  "message_move",
   "draft_create",
   "draft_update",
   "drafts_list",
@@ -78,7 +80,7 @@ describe("MCP tool surface", () => {
     messageId = listed.messages[0].id;
   });
 
-  it("advertises all eleven tools with input schemas", async () => {
+  it("advertises all thirteen tools with input schemas", async () => {
     const listed = (await handleMcpJsonRpc(mail, {
       jsonrpc: "2.0",
       id: 1,
@@ -201,6 +203,76 @@ describe("MCP tool surface", () => {
     expect(payloadOf(res)).toEqual({ updated: true });
     const listed = await mail.listMessages("personal", { limit: 10 });
     expect(listed.messages[0].seen).toBe(true);
+  });
+
+  it("archives a message into the Archive mailbox through message_archive", async () => {
+    const res = await call(mail, "message_archive", {
+      account: "personal",
+      messageId,
+    });
+    expect(payloadOf(res).result).toMatchObject({
+      moved: true,
+      fromFolder: "INBOX",
+      toFolder: "Archive",
+    });
+
+    // Gone from the inbox listing, present in Archive — a move, not a delete.
+    const inbox = await mail.listMessages("personal", { limit: 10 });
+    expect(inbox.messages.map((m) => m.id)).not.toContain(messageId);
+    const archived = await mail.listMessages("personal", {
+      limit: 10,
+      folder: "Archive",
+    });
+    expect(archived.messages.map((m) => m.subject)).toContain(
+      "Original thread",
+    );
+  });
+
+  it("refuses to archive a message that is already in Archive", async () => {
+    await call(mail, "message_archive", { account: "personal", messageId });
+    const res = (await call(mail, "message_archive", {
+      account: "personal",
+      messageId,
+    })) as ToolResult & { result: { isError?: boolean } };
+    expect(res.result.isError).toBe(true);
+    expect(payloadOf(res).error).toMatch(/already in Archive/i);
+  });
+
+  it("reports an archive of a message that is gone as not moved", async () => {
+    const res = await call(mail, "message_archive", {
+      account: "personal",
+      // Well-formed id, uid nobody holds — another client moved it first.
+      messageId: `${messageId.split(":")[0]}:9999`,
+    });
+    expect(payloadOf(res).result).toMatchObject({ moved: false });
+  });
+
+  it("moves a message back out of Archive through message_move", async () => {
+    const archived = payloadOf(
+      await call(mail, "message_archive", { account: "personal", messageId }),
+    ).result;
+    const res = await call(mail, "message_move", {
+      account: "personal",
+      messageId: archived.id,
+      folder: archived.fromFolder,
+    });
+    expect(payloadOf(res).result).toMatchObject({
+      moved: true,
+      fromFolder: "Archive",
+      toFolder: "INBOX",
+    });
+    const inbox = await mail.listMessages("personal", { limit: 10 });
+    expect(inbox.messages.map((m) => m.subject)).toContain("Original thread");
+  });
+
+  it("refuses a message_move into the folder the message is already in", async () => {
+    const res = (await call(mail, "message_move", {
+      account: "personal",
+      messageId,
+      folder: "INBOX",
+    })) as ToolResult & { result: { isError?: boolean } };
+    expect(res.result.isError).toBe(true);
+    expect(payloadOf(res).error).toMatch(/already in INBOX/i);
   });
 
   it("drafts a reply through draft_create without sending it", async () => {

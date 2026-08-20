@@ -17,6 +17,7 @@ import type {
   MailProvider,
   MailboxCursor,
   MailboxSyncResult,
+  MoveResult,
   ProviderAccount,
   SearchMessagesOpts,
   SendMessageInput,
@@ -646,6 +647,75 @@ export function draftsMailboxPath(
     /^(drafts|draft|entw(ü|u)rfe|brouillons|borradores)$/i.test(b.name),
   );
   return byName?.path ?? null;
+}
+
+/**
+ * SPECIAL-USE \\Archive first, then Gmail's All Mail — moving a message there
+ * is exactly how Gmail's IMAP spells "remove the Inbox label", which is what
+ * archiving is on that server — and only then the common names.
+ *
+ * Returns null rather than a guess. Exported for tests: filing mail into the
+ * wrong mailbox is a move the user has to undo by hand, in another client.
+ */
+export function archiveMailboxPath(
+  boxes: { name: string; path: string; specialUse?: string }[],
+): string | null {
+  const special = boxes.find((b) => b.specialUse === "\\Archive");
+  if (special) return special.path;
+  const all = boxes.find((b) => b.specialUse === "\\All");
+  if (all) return all.path;
+  const byPath = boxes.find((b) => /^\[gmail\]\/all mail$/i.test(b.path));
+  if (byPath) return byPath.path;
+  const byName = boxes.find((b) =>
+    /^(archive|archives|archiv|archivio|archivo|archief|arkiv)$/i.test(b.name),
+  );
+  return byName?.path ?? null;
+}
+
+/**
+ * MOVE one uid out of its folder, on an already-connected client.
+ *
+ * The uid is looked up first, because a MOVE of a uid the server no longer
+ * holds is a perfectly successful no-op: without this check every archive of
+ * an already-moved message would report success and the row would vanish from
+ * a list it is in fact still in.
+ */
+async function moveUid(
+  client: ImapFlow,
+  accountId: string,
+  source: { folder: string; uid: number },
+  destination: string,
+): Promise<MoveResult> {
+  if (source.folder === destination) {
+    throw new Error(`message is already in ${destination}`);
+  }
+  // Writable lock: MOVE expunges from the source, which needs read-write.
+  const lock = await client.getMailboxLock(source.folder);
+  try {
+    const present = await client.search({ uid: String(source.uid) }, { uid: true });
+    if (!present || present.length === 0) {
+      return { moved: false, fromFolder: source.folder, toFolder: destination };
+    }
+    const res = await client.messageMove(String(source.uid), destination, {
+      uid: true,
+    });
+    if (!res) {
+      return { moved: false, fromFolder: source.folder, toFolder: destination };
+    }
+    // uidMap is UIDPLUS-only. Without it the mail is in `destination` all the
+    // same; there is simply no id to hand back, and an undo has nothing to
+    // address — which is why the id is optional rather than fabricated.
+    const newUid =
+      typeof res === "object" ? res.uidMap?.get(source.uid) : undefined;
+    return {
+      moved: true,
+      fromFolder: source.folder,
+      toFolder: destination,
+      id: newUid == null ? undefined : makeId(accountId, destination, newUid),
+    };
+  } finally {
+    lock.release();
+  }
 }
 
 /**
@@ -1296,6 +1366,35 @@ export class ImapSmtpProvider implements MailProvider {
       } finally {
         lock.release();
       }
+    });
+  }
+
+  async moveMessage(
+    account: ProviderAccount,
+    messageId: string,
+    folder: string,
+  ): Promise<MoveResult> {
+    const parsed = parseId(messageId, account.id);
+    if (!parsed) throw new Error(`invalid message id: ${messageId}`);
+    return withImap(account.id, account.creds, async (client) =>
+      moveUid(client, account.id, parsed, folder),
+    );
+  }
+
+  async archiveMessage(
+    account: ProviderAccount,
+    messageId: string,
+  ): Promise<MoveResult> {
+    const parsed = parseId(messageId, account.id);
+    if (!parsed) throw new Error(`invalid message id: ${messageId}`);
+    return withImap(account.id, account.creds, async (client) => {
+      const path = archiveMailboxPath(await client.list());
+      if (!path) {
+        throw new Error(
+          "no Archive mailbox found on this account — create one named Archive in your mail provider",
+        );
+      }
+      return moveUid(client, account.id, parsed, path);
     });
   }
 
