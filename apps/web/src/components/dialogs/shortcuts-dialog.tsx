@@ -106,9 +106,9 @@ export function ShortcutsDialog({
 
           <p className="text-[12px] leading-4 text-fg-tertiary">
             Archiving moves the message to your mailbox&rsquo;s Archive folder;
-            nothing is deleted. Boxaide can&rsquo;t delete, star, or snooze — so
-            those keys do nothing here. j and k walk drafts too when the Drafts
-            view is open.
+            nothing is deleted. Boxaide can&rsquo;t delete, star, or snooze, so those
+            keys do nothing here. j and k walk drafts too when the Drafts view
+            is open.
           </p>
       </DialogBody>
       </DialogContent>

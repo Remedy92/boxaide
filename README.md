@@ -33,7 +33,7 @@ In the UI: **Connect mailbox** → pick a preset (Gmail / Fastmail / Outlook / i
 ### Archiving
 
 `e` in the list, or the archive button in the reader, moves the message to the
-account's **Archive** mailbox — the one your server advertises as `\Archive`,
+account's **Archive** mailbox: the one your server advertises as `\Archive`,
 or Gmail's *All Mail*, which is what archiving means there. Nothing is deleted,
 and the toast offers an **Undo** that moves the message straight back to the
 folder it came from. A server that cannot name the message's new id after a

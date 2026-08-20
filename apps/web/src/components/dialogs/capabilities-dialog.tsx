@@ -30,7 +30,7 @@ const CAN = [
 
 const CANNOT = [
   "Answer you by itself — Boxaide runs no model and never calls one",
-  "Delete messages — archiving moves them, it never removes them",
+  "Delete messages. Archiving moves them, it never removes them",
   "Star, flag, label, or tag",
   "Snooze or remind",
   "Group messages into conversations",

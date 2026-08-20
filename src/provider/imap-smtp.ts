@@ -1499,7 +1499,7 @@ export class ImapSmtpProvider implements MailProvider {
       });
       if (!paths.archive) {
         throw new Error(
-          "no Archive mailbox found on this account — create one named Archive in your mail provider",
+          "no Archive mailbox found on this account. Create one named Archive in your mail provider",
         );
       }
       if (paths.drafts && parsed.folder === paths.drafts) {
