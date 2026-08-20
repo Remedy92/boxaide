@@ -147,6 +147,7 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     masterKey: config.masterKey,
     mail,
     launcher,
+    store,
     calendarHelperPath: config.calendarHelperPath,
   });
 

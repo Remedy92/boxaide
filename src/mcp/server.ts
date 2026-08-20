@@ -624,13 +624,27 @@ async function dispatch(
           args.seen === undefined ? true : Boolean(args.seen),
         ),
       };
-    case "message_archive":
-      return {
-        result: await mail.archiveMessage(
-          String(args.account),
-          String(args.messageId),
-        ),
-      };
+    case "message_archive": {
+      const result = await mail.archiveMessage(
+        String(args.account),
+        String(args.messageId),
+      );
+      // Only a launched agent's archives are written down, and only the ones
+      // that happened. The user's own client is the user: they archived it on
+      // purpose and have the toast's own undo. An agent working a list needs
+      // one undo for the list, which is what this row feeds.
+      if (scope && result.moved) {
+        platform?.archiveLog?.record({
+          accountId: mail.accountId(String(args.account)),
+          messageId: result.id ?? null,
+          fromFolder: result.fromFolder,
+          toFolder: result.toFolder,
+          agent: channel?.presence().lastAgent ?? null,
+          chatId: scope === "run" ? null : (channel?.activeChat().id ?? null),
+        });
+      }
+      return { result };
+    }
     case "message_move":
       return {
         result: await mail.moveMessage(

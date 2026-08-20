@@ -39,9 +39,14 @@ and the toast offers an **Undo** that moves the message straight back to the
 folder it came from. A server that cannot name the message's new id after a
 move (no UIDPLUS) shows no Undo at all, rather than one that would fail.
 
+An agent Boxaide launched can archive too, and every message it files is
+written down: the Agent view shows *Claude archived 37 messages* with one
+button that moves the run back. Any other move it wants to make, Trash
+included, waits for you to approve it first.
+
 A mailbox whose server has no Archive folder says so instead of guessing:
 create one named `Archive` in your mail provider and it is picked up on the
-next archive. Archiving is one message per request — there is no bulk archive
+next archive. Archiving is one message per request: there is no bulk archive
 yet.
 
 ### Production-ish start

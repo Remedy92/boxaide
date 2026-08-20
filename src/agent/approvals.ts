@@ -120,6 +120,8 @@ export class ApprovalQueue {
       id: randomUUID(),
       tool: input.tool,
       args: input.args,
+      // Captured now, while the message is still where the agent found it.
+      context: this.contextFor(input.tool, input.args),
       profile: input.profile,
       agent: input.agent,
       chatId: input.chatId,
@@ -262,6 +264,27 @@ export class ApprovalQueue {
       .run(state, outcome, at, id);
   }
 
+  /**
+   * What the card needs beyond the arguments, per tool.
+   *
+   * Only message_move has any: it names its message by an opaque
+   * accountId:folder:uid id, and nobody can judge "move this to Trash" from
+   * one. Read from the local index, so an unindexed message simply yields
+   * nothing and the card falls back to the id.
+   */
+  private contextFor(
+    tool: string,
+    args: Record<string, unknown>,
+  ): StoredApproval["context"] {
+    if (tool !== "message_move") return null;
+    const account = args.account;
+    const messageId = args.messageId;
+    if (typeof account !== "string" || typeof messageId !== "string") {
+      return null;
+    }
+    return this.deps.mail.describeMessage(account, messageId);
+  }
+
   /* ---- watching --------------------------------------------------------- */
 
   subscribe(listener: () => void): () => void {
@@ -344,10 +367,21 @@ export function describe(row: StoredApproval): ApprovalView {
     body = text("description");
   } else if (row.tool === "message_move") {
     const folder = text("folder") ?? "(no folder named)";
-    title = `Move a message to ${folder}`;
+    // The subject when the agent asked, not the id. A card the user cannot
+    // read is a click they cannot make responsibly, and this one can end with
+    // mail in Trash.
+    const subject = row.context?.subject?.trim();
+    title = subject
+      ? `Move “${subject}” to ${folder}`
+      : `Move a message to ${folder}`;
     push(fields, "Account", text("account"));
-    push(fields, "Message", text("messageId"));
+    push(fields, "From", row.context?.from ?? null);
+    push(fields, "Subject", subject ?? null);
+    push(fields, "Now in", row.context?.folder ?? null);
     push(fields, "Into", folder);
+    // Only when there was nothing better to say: an id is not something a
+    // person reads, but it beats naming no message at all.
+    if (!subject) push(fields, "Message", text("messageId"));
   } else if (row.tool === "meeting_cancel") {
     title = "Cancel a meeting and tell everyone invited";
     push(fields, "Meeting", text("meetingId"));

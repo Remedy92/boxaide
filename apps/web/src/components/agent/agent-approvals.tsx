@@ -2,12 +2,12 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { CalendarPlus, CalendarX, FolderInput, Send } from "lucide-react";
+import { Archive, CalendarPlus, CalendarX, FolderInput, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/atoms";
 import { useAgent } from "@/lib/hooks/use-agent";
 import { friendlyError } from "@/lib/api/errors";
-import type { AgentApproval } from "@/lib/api/endpoints";
+import type { AgentApproval, AgentArchiveSweep } from "@/lib/api/endpoints";
 
 /**
  * What an agent asked to do, and the two buttons that answer it.
@@ -27,12 +27,95 @@ import type { AgentApproval } from "@/lib/api/endpoints";
  */
 export function AgentApprovals() {
   const agent = useAgent();
-  if (agent.approvals.length === 0) return null;
+  const sweeps = agent.archiveSweeps;
+  if (agent.approvals.length === 0 && sweeps.length === 0) return null;
   return (
     <div className="mb-2 space-y-2">
       {agent.approvals.map((row) => (
         <ApprovalCard key={row.id} approval={row} />
       ))}
+      {sweeps.map((row) => (
+        <SweepCard key={row.id} sweep={row} />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * What an agent archived, and the undo for all of it.
+ *
+ * Archiving is the one mail write an agent makes without asking, and the
+ * reason that is allowed is that a move is reversible. Reversible by a person,
+ * though — an agent working an inbox files messages one call at a time, and
+ * the per-message Undo lives on a toast in a window nobody is watching while
+ * it works. This is the same undo at the size the sweep actually was.
+ *
+ * Not a request, so it has no Approve: the archiving already happened. It sits
+ * with the requests because this is where the user looks for what an agent did
+ * to their mail.
+ */
+function SweepCard({ sweep }: { sweep: AgentArchiveSweep }) {
+  const agent = useAgent();
+  const [busy, setBusy] = React.useState(false);
+
+  const undo = async () => {
+    setBusy(true);
+    try {
+      const { restored, failed } = await agent.undoArchiveSweep(sweep.id);
+      if (restored === 0) {
+        toast.error("Nothing could be moved back");
+      } else if (failed > 0) {
+        // Never rounded up: the ones that did not come back are messages the
+        // user still has to find, and a clean success would hide them.
+        toast.success(
+          `Moved ${restored} back. ${failed} could not be, and are still filed.`,
+        );
+      } else {
+        toast.success(`Moved ${restored} back`);
+      }
+    } catch (err) {
+      toast.error(friendlyError(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const who = sweep.agent ?? "An agent";
+  const what = sweep.count === 1 ? "1 message" : `${sweep.count} messages`;
+
+  return (
+    <div className="rounded-[var(--radius-md)] border border-border-control bg-surface-1 px-3 py-2.5">
+      <div className="flex items-start gap-2">
+        <Archive
+          className="mt-0.5 size-4 shrink-0 text-fg-tertiary"
+          strokeWidth={1.5}
+          aria-hidden="true"
+        />
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] leading-[18px] text-fg-primary">
+            {who} archived {what}
+          </p>
+          {sweep.undoable < sweep.count && (
+            <p className="mt-0.5 text-[12px] leading-4 text-fg-tertiary">
+              {sweep.undoable} of them can be moved back. Your server did not
+              say where the rest landed, so they stay filed.
+            </p>
+          )}
+        </div>
+      </div>
+      <div className="mt-2 flex justify-end gap-1">
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          className="h-6 px-2 text-[12px]"
+          disabled={busy || sweep.undoable === 0}
+          onClick={() => void undo()}
+        >
+          {busy && <Spinner />}
+          Move them back
+        </Button>
+      </div>
     </div>
   );
 }

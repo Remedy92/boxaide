@@ -251,6 +251,28 @@ export class MailIndexStore {
     return summaries;
   }
 
+  /**
+   * One indexed summary by its message id, or null when the message was never
+   * indexed. Reads the (account_id, id) index rather than the primary key,
+   * because the caller knows the id and not the folder it sits in.
+   *
+   * The approval card is the caller that matters: it has to say which message
+   * an agent wants to move, and a local read is the only way to say it without
+   * an IMAP round trip per card.
+   */
+  getSummary(accountId: string, messageId: string): MailMessageSummary | null {
+    const row = this.db
+      .prepare(
+        `SELECT account_id as accountId, folder, uid, id, message_id_enc as messageIdEnc,
+                from_enc as fromEnc, to_enc as toEnc, subject_enc as subjectEnc,
+                snippet_enc as snippetEnc, date, internal_date as internalDate,
+                seen, has_attachments as hasAttachments
+         FROM message_summaries WHERE account_id = ? AND id = ?`,
+      )
+      .get(accountId, messageId) as SummaryRow | undefined;
+    return row ? this.toSummary(row) : null;
+  }
+
   listUids(accountId: string, folder: string): number[] {
     const rows = this.db
       .prepare(

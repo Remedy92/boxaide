@@ -661,6 +661,34 @@ export type AgentApproval = {
   askedAt: string;
 };
 
+/**
+ * One run of archiving by one launched agent. `undoable` is lower than `count`
+ * on a server that archived without naming the message's new id, and the pane
+ * says so rather than promising a full undo it cannot deliver.
+ */
+export type AgentArchiveSweep = {
+  id: number;
+  agent: string | null;
+  chatId: string | null;
+  count: number;
+  undoable: number;
+  firstAt: string;
+  lastAt: string;
+};
+
+/** Move a whole sweep back. Partial success is normal; the counts say so. */
+export function undoAgentArchiveSweep(
+  id: number,
+  ctx: Ctx,
+): Promise<{ restored: number; failed: number; sweeps: AgentArchiveSweep[] }> {
+  return request(`/api/agent/archives/${id}/undo`, {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
 export function decideAgentApproval(
   id: string,
   decision: "approve" | "deny",

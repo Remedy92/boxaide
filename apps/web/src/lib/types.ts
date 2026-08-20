@@ -270,6 +270,11 @@ export type AgentStateResponse = {
    * ask, which every reader treats as none.
    */
   approvals?: import("@/lib/api/endpoints").AgentApproval[];
+  /**
+   * What launched agents archived, newest run first. Absent on a server built
+   * before the log existed, which every reader treats as none.
+   */
+  archiveSweeps?: import("@/lib/api/endpoints").AgentArchiveSweep[];
 };
 
 /* -------------------------------------------------------------------------- */

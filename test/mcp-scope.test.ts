@@ -163,7 +163,8 @@ describe("agent scopes", () => {
     expect(JSON.parse(moved.result.content[0].text).queued).toBe(true);
     const [card] = approvals.pending();
     // The card names where the mail is going, because that is the whole
-    // question the user is being asked.
+    // question the user is being asked, and WHICH mail: an id is not
+    // something a person can approve moving to Trash.
     expect(card.title).toContain("INBOX");
     // Still in Archive: asking moved nothing.
     expect(
@@ -174,6 +175,38 @@ describe("agent scopes", () => {
     expect(
       (await mail.listMessages("personal", { folder: "Archive" })).messages,
     ).toHaveLength(0);
+  });
+
+  it("names the message on the card, not its id", async () => {
+    // The whole point of the gate: "move this to Trash" is not a question
+    // anyone can answer about an accountId:folder:uid string. The subject is
+    // snapshotted when the agent asks, from the local index, no IMAP.
+    const inbox = await mail.listMessages("personal", { limit: 5 });
+    const target = inbox.messages[0];
+    await call("message_move", "chat", {
+      account: "personal",
+      messageId: target.id,
+      folder: "Archive",
+    });
+    const [card] = approvals.pending();
+    expect(card.title).toBe(`Move “${target.subject}” to Archive`);
+    const fields = Object.fromEntries(card.fields.map((f) => [f.label, f.value]));
+    expect(fields.From).toBe(target.from);
+    expect(fields["Now in"]).toBe("INBOX");
+    expect(fields.Into).toBe("Archive");
+  });
+
+  it("names a message it cannot describe by its id rather than not at all", async () => {
+    // Nothing indexed under that id: the snapshot comes back empty and the
+    // card still has to say what it is being asked about.
+    await call("message_move", "chat", {
+      account: "personal",
+      messageId: "personal:INBOX:4242",
+      folder: "Archive",
+    });
+    const [card] = approvals.pending();
+    expect(card.title).toBe("Move a message to Archive");
+    expect(card.fields.map((f) => f.label)).toContain("Message");
   });
 
   it("fails a queued move whose message left before anyone approved it", async () => {

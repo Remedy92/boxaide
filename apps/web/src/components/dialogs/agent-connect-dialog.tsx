@@ -225,7 +225,9 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
             <p className="text-[12px] leading-4 text-fg-tertiary">
               It cannot connect or remove a mailbox, and it cannot delete, label
               or star mail. Archiving is a move, so nothing it does removes a
-              message. A move to any other folder waits for you to approve it.
+              message, and the Agent view offers one button that moves a whole
+              run of them back. A move to any other folder waits for you to
+              approve it.
             </p>
           </div>
 

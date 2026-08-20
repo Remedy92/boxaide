@@ -14,7 +14,9 @@ import {
   sendAgentMessage,
   stopAgentTurn,
   streamAgent,
+  undoAgentArchiveSweep,
   type AgentApproval,
+  type AgentArchiveSweep,
 } from "@/lib/api/endpoints";
 import { ApiError } from "@/lib/api/client";
 import { friendlyError } from "@/lib/api/errors";
@@ -130,6 +132,14 @@ export type AgentConversation = {
   approvals: AgentApproval[];
   /** Carries the action out, or drops it. Rejects with the reason it failed. */
   decideApproval: (id: string, decision: "approve" | "deny") => Promise<void>;
+  /**
+   * What launched agents archived, newest run first. Archiving is the one mail
+   * write an agent makes unasked, on the grounds that it is reversible; this
+   * is where reversing it is offered at the size the sweep actually was.
+   */
+  archiveSweeps: AgentArchiveSweep[];
+  /** Moves one sweep back. Resolves with what actually made it. */
+  undoArchiveSweep: (id: number) => Promise<{ restored: number; failed: number }>;
 };
 
 /**
@@ -217,6 +227,9 @@ function AgentSession({
   const [chat, setChat] = React.useState<AgentChat | null>(null);
   const [storage, setStorage] = React.useState<AgentChatStorage>(NO_STORAGE);
   const [approvals, setApprovals] = React.useState<AgentApproval[]>([]);
+  const [archiveSweeps, setArchiveSweeps] = React.useState<AgentArchiveSweep[]>(
+    [],
+  );
   const claimed = React.useMemo(() => {
     const seqs = new Set<number>(claimedIn(turns, presence));
     return seqs;
@@ -248,6 +261,7 @@ function AgentSession({
       setTurns(state.turns);
       setPresence(normalise(state.presence));
       setApprovals(state.approvals ?? []);
+      setArchiveSweeps(state.archiveSweeps ?? []);
     },
     [ctx],
   );
@@ -277,6 +291,7 @@ function AgentSession({
           setTurns((prev) => merge(prev, state.turns));
           setPresence(normalise(state.presence));
           setApprovals(state.approvals ?? []);
+          setArchiveSweeps(state.archiveSweeps ?? []);
           setConnection("live");
           attempt = 0;
           // Not awaited: the conversation must paint whether or not the rail's
@@ -520,6 +535,15 @@ function AgentSession({
     [ctx],
   );
 
+  const undoArchiveSweep = React.useCallback(
+    async (id: number) => {
+      const result = await undoAgentArchiveSweep(id, ctx);
+      setArchiveSweeps(result.sweeps);
+      return { restored: result.restored, failed: result.failed };
+    },
+    [ctx],
+  );
+
   const value = React.useMemo<AgentConversation>(
     () => ({
       turns,
@@ -542,6 +566,8 @@ function AgentSession({
       removeChat,
       approvals,
       decideApproval,
+      archiveSweeps,
+      undoArchiveSweep,
     }),
     [
       turns,
@@ -564,6 +590,8 @@ function AgentSession({
       removeChat,
       approvals,
       decideApproval,
+      archiveSweeps,
+      undoArchiveSweep,
     ],
   );
 

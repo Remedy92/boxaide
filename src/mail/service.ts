@@ -371,6 +371,37 @@ export class MailService {
     this.index.markDirty(accountId, result.toFolder);
   }
 
+  /** The account id behind an alias or id. Throws when neither names one. */
+  accountId(accountRef: string): string {
+    return this.resolve(accountRef).id;
+  }
+
+  /**
+   * What a message is, in the terms a person judges it by, from the local
+   * index alone. Null when it was never indexed.
+   *
+   * No IMAP: the caller is the approval card, which is drawn while the user
+   * waits and may be drawn for a message that has since moved.
+   */
+  describeMessage(
+    accountRef: string,
+    messageId: string,
+  ): { subject: string; from: string; folder: string } | null {
+    let accountId: string;
+    try {
+      accountId = this.resolve(accountRef).id;
+    } catch {
+      return null;
+    }
+    const summary = this.index.getSummary(accountId, messageId);
+    if (!summary) return null;
+    return {
+      subject: summary.subject,
+      from: summary.from,
+      folder: summary.folder,
+    };
+  }
+
   async listFolders(accountRef: string): Promise<MailFolder[]> {
     return this.provider.listFolders(this.resolve(accountRef));
   }
