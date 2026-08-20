@@ -263,7 +263,7 @@ function CapabilitySection({
   const pinned = rest.filter((row) => row.configured);
   const folded = rest.filter((row) => !row.configured);
   const [open, setOpen] = React.useState(false);
-  const listId = `connector-alternatives-${kind}`;
+  const rowId = (id: string) => `connector-alternative-${kind}-${id}`;
 
   return (
     <section className="space-y-2">
@@ -278,45 +278,53 @@ function CapabilitySection({
         />
       )}
 
-      {pinned.map((row) => (
-        <ConnectorCard key={row.id} connector={row} check={checks[row.id]} recommended={false} />
-      ))}
-
-      {folded.length > 0 && (
-        <div className="space-y-2">
-          <button
-            type="button"
-            aria-expanded={open}
-            aria-controls={listId}
-            onClick={() => setOpen((shown) => !shown)}
-            className="flex items-center gap-1 rounded-[var(--radius-sm)] text-[12px] leading-4 text-fg-secondary hover:text-fg"
-          >
-            <ChevronDown
-              aria-hidden="true"
-              strokeWidth={1.5}
-              className={cn(
-                "size-3.5 transition-transform duration-[var(--dur-fast)]",
-                open && "rotate-180",
-              )}
-            />
-            {open
-              ? "Hide the other option"
-              : folded.length === 1
-                ? `Other option: ${folded[0].label}`
-                : `${folded.length} other options`}
-          </button>
-          {open && (
-            <div id={listId} className="space-y-2">
-              {folded.map((row) => (
-                <ConnectorCard
-                  key={row.id}
-                  connector={row}
-                  check={checks[row.id]}
-                  recommended={false}
+      {/* Every alternative is a keyed child of this one element, and a folded
+          one is hidden rather than left unrendered. Saving a key moves a row
+          from folded to pinned, and a row that changed parent on the way would
+          be torn down and rebuilt while its check was still running: the
+          spinner would vanish, the caret would be dropped, and a check that
+          never reached the server would report nothing at all. Same parent,
+          same key, same component. */}
+      {rest.length > 0 && (
+        /* Gaps rather than margins: a hidden row is not a flex item at all, so
+           a collapsed fold leaves no space behind it. */
+        <div className="flex flex-col gap-2">
+          {[
+            ...pinned.map((row) => (
+              <div key={row.id}>
+                <ConnectorCard connector={row} check={checks[row.id]} recommended={false} />
+              </div>
+            )),
+            folded.length === 0 ? null : (
+              <button
+                key="toggle"
+                type="button"
+                aria-expanded={open}
+                aria-controls={folded.map((row) => rowId(row.id)).join(" ")}
+                onClick={() => setOpen((shown) => !shown)}
+                className="flex items-center gap-1 rounded-[var(--radius-sm)] text-[12px] leading-4 text-fg-secondary hover:text-fg"
+              >
+                <ChevronDown
+                  aria-hidden="true"
+                  strokeWidth={1.5}
+                  className={cn(
+                    "size-3.5 transition-transform duration-[var(--dur-fast)]",
+                    open && "rotate-180",
+                  )}
                 />
-              ))}
-            </div>
-          )}
+                {open
+                  ? "Hide the other option"
+                  : folded.length === 1
+                    ? `Other option: ${folded[0].label}`
+                    : `${folded.length} other options`}
+              </button>
+            ),
+            ...folded.map((row) => (
+              <div key={row.id} id={rowId(row.id)} hidden={!open}>
+                <ConnectorCard connector={row} check={checks[row.id]} recommended={false} />
+              </div>
+            )),
+          ]}
         </div>
       )}
     </section>
@@ -413,7 +421,10 @@ function ConnectorCard({
       { id: connector.id, apiKey },
       {
         onSuccess: () => {
-          setValue("");
+          // Only what this save wrote is cleared. A paste that arrived while
+          // it was in flight is sitting in the field waiting for Save, and
+          // wiping it would lose a key nobody copied twice.
+          setValue((current) => (current === apiKey ? "" : current));
           setReveal(false);
           setConfirmRemove(false);
           // Clearing the value disables Save, and a focused element that turns
@@ -435,11 +446,19 @@ function ConnectorCard({
    * Shared by the paste and by Enter, so both behave the same.
    */
   const commit = (raw: string) => {
-    if (save.isPending) return;
     const cleaned = cleanPastedKey(raw);
+    // The field keeps the key, packaging off, whatever happens next. A save
+    // that fails has to leave something to press Save on again: an empty field
+    // sends somebody back to the vendor for a key they already have.
+    setValue(cleaned.key);
     if (cleaned.problem) {
-      setValue(cleaned.key);
       toast.error(cleaned.problem);
+      return;
+    }
+    if (save.isPending) {
+      toast.error(
+        `Still saving the last ${connector.label} key. Press Save when that finishes.`,
+      );
       return;
     }
     write(
@@ -456,14 +475,19 @@ function ConnectorCard({
    * one ⌘V, and asking them to then find a Save button and afterwards a Check
    * button is two steps that only ever have one answer.
    *
-   * Read off the event rather than the field, because React has not written the
-   * pasted text into state yet when this fires.
+   * Read off the event rather than the field, because React has not written
+   * the pasted text into state yet when this fires, and dropped into whatever
+   * the field already holds at the caret: a paste that completes a half-typed
+   * key has to save the whole of it, not the half that arrived last.
    */
   const paste = (event: React.ClipboardEvent<HTMLInputElement>) => {
     const text = event.clipboardData.getData("text");
     if (text.trim() === "") return;
+    const field = event.currentTarget;
+    const start = field.selectionStart ?? value.length;
+    const end = field.selectionEnd ?? value.length;
     event.preventDefault();
-    commit(text);
+    commit(value.slice(0, start) + text + value.slice(end));
   };
 
   /** Enter in the field is the same save, for a key somebody typed out. */
@@ -485,7 +509,7 @@ function ConnectorCard({
               {connector.label}
             </span>
             {recommended && (
-              <span className="rounded-[var(--radius-sm)] bg-accent-subtle-bg px-1.5 py-0.5 text-[11px] leading-4 font-medium text-accent">
+              <span className="rounded-[var(--radius-sm)] bg-accent-subtle px-1.5 py-0.5 text-[11px] leading-4 font-medium text-accent">
                 Start here
               </span>
             )}
@@ -534,9 +558,11 @@ function ConnectorCard({
         <div className="flex flex-wrap items-center gap-2">
           {/* Not the vendor's home page: the page that issues the key. It is
               first because it is the first thing to do, and it is a link so
-              that middle-click and ⌘-click work like every other link. */}
-          {facts && !connector.configured && (
-            <Button asChild variant="default">
+              that middle-click and ⌘-click work like every other link. It stays
+              once a key is saved, quieter: the row that needs the key page
+              most is the one holding a key the provider just refused. */}
+          {facts && (
+            <Button asChild variant={connector.configured ? "secondary" : "default"}>
               <a href={facts.keysHref} target="_blank" rel="noreferrer noopener">
                 Get a key
                 <ExternalLink aria-hidden="true" className="size-3.5" strokeWidth={1.5} />
@@ -593,7 +619,7 @@ function ConnectorCard({
               onClick={() => probe.mutate(connector.id)}
             >
               {probe.isPending && <Spinner />}
-              Check again
+              {check ? "Check again" : "Check"}
             </Button>
           )}
           {connector.source === "settings" && (
