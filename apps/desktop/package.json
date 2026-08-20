@@ -1,6 +1,6 @@
 {
   "name": "boxaide-desktop",
-  "version": "0.2.25",
+  "version": "0.2.26",
   "private": true,
   "description": "Desktop shell for Boxaide — runs the Boxaide server in-process and opens the UI in a window",
   "author": "Boxaide contributors",
