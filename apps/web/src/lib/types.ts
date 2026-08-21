@@ -506,6 +506,13 @@ export type MemoryFile = {
   name: string;
   bytes: number;
   updatedAt: string;
+  /**
+   * Whether a person has seen the bytes this file holds NOW. Scheduled
+   * automations read only reviewed notes, so an unreviewed one is something
+   * the agent learned that no unattended run may act on yet. The agent
+   * rewriting a note takes its review with it.
+   */
+  reviewed: boolean;
 };
 
 export type MemoryListResponse = { files: MemoryFile[] };

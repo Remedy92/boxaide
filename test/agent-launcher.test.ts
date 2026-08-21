@@ -38,6 +38,7 @@ import { renderClaudeRunLine } from "../src/agent/agent-stream.js";
 import { DRIVEN_SYSTEM, type DriverChannel } from "../src/agent/driver.js";
 import { parseTabbedModels } from "../src/agent/model-list.js";
 import { claudeLoginScript, watchForClaudeSignIn } from "../src/api/routes.js";
+import { markReviewed } from "../src/memory/reviews.js";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -1147,13 +1148,23 @@ exec /bin/sleep 60
     await launcher.runOnce({ runId: "r1", prompt: "do the thing", closeGraceMs: 200 });
     expect(seenPrompt).toBe(`${AUTOMATION_RUN_PREAMBLE}\n\ndo the thing`);
 
-    // With notes: preamble, then the notes as background, and the task still
-    // last — never the ask-first offer, which a run has nobody to answer.
+    // Notes the agent wrote but nobody has read: a run is unattended, so it
+    // gets none of them. See src/memory/reviews.ts.
     const memory = join(`${dataDir}-agents`, "workdir", "memory");
     mkdirSync(memory, { recursive: true });
-    writeFileSync(join(memory, "MEMORY.md"), "- company.md — what Acme does\n");
-    writeFileSync(join(memory, "company.md"), "Acme ships boats.\n");
+    const index = "- company.md — what Acme does\n";
+    const company = "Acme ships boats.\n";
+    writeFileSync(join(memory, "MEMORY.md"), index);
+    writeFileSync(join(memory, "company.md"), company);
     await launcher.runOnce({ runId: "r2", prompt: "do the thing", closeGraceMs: 200 });
+    expect(seenPrompt).toBe(`${AUTOMATION_RUN_PREAMBLE}\n\ndo the thing`);
+
+    // Once a person has read them: preamble, then the notes as background, and
+    // the task still last — never the ask-first offer, which a run has nobody
+    // to answer.
+    markReviewed(dataDir, "MEMORY.md", index);
+    markReviewed(dataDir, "company.md", company);
+    await launcher.runOnce({ runId: "r3", prompt: "do the thing", closeGraceMs: 200 });
     expect(seenPrompt.startsWith(`${AUTOMATION_RUN_PREAMBLE}\n\n`)).toBe(true);
     expect(seenPrompt).toContain("Acme ships boats.");
     expect(seenPrompt).not.toContain("want me to?");

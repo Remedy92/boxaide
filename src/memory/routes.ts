@@ -9,12 +9,20 @@
  * enforced by the store, and the request body itself is already bounded by
  * the server-wide body limit (MAX_HTTP_BODY_BYTES in src/app.ts).
  *
- *   GET /api/memory          every file, index first
- *   GET /api/memory/:name    one file's text
- *   PUT /api/memory/:name    { content } replaces one file
+ *   GET  /api/memory              every file, index first, each with whether
+ *                                 the bytes it holds now have been reviewed
+ *   GET  /api/memory/:name        one file's text
+ *   PUT  /api/memory/:name        { content } replaces one file
+ *   POST /api/memory/:name/review the note as it stands reads right
+ *
+ * Review is the half of this surface that is not convenience. Automation runs
+ * read only notes a person has seen (src/memory/reviews.ts), so these two
+ * writes are how anything the agent learned unattended ever reaches one.
+ * Saving an edit reviews it: a person who retyped a line has read it.
  */
 import type { Hono } from "hono";
 import type { Platform } from "../platform.js";
+import { isReviewed, markReviewed } from "./reviews.js";
 import { listMemoryFiles, readMemoryFile, writeMemoryFile } from "./store.js";
 
 function errMessage(err: unknown): string {
@@ -39,7 +47,19 @@ export function registerMemoryRoutes(app: Hono, platform: Platform): void {
 
   app.get("/api/memory", async (c) => {
     if (!dataDir) return c.json({ error: "not available" }, 404);
-    return c.json({ files: await listMemoryFiles(dataDir) });
+    const files = await listMemoryFiles(dataDir);
+    // Read per file rather than trusting size or mtime: the predicate is the
+    // exact bytes, because that is what an automation run will be handed.
+    const withReview = await Promise.all(
+      files.map(async (file) => {
+        const content = await readMemoryFile(dataDir, file.name);
+        return {
+          ...file,
+          reviewed: content !== null && isReviewed(dataDir, file.name, content),
+        };
+      }),
+    );
+    return c.json({ files: withReview });
   });
 
   app.get("/api/memory/:name", async (c) => {
@@ -64,11 +84,33 @@ export function registerMemoryRoutes(app: Hono, platform: Platform): void {
     if (typeof body.content !== "string") {
       return c.json({ error: "content is required and must be a string" }, 400);
     }
+    const name = c.req.param("name") ?? "";
     try {
-      await writeMemoryFile(dataDir, c.req.param("name") ?? "", body.content);
-      return c.json({ ok: true });
+      await writeMemoryFile(dataDir, name, body.content);
+      // The person typed it, so they have read it.
+      markReviewed(dataDir, name, body.content);
+      return c.json({ ok: true, reviewed: true });
     } catch (err) {
       return c.json({ error: errMessage(err) }, 400);
     }
+  });
+
+  /**
+   * "This reads right." The note is left exactly as the agent wrote it and
+   * becomes available to automation runs. Hashed at this moment, so a later
+   * rewrite by the agent un-reviews it without anybody having to notice.
+   */
+  app.post("/api/memory/:name/review", async (c) => {
+    if (!dataDir) return c.json({ error: "not available" }, 404);
+    const name = c.req.param("name") ?? "";
+    let content: string | null;
+    try {
+      content = await readMemoryFile(dataDir, name);
+    } catch (err) {
+      return c.json({ error: errMessage(err) }, 400);
+    }
+    if (content === null) return c.json({ error: "not found" }, 404);
+    markReviewed(dataDir, name, content);
+    return c.json({ ok: true, reviewed: true });
   });
 }

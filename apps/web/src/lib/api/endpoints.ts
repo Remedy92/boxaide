@@ -1259,14 +1259,38 @@ export function saveMemoryFile(
   name: string,
   content: string,
   ctx: Ctx,
-): Promise<{ ok: true }> {
-  return request<{ ok: true }>(`/api/memory/${encodeURIComponent(name)}`, {
-    method: "PUT",
-    body: { content },
-    baseUrl: ctx.baseUrl,
-    token: ctx.token,
-    signal: ctx.signal,
-  });
+): Promise<{ ok: true; reviewed: true }> {
+  return request<{ ok: true; reviewed: true }>(
+    `/api/memory/${encodeURIComponent(name)}`,
+    {
+      method: "PUT",
+      body: { content },
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
+/**
+ * "This note reads right." The text is left exactly as the agent wrote it and
+ * becomes available to scheduled automations, which otherwise skip anything
+ * nobody has read. Recorded against the bytes on disk at this moment: if the
+ * agent rewrites the note later, it goes back to unreviewed on its own.
+ */
+export function reviewMemoryFile(
+  name: string,
+  ctx: Ctx,
+): Promise<{ ok: true; reviewed: true }> {
+  return request<{ ok: true; reviewed: true }>(
+    `/api/memory/${encodeURIComponent(name)}/review`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
 }
 
 /* -------------------------------------------------------------------------- */

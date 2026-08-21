@@ -14,6 +14,7 @@ import { useApp } from "@/lib/hooks/use-app-state";
 import {
   useMemoryFile,
   useMemoryFiles,
+  useReviewMemoryFile,
   useSaveMemoryFile,
 } from "@/lib/hooks/use-memory";
 import { useApiCtx } from "@/lib/hooks/use-settings";
@@ -31,6 +32,13 @@ import { cn } from "@/lib/utils";
  * here; a form for inventing notes would be a second place holding that
  * opinion. What a person gets is exactly one power: their correction wins on
  * the next conversation.
+ *
+ * The other thing this page is, and the reason it is not decoration: a note's
+ * material comes from read mail, so a stranger who lands a line in one has
+ * written into every prompt that follows. Scheduled automations, which run
+ * with nobody watching, read only notes somebody has looked at here. So the
+ * review state is on every row, and saying a note reads right is a real
+ * action rather than a tidy-up.
  */
 export function MemoryPanel() {
   const app = useApp();
@@ -45,7 +53,8 @@ export function MemoryPanel() {
     <div className="space-y-5">
       <PanelHeader title="What I remember">
         Notes your agent keeps about your work, in its own words. Correct a
-        line and save — the next conversation reads your version.
+        line and save — the next conversation reads your version. Scheduled
+        automations skip any note you have not read here.
       </PanelHeader>
 
       {/* The query is switched off without a token, so it never resolves and a
@@ -124,6 +133,7 @@ function MemoryEditor({ files }: { files: MemoryFile[] }) {
 
   const detail = useMemoryFile(active?.name ?? null);
   const save = useSaveMemoryFile();
+  const review = useReviewMemoryFile();
 
   /** Null means "no edits yet" — the textarea shows what the server returned. */
   const [draft, setDraft] = React.useState<string | null>(null);
@@ -157,7 +167,8 @@ function MemoryEditor({ files }: { files: MemoryFile[] }) {
     <div className="space-y-4">
       <p className="text-[12px] leading-4 text-fg-tertiary">
         The agent keeps this list itself, starting and retiring notes as it
-        learns. Anything below, you can correct.
+        learns. Anything below, you can correct. A note marked new is one
+        nothing scheduled will act on until you have read it.
       </p>
 
       <ul aria-label="Notes" className="space-y-1">
@@ -179,6 +190,13 @@ function MemoryEditor({ files }: { files: MemoryFile[] }) {
                 <span className="min-w-0 flex-1 truncate font-mono">
                   {file.name}
                 </span>
+                {/* Named for what it means to the user, not for the flag:
+                    "unreviewed" is our word for it, "new" is theirs. */}
+                {!file.reviewed && (
+                  <span className="shrink-0 rounded-[var(--radius-sm)] bg-surface-hover px-1.5 py-0.5 text-[11px] leading-4 text-warning">
+                    New
+                  </span>
+                )}
                 <time
                   dateTime={isoAttr(file.updatedAt)}
                   title={isoTitle(file.updatedAt)}
@@ -227,16 +245,47 @@ function MemoryEditor({ files }: { files: MemoryFile[] }) {
           </p>
         )}
 
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={!dirty || tooBig || save.isPending}
-          aria-busy={save.isPending || undefined}
-          onClick={submit}
-        >
-          {save.isPending && <Spinner />}
-          {save.isPending ? "Saving…" : "Save"}
-        </Button>
+        {/* Two ways a note becomes something automations may read: correct it
+            and save, or say the agent's own words read right. Both record the
+            bytes on screen, so a later rewrite by the agent undoes it. */}
+        {active !== undefined && !active.reviewed && !dirty && (
+          <p className="max-w-[52ch] text-[12px] leading-4 text-fg-secondary">
+            Your agent wrote this and you have not read it yet, so nothing
+            scheduled will use it. Correct anything that is wrong, then save or
+            say it reads right.
+          </p>
+        )}
+
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={!dirty || tooBig || save.isPending}
+            aria-busy={save.isPending || undefined}
+            onClick={submit}
+          >
+            {save.isPending && <Spinner />}
+            {save.isPending ? "Saving…" : "Save"}
+          </Button>
+
+          {active !== undefined && !active.reviewed && (
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={dirty || detail.isPending || review.isPending}
+              aria-busy={review.isPending || undefined}
+              onClick={() => {
+                if (!active || dirty || review.isPending) return;
+                review.mutate(active.name, {
+                  onSuccess: () => toast.success(`${active.name} marked read`),
+                });
+              }}
+            >
+              {review.isPending && <Spinner />}
+              Reads right
+            </Button>
+          )}
+        </div>
       </section>
 
       {/* Mounted whether or not there is anything to report: a live region
@@ -262,6 +311,21 @@ function MemoryEditor({ files }: { files: MemoryFile[] }) {
                   : detail.error
               }
             />
+          </>
+        )}
+        {review.isError && (
+          <>
+            <p className="flex items-center gap-1.5 text-[12px] leading-4 text-danger">
+              <StatusDot tone="danger" />
+              Could not mark {active?.name} read.
+            </p>
+            <p className="text-[12px] leading-4 text-fg-secondary">
+              {friendlyError(
+                review.error instanceof Error
+                  ? review.error.message
+                  : review.error,
+              )}
+            </p>
           </>
         )}
         {save.isError && (

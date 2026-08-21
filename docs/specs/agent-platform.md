@@ -608,6 +608,18 @@ nature, so its block is the one true at launch.
 A read that fails degrades to the no-notes or empty case; a launch never
 fails over its notes.
 
+A note reaches an automation run only after a human has read it. Review is
+recorded as a hash of the reviewed bytes in `<dataDir>/memory-reviews.json`
+(`src/memory/reviews.ts`), deliberately outside the subtree the agent can
+write: a note the agent rewrites after it passed goes back to unreviewed on its
+own. `runMemoryBlock` injects reviewed notes only, and an unreviewed index
+takes the whole block with it. Chat and driven launches are not gated, because
+the person is in the conversation. Saving an edit in Settings reviews it; so
+does `POST /api/memory/:name/review`, which leaves the agent's own words alone.
+This is the layer that does not depend on the model obeying anything: text a
+stranger got written into a note at three in the morning waits for a human
+before it can reach an unattended run.
+
 Notes are quoted, never obeyed. Their material comes from read mail, so a
 sender who lands a line in a topic file has written into every later prompt.
 Injected content is wrapped in `--- BEGIN/END WORKSPACE NOTES ---` markers,

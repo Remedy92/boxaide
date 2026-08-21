@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getMemoryFile,
   listMemoryFiles,
+  reviewMemoryFile,
   saveMemoryFile,
 } from "@/lib/api/endpoints";
 import { ApiError } from "@/lib/api/errors";
@@ -75,6 +76,22 @@ export function useSaveMemoryFile() {
         memoryFileKey(ctx.baseUrl, ctx.token, input.name),
         { name: input.name, content: input.content },
       );
+      void queryClient.invalidateQueries({ queryKey: ["memory-files"] });
+    },
+  });
+}
+
+/**
+ * "This reads right": marks the note as a person has seen it, which is what
+ * lets a scheduled automation use it at all. Only the list carries review
+ * state, so only the list is invalidated.
+ */
+export function useReviewMemoryFile() {
+  const ctx = useApiCtx();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => reviewMemoryFile(name, ctx),
+    onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["memory-files"] });
     },
   });
