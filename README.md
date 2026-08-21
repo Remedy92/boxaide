@@ -241,7 +241,7 @@ The platform modules add their own tools. Full list in [Agent work platform](#ag
 |------|---------|
 | CRM | `crm_sync`, `crm_contacts_search`, `crm_contact_get`, `crm_contact_upsert`, `crm_contact_delete`, `crm_note_add`, `crm_org_upsert`, `crm_orgs_list`, `crm_interactions_list`, `crm_pipeline_get`, `crm_deal_upsert`, `crm_deal_move`, `crm_deal_delete` |
 | Automations | `automation_create`, `automation_update`, `automation_delete`, `automations_list`, `automation_run_now`, `automation_runs_list` |
-| Outreach | `campaign_create`, `campaign_update`, `campaigns_list`, `campaign_add_contacts`, `outbox_queue_draft`, `outbox_list`, `suppression_add`, `suppression_list` |
+| Outreach | `outbox_queue_draft`, `outbox_list`, `suppression_add`, `suppression_list` |
 | Enrichment | `enrich_find_email`, `enrich_verify_email`, `crm_contacts_import` |
 | Research | `web_search`, `web_fetch` |
 | Prospecting | `prospect_find_companies`, `prospect_find_people`. Find companies and the people who work at them, by title, seniority, location, headcount and keyword. Needs an Apollo key. |
@@ -295,7 +295,7 @@ Three modules ship with the inbox. They are free, MIT, and run only on your mach
 |---|---|---|
 | **CRM** | Contacts, organisations, notes, an interaction timeline and a deal pipeline, all derived from mail you already have. | **People** and **Pipeline** views |
 | **Automations** | Named prompts on a cron. Each run is a one-shot headless agent with the Boxaide tools and no user to talk to. | **Automations** view |
-| **Outreach** | Campaigns of timed steps that produce drafts. Every draft waits for you. | **Outreach** view |
+| **Outreach** | An approval queue for drafts an agent writes, plus the suppression list. Every draft waits for you. | **Outreach** view |
 
 ### CRM: derived, not entered
 
@@ -338,8 +338,8 @@ Why this is a conversation and not an importer: the two systems do not have the 
 
 ### No auto-send
 
-**No agent sends outreach.** Campaigns and `outbox_queue_draft` land as
-`pending` rows. The Outreach view shows each one — recipient, subject, body —
+**No agent sends outreach.** `outbox_queue_draft` lands as a
+`pending` row. The Outreach view shows each one — recipient, subject, body —
 with **Approve**, **Edit** or **Reject**. Approval is REST only, from the
 browser, by you. There is no MCP tool that approves, rejects or sends an
 outbox row.
@@ -389,7 +389,7 @@ approve its own request, and there is no MCP tool that approves anything.
 
 | Reason | How an address gets there |
 |---|---|
-| `reply-stop` | Someone replied "stop", "unsubscribe" or "opt out" to a campaign. Detected on the inbound message; the campaign contact stops immediately. |
+| `reply-stop` | Someone replied "stop", "unsubscribe" or "opt out" to mail this app queued. Detected on the inbound message; the address is suppressed immediately. |
 | `manual` | You added it in the Outreach view. |
 | `bounce` | You or an agent recorded a hard bounce with `suppression_add`. A failed send does not add this on its own. |
 | `agent` | An agent added it with `suppression_add`. |
@@ -404,7 +404,7 @@ Same store, same master key, same file as the rest of Boxaide: `~/.boxaide/boxai
 
 | Data | At rest |
 |---|---|
-| Note text, interaction subjects and snippets, campaign step subjects and bodies, outbox subjects and bodies, automation run logs | encrypted, AES-256-GCM, same master key as your mail passwords |
+| Note text, interaction subjects and snippets, outbox subjects and bodies, automation run logs | encrypted, AES-256-GCM, same master key as your mail passwords |
 | Contact email and name, organisation name and domain, tags, deal titles, suppression addresses | plaintext — they are CRM identity, needed for UNIQUE and for search |
 | Automation prompts | plaintext — you wrote them, they are not mail content |
 

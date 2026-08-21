@@ -143,7 +143,7 @@ export function createPlatform(opts: {
   // Prospecting asks a vendor who exists. Like research it keeps nothing, so
   // it needs no db, no master key, and no start/stop.
   const prospectingService = new ProspectingService({ getKey });
-  const engine = new OutreachEngine(outreachStore, crmStore, opts.mail, {
+  const engine = new OutreachEngine(outreachStore, opts.mail, {
     // Deliverability check at the send chokepoint. The engine holds no
     // opinion about who does the checking: it asks this callback, and with
     // no provider key set the callback answers null and nothing changes.
@@ -186,7 +186,6 @@ export function createPlatform(opts: {
   crmService.setOptOutSink((contactId, email) => {
     if (!outreachStore.hasOutreachHistory(contactId)) return;
     outreachStore.addSuppression(email, "reply-stop");
-    outreachStore.optOutContact(contactId);
   });
 
   return {

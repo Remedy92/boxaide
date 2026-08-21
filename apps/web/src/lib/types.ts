@@ -414,25 +414,6 @@ export type AutomationRun = {
 /* outreach — /api/outreach/*                                                 */
 /* -------------------------------------------------------------------------- */
 
-export type CampaignStatus = "draft" | "active" | "paused" | "done";
-
-/**
- * A campaign row from GET /api/outreach/campaigns. `counts` is keyed by
- * campaign-contact state ('active' | 'replied' | 'opted_out' | 'done' |
- * 'suppressed') and OMITS states with no rows — never read it as a full map.
- *
- * The sequence steps are not on this response. No GET returns them: they are
- * authored through the agent, and PATCH echoes them back.
- */
-export type OutreachCampaign = {
-  id: string;
-  name: string;
-  accountId: string;
-  status: CampaignStatus;
-  createdAt: string;
-  counts: Record<string, number>;
-};
-
 export type OutboxStatus =
   | "pending"
   | "approved"
@@ -452,9 +433,7 @@ export type OutboxStatus =
 export type OutboxRow = {
   id: string;
   accountId: string;
-  campaignId: string | null;
   contactId: string | null;
-  stepPosition: number | null;
   to: string;
   subject: string;
   body: string;

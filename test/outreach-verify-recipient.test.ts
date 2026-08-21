@@ -80,7 +80,7 @@ describe("outreach pre-send verification", () => {
   function makeEngine(
     verify: (email: string) => Promise<RecipientVerdict | null>,
   ): OutreachEngine {
-    engine = new OutreachEngine(platform.outreachStore, platform.crmStore, mail, {
+    engine = new OutreachEngine(platform.outreachStore, mail, {
       sleep: async () => {},
       random: () => 0,
       verifyRecipient: async (email) => {
@@ -142,7 +142,7 @@ describe("outreach pre-send verification", () => {
 
     // No verifyRecipient dep at all: an install with no provider key.
     const bare = approve("b@example.com");
-    engine = new OutreachEngine(platform.outreachStore, platform.crmStore, mail, {
+    engine = new OutreachEngine(platform.outreachStore, mail, {
       sleep: async () => {},
       random: () => 0,
     });

@@ -29,6 +29,7 @@ import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { appHashOf } from "./app-hash.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -742,14 +743,15 @@ function showPopover(url) {
       popover = null;
     });
 
-    // The page's "Open Boxaide" button and every mail row navigate to the
-    // server's root. That navigation IS the popover's exit: catch it, raise
-    // the real window, keep the popover parked on /tray/ for next time.
+    // The page's "Open Boxaide" button navigates to the server's root and a
+    // mail row to that message's hash. That navigation IS the popover's exit:
+    // catch it, raise the real window on the address it named, keep the
+    // popover parked on /tray/ for next time.
     popover.webContents.on("will-navigate", (event, target) => {
       event.preventDefault();
       if (originOf(target) === origin) {
         popover?.hide();
-        openMainWindow();
+        openMainWindow(appHashOf(target));
         return;
       }
       openExternal(target);

@@ -912,136 +912,6 @@
     }
   },
   {
-    "name": "campaign_create",
-    "description": "Create an outreach campaign with its email sequence. The campaign starts as a draft and queues nothing until a human sets it active. Step 0 is the first email; every later step waits waitDays after the previous one. Subjects and bodies are templates: {{name}}, {{email}} and {{org}} are filled per contact.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "Unique campaign name."
-        },
-        "account": {
-          "type": "string",
-          "description": "Sending account alias or id."
-        },
-        "steps": {
-          "type": "array",
-          "description": "Sequence in order; the first entry is the initial mail.",
-          "items": {
-            "type": "object",
-            "properties": {
-              "subject": {
-                "type": "string"
-              },
-              "body": {
-                "type": "string",
-                "description": "Plain text. No HTML."
-              },
-              "waitDays": {
-                "type": "number",
-                "description": "Days after the previous step. Ignored on step 0.",
-                "default": 0
-              }
-            },
-            "required": [
-              "subject",
-              "body"
-            ]
-          }
-        }
-      },
-      "required": [
-        "name",
-        "account",
-        "steps"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "campaign_update",
-    "description": "Rename a campaign, change its status ('draft'|'active'|'paused'|'done'), or replace its steps. Steps can only be replaced while the campaign is still a draft — once contacts are moving through a sequence, rewriting it would send them mail nobody approved the campaign for.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "campaignId": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "status": {
-          "type": "string",
-          "enum": [
-            "draft",
-            "active",
-            "paused",
-            "done"
-          ]
-        },
-        "steps": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "subject": {
-                "type": "string"
-              },
-              "body": {
-                "type": "string"
-              },
-              "waitDays": {
-                "type": "number",
-                "default": 0
-              }
-            },
-            "required": [
-              "subject",
-              "body"
-            ]
-          }
-        }
-      },
-      "required": [
-        "campaignId"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "campaigns_list",
-    "description": "List campaigns with their sending account, status, and contact counts per state (active, replied, opted_out, done, suppressed).",
-    "inputSchema": {
-      "type": "object",
-      "properties": {},
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "campaign_add_contacts",
-    "description": "Add CRM contacts (ids from crm_contacts_search) to a campaign. Suppressed addresses are refused and reported back, never quietly enrolled.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "campaignId": {
-          "type": "string"
-        },
-        "contactIds": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "campaignId",
-        "contactIds"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "outbox_queue_draft",
     "description": "Queue one email for human review. This is the ONLY way an automation or agent gets outreach toward delivery; a human reviews it in the Boxaide Outreach view before anything is sent. Nothing here sends mail, and there is no tool that approves or sends a queued row — do not look for one. An opt-out footer is appended automatically.",
     "inputSchema": {
@@ -1065,10 +935,6 @@
         "contactId": {
           "type": "string",
           "description": "CRM contact id, when known."
-        },
-        "campaignId": {
-          "type": "string",
-          "description": "Campaign this belongs to, when any."
         }
       },
       "required": [
@@ -1369,7 +1235,7 @@
   },
   {
     "name": "crm_contacts_import",
-    "description": "Import contacts into the CRM from CSV text. The first line is a header; 'email' is required and 'name', 'title', 'org', 'orgDomain' and 'tags' are optional. Quoted fields and commas inside quotes are handled. Addresses that are not addresses are skipped, repeats of an earlier line are skipped, and every skip comes back with its line number and reason. At most 500 rows per call: a longer file is refused outright, so split it rather than expecting a partial import. Nothing here contacts anyone or enrols anyone in a campaign.",
+    "description": "Import contacts into the CRM from CSV text. The first line is a header; 'email' is required and 'name', 'title', 'org', 'orgDomain' and 'tags' are optional. Quoted fields and commas inside quotes are handled. Addresses that are not addresses are skipped, repeats of an earlier line are skipped, and every skip comes back with its line number and reason. At most 500 rows per call: a longer file is refused outright, so split it rather than expecting a partial import. Nothing here contacts anyone.",
     "inputSchema": {
       "type": "object",
       "properties": {

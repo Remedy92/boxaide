@@ -198,8 +198,8 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
 }
 
 /** CORS response headers shared by preflight and real responses. */
-// PATCH is here because the web UI edits automations and outreach campaigns
-// with it (/api/automations/:id, /api/outreach/campaigns/:id); an allowlisted
+// PATCH is here because the web UI edits automations with it
+// (/api/automations/:id); an allowlisted
 // hosted origin cannot reach those routes if the preflight omits the method.
 // PUT is here for the same reason: the Connectors panel saves provider API
 // keys with PUT /api/connectors/:id.
@@ -634,7 +634,7 @@ export function createApi(
   });
 
   // POST, not PUT: the CORS allow-list of methods carries only the verbs the
-  // UI actually sends (PATCH is there for automations and campaigns; PUT is
+  // UI actually sends (PATCH is there for automations; PUT is
   // not), and a draft update is a replace-and-delete rather than an idempotent
   // write.
   app.post("/api/drafts/:accountId/:draftId", async (c) => {
