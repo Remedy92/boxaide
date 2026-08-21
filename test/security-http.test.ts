@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const TOKEN = "test-token-abcdefghijklmnop";
+const BOOTSTRAP = "desktop-bootstrap-capability-test";
 
 function makeRuntime(allowedOrigins: string[] = []): Runtime {
   return createRuntime({
@@ -26,6 +27,7 @@ function makeRuntime(allowedOrigins: string[] = []): Runtime {
     host: "127.0.0.1",
     port: 0,
     fixtureMode: true,
+    bootstrapCapability: BOOTSTRAP,
     allowedOrigins,
     store: new Store(randomBytes(32), ":memory:"),
     provider: new FixtureProvider(),
@@ -232,10 +234,29 @@ describe("HTTP security surface (shipped app)", () => {
 
   it("hands the token to a genuine loopback request", async () => {
     const res = await runtime.app.request("/api/local-bootstrap", {
-      headers: { Host: "127.0.0.1:8787" },
+      headers: {
+        Host: "127.0.0.1:8787",
+        "X-Boxaide-Bootstrap": BOOTSTRAP,
+      },
     });
     expect(res.status).toBe(200);
     expect((await res.json()).token).toBe(TOKEN);
+    const replay = await runtime.app.request("/api/local-bootstrap", {
+      headers: {
+        Host: "127.0.0.1:8787",
+        "X-Boxaide-Bootstrap": BOOTSTRAP,
+      },
+    });
+    expect(replay.status).toBe(401);
+    expect(await replay.text()).not.toContain(TOKEN);
+  });
+
+  it("does not treat another local process as the desktop app", async () => {
+    const res = await runtime.app.request("/api/local-bootstrap", {
+      headers: { Host: "127.0.0.1:8787" },
+    });
+    expect(res.status).toBe(401);
+    expect(await res.text()).not.toContain(TOKEN);
   });
 
   it("withholds the token entirely when the bind address is not loopback", async () => {
@@ -286,6 +307,36 @@ describe("HTTP security surface (shipped app)", () => {
     expect(bare.status).toBe(401);
   });
 
+  it("rejects oversized JSON bodies before parsing or persistence", async () => {
+    const res = await runtime.app.request("/api/automations", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        name: "large",
+        cron: "0 8 * * *",
+        prompt: "x".repeat(1024 * 1024),
+      }),
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: "request body too large" });
+    expect(runtime.platform.automationStore.list()).toEqual([]);
+  });
+
+  it("rejects oversized MCP batches before dispatch", async () => {
+    const batch = Array.from({ length: 51 }, (_, id) => ({
+      jsonrpc: "2.0",
+      id,
+      method: "ping",
+    }));
+    const res = await runtime.app.request("/mcp", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify(batch),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.message).toMatch(/batch is too large/);
+  });
+
   it("gates the agent-platform routes behind the same token", async () => {
     // One representative read per module. Registered inside createApi, so the
     // /api/* auth middleware must cover them — a regression here exposes CRM
@@ -295,6 +346,7 @@ describe("HTTP security surface (shipped app)", () => {
       "/api/automations",
       "/api/outreach/outbox",
       "/api/outreach/badge",
+      "/api/connectors",
     ];
     for (const route of routes) {
       const anon = await runtime.app.request(route);
@@ -304,6 +356,22 @@ describe("HTTP security surface (shipped app)", () => {
       });
       expect(authed.status, route).toBe(200);
     }
+  });
+
+  it("gates the connector key check behind the same token", async () => {
+    // The one route here that calls a third party with the operator's key.
+    // Anything on localhost that could reach it could spend their credits and
+    // learn which providers they pay for.
+    const route = "/api/connectors/exa/check";
+    const anon = await runtime.app.request(route, { method: "POST" });
+    expect(anon.status).toBe(401);
+    const authed = await runtime.app.request(route, {
+      method: "POST",
+      headers: authHeaders,
+    });
+    // No key is set in this runtime, so the answer is "nothing to check",
+    // which is still proof the token got past the gate.
+    expect(authed.status).toBe(400);
   });
 });
 
@@ -429,7 +497,7 @@ describe("CORS allowlist over HTTP", () => {
     expect(res.headers.get("vary")).toBe("Origin");
     expect(res.headers.get("access-control-allow-methods")).toContain("POST");
     expect(res.headers.get("access-control-allow-methods")).toContain("DELETE");
-    // The UI edits automations and campaigns with PATCH; a preflight that
+    // The UI edits automations with PATCH; a preflight that
     // omits it locks an allowlisted hosted origin out of those routes.
     expect(res.headers.get("access-control-allow-methods")).toContain("PATCH");
     expect(res.headers.get("access-control-allow-headers")).toContain(
@@ -563,7 +631,10 @@ describe("CORS allowlist over HTTP", () => {
 
   it("marks the local-bootstrap token response uncacheable", async () => {
     const res = await open.app.request("/api/local-bootstrap", {
-      headers: { Host: "127.0.0.1:8787" },
+      headers: {
+        Host: "127.0.0.1:8787",
+        "X-Boxaide-Bootstrap": BOOTSTRAP,
+      },
     });
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");

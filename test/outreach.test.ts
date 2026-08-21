@@ -1,14 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { randomBytes, randomUUID } from "node:crypto";
-import { encryptSecret } from "../src/crypto/secrets.js";
 import type Database from "better-sqlite3";
 import { Store } from "../src/db/store.js";
 import { FixtureProvider } from "../src/provider/fixture.js";
 import { MailService } from "../src/mail/service.js";
 import { createPlatform, type Platform } from "../src/platform.js";
 import type { AgentLauncher } from "../src/agent/launcher.js";
-import { OutreachEngine, renderTemplate } from "../src/outreach/engine.js";
-import { OPT_OUT_FOOTER } from "../src/outreach/store.js";
+import { OutreachEngine } from "../src/outreach/engine.js";
+import {
+  MAX_OUTREACH_BODY_BYTES,
+  OPT_OUT_FOOTER,
+} from "../src/outreach/store.js";
 import { OPT_OUT_KEYWORD, optOutIntent } from "../src/outreach/opt-out.js";
 import { dispatchOutreachTool, OUTREACH_TOOLS } from "../src/outreach/tools.js";
 import { registerOutreachRoutes } from "../src/outreach/routes.js";
@@ -47,6 +49,7 @@ function createCrmFixtureTables(db: Database.Database): void {
       -- Written by CRM sync from the full body (src/crm/store.ts owns the
       -- production migration); outreach only reads it.
       opt_out INTEGER NOT NULL DEFAULT 0,
+      opt_out_full INTEGER NOT NULL DEFAULT 0,
       UNIQUE (account_id, message_id, contact_id)
     );
   `);
@@ -86,32 +89,19 @@ describe("outreach", () => {
     return id;
   }
 
-  /** Inbound interaction with encrypted subject/snippet, as CrmService writes. */
-  function addInboundInteraction(
-    contactId: string,
-    at: Date,
-    subject: string,
-    snippet: string,
-    optOut = 0,
-  ): void {
-    const enc = (t: string) => encryptSecret(masterKey, t);
-    store.db
-      .prepare(
-        `INSERT INTO interactions
-           (id, contact_id, account_id, message_id, direction, at, subject_enc,
-            snippet_enc, opt_out)
-         VALUES (?, ?, ?, ?, 'in', ?, ?, ?, ?)`,
-      )
-      .run(
-        randomUUID(),
-        contactId,
-        accountId,
-        `msg-${randomUUID()}`,
-        at.toISOString(),
-        enc(subject),
-        enc(snippet),
-        optOut,
-      );
+  /**
+   * Give a contact outreach history the way every real flow does: a queued
+   * row. The opt-out sink only suppresses people this product mailed or was
+   * about to mail.
+   */
+  function giveOutreachHistory(contactId: string, email: string): void {
+    platform.outreachStore.queueOutbox({
+      accountId,
+      to: email,
+      subject: "Hi",
+      body: "Hello there.",
+      contactId,
+    });
   }
 
   beforeEach(async () => {
@@ -134,18 +124,13 @@ describe("outreach", () => {
     });
     clock = new Date("2026-08-13T09:00:00.000Z");
     slept = [];
-    engine = new OutreachEngine(
-      platform.outreachStore,
-      platform.crmStore,
-      mail,
-      {
-        now: () => new Date(clock),
-        sleep: async (ms) => {
-          slept.push(ms);
-        },
-        random: () => 0.5,
+    engine = new OutreachEngine(platform.outreachStore, mail, {
+      now: () => new Date(clock),
+      sleep: async (ms) => {
+        slept.push(ms);
       },
-    );
+      random: () => 0.5,
+    });
   });
 
   afterEach(() => {
@@ -156,229 +141,23 @@ describe("outreach", () => {
     store.db.close();
   });
 
-  function makeCampaign(steps = [
-    { subject: "Hi {{name}}", body: "About {{org}}, mail {{email}}" },
-    { subject: "Following up", body: "Second touch", waitDays: 3 },
-  ]) {
-    const campaign = platform.outreachStore.createCampaign({
-      name: `camp-${randomUUID()}`,
-      accountId,
-      steps,
-    });
-    platform.outreachStore.updateCampaign(campaign.id, { status: "active" });
-    return campaign;
-  }
-
-  /* ---- lifecycle ------------------------------------------------------ */
-
-  it("runs a full sequence over fixture time, one queued step at a time", () => {
-    const campaign = makeCampaign();
-    const contactId = addContact("ada@acme.example", "Ada Lovelace", "Acme");
-    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
-
-    expect(engine.advanceSequences()).toBe(1);
-    let outbox = platform.outreachStore.listOutbox({ status: "pending" });
-    expect(outbox).toHaveLength(1);
-    expect(outbox[0].subject).toBe("Hi Ada");
-    expect(outbox[0].body).toBe(
-      `About Acme, mail ada@acme.example${OPT_OUT_FOOTER}`,
-    );
-    expect(outbox[0].stepPosition).toBe(0);
-
-    // Not due yet: step 1 waits three days.
-    clock = new Date(clock.getTime() + 2 * DAY);
-    expect(engine.advanceSequences()).toBe(0);
-
-    clock = new Date(clock.getTime() + 2 * DAY);
-    expect(engine.advanceSequences()).toBe(1);
-    outbox = platform.outreachStore.listOutbox({ status: "pending" });
-    expect(outbox.map((r) => r.stepPosition)).toEqual([0, 1]);
-
-    // Sequence exhausted: the contact is done and nothing else is queued.
-    clock = new Date(clock.getTime() + 30 * DAY);
-    expect(engine.advanceSequences()).toBe(0);
-    expect(
-      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
-    ).toBe("done");
-  });
-
-  it("stops the sequence when the contact replies", () => {
-    const campaign = makeCampaign();
-    const contactId = addContact("grace@navy.example", "Grace Hopper");
-    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
-    engine.advanceSequences();
-
-    addInboundInteraction(
-      contactId,
-      new Date(clock.getTime() + 1 * DAY),
-      "Re: Hi Grace",
-      "Sounds good, let us talk next week.",
-    );
-    clock = new Date(clock.getTime() + 4 * DAY);
-
-    expect(engine.advanceSequences()).toBe(0);
-    expect(
-      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
-    ).toBe("replied");
-    expect(platform.outreachStore.listOutbox()).toHaveLength(1);
-    expect(platform.outreachStore.isSuppressed("grace@navy.example")).toBe(
-      false,
-    );
-  });
-
-  it("suppresses the address when the reply asks to stop", () => {
-    const campaign = makeCampaign();
-    const contactId = addContact("alan@bletchley.example", "Alan Turing");
-    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
-    engine.advanceSequences();
-
-    // opt_out = 1: the row as CRM sync writes it after reading the full body.
-    // A stored 0 is a judgement the engine must not second-guess.
-    addInboundInteraction(
-      contactId,
-      new Date(clock.getTime() + 1 * DAY),
-      "Re: Hi Alan",
-      "Please stop emailing me.",
-      1,
-    );
-    clock = new Date(clock.getTime() + 4 * DAY);
-
-    engine.advanceSequences();
-    expect(
-      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
-    ).toBe("opted_out");
-    const suppression = platform.outreachStore.listSuppression();
-    expect(suppression).toEqual([
-      expect.objectContaining({
-        email: "alan@bletchley.example",
-        reason: "reply-stop",
+  it("bounds queued bodies", () => {
+    expect(() =>
+      platform.outreachStore.queueOutbox({
+        accountId,
+        to: "a@example.com",
+        subject: "hello",
+        body: "x".repeat(MAX_OUTREACH_BODY_BYTES + 1),
       }),
-    ]);
-  });
-
-  it("suppresses on the bare 'stop' reply the footer invites", () => {
-    const campaign = makeCampaign();
-    const contactId = addContact("ada@analytical.example", "Ada Lovelace");
-    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
-    engine.advanceSequences();
-
-    // A real mail client reply: "stop" first, quoted original underneath —
-    // the snippet carries both. This is the exact reply OPT_OUT_FOOTER asks
-    // for, and it must suppress, not read as engagement.
-    addInboundInteraction(
-      contactId,
-      new Date(clock.getTime() + 1 * DAY),
-      "Re: Hi Ada",
-      "Stop.\n\nOn Thu, Aug 14 you wrote: Hi Ada, saw your work…",
-      1,
-    );
-    clock = new Date(clock.getTime() + 4 * DAY);
-
-    engine.advanceSequences();
-    expect(
-      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
-    ).toBe("opted_out");
-    expect(platform.outreachStore.isSuppressed("ada@analytical.example")).toBe(
-      true,
-    );
-  });
-
-  it("keeps 'stop' mid-sentence as a normal reply, not an opt-out", () => {
-    const campaign = makeCampaign();
-    const contactId = addContact("kay@mercury.example", "Kay McNulty");
-    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
-    engine.advanceSequences();
-
-    addInboundInteraction(
-      contactId,
-      new Date(clock.getTime() + 1 * DAY),
-      "Re: Hi Kay",
-      "Sounds interesting — we should stop by your office next week.",
-    );
-    clock = new Date(clock.getTime() + 4 * DAY);
-
-    engine.advanceSequences();
-    expect(
-      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
-    ).toBe("replied");
-    expect(platform.outreachStore.isSuppressed("kay@mercury.example")).toBe(
-      false,
-    );
-  });
-
-  it("keeps a subject that merely starts with 'Stop' as a normal reply", () => {
-    const campaign = makeCampaign();
-    const contactId = addContact("booth@saastr.example", "Booth Owner");
-    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
-    engine.advanceSequences();
-
-    // Subjects use the whole-match rule: only a subject that IS the keyword
-    // opts out. Otherwise every conference invite suppresses its sender.
-    addInboundInteraction(
-      contactId,
-      new Date(clock.getTime() + 1 * DAY),
-      "Stop by our booth at SaaStr",
-      "We are in hall 3 all week.",
-    );
-    clock = new Date(clock.getTime() + 4 * DAY);
-
-    engine.advanceSequences();
-    expect(
-      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
-    ).toBe("replied");
-    expect(platform.outreachStore.isSuppressed("booth@saastr.example")).toBe(
-      false,
-    );
-  });
-
-  it("does not fabricate an opt-out across the subject/snippet seam", () => {
-    const campaign = makeCampaign();
-    const contactId = addContact("seam@example.com", "Seam");
-    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
-    engine.advanceSequences();
-
-    // Joined, these two fields read "Should we stop emailing lists entirely?"
-    // — a phrase that exists in neither field. Each field is matched alone.
-    addInboundInteraction(
-      contactId,
-      new Date(clock.getTime() + 1 * DAY),
-      "Re: Should we stop",
-      "emailing lists entirely?",
-    );
-    clock = new Date(clock.getTime() + 4 * DAY);
-
-    engine.advanceSequences();
-    expect(
-      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
-    ).toBe("replied");
-    expect(platform.outreachStore.isSuppressed("seam@example.com")).toBe(false);
+    ).toThrow(/body must be at most/);
   });
 
   /* ---- suppression at flag time (the platform sink) --------------------- */
 
-  it("suppresses a 'stop' that arrives after the contact was parked 'replied'", async () => {
-    const campaign = makeCampaign();
+  it("suppresses a 'stop' that arrives after outreach touched the contact", async () => {
     const contactId = addContact("late@example.com", "Late Stopper");
-    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
-    engine.advanceSequences();
+    giveOutreachHistory(contactId, "late@example.com");
 
-    // A plain answer parks them in 'replied' — outside the window
-    // advanceSequences ever looks at again.
-    addInboundInteraction(
-      contactId,
-      new Date(clock.getTime() + 1 * DAY),
-      "Re: Hi Late",
-      "Thanks, let me think about it.",
-    );
-    clock = new Date(clock.getTime() + 4 * DAY);
-    engine.advanceSequences();
-    expect(
-      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
-    ).toBe("replied");
-
-    // Weeks later they write "stop". The CRM sync flags the row and the
-    // platform sink suppresses AT THAT MOMENT — no engine pass needed, no
-    // campaign window consulted.
     provider.seedAccount(accountId, "me@test.com", [
       {
         subject: "Re: Hi Late",
@@ -392,9 +171,6 @@ describe("outreach", () => {
     expect(
       platform.outreachStore.listSuppression()[0].reason,
     ).toBe("reply-stop");
-    expect(
-      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
-    ).toBe("opted_out");
   });
 
   it("leaves a flagged contact outreach never touched alone", async () => {
@@ -415,10 +191,8 @@ describe("outreach", () => {
   });
 
   it("keeps a human's un-suppression: the same old 'stop' never re-suppresses", async () => {
-    const campaign = makeCampaign();
     const contactId = addContact("mind@changed.example", "Mind Changer");
-    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
-    engine.advanceSequences();
+    giveOutreachHistory(contactId, "mind@changed.example");
 
     provider.seedAccount(accountId, "me@test.com", [
       {
@@ -475,6 +249,89 @@ describe("outreach", () => {
     );
   });
 
+  it("retries a body fetch that failed, then suppresses from the full body", async () => {
+    const contactId = addContact("late@fetch.example", "Late Fetch");
+    giveOutreachHistory(contactId, "late@fetch.example");
+
+    const longBody = `${"Thanks for the detailed note, I read all of it. ".repeat(
+      5,
+    )}Please unsubscribe me from this list.`;
+    provider.seedAccount(accountId, "me@test.com", [
+      {
+        subject: "Re: Hi Late",
+        from: "Late Fetch <late@fetch.example>",
+        snippet: longBody.slice(0, 140),
+        bodyText: longBody,
+      },
+    ]);
+    expect(longBody.slice(0, 140)).not.toMatch(/unsubscribe/i);
+
+    const original = provider.getMessage.bind(provider);
+    provider.getMessage = async () => {
+      throw new Error("imap fetch failed");
+    };
+    await platform.crmService.syncFromMail();
+    expect(platform.outreachStore.isSuppressed("late@fetch.example")).toBe(
+      false,
+    );
+
+    provider.getMessage = original;
+    await platform.crmService.syncFromMail();
+    expect(platform.outreachStore.isSuppressed("late@fetch.example")).toBe(
+      true,
+    );
+  });
+
+  it("merges a queued draft that repeats a pending one word for word", () => {
+    const draft = {
+      accountId,
+      to: "twice@example.com",
+      subject: "Quick question",
+      body: "Hello there.",
+    };
+    const first = platform.outreachStore.queueOutbox(draft);
+    // What two overlapping automation runs reaching the same conclusion look
+    // like. The second gets the first row back, not a second row.
+    const second = platform.outreachStore.queueOutbox(draft);
+
+    expect(second.id).toBe(first.id);
+    expect(platform.outreachStore.listOutbox({}).length).toBe(1);
+  });
+
+  it("keeps a second draft that differs, however slightly", () => {
+    const base = {
+      accountId,
+      to: "twice@example.com",
+      subject: "Quick question",
+      body: "Hello there.",
+    };
+    platform.outreachStore.queueOutbox(base);
+    // A reviewer can delete a duplicate they can see; they cannot recover a
+    // draft that was never written. So anything not identical is kept.
+    platform.outreachStore.queueOutbox({ ...base, body: "Hello again." });
+    platform.outreachStore.queueOutbox({ ...base, subject: "Another thing" });
+    platform.outreachStore.queueOutbox({ ...base, to: "other@example.com" });
+
+    expect(platform.outreachStore.listOutbox({}).length).toBe(4);
+  });
+
+  it("stops matching a draft once the pending row has been decided", () => {
+    const draft = {
+      accountId,
+      to: "twice@example.com",
+      subject: "Quick question",
+      body: "Hello there.",
+    };
+    const first = platform.outreachStore.queueOutbox(draft);
+    platform.outreachStore.decide(first.id, "rejected");
+    // The merge only ever speaks for rows still awaiting review. A rejected
+    // one must not silently swallow a later attempt.
+    const again = platform.outreachStore.queueOutbox(draft);
+
+    expect(again.id).not.toBe(first.id);
+    expect(platform.outreachStore.listOutbox({}).length).toBe(2);
+  });
+
   it("fails an approved row whose address was suppressed after approval", async () => {
     const row = platform.outreachStore.queueOutbox({
       accountId,
@@ -500,6 +357,28 @@ describe("outreach", () => {
     // this fails instead of quietly ignoring people who did as they were told.
     expect(optOutIntent(OPT_OUT_KEYWORD, "body")).toBe(true);
     expect(OPT_OUT_FOOTER).toContain(`"${OPT_OUT_KEYWORD}"`);
+  });
+
+  it("applies the whole-match rule to subjects, after reply prefixes", () => {
+    // A subject that IS the keyword opts out, whatever the mail client
+    // prepended. Localized prefixes too (Aw, Sv, Antw).
+    expect(optOutIntent("stop", "subject")).toBe(true);
+    expect(optOutIntent("Re: stop", "subject")).toBe(true);
+    expect(optOutIntent("Fwd: Stop.", "subject")).toBe(true);
+    expect(optOutIntent("Aw: please stop", "subject")).toBe(true);
+
+    // A subject that merely starts with it is a normal mail. Otherwise every
+    // conference invite suppresses its sender.
+    expect(optOutIntent("Stop by our booth at SaaStr", "subject")).toBe(false);
+    expect(optOutIntent("Re: Should we stop", "subject")).toBe(false);
+  });
+
+  it("never fabricates an opt-out across a field seam", () => {
+    // Joined, these read "Should we stop emailing lists entirely?" — a phrase
+    // that exists in neither field. Callers must match each field alone; this
+    // pins what each alone answers.
+    expect(optOutIntent("Re: Should we stop", "subject")).toBe(false);
+    expect(optOutIntent("emailing lists entirely?", "body")).toBe(false);
   });
 
   it("ignores 'unsubscribe' that lives in quoted thread or signature, not the reply", () => {
@@ -546,19 +425,6 @@ describe("outreach", () => {
       "recipient suppressed",
     );
     expect(provider.getSent()).toHaveLength(0);
-  });
-
-  it("refuses to queue for an address already on the suppression list", () => {
-    const campaign = makeCampaign();
-    const contactId = addContact("no@thanks.example", "Nope");
-    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
-    platform.outreachStore.addSuppression("no@thanks.example", "manual");
-
-    expect(engine.advanceSequences()).toBe(0);
-    expect(
-      platform.outreachStore.listCampaignContacts(campaign.id)[0].state,
-    ).toBe("suppressed");
-    expect(platform.outreachStore.listOutbox()).toHaveLength(0);
   });
 
   /* ---- the send guard -------------------------------------------------- */
@@ -642,19 +508,14 @@ describe("outreach", () => {
   /* ---- cap and spacing -------------------------------------------------- */
 
   it("stops at the per-account daily cap and keeps the rest approved", async () => {
-    const capped = new OutreachEngine(
-      platform.outreachStore,
-      platform.crmStore,
-      mail,
-      {
-        now: () => new Date(clock),
-        sleep: async (ms) => {
-          slept.push(ms);
-        },
-        random: () => 0.5,
-        dailyCap: () => 2,
+    const capped = new OutreachEngine(platform.outreachStore, mail, {
+      now: () => new Date(clock),
+      sleep: async (ms) => {
+        slept.push(ms);
       },
-    );
+      random: () => 0.5,
+      dailyCap: () => 2,
+    });
     const ids = ["a", "b", "c"].map(
       (local) =>
         platform.outreachStore.queueOutbox({
@@ -701,18 +562,13 @@ describe("outreach", () => {
     // random() = 0 is the adversarial draw: a symmetric +-20s jitter would
     // produce a 40s gap here, which invariant 5 forbids. The floor must hold.
     const floorSlept: number[] = [];
-    const zeroJitter = new OutreachEngine(
-      platform.outreachStore,
-      platform.crmStore,
-      mail,
-      {
-        now: () => new Date(clock),
-        sleep: async (ms) => {
-          floorSlept.push(ms);
-        },
-        random: () => 0,
+    const zeroJitter = new OutreachEngine(platform.outreachStore, mail, {
+      now: () => new Date(clock),
+      sleep: async (ms) => {
+        floorSlept.push(ms);
       },
-    );
+      random: () => 0,
+    });
     for (const local of ["a", "b"]) {
       const row = platform.outreachStore.queueOutbox({
         accountId,
@@ -729,18 +585,12 @@ describe("outreach", () => {
   /* ---- encryption at rest ----------------------------------------------- */
 
   it("keeps subjects and bodies encrypted at rest", () => {
-    const campaign = makeCampaign([
-      { subject: "Secret subject", body: "Secret body" },
-    ]);
-    const contactId = addContact("ada@acme.example", "Ada Lovelace", "Acme");
-    platform.outreachStore.addCampaignContacts(campaign.id, [contactId]);
-    engine.advanceSequences();
-
-    const step = store.db
-      .prepare(`SELECT subject_enc, body_enc FROM sequence_steps`)
-      .get() as { subject_enc: string; body_enc: string };
-    expect(step.subject_enc).not.toContain("Secret subject");
-    expect(step.body_enc).not.toContain("Secret body");
+    platform.outreachStore.queueOutbox({
+      accountId,
+      to: "ada@acme.example",
+      subject: "Secret subject",
+      body: "Secret body",
+    });
 
     const row = store.db
       .prepare(`SELECT to_addr, subject_enc, body_enc FROM outbox`)
@@ -757,13 +607,9 @@ describe("outreach", () => {
 
   /* ---- tools and routes -------------------------------------------------- */
 
-  it("exposes exactly the eight spec tools and no approval tool", () => {
+  it("exposes exactly the four spec tools and no approval tool", () => {
     expect(OUTREACH_TOOLS.map((t) => t.name).sort()).toEqual(
       [
-        "campaign_add_contacts",
-        "campaign_create",
-        "campaign_update",
-        "campaigns_list",
         "outbox_list",
         "outbox_queue_draft",
         "suppression_add",
@@ -786,57 +632,6 @@ describe("outreach", () => {
     expect(res.queued.status).toBe("pending");
     expect(res.queued.body).toBe(`text${OPT_OUT_FOOTER}`);
     expect(platform.outreachStore.pendingCount()).toBe(1);
-  });
-
-  it("refuses suppressed contacts when adding them to a campaign", async () => {
-    const campaign = makeCampaign();
-    const ok = addContact("ok@example.com", "Fine");
-    const bad = addContact("bad@example.com", "Nope");
-    platform.outreachStore.addSuppression("bad@example.com", "manual");
-    const res = (await dispatchOutreachTool(
-      platform,
-      "campaign_add_contacts",
-      { campaignId: campaign.id, contactIds: [ok, bad, "ghost"] },
-    )) as {
-      added: number;
-      refused: Array<{ email: string }>;
-      unknown: string[];
-    };
-    expect(res.added).toBe(1);
-    expect(res.refused.map((r) => r.email)).toEqual(["bad@example.com"]);
-    expect(res.unknown).toEqual(["ghost"]);
-  });
-
-  it("refuses to rewrite steps once the campaign is live", async () => {
-    const campaign = makeCampaign();
-    await expect(
-      dispatchOutreachTool(platform, "campaign_update", {
-        campaignId: campaign.id,
-        steps: [{ subject: "new", body: "new" }],
-      }),
-    ).rejects.toThrow(/draft/);
-  });
-
-  it("rejects an unknown campaign status instead of writing it", async () => {
-    const campaign = makeCampaign();
-    await expect(
-      dispatchOutreachTool(platform, "campaign_update", {
-        campaignId: campaign.id,
-        status: "sending",
-      }),
-    ).rejects.toThrow(/unknown status/);
-
-    const app = new Hono();
-    registerOutreachRoutes(app, platform);
-    const res = await app.request(`/api/outreach/campaigns/${campaign.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ status: "bogus" }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(res.status).toBe(400);
-    expect(platform.outreachStore.getCampaign(campaign.id)?.status).toBe(
-      "active",
-    );
   });
 
   it("serves approve, reject and the badge over REST, and approval triggers the send", async () => {
@@ -877,40 +672,6 @@ describe("outreach", () => {
 
     const empty = await app.request("/api/outreach/badge");
     expect(await empty.json()).toEqual({ pending: 0 });
-  });
-
-  it("kicks the engine when a contact joins an active campaign over REST", async () => {
-    const app = new Hono();
-    registerOutreachRoutes(app, platform);
-    const campaign = makeCampaign();
-    const contactId = addContact("kick@acme.example", "Kick", "Acme");
-
-    const res = await app.request(
-      `/api/outreach/campaigns/${campaign.id}/contacts`,
-      {
-        method: "POST",
-        body: JSON.stringify({ contactIds: [contactId] }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(await res.json()).toMatchObject({ added: 1 });
-    // Step 0 lands 'pending' without waiting for the hourly tick — and it is
-    // queued, never sent: no human approved anything (invariant 1).
-    await vi.waitFor(() => {
-      expect(platform.outreachStore.pendingCount()).toBe(1);
-    });
-    expect(provider.getSent()).toHaveLength(0);
-  });
-
-  it("substitutes templates with a sane fallback name", () => {
-    expect(
-      renderTemplate("Hi {{name}} at {{org}} <{{email}}>", {
-        id: "1",
-        email: "ada@acme.example",
-        name: null,
-        org: null,
-      }),
-    ).toBe("Hi ada at  <ada@acme.example>");
   });
 
   it("rewrites pre-canonical suppression rows onto canonical keys at open", () => {

@@ -545,6 +545,239 @@ describe("HTTP API via createRuntime (shipped app)", () => {
   });
 });
 
+describe("archive over HTTP (shipped routes)", () => {
+  /** A runtime with one connected account and one seeded inbox message. */
+  async function withMessage() {
+    const masterKey = randomBytes(32);
+    const store = new Store(masterKey, ":memory:");
+    const provider = new FixtureProvider();
+    const runtime = createRuntime({
+      dataDir: ":memory:",
+      masterKey,
+      bearerToken: "test-token",
+      host: "127.0.0.1",
+      port: 0,
+      fixtureMode: true,
+      store,
+      provider,
+      webRoot: WEB_FIXTURE,
+    });
+    const headers = {
+      Authorization: "Bearer test-token",
+      "Content-Type": "application/json",
+    };
+    const connected = await runtime.app.request("/api/accounts", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        alias: "personal",
+        email: "you@personal.test",
+        username: "you@personal.test",
+        password: "ok",
+        imapHost: "fixture",
+        smtpHost: "fixture",
+      }),
+    });
+    const account = (await connected.json()).account;
+    provider.seedAccount(account.id, "you@personal.test", [
+      { subject: "Filed away", from: "n@test.com", bodyText: "archive me" },
+    ]);
+    const listed = await runtime.app.request(
+      "/api/messages?account=personal",
+      { headers },
+    );
+    const message = (await listed.json()).messages[0];
+    return { runtime, headers, message };
+  }
+
+  const archive = (
+    runtime: { app: { request: typeof fetch } },
+    headers: Record<string, string>,
+    id: string,
+  ) =>
+    runtime.app.request(
+      `/api/messages/personal/${encodeURIComponent(id)}/archive`,
+      { method: "POST", headers },
+    );
+
+  it("moves a message to Archive and reports both mailboxes", async () => {
+    const { runtime, headers, message } = await withMessage();
+    const res = await archive(runtime, headers, message.id);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      moved: true,
+      fromFolder: "INBOX",
+      toFolder: "Archive",
+    });
+
+    const inbox = await runtime.app.request("/api/messages?account=personal", {
+      headers,
+    });
+    const subjects = (await inbox.json()).messages.map(
+      (m: { subject: string }) => m.subject,
+    );
+    expect(subjects).not.toContain("Filed away");
+
+    const archived = await runtime.app.request(
+      "/api/messages?account=personal&folder=Archive",
+      { headers },
+    );
+    expect(
+      (await archived.json()).messages.map((m: { subject: string }) => m.subject),
+    ).toContain("Filed away");
+    runtime.store.close();
+  });
+
+  it("puts an archived message back through the move route", async () => {
+    const { runtime, headers, message } = await withMessage();
+    const archived = await (await archive(runtime, headers, message.id)).json();
+
+    const back = await runtime.app.request(
+      `/api/messages/personal/${encodeURIComponent(archived.id)}/move`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ folder: archived.fromFolder }),
+      },
+    );
+    expect(back.status).toBe(200);
+    expect(await back.json()).toMatchObject({
+      moved: true,
+      fromFolder: "Archive",
+      toFolder: "INBOX",
+    });
+    runtime.store.close();
+  });
+
+  it("answers 404 when the message already left the folder", async () => {
+    const { runtime, headers, message } = await withMessage();
+    const gone = `${message.accountId}:9999`;
+    const res = await archive(runtime, headers, gone);
+    expect(res.status).toBe(404);
+    runtime.store.close();
+  });
+
+  it("rejects a move with no destination folder", async () => {
+    const { runtime, headers, message } = await withMessage();
+    const res = await runtime.app.request(
+      `/api/messages/personal/${encodeURIComponent(message.id)}/move`,
+      { method: "POST", headers, body: JSON.stringify({ folder: "  " }) },
+    );
+    expect(res.status).toBe(400);
+    runtime.store.close();
+  });
+
+  const trash = (
+    runtime: { app: { request: typeof fetch } },
+    headers: Record<string, string>,
+    id: string,
+  ) =>
+    runtime.app.request(
+      `/api/messages/personal/${encodeURIComponent(id)}/trash`,
+      { method: "POST", headers },
+    );
+
+  it("deletes by moving to Trash, and says which mailboxes", async () => {
+    const { runtime, headers, message } = await withMessage();
+    const res = await trash(runtime, headers, message.id);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      moved: true,
+      fromFolder: "INBOX",
+      toFolder: "Trash",
+    });
+
+    const inbox = await runtime.app.request("/api/messages?account=personal", {
+      headers,
+    });
+    expect(
+      (await inbox.json()).messages.map((m: { subject: string }) => m.subject),
+    ).not.toContain("Filed away");
+
+    // Still on the server, in the mailbox the user's own client calls Trash.
+    // Nothing was expunged, which is the whole claim Delete makes here.
+    const deleted = await runtime.app.request(
+      "/api/messages?account=personal&folder=Trash",
+      { headers },
+    );
+    expect(
+      (await deleted.json()).messages.map((m: { subject: string }) => m.subject),
+    ).toContain("Filed away");
+    runtime.store.close();
+  });
+
+  it("puts a deleted message back through the move route", async () => {
+    const { runtime, headers, message } = await withMessage();
+    const deleted = await (await trash(runtime, headers, message.id)).json();
+
+    const back = await runtime.app.request(
+      `/api/messages/personal/${encodeURIComponent(deleted.id)}/move`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ folder: deleted.fromFolder }),
+      },
+    );
+    expect(back.status).toBe(200);
+    expect(await back.json()).toMatchObject({
+      moved: true,
+      fromFolder: "Trash",
+      toFolder: "INBOX",
+    });
+    runtime.store.close();
+  });
+
+  it("answers 404 when the message to delete already left the folder", async () => {
+    const { runtime, headers, message } = await withMessage();
+    const res = await trash(runtime, headers, `${message.accountId}:9999`);
+    expect(res.status).toBe(404);
+    runtime.store.close();
+  });
+
+  it("refuses to delete a draft, and says where to do it instead", async () => {
+    const { runtime, headers } = await withMessage();
+    const created = await runtime.app.request("/api/drafts", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        account: "personal",
+        to: "someone@test.com",
+        subject: "Half written",
+        text: "…",
+      }),
+    });
+    const draft = (await created.json()).draft;
+    const res = await trash(runtime, headers, draft.id);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("draft tools");
+    runtime.store.close();
+  });
+
+  it("refuses both routes without a bearer token", async () => {
+    const { runtime, headers, message } = await withMessage();
+    const path = `/api/messages/personal/${encodeURIComponent(message.id)}`;
+    expect(
+      (await runtime.app.request(`${path}/archive`, { method: "POST" })).status,
+    ).toBe(401);
+    expect(
+      (await runtime.app.request(`${path}/trash`, { method: "POST" })).status,
+    ).toBe(401);
+    expect(
+      (
+        await runtime.app.request(`${path}/move`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ folder: "Archive" }),
+        })
+      ).status,
+    ).toBe(401);
+    // The same call with the token is not a 401, so the gate is what refused.
+    expect((await archive(runtime, headers, message.id)).status).toBe(200);
+    runtime.store.close();
+  });
+});
+
 describe("Store.open database name", () => {
   it("opens boxaide.db when neither file exists", () => {
     const dir = mkdtempSync(join(tmpdir(), "boxaide-db-"));

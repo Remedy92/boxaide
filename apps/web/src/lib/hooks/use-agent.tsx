@@ -2,15 +2,32 @@
 
 import * as React from "react";
 import {
+  archiveAgentChat,
   clearAgentConversation,
+  createAgentChat,
+  decideAgentApproval,
+  deleteAgentChat,
   getAgentState,
+  listAgentChats,
+  renameAgentChat,
+  selectAgentChat,
   sendAgentMessage,
+  stopAgentTurn,
   streamAgent,
+  unarchiveAgentChat,
+  undoAgentArchiveSweep,
+  type AgentApproval,
+  type AgentArchiveSweep,
 } from "@/lib/api/endpoints";
 import { ApiError } from "@/lib/api/client";
 import { friendlyError } from "@/lib/api/errors";
 import { useApiCtx } from "@/lib/hooks/use-settings";
-import type { AgentPresence, AgentTurn } from "@/lib/types";
+import type {
+  AgentChat,
+  AgentChatStorage,
+  AgentPresence,
+  AgentTurn,
+} from "@/lib/types";
 
 /**
  * The live agent conversation.
@@ -36,6 +53,15 @@ const IDLE: AgentPresence = {
   lastAgent: null,
   launchedAgent: null,
   working: null,
+  dropped: [],
+};
+
+/** Reads as "nothing stored yet" until the server has answered once. */
+const NO_STORAGE: AgentChatStorage = {
+  bytes: 0,
+  budget: 0,
+  chats: 0,
+  archived: 0,
 };
 
 /**
@@ -44,7 +70,10 @@ const IDLE: AgentPresence = {
  * pane would show a running indicator keyed off a field that is never there.
  */
 function normalise(presence: AgentPresence): AgentPresence {
-  return presence.working ? presence : { ...presence, working: null };
+  return {
+    ...presence,
+    working: presence.working ?? null,
+  };
 }
 
 /** Reconnect backoff. Capped low: this is a server on the same machine. */
@@ -62,21 +91,59 @@ export type AgentConversation = {
   presence: AgentPresence;
   connection: AgentConnection;
   /**
-   * User turns an agent has taken. A hand-off is permanent — the server will
-   * never offer a claimed message to a second agent — so this is what
-   * separates "still queued" from "taken and never answered".
+   * User turns that will not be handed over again. A live lease is `working`,
+   * not this: this is the dead-letter list, plus history rows still marked
+   * delivered with no answer on an older server that cannot re-queue.
    *
-   * Two sources, because neither alone is enough. `turn.delivered` is correct
-   * on history but frozen at false on the live stream frame, which the server
-   * writes before the hand-off; the seqs seen in `presence.working` cover
-   * exactly that gap, for this session.
+   * `turn.delivered` is frozen at false on the live stream frame (written
+   * before the hand-off). `presence.dropped` and `presence.working` cover
+   * that gap for this session.
    */
   claimed: ReadonlySet<number>;
   /** Set when the last send or clear failed. Cleared on the next attempt. */
   error: string | null;
   sending: boolean;
   send: (text: string) => Promise<void>;
+  /**
+   * Ends the message the agent is answering, named by its seq.
+   *
+   * The caller names it rather than this reading `presence.working`, so what is
+   * stopped is the run the user was looking at when they pressed the button and
+   * not whatever was claimed by the time the request landed.
+   */
+  stop: (seq: number) => Promise<void>;
+  stopping: boolean;
   clear: () => Promise<void>;
+  /** Live chats, newest message first. Archived ones are fetched separately. */
+  chats: AgentChat[];
+  /** The chat on screen. Null until the server has answered once. */
+  chat: AgentChat | null;
+  storage: AgentChatStorage;
+  /** Switching also makes the chat active on the server, so sends follow. */
+  openChat: (id: string) => Promise<void>;
+  newChat: () => Promise<void>;
+  renameChat: (id: string, title: string) => Promise<void>;
+  /** Puts a chat away with its messages. `unarchiveChat` is the undo. */
+  archiveChat: (id: string) => Promise<void>;
+  unarchiveChat: (id: string) => Promise<void>;
+  /** Permanent, for a live chat or an archived one. Nothing undoes this. */
+  removeChat: (id: string) => Promise<void>;
+  /**
+   * Actions an agent asked for and nobody has answered yet. Server-wide, not
+   * per chat: a scheduled run belongs to no conversation, and a request the
+   * user cannot see is a send that never happens.
+   */
+  approvals: AgentApproval[];
+  /** Carries the action out, or drops it. Rejects with the reason it failed. */
+  decideApproval: (id: string, decision: "approve" | "deny") => Promise<void>;
+  /**
+   * What launched agents archived, newest run first. Archiving is the one mail
+   * write an agent makes unasked, on the grounds that it is reversible; this
+   * is where reversing it is offered at the size the sweep actually was.
+   */
+  archiveSweeps: AgentArchiveSweep[];
+  /** Moves one sweep back. Resolves with what actually made it. */
+  undoArchiveSweep: (id: number) => Promise<{ restored: number; failed: number }>;
 };
 
 /**
@@ -92,7 +159,15 @@ function merge(previous: AgentTurn[], incoming: AgentTurn[]): AgentTurn[] {
   const bySeq = new Map(previous.map((turn) => [turn.seq, turn]));
   let changed = false;
   for (const turn of incoming) {
-    if (bySeq.has(turn.seq)) continue;
+    const existing = bySeq.get(turn.seq);
+    if (existing) {
+      if (existing.delivered === turn.delivered && existing.replyTo === turn.replyTo) {
+        continue;
+      }
+      bySeq.set(turn.seq, { ...existing, delivered: turn.delivered, replyTo: turn.replyTo });
+      changed = true;
+      continue;
+    }
     bySeq.set(turn.seq, turn);
     changed = true;
   }
@@ -100,11 +175,16 @@ function merge(previous: AgentTurn[], incoming: AgentTurn[]): AgentTurn[] {
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
 }
 
-/** Which user turns this payload proves were handed to an agent. */
+/** User turns that will not be offered again. */
 function claimedIn(turns: AgentTurn[], presence: AgentPresence): number[] {
-  const seqs = turns.filter((turn) => turn.delivered).map((turn) => turn.seq);
-  if (presence.working) seqs.push(presence.working.seq);
-  return seqs;
+  // New servers name the dead-letter list. Do not also trust `delivered` on
+  // a live turn: that flag is a lease, and a re-queue does not rewrite the
+  // stream frame the client already stored.
+  if (presence.dropped !== undefined) return [...presence.dropped];
+  const workingSeq = presence.working?.seq;
+  return turns
+    .filter((turn) => turn.delivered && turn.seq !== workingSeq)
+    .map((turn) => turn.seq);
 }
 
 const AgentContext = React.createContext<AgentConversation | null>(null);
@@ -146,25 +226,48 @@ function AgentSession({
   );
   const [error, setError] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
-  const [claimed, setClaimed] = React.useState<ReadonlySet<number>>(
-    () => new Set<number>(),
-  );
-
-  /* Every turn the server has ever reported as claimed, from either source.
-     Derived state, so it survives a reconnect and needs no effect: the history
-     refetch re-states the flag and the stream re-states presence. */
-  const noteClaims = React.useCallback(
-    (seqs: Iterable<number>) =>
-      setClaimed((prev) => {
-        let next: Set<number> | null = null;
-        for (const seq of seqs) {
-          if (prev.has(seq)) continue;
-          next ??= new Set(prev);
-          next.add(seq);
-        }
-        return next ?? prev;
-      }),
+  const [stopping, setStopping] = React.useState(false);
+  const [chats, setChats] = React.useState<AgentChat[]>([]);
+  const [chat, setChat] = React.useState<AgentChat | null>(null);
+  const [storage, setStorage] = React.useState<AgentChatStorage>(NO_STORAGE);
+  const [approvals, setApprovals] = React.useState<AgentApproval[]>([]);
+  const [archiveSweeps, setArchiveSweeps] = React.useState<AgentArchiveSweep[]>(
     [],
+  );
+  const claimed = React.useMemo(() => {
+    const seqs = new Set<number>(claimedIn(turns, presence));
+    return seqs;
+  }, [turns, presence]);
+
+  /* The chat on screen, readable from inside the long-lived stream loop.
+     State cannot be: that effect is keyed on the connection, not on the
+     selection, and re-running it on every switch would drop and rebuild the
+     SSE connection each time somebody clicked a row in the rail. */
+  const shown = React.useRef<string | null>(null);
+
+  /**
+   * Shows a chat and makes it the one the composer writes to.
+   *
+   * The turns are dropped before the fetch, not merged after it: `seq` is
+   * global across chats, so a stale turn from the previous conversation would
+   * sort cleanly into the middle of this one and look like it belonged.
+   */
+  const refresh = React.useCallback(
+    async (id: string | null) => {
+      shown.current = id;
+      setTurns([]);
+      const state = await getAgentState(ctx, undefined, id ?? undefined);
+      // A second click landed while this was in flight. That switch owns the
+      // pane now, and painting this answer would show the wrong conversation.
+      if (shown.current !== id) return;
+      shown.current = state.chat?.id ?? null;
+      setChat(state.chat ?? null);
+      setTurns(state.turns);
+      setPresence(normalise(state.presence));
+      setApprovals(state.approvals ?? []);
+      setArchiveSweeps(state.archiveSweeps ?? []);
+    },
+    [ctx],
   );
 
   React.useEffect(() => {
@@ -181,21 +284,72 @@ function AgentSession({
         try {
           // History first, then follow. Both merge on seq, so a turn written
           // between the two lands exactly once and in the right place.
-          const state = await getAgentState({ ...ctx, signal: abort.signal });
+          const state = await getAgentState(
+            { ...ctx, signal: abort.signal },
+            undefined,
+            shown.current ?? undefined,
+          );
           if (stopped) return;
+          shown.current = state.chat?.id ?? null;
+          setChat(state.chat ?? null);
           setTurns((prev) => merge(prev, state.turns));
-          noteClaims(claimedIn(state.turns, state.presence));
           setPresence(normalise(state.presence));
+          setApprovals(state.approvals ?? []);
+          setArchiveSweeps(state.archiveSweeps ?? []);
           setConnection("live");
           attempt = 0;
+          // Not awaited: the conversation must paint whether or not the rail's
+          // list arrives, and a server without chats answers this with a 404.
+          void listAgentChats({ ...ctx, signal: abort.signal })
+            .then((list) => {
+              if (stopped) return;
+              setChats(list.chats);
+              setStorage(list.storage);
+            })
+            .catch(() => {
+              // Older server, or a list that failed once. The stream sends the
+              // list again on the next change either way.
+            });
 
           await streamAgent(
             { ...ctx, signal: abort.signal },
             {
-              turn: (turn) => setTurns((prev) => merge(prev, [turn])),
-              presence: (next) => {
-                noteClaims(claimedIn([], next));
-                setPresence(normalise(next));
+              // A turn written in a chat the user is not looking at belongs to
+              // that chat's history, not to this pane. The rail still learns
+              // about it from the `chats` frame.
+              turn: (turn) => {
+                if (turn.chatId && turn.chatId !== shown.current) return;
+                setTurns((prev) => merge(prev, [turn]));
+              },
+              presence: (next) => setPresence(normalise(next)),
+              approvals: (pending) => setApprovals(pending),
+              chats: (list) => {
+                setChats(list.chats);
+                setStorage(list.storage);
+                const current = list.chats.find((row) => row.id === shown.current);
+                if (current) {
+                  setChat(current);
+                  // The server trimmed this chat under a client that had
+                  // streamed every turn. Those rows are gone; keeping them
+                  // painted would put "older messages were dropped" above the
+                  // messages it is talking about.
+                  setTurns((prev) =>
+                    prev.length > current.turns
+                      ? prev.slice(prev.length - current.turns)
+                      : prev,
+                  );
+                  return;
+                }
+                // The chat on screen is no longer a live chat: another window
+                // archived or deleted it. Either way this pane is showing a
+                // conversation the list no longer has, and the archived one
+                // is read from the dialog rather than left open here. Fall
+                // back to the active one.
+                if (shown.current !== null) {
+                  void refresh(null).catch(() => {
+                    // The next frame, or the reconnect, asks again.
+                  });
+                }
               },
             },
           );
@@ -205,10 +359,18 @@ function AgentSession({
           await sleep(250);
         } catch (err) {
           if (stopped || abort.signal.aborted) return;
-          // A 404 means this build of the server has no agent channel at all.
-          // Retrying every eight seconds forever would never fix that, and the
-          // UI has a specific thing to say about it.
           if (err instanceof ApiError && err.status === 404) {
+            // The chat this pane was showing is gone — deleted in another
+            // window. Fall back to the active one rather than declaring the
+            // whole channel missing.
+            if (shown.current !== null) {
+              shown.current = null;
+              setTurns([]);
+              continue;
+            }
+            // No chat asked for, so this build of the server has no agent
+            // channel at all. Retrying forever would never fix that, and the
+            // UI has a specific thing to say about it.
             setConnection("unsupported");
             return;
           }
@@ -225,7 +387,8 @@ function AgentSession({
       stopped = true;
       abort.abort();
     };
-  }, [ctx, enabled, noteClaims]);
+    // `refresh` is stable on ctx, so this does not reconnect on a chat switch.
+  }, [ctx, enabled, refresh]);
 
   const send = React.useCallback(
     async (text: string) => {
@@ -234,11 +397,12 @@ function AgentSession({
       setSending(true);
       setError(null);
       try {
-        const result = await sendAgentMessage(trimmed, ctx);
+        // The chat this pane is showing, not the one the server has active:
+        // another window may have selected a different one since.
+        const result = await sendAgentMessage(trimmed, ctx, shown.current ?? undefined);
         // The stream will deliver this turn too; merge() makes the duplicate
         // free, and painting it now is what keeps the composer feeling instant.
         setTurns((prev) => merge(prev, [result.turn]));
-        noteClaims(claimedIn([result.turn], result.presence));
         setPresence(normalise(result.presence));
       } catch (err) {
         setError(friendlyError(err instanceof Error ? err.message : String(err)));
@@ -246,23 +410,204 @@ function AgentSession({
         setSending(false);
       }
     },
-    [ctx, noteClaims],
+    [ctx],
+  );
+
+  /**
+   * The presence in the reply is applied rather than waited for.
+   *
+   * The stream sends the same thing a moment later, but the button the user
+   * pressed has to stop looking live on the click that pressed it — a Stop that
+   * spins on for another frame reads as one that did not take.
+   *
+   * Only over the run it stopped, though. The killed turn frees the loop to
+   * claim the next queued message, and that presence frame can arrive on the
+   * stream before this reply is even parsed; writing this older snapshot over
+   * it would paint an idle pane while an agent is genuinely working, until
+   * whenever the next frame happens to arrive.
+   */
+  const stop = React.useCallback(
+    async (seq: number) => {
+      setStopping(true);
+      setError(null);
+      try {
+        const result = await stopAgentTurn(seq, ctx);
+        setPresence((prev) =>
+          prev.working?.seq === seq ? normalise(result.presence) : prev,
+        );
+      } catch (err) {
+        setError(friendlyError(err instanceof Error ? err.message : String(err)));
+      } finally {
+        setStopping(false);
+      }
+    },
+    [ctx],
   );
 
   const clear = React.useCallback(async () => {
     setError(null);
     try {
-      await clearAgentConversation(ctx);
+      await clearAgentConversation(ctx, shown.current ?? undefined);
       setTurns([]);
-      setClaimed(new Set());
     } catch (err) {
       setError(friendlyError(err instanceof Error ? err.message : String(err)));
     }
   }, [ctx]);
 
+  const withChats = React.useCallback(
+    async (run: () => Promise<void>) => {
+      setError(null);
+      try {
+        await run();
+        const list = await listAgentChats(ctx);
+        setChats(list.chats);
+        setStorage(list.storage);
+      } catch (err) {
+        setError(friendlyError(err instanceof Error ? err.message : String(err)));
+      }
+    },
+    [ctx],
+  );
+
+  const openChat = React.useCallback(
+    (id: string) =>
+      withChats(async () => {
+        await selectAgentChat(id, ctx);
+        await refresh(id);
+      }),
+    [ctx, refresh, withChats],
+  );
+
+  const newChat = React.useCallback(
+    () =>
+      withChats(async () => {
+        const created = await createAgentChat(ctx);
+        await refresh(created.chat.id);
+      }),
+    [ctx, refresh, withChats],
+  );
+
+  const renameChat = React.useCallback(
+    (id: string, title: string) =>
+      withChats(async () => {
+        await renameAgentChat(id, title, ctx);
+        if (shown.current === id) setChat((prev) => (prev ? { ...prev, title } : prev));
+      }),
+    [ctx, withChats],
+  );
+
+  const archiveChat = React.useCallback(
+    (id: string) =>
+      withChats(async () => {
+        await archiveAgentChat(id, ctx);
+        // The messages are still there, but a chat the user has just put away
+        // is not one to leave them staring at. The server has already moved on
+        // to another one; ask it which.
+        if (shown.current === id) await refresh(null);
+      }),
+    [ctx, refresh, withChats],
+  );
+
+  /* No refresh: unarchiving only puts the row back in the list, and the pane
+     stays wherever the user left it. Opening the chat is a separate click. */
+  const unarchiveChat = React.useCallback(
+    (id: string) => withChats(() => unarchiveAgentChat(id, ctx).then(() => undefined)),
+    [ctx, withChats],
+  );
+
+  const removeChat = React.useCallback(
+    (id: string) =>
+      withChats(async () => {
+        await deleteAgentChat(id, ctx);
+        if (shown.current === id) await refresh(null);
+      }),
+    [ctx, refresh, withChats],
+  );
+
+  /**
+   * The answer is applied from the route's own reply rather than waiting for
+   * the stream frame that follows it. The card has to leave the screen on the
+   * click that dismissed it; a second click on a card still painted would come
+   * back 409, which is correct and still reads as a bug.
+   */
+  const decideApproval = React.useCallback(
+    async (id: string, decision: "approve" | "deny") => {
+      setApprovals((prev) => prev.filter((row) => row.id !== id));
+      try {
+        const result = await decideAgentApproval(id, decision, ctx);
+        setApprovals(result.pending);
+      } catch (err) {
+        // Put it back: nothing was sent, and a card that vanished on a failed
+        // approval would read as one that went through.
+        const state = await getAgentState(ctx, undefined, shown.current ?? undefined)
+          .catch(() => null);
+        if (state) setApprovals(state.approvals ?? []);
+        throw err;
+      }
+    },
+    [ctx],
+  );
+
+  const undoArchiveSweep = React.useCallback(
+    async (id: number) => {
+      const result = await undoAgentArchiveSweep(id, ctx);
+      setArchiveSweeps(result.sweeps);
+      return { restored: result.restored, failed: result.failed };
+    },
+    [ctx],
+  );
+
   const value = React.useMemo<AgentConversation>(
-    () => ({ turns, presence, connection, claimed, error, sending, send, clear }),
-    [turns, presence, connection, claimed, error, sending, send, clear],
+    () => ({
+      turns,
+      presence,
+      connection,
+      claimed,
+      error,
+      sending,
+      send,
+      stop,
+      stopping,
+      clear,
+      chats,
+      chat,
+      storage,
+      openChat,
+      newChat,
+      renameChat,
+      archiveChat,
+      unarchiveChat,
+      removeChat,
+      approvals,
+      decideApproval,
+      archiveSweeps,
+      undoArchiveSweep,
+    }),
+    [
+      turns,
+      presence,
+      connection,
+      claimed,
+      error,
+      sending,
+      send,
+      stop,
+      stopping,
+      clear,
+      chats,
+      chat,
+      storage,
+      openChat,
+      newChat,
+      renameChat,
+      archiveChat,
+      unarchiveChat,
+      removeChat,
+      approvals,
+      decideApproval,
+      archiveSweeps,
+      undoArchiveSweep,
+    ],
   );
 
   return <AgentContext.Provider value={value}>{children}</AgentContext.Provider>;

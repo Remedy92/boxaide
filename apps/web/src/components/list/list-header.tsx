@@ -143,8 +143,8 @@ export function ListHeader({
             A disabled Radix trigger leaves the tab order, and the tooltip that
             carries the only explanation is then hover-only — keyboard and
             screen-reader users would get a dead control with no stated reason.
-            The reason is bound with aria-describedby, the same pattern
-            compose-button already uses. */}
+            The reason is bound with aria-describedby, the same pattern the
+            rail's disabled nav rows already use. */}
         {folderReason ? (
           <>
             <Tooltip>

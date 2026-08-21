@@ -5,6 +5,9 @@ import { ChevronRight, TriangleAlert } from "lucide-react";
 import { Markdown } from "@/lib/format/markdown";
 import { isoAttr, isoTitle } from "@/lib/format/date";
 import { displayAgentName } from "@/components/agent/agent-presence";
+import { AgentSignIn } from "@/components/agent/agent-sign-in";
+import { signedOutExit } from "@/components/rail/agent-exit";
+import { useLocalAgents } from "@/lib/hooks/use-local-agents";
 import { cn } from "@/lib/utils";
 import type { AgentTurn, AgentWork } from "@/lib/types";
 import { groupRuns, type Run } from "./group-runs";
@@ -76,6 +79,7 @@ export function AgentRunView({
   waiting,
   lastSeenAt,
   claimed,
+  busyElsewhere,
 }: {
   run: Run;
   /** Set when THIS run is the one an agent is answering right now. */
@@ -83,8 +87,10 @@ export function AgentRunView({
   /** Parked `chat_await_message` count — the only proof a next hand-off is ready. */
   waiting: number;
   lastSeenAt: string | null;
-  /** True once an agent has taken this question — see useAgent().claimed. */
+  /** True when this question was dead-lettered — see useAgent().claimed. */
   claimed: boolean;
+  /** An agent is answering some other message — this one's, but not here. */
+  busyElsewhere: boolean;
 }) {
   const running = work !== null;
   const unanswered = run.answers.length === 0;
@@ -109,7 +115,11 @@ export function AgentRunView({
       {/* No answer, and nothing in flight. Which of the two reasons it is
           changes what the user should do, so they are never merged. */}
       {unanswered && !running && run.question && (
-        <Unanswered waiting={waiting} claimed={claimed} />
+        <Unanswered
+          waiting={waiting}
+          claimed={claimed}
+          busyElsewhere={busyElsewhere}
+        />
       )}
     </div>
   );
@@ -274,36 +284,54 @@ function Steps({
 }
 
 /**
- * A question with no answer, and the two ways that happens.
+ * A question with no answer, and the three ways that happens.
  *
  * Queued is recoverable and needs nothing from the user: the message sits
- * unclaimed on disk and the next agent to call in gets it.
+ * unclaimed on disk and the next agent to call in gets it. When the one agent
+ * there is happens to be answering a different message, it says that instead —
+ * "waiting for an agent" beside a running agent is what made a working queue
+ * look like a broken one.
  *
- * Dropped is not. A hand-off is permanent — `claimNextUserTurn` marks the row
- * delivered inside the claim transaction and no agent is ever offered it again
- * — so an agent that took this one and went away took it with it. Telling
- * somebody to wait for that would be telling them to wait for nothing.
+ * Dropped is not. After a few failed leases the row stays claimed — no agent
+ * is offered it again — so telling somebody to wait would be telling them to
+ * wait for nothing.
+ *
+ * Unless the launched CLI was simply signed out, which is the one dropped
+ * message that has a cause worth naming and a fix worth offering: signing in
+ * restarts the agent and this message is handed over again.
  */
 function Unanswered({
   waiting,
   claimed,
+  busyElsewhere,
 }: {
   waiting: number;
   claimed: boolean;
+  busyElsewhere: boolean;
 }) {
+  const agents = useLocalAgents();
+  const signedOut = signedOutExit({
+    running: agents.data?.running ?? null,
+    lastExit: agents.data?.lastExit ?? null,
+  });
+
   if (claimed) {
     return (
-      <p className="flex items-start gap-2 text-[12px] leading-4 text-fg-tertiary">
-        <TriangleAlert
-          aria-hidden="true"
-          className="mt-px size-3.5 shrink-0 text-warning"
-          strokeWidth={1.5}
-        />
-        <span>
-          Your agent took this one and never answered. It will not be handed
-          over again — send it once more to try another agent.
-        </span>
-      </p>
+      <div className="space-y-2">
+        <p className="flex items-start gap-2 text-[12px] leading-4 text-fg-tertiary">
+          <TriangleAlert
+            aria-hidden="true"
+            className="mt-px size-3.5 shrink-0 text-warning"
+            strokeWidth={1.5}
+          />
+          <span>
+            {signedOut
+              ? "Your agent is signed out, so it could not answer — sign in and this message is handed over again."
+              : "Your agent took this one and never answered. It will not be handed over again — send it once more to try another agent."}
+          </span>
+        </p>
+        {signedOut && <AgentSignIn className="pl-[22px]" />}
+      </div>
     );
   }
 
@@ -315,7 +343,9 @@ function Unanswered({
       />
       {waiting > 0
         ? "Handing this to your agent…"
-        : "Waiting for an agent. This is delivered as soon as one starts."}
+        : busyElsewhere
+          ? "Your agent is answering another message. This one is next."
+          : "Waiting for an agent. This is delivered as soon as one starts."}
     </p>
   );
 }

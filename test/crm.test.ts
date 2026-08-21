@@ -8,7 +8,8 @@ import { CrmStore } from "../src/crm/store.js";
 import { CrmService } from "../src/crm/service.js";
 import { CRM_TOOLS, dispatchCrmTool } from "../src/crm/tools.js";
 import { registerCrmRoutes } from "../src/crm/routes.js";
-import type { Platform } from "../src/platform.js";
+import { createPlatform, type Platform } from "../src/platform.js";
+import type { AgentLauncher } from "../src/agent/launcher.js";
 
 const baseCreds = {
   imapHost: "fixture",
@@ -233,6 +234,27 @@ describe("CrmService opt-out detection", () => {
     h.store.close();
   });
 
+  it("retries the body fetch when the first pass could not read it", async () => {
+    const h = await harness();
+    h.provider.seedAccount(h.account.id, "you@work.test", [
+      optOutMail("Kim <kim@acme.test>"),
+    ]);
+    const original = h.provider.getMessage.bind(h.provider);
+    h.provider.getMessage = async () => {
+      throw new Error("imap fetch failed");
+    };
+
+    await h.crmService.syncFromMail();
+    const kim = h.crmStore.getContactByEmail("kim@acme.test")!;
+    expect(h.crmStore.listInteractions(kim.id)[0].optOut).toBe(false);
+
+    h.provider.getMessage = original;
+    await h.crmService.syncFromMail();
+    expect(h.crmStore.listInteractions(kim.id)[0].optOut).toBe(true);
+
+    h.store.close();
+  });
+
   it("does not re-fetch bodies for interactions it already recorded", async () => {
     const h = await harness();
     seedMail(h.provider, h.account.id);
@@ -292,7 +314,7 @@ describe("CRM encryption at rest", () => {
 });
 
 describe("CRM tool dispatch", () => {
-  it("exposes the thirteen tools of the spec", () => {
+  it("exposes the fifteen tools of the spec", () => {
     expect(CRM_TOOLS.map((t) => t.name).sort()).toEqual(
       [
         "crm_contact_delete",
@@ -302,10 +324,12 @@ describe("CRM tool dispatch", () => {
         "crm_deal_delete",
         "crm_deal_move",
         "crm_deal_upsert",
+        "crm_intent_set",
         "crm_interactions_list",
         "crm_note_add",
         "crm_org_upsert",
         "crm_orgs_list",
+        "crm_outreach_state",
         "crm_pipeline_get",
         "crm_sync",
       ].sort(),
@@ -673,6 +697,73 @@ describe("CRM REST routes", () => {
     expect(
       (await app.request(`/api/crm/deals/${dealId}`, { method: "DELETE" })).status,
     ).toBe(200);
+
+    h.store.close();
+  });
+});
+
+/**
+ * The CSV import path is wired in platform.ts, not in either module: the CRM
+ * must not know about enrichment and enrichment must not know about the CRM.
+ * That makes the callback the only place a column can go missing, so it gets
+ * the real object graph rather than a stand-in.
+ */
+describe("csv import wiring", () => {
+  it("writes the tags column the parser read and the tool promises", async () => {
+    const h = await harness();
+    const platform = createPlatform({
+      db: h.store.db,
+      masterKey: h.masterKey,
+      mail: h.mail,
+      launcher: {} as AgentLauncher,
+    });
+
+    const outcome = platform.enrichmentService.importContacts(
+      "email,name,org,tags\njane@acme.test,Jane,Acme,vip;eu\n",
+    );
+    expect(outcome.skipped).toEqual([]);
+    expect(outcome.imported).toHaveLength(1);
+
+    const contactId = outcome.imported[0].contactId;
+    expect(h.crmStore.listTags(contactId)).toEqual(["eu", "vip"]);
+
+    h.store.close();
+  });
+
+  /**
+   * A row with a domain and no company name points at an organisation; it does
+   * not name one. upsertOrg renames whatever it matches, so calling it here
+   * would let a bought list rewrite the CRM's own names, and a first sighting
+   * would land as the raw domain string beside orgs the mail sync named.
+   */
+  it("points at an org by domain instead of renaming it to the domain", async () => {
+    const h = await harness();
+    const platform = createPlatform({
+      db: h.store.db,
+      masterKey: h.masterKey,
+      mail: h.mail,
+      launcher: {} as AgentLauncher,
+    });
+
+    // Domain only, org never seen: named the way mail sync would have named it.
+    platform.enrichmentService.importContacts(
+      "email,website\njane@acme.test,https://www.acme.test/about\n",
+    );
+    const created = h.crmStore.getOrgByDomain("acme.test");
+    expect(created?.name).toBe("Acme");
+
+    // A human corrects it, and a later domain-only import leaves it corrected.
+    h.crmStore.upsertOrg({ name: "Acme Corporation", domain: "acme.test" });
+    platform.enrichmentService.importContacts(
+      "email,website\nbob@acme.test,acme.test\n",
+    );
+    expect(h.crmStore.getOrgByDomain("acme.test")?.name).toBe("Acme Corporation");
+
+    // A file that does name the company is still allowed to say so.
+    platform.enrichmentService.importContacts(
+      "email,org,website\nsue@acme.test,Acme Ltd,acme.test\n",
+    );
+    expect(h.crmStore.getOrgByDomain("acme.test")?.name).toBe("Acme Ltd");
 
     h.store.close();
   });

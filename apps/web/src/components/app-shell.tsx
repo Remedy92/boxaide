@@ -3,8 +3,10 @@
 import * as React from "react";
 import { AgentView } from "@/components/agent/agent-view";
 import { AutomationsView } from "@/components/automations/automations-view";
+import { CalendarView } from "@/components/calendar/calendar-view";
 import { AgentConnectDialog } from "@/components/dialogs/agent-connect-dialog";
 import { CapabilitiesDialog } from "@/components/dialogs/capabilities-dialog";
+import { ChatsDialog } from "@/components/dialogs/chats-dialog";
 import { CommandPalette } from "@/components/dialogs/command-palette";
 import { ComposeDialog } from "@/components/dialogs/compose-dialog";
 import { ConnectMailboxDialog } from "@/components/dialogs/connect-mailbox-dialog";
@@ -12,7 +14,6 @@ import { ContactPane } from "@/components/crm/contact-pane";
 import { PeopleList } from "@/components/crm/people-list";
 import { PipelineBoard } from "@/components/pipeline/pipeline-board";
 import { RemoveAccountDialog } from "@/components/dialogs/remove-account-dialog";
-import { SettingsDialog } from "@/components/dialogs/settings-dialog";
 import { ShortcutsDialog } from "@/components/dialogs/shortcuts-dialog";
 import { DraftEditor } from "@/components/drafts/draft-editor";
 import { DraftsList } from "@/components/drafts/drafts-list";
@@ -21,11 +22,13 @@ import { OutboxPane } from "@/components/outreach/outbox-pane";
 import { OutreachList } from "@/components/outreach/outreach-list";
 import { SetupWizard } from "@/components/onboarding/setup-wizard";
 import { LeftRail } from "@/components/rail/left-rail";
+import { SettingsView } from "@/components/settings/settings-view";
 import { RailSheet } from "@/components/rail/rail-sheet";
 import { Reader } from "@/components/reader/reader";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { AgentProvider } from "@/lib/hooks/use-agent";
 import { AppStateProvider, useApp } from "@/lib/hooks/use-app-state";
+import { useArchive, useTrash } from "@/lib/hooks/use-move";
 import { useCrmContacts } from "@/lib/hooks/use-crm-contacts";
 import { useDrafts } from "@/lib/hooks/use-drafts";
 import { useKeyboard } from "@/lib/hooks/use-keyboard";
@@ -63,6 +66,8 @@ function Shell() {
   const accounts = useAccounts();
   const nav = useMessageNavigation();
   const markRead = useMarkRead();
+  const archive = useArchive();
+  const trash = useTrash();
   const inMail = app.view === "mail";
   const drafting = app.view === "drafts";
   const peopling = app.view === "people";
@@ -71,7 +76,13 @@ function Shell() {
   const conversing = app.view === "agent";
   const boarding = app.view === "pipeline";
   const automating = app.view === "automations";
-  const singlePane = conversing || boarding || automating;
+  /** One column too: an agenda is a single list, not a list and a pane. */
+  const calendaring = app.view === "calendar";
+  /* Settings is a page like the others, with its own sidebar inside the pane —
+     so it takes the whole workspace and the shell drops to two tracks. */
+  const settingsOpen = app.view === "settings";
+  const singlePane =
+    conversing || boarding || automating || calendaring || settingsOpen;
   const drafts = useDrafts(app.account, drafting);
   /* The same query the People list issues, so j / k walk exactly the rows on
      screen. React Query dedupes it — one request, two readers. */
@@ -82,7 +93,7 @@ function Shell() {
   });
   /* Same arrangement for the approval queue: the list column issues this query
      and React Query dedupes it, so j / k walk exactly the rows on screen. Only
-     while the Queue tab is up — campaigns and suppression are not a selection. */
+     while the Queue tab is up — suppression is not a selection. */
   const outboxQueue = useOutbox(
     "pending",
     outreaching && app.outreachTab === "queue",
@@ -211,6 +222,12 @@ function Shell() {
       },
       escape: () => {
         if (app.clearSearch()) return;
+        // Settings is a page, so Escape leaves it the way the close button
+        // does — back to the view it was opened over.
+        if (settingsOpen) {
+          app.closeSettings();
+          return;
+        }
         // The expanded rail overlay is hand-rolled, not a Radix layer, so
         // nothing else would dismiss it on Escape.
         if (app.railOverlay) {
@@ -269,6 +286,32 @@ function Shell() {
           seen: !current.seen,
         });
       },
+      archive: () => {
+        if (!inMail) return;
+        // The selection, not nav.current. They differ whenever the open
+        // message has dropped out of the visible list — the unread filter
+        // refetching after the message was auto-marked read is the everyday
+        // way that happens — and the reader still shows it, with a working
+        // Archive button. `e` has to archive the message on screen, or it is
+        // a dead key with nothing to explain itself.
+        const current = nav.current ?? app.selected;
+        if (!current) return;
+        archive.mutate({
+          accountId: current.accountId,
+          messageId: "id" in current ? current.id : current.messageId,
+        });
+      },
+      trash: () => {
+        if (!inMail) return;
+        // The selection, not nav.current, for the same reason `e` uses it: the
+        // open message can have dropped out of the visible list.
+        const current = nav.current ?? app.selected;
+        if (!current) return;
+        trash.mutate({
+          accountId: current.accountId,
+          messageId: "id" in current ? current.id : current.messageId,
+        });
+      },
       reply: () => (inMail ? app.requestReply("reply") : undefined),
       replyAll: () => (inMail ? app.requestReply("replyAll") : undefined),
       forward: () => (inMail ? app.requestReply("forward") : undefined),
@@ -279,6 +322,7 @@ function Shell() {
       focusSearch: app.focusSearch,
       commandPalette: () => app.openPalette(),
       shortcuts: () => app.openDialog("shortcuts"),
+      settings: () => app.openSettings(),
       goAgent: () => app.setView("agent"),
       goInbox: () => {
         app.setView("mail");
@@ -421,18 +465,32 @@ function Shell() {
               ? "Agent conversation"
               : automating
                 ? "Automations"
-                : "Pipeline"
+                : calendaring
+                  ? "Calendar"
+                  : settingsOpen
+                    ? "Settings"
+                    : "Pipeline"
           }
           tabIndex={-1}
           className="h-full min-h-0 bg-surface-2"
         >
-          {conversing ? (
+          {settingsOpen ? (
+            <SettingsView
+              onOpenRail={() => app.setRailSheetOpen(true)}
+              showRailButton={app.narrow}
+            />
+          ) : conversing ? (
             <AgentView
               onOpenRail={() => app.setRailSheetOpen(true)}
               showRailButton={app.narrow}
             />
           ) : automating ? (
             <AutomationsView
+              onOpenRail={() => app.setRailSheetOpen(true)}
+              showRailButton={app.narrow}
+            />
+          ) : calendaring ? (
+            <CalendarView
               onOpenRail={() => app.setRailSheetOpen(true)}
               showRailButton={app.narrow}
             />
@@ -502,18 +560,16 @@ function Shell() {
         seed={app.composeSeed}
         onOpenChange={(open) => (open ? undefined : app.closeDialog())}
       />
-      <SettingsDialog
-        open={app.dialog === "settings"}
-        focus={app.settingsFocus}
-        autoTest={app.settingsAutoTest}
-        onOpenChange={(open) => (open ? undefined : app.closeDialog())}
-      />
       <ShortcutsDialog
         open={app.dialog === "shortcuts"}
         onOpenChange={(open) => (open ? undefined : app.closeDialog())}
       />
       <CapabilitiesDialog
         open={app.dialog === "capabilities"}
+        onOpenChange={(open) => (open ? undefined : app.closeDialog())}
+      />
+      <ChatsDialog
+        open={app.dialog === "chats"}
         onOpenChange={(open) => (open ? undefined : app.closeDialog())}
       />
       <AgentConnectDialog

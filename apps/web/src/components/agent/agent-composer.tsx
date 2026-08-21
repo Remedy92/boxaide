@@ -1,9 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { Spinner } from "@/components/atoms";
 import { AgentModelSelect } from "@/components/agent/agent-model-select";
+import { AgentSelect } from "@/components/agent/agent-select";
 import { cn } from "@/lib/utils";
 
 /** Matches MAX_CHAT_CHARS on the server, which returns 400 past it. */
@@ -23,17 +24,39 @@ const MAX_HEIGHT = 168;
  * nobody listening is queued on the server and handed over the moment one
  * starts, so refusing to send would break the perfectly normal "type the
  * question, then start your agent" order.
+ *
+ * The one button is Stop while a run is live and the box is empty, and Send the
+ * rest of the time. It never changes under a typed message: a button that turns
+ * into Stop because the agent started answering is one that cancels the run the
+ * user was about to add to. Enter keeps sending throughout — a message typed
+ * mid-run is queued, exactly as before.
  */
 export function AgentComposer({
   onSend,
   sending,
+  onStop,
+  running,
+  stopping,
   disabled,
   autoFocus,
+  seed,
+  onSeedTaken,
 }: {
   onSend: (text: string) => void;
   sending: boolean;
+  /** Ends the run in flight. Absent on a server that cannot stop one. */
+  onStop?: () => void;
+  /** A message in this conversation is being answered right now. */
+  running?: boolean;
+  stopping?: boolean;
   disabled?: boolean;
   autoFocus?: boolean;
+  /**
+   * An opening line put here by something else, currently only "Start
+   * conversation about this email". It replaces whatever is in the box.
+   */
+  seed?: { nonce: number; text: string } | null;
+  onSeedTaken?: () => void;
 }) {
   const [text, setText] = React.useState("");
   const ref = React.useRef<HTMLTextAreaElement | null>(null);
@@ -69,6 +92,36 @@ export function AgentComposer({
     };
   }, [resize]);
 
+  /**
+   * Take a seeded opening line.
+   *
+   * The mail composer is keyed on its seed's nonce and needs no effect for
+   * this. That works there because the seed IS the form: a compose dialog with
+   * no seed is not on screen. This box is on screen the whole time, so keying
+   * it would remount a live composer, and the caret still has to be placed by
+   * hand afterwards. One effect does both, and the nonce is what makes the same
+   * sentence seeded twice in a row still arrive twice.
+   *
+   * The caret goes to the end, not over the text: the point of prefilling is
+   * that the user types their own question after it.
+   */
+  const takenNonce = React.useRef<number | null>(null);
+  React.useEffect(() => {
+    if (!seed || takenNonce.current === seed.nonce) return;
+    takenNonce.current = seed.nonce;
+    setText(seed.text);
+    const node = ref.current;
+    if (node) {
+      // The DOM first: setText has only been queued, and a selection set
+      // against the old value is clamped to it. Same string React commits a
+      // moment later, so nothing is written twice.
+      node.value = seed.text;
+      node.focus();
+      node.setSelectionRange(seed.text.length, seed.text.length);
+    }
+    onSeedTaken?.();
+  }, [onSeedTaken, seed]);
+
   const submit = () => {
     const value = text.trim();
     if (!value || sending || disabled) return;
@@ -80,6 +133,7 @@ export function AgentComposer({
   };
 
   const overLimit = text.length > MAX_CHARS;
+  const showStop = Boolean(running && onStop) && !text.trim();
 
   return (
     <form
@@ -123,7 +177,8 @@ export function AgentComposer({
 
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
         <div className="flex min-w-0 items-center gap-2">
-          <AgentModelSelect />
+          <AgentSelect disabled={disabled || sending} />
+          <AgentModelSelect disabled={disabled || sending} />
           <p
             id="mailmux-agent-hint"
             className="truncate pl-1 text-[11px] leading-4 text-fg-tertiary"
@@ -142,9 +197,12 @@ export function AgentComposer({
           </p>
         </div>
         <button
-          type="submit"
-          aria-label="Send to your agent"
-          disabled={!text.trim() || sending || disabled || overLimit}
+          type={showStop ? "button" : "submit"}
+          aria-label={showStop ? "Stop the agent" : "Send to your agent"}
+          onClick={showStop ? onStop : undefined}
+          disabled={
+            showStop ? stopping : !text.trim() || sending || disabled || overLimit
+          }
           className={cn(
             "flex size-7 shrink-0 items-center justify-center rounded-[var(--radius-md)]",
             "bg-accent-fill text-accent-fill-fg transition-colors duration-[var(--dur-fast)]",
@@ -152,7 +210,19 @@ export function AgentComposer({
             "disabled:bg-surface-hover disabled:text-fg-disabled",
           )}
         >
-          {sending ? <Spinner /> : <ArrowUp className="size-4" strokeWidth={1.5} />}
+          {showStop ? (
+            stopping ? (
+              <Spinner />
+            ) : (
+              // Filled, because the square outline alone reads as an empty
+              // checkbox at this size.
+              <Square className="size-3 fill-current" strokeWidth={1.5} />
+            )
+          ) : sending ? (
+            <Spinner />
+          ) : (
+            <ArrowUp className="size-4" strokeWidth={1.5} />
+          )}
         </button>
       </div>
     </form>

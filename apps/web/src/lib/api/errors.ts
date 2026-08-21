@@ -229,3 +229,45 @@ export function hasTechnicalDetails(raw: unknown): boolean {
   const msg = String(raw ?? "").trim();
   return msg.length > 0 && friendlyError(msg) !== msg;
 }
+
+/**
+ * The sentence the server wrote, not the one friendlyError would substitute.
+ *
+ * A few routes answer with copy meant to be read as is — which System Settings
+ * pane to open, which stored mailbox password was refused — and ERROR_HINTS
+ * would rewrite any of it that mentions a password into generic IMAP advice.
+ *
+ * A rejected token and a refused origin are the exceptions, for the reason
+ * toApiError gives: their bodies are the bare words "unauthorized" and
+ * "forbidden origin", which are not sentences and which the canonical copy
+ * already says better. Those, and a transport failure that has no server
+ * sentence at all, fall back to the classified message.
+ */
+/**
+ * A refusal the same request can overcome by saying "yes, do it anyway".
+ *
+ * Only 409 means this. It is the duplicate-calendar warning: the server has
+ * something to tell the person and nothing to correct about the request, so the
+ * UI shows the sentence beside an "Add it anyway" button rather than treating it
+ * as a failure to fix. Every other status stays an error.
+ */
+export function needsConfirmation(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409;
+}
+
+export function serverSentence(error: unknown): string {
+  if (error instanceof ApiError) {
+    const raw = error.raw.trim();
+    if (
+      error.status >= 400 &&
+      error.kind !== "unauthorized" &&
+      error.kind !== "forbidden-origin" &&
+      raw
+    ) {
+      return raw;
+    }
+    return error.message;
+  }
+  return (error instanceof Error ? error.message : String(error ?? "")) ||
+    "The server did not say why.";
+}

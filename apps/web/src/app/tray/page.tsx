@@ -13,21 +13,24 @@ import { displayName } from "@/lib/format/address";
 import { formatListDate } from "@/lib/format/date";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
+import { takeDesktopBootstrapCapability } from "@/lib/desktop-bootstrap";
+import type { MailMessageSummary } from "@/lib/types";
 
 /**
  * The menu-bar popover. Loaded by the desktop shell's tray window at `/tray/`,
- * always same-origin with the server, so `/api/local-bootstrap` supplies the
- * token even when this window never went through the wizard.
+ * always same-origin with the server. It normally reads the token already
+ * saved by the main desktop window; a fragment capability is supported for a
+ * direct shell launch without weakening bootstrap for ordinary browsers.
  *
  * It is a glance, not a client: recent mail, whether an agent is listening,
  * one button into the app. Clicking anything that needs more room navigates
- * to `/` — the desktop shell intercepts that and raises the main window.
+ * to the app — the desktop shell intercepts that and raises the main window,
+ * on the address the navigation named.
  *
  * In a plain browser the page still works (it is part of the static export);
- * navigation then simply opens the inbox in the same tab.
+ * navigation then simply opens the same address in the same tab.
  */
 
-const REFRESH_MAIL_MS = 30_000;
 const REFRESH_AGENT_MS = 8_000;
 const LIST_LIMIT = 9;
 
@@ -37,7 +40,28 @@ const LIST_LIMIT = 9;
  * never fires that. Absolute URL, so no relative-destination lint concern.
  */
 function openInbox() {
-  window.location.assign(new URL("/", window.location.origin).toString());
+  // `#/` rather than a bare `/`: the desktop shell forwards only a hash that
+  // names a page, and the empty one names none, so a window already open on a
+  // message stayed on it. The root hash is a page, the one with nothing open
+  // on it, and it closes a message or Settings the way the app itself does.
+  window.location.assign(new URL("/#/", window.location.origin).toString());
+}
+
+/**
+ * The same navigation, carrying the row the user pressed. The app routes a
+ * message on the hash, so the address is the whole of the popover's ability
+ * to open one: the desktop shell forwards the hash into the window it raises,
+ * and a browser tab lands on it unaided.
+ *
+ * The format belongs to `hashFor` in use-app-state.tsx and is written out
+ * again rather than imported, because that module is the app's state provider
+ * and the popover deliberately mounts none of it.
+ */
+function openMessage(message: MailMessageSummary) {
+  const hash = `#/a/${encodeURIComponent(
+    message.accountId,
+  )}/m/${encodeURIComponent(message.id)}`;
+  window.location.assign(new URL(`/${hash}`, window.location.origin).toString());
 }
 
 function useTrayCtx() {
@@ -48,12 +72,19 @@ function useTrayCtx() {
   const [origin] = React.useState(() =>
     typeof window === "undefined" ? "" : window.location.origin,
   );
+  const [bootstrapCapability] = React.useState(takeDesktopBootstrapCapability);
 
   const bootstrap = useQuery({
     queryKey: ["tray-bootstrap", origin],
-    enabled: origin.length > 0 && settings.token.length === 0,
+    enabled:
+      origin.length > 0 &&
+      settings.token.length === 0 &&
+      bootstrapCapability.length > 0,
     queryFn: ({ signal }) =>
-      getLocalBootstrap({ baseUrl: origin, token: "", signal }),
+      getLocalBootstrap(
+        { baseUrl: origin, token: "", signal },
+        bootstrapCapability,
+      ),
     staleTime: Infinity,
     retry: false,
   });
@@ -70,7 +101,7 @@ export default function TrayPage() {
     enabled: ctx.ready,
     queryFn: ({ signal }) =>
       listMessages({ account: "all", limit: LIST_LIMIT }, { ...ctx, signal }),
-    refetchInterval: REFRESH_MAIL_MS,
+    staleTime: 30_000,
   });
 
   const agent = useQuery({
@@ -122,7 +153,7 @@ export default function TrayPage() {
                     instead, which client-side routing would never trigger. */}
                 <button
                   type="button"
-                  onClick={openInbox}
+                  onClick={() => openMessage(m)}
                   className={cn(
                     "w-full text-left",
                     "flex flex-col gap-0.5 px-4 py-2",

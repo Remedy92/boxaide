@@ -58,6 +58,12 @@ export type MailMessageSummary = {
   to: string;
   subject: string;
   date: string;
+  /**
+   * Server receive time, when the read asked for it. The `date` above comes
+   * from the sender's header and a wrong clock on their side would hide a
+   * message that really did arrive inside a `since` window.
+   */
+  internalDate?: string;
   snippet: string;
   seen: boolean;
   hasAttachments: boolean;
@@ -70,16 +76,34 @@ export type MailMessage = MailMessageSummary & {
   bcc?: string;
   /** Space-separated References chain, for replying in-thread. */
   references?: string;
+  /**
+   * Inbound iMIP part (RFC 6047) — the invite or reply .ics that came with the
+   * mail. Optional because it only exists when the sender attached one, and
+   * because the fixture provider and index-served rows never carry it: the
+   * summary row this type extends comes from the SQLite index, which stores
+   * headers only. Reach for it after a real getMessage, not off a list.
+   */
+  calendar?: { method?: string; content: string };
 };
 
-export type ListMessagesOpts = {
+/**
+ * ISO timestamp. IMAP SINCE compares whole days, so the server hands back the
+ * whole day and the provider trims the remainder against the exact instant.
+ * Without it a caller asking for "the last 24 hours" gets the newest `limit`
+ * messages instead, which silently drops mail after a busy period.
+ */
+export type SinceOpt = { since?: string };
+
+export type ListMessagesOpts = SinceOpt & {
   folder?: string;
   limit?: number;
   offset?: number;
   unreadOnly?: boolean;
+  /** Blocking IMAP fill even when the index is warm. CRM sync uses this. */
+  refresh?: boolean;
 };
 
-export type SearchMessagesOpts = {
+export type SearchMessagesOpts = SinceOpt & {
   query: string;
   folder?: string;
   limit?: number;
@@ -94,16 +118,50 @@ export type SendMessageInput = {
   bcc?: string;
   inReplyTo?: string;
   references?: string;
+  /**
+   * iMIP calendar part (RFC 6047). Nodemailer emits it as text/calendar with
+   * the method parameter, which is what makes Gmail/Outlook render the
+   * Accept/Decline bar instead of a dead .ics attachment.
+   */
+  icalEvent?: { method: "REQUEST" | "CANCEL"; content: string };
 };
 
 export type SendResult = {
   messageId: string;
   accepted: string[];
+  /** Sent-folder copy, when APPEND (or the fixture) named the new uid. */
+  copied?: MailMessageSummary;
+  /**
+   * Where the copy landed. Servers name that mailbox differently — "Sent",
+   * "Sent Items", "[Gmail]/Sent Mail" — so callers must not guess it.
+   */
+  sentFolder?: string;
 };
 
 export type ConnectionTestResult = {
   ok: boolean;
   error?: string;
+};
+
+/**
+ * Where a moved message came from and where it landed.
+ *
+ * `moved: false` means the uid was no longer in the source folder — another
+ * client got there first — and nothing was written. Callers must not report
+ * an archive that did not happen.
+ */
+export type MoveResult = {
+  moved: boolean;
+  /** Mailbox it came from. An undo moves it back here. */
+  fromFolder: string;
+  /** Mailbox it landed in. */
+  toFolder: string;
+  /**
+   * The message's new `accountId:folder:uid` id. Only a server with UIDPLUS
+   * names the new uid, so without it the mail is still in `toFolder` — there
+   * is just no id to address it by, and an undo has nothing to move back.
+   */
+  id?: string;
 };
 
 /**
@@ -147,6 +205,40 @@ export type ListDraftsOpts = {
   limit?: number;
 };
 
+/** IMAP resync cursor stored in mailbox_state. */
+export type MailboxCursor = {
+  uidvalidity: number;
+  highestModseq: string | null;
+  uidnext: number | null;
+  exists: number;
+};
+
+export type SyncMailboxOpts = SinceOpt & {
+  folder?: string;
+  limit?: number;
+  offset?: number;
+  cursor?: MailboxCursor | null;
+  /** Ignore CHANGEDSINCE and refill the sequence window of `limit`. */
+  fullWindow?: boolean;
+  /** Indexed UIDs; used to detect expunges when VANISHED is missing. */
+  knownUids?: number[];
+};
+
+export type MailboxSyncResult = {
+  /** True when the indexed window was replaced (cold fill or uidvalidity). */
+  replaced: boolean;
+  messages: MailMessageSummary[];
+  vanishedUids: number[];
+  flagUpdates: Array<{ uid: number; seen: boolean }>;
+  cursor: MailboxCursor;
+  /**
+   * Set when the read was `since`-driven: every message at or after this
+   * instant is now in `messages`, so the index can answer that window without
+   * asking IMAP again.
+   */
+  coveredSince?: string;
+};
+
 export type MailFolder = {
   name: string;
   path: string;
@@ -161,6 +253,24 @@ export interface MailProvider {
     account: ProviderAccount,
     opts?: ListMessagesOpts,
   ): Promise<MailMessageSummary[]>;
+  /**
+   * Fill or incrementally update a folder window. `replaced` means the caller
+   * should drop cached rows for that folder before upserting.
+   */
+  syncMailbox(
+    account: ProviderAccount,
+    opts?: SyncMailboxOpts,
+  ): Promise<MailboxSyncResult>;
+  /**
+   * Keep the connection selected on `folder` and invoke `onChange` on EXISTS /
+   * FLAGS / EXPUNGE. Returns an unsubscribe. Optional: fixture has nothing to
+   * watch.
+   */
+  watchMailbox?(
+    account: ProviderAccount,
+    folder: string,
+    onChange: () => void,
+  ): () => void;
   searchMessages(
     account: ProviderAccount,
     opts: SearchMessagesOpts,
@@ -174,6 +284,38 @@ export interface MailProvider {
     account: ProviderAccount,
     input: SendMessageInput,
   ): Promise<SendResult>;
+  /**
+   * Move one message into another mailbox. Throws when the id cannot be parsed
+   * or the message already sits in `folder`; returns `moved: false` when the
+   * uid is no longer in the source folder.
+   */
+  moveMessage(
+    account: ProviderAccount,
+    messageId: string,
+    folder: string,
+  ): Promise<MoveResult>;
+  /**
+   * Move one message into the account's Archive mailbox. Which mailbox that is
+   * is the provider's to resolve, because servers name it differently, and a
+   * server with no Archive mailbox at all throws rather than guessing one:
+   * filing mail somewhere the user's own client will never look for it is
+   * worse than not filing it.
+   */
+  archiveMessage(
+    account: ProviderAccount,
+    messageId: string,
+  ): Promise<MoveResult>;
+  /**
+   * Move one message into the account's Trash mailbox. Deleting in this app is
+   * a move, never an IMAP expunge: the message stays where the user's own
+   * client will find it, and the result names the folder it left so the move
+   * can be undone. A server with no Trash mailbox throws rather than guessing
+   * one, exactly as archiveMessage does.
+   */
+  trashMessage(
+    account: ProviderAccount,
+    messageId: string,
+  ): Promise<MoveResult>;
   /** Set or clear the \Seen flag. Returns false when the message is gone. */
   markRead(
     account: ProviderAccount,

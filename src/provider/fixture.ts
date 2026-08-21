@@ -11,10 +11,13 @@ import type {
   MailMessage,
   MailMessageSummary,
   MailProvider,
+  MoveResult,
   ProviderAccount,
+  MailboxSyncResult,
   SearchMessagesOpts,
   SendMessageInput,
   SendResult,
+  SyncMailboxOpts,
 } from "./types.js";
 
 /** `inReplyTo` has no place on a delivered message; a draft needs to keep it. */
@@ -27,12 +30,30 @@ type Stored = MailMessage & { accountEmail: string; inReplyTo?: string };
  */
 const DRAFTS_FOLDER = "Drafts";
 
+/** Mirrors a server that advertises SPECIAL-USE \\Archive. */
+const ARCHIVE_FOLDER = "Archive";
+
+/** Mirrors a server that advertises SPECIAL-USE \\Trash. */
+const TRASH_FOLDER = "Trash";
+
 function nowIso(offsetMs = 0): string {
   return new Date(Date.now() + offsetMs).toISOString();
 }
 
-function makeId(accountId: string, uid: number): string {
-  return `${accountId}:${uid}`;
+/** Same accountId:folder:uid shape as the IMAP provider, folder encoded. */
+function makeId(accountId: string, folder: string, uid: number): string {
+  return `${accountId}:${encodeURIComponent(folder)}:${uid}`;
+}
+
+/** Mirrors the IMAP provider's since filter so the two agree in tests. */
+function applySince<T extends { date: string }>(
+  msgs: T[],
+  since: string | undefined,
+): T[] {
+  if (!since) return msgs;
+  const from = new Date(since);
+  if (Number.isNaN(from.getTime())) return msgs;
+  return msgs.filter((m) => new Date(m.date).getTime() >= from.getTime());
 }
 
 /**
@@ -42,6 +63,7 @@ function makeId(accountId: string, uid: number): string {
 export class FixtureProvider implements MailProvider {
   private boxes = new Map<string, Stored[]>();
   private nextUid = new Map<string, number>();
+  private uidValidity = new Map<string, number>();
   private sent: Array<SendMessageInput & { accountId: string; messageId: string }> =
     [];
 
@@ -53,7 +75,7 @@ export class FixtureProvider implements MailProvider {
     const list: Stored[] = [];
     let uid = 1;
     for (const m of messages) {
-      const id = makeId(accountId, uid);
+      const id = makeId(accountId, m.folder ?? "INBOX", uid);
       list.push({
         id,
         accountId,
@@ -69,6 +91,10 @@ export class FixtureProvider implements MailProvider {
         hasAttachments: m.hasAttachments ?? false,
         bodyText: m.bodyText ?? `Body for: ${m.subject}`,
         bodyHtml: m.bodyHtml,
+        // Carried through so a seeded iMIP part survives to getMessage. The
+        // field only ever exists on a full read, which is exactly what a test
+        // exercising the RSVP scanner needs to seed.
+        calendar: m.calendar,
         accountEmail: email,
       });
       uid += 1;
@@ -84,6 +110,7 @@ export class FixtureProvider implements MailProvider {
   clear(): void {
     this.boxes.clear();
     this.nextUid.clear();
+    this.uidValidity.clear();
     this.sent = [];
   }
 
@@ -133,10 +160,63 @@ export class FixtureProvider implements MailProvider {
       (m) => m.folder === folder,
     );
     if (opts.unreadOnly) msgs = msgs.filter((m) => !m.seen);
+    // Before the slice, exactly as IMAP does it: the server selects by date
+    // and `limit` only caps the result. Filtering after would reintroduce the
+    // truncation bug the option exists to remove.
+    msgs = applySince(msgs, opts.since);
     msgs = [...msgs].sort(
       (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
     );
     return msgs.slice(offset, offset + limit).map(toSummary);
+  }
+
+  async syncMailbox(
+    account: ProviderAccount,
+    opts: SyncMailboxOpts = {},
+  ): Promise<MailboxSyncResult> {
+    const folder = opts.folder ?? "INBOX";
+    const uidvalidity = this.uidValidity.get(account.id) ?? 1;
+    const messages = await this.listMessages(account, {
+      folder,
+      limit: opts.limit,
+      offset: opts.offset,
+      since: opts.since,
+    });
+    const box = this.ensureBox(account.id, account.email).filter(
+      (m) => m.folder === folder,
+    );
+    // A dated read only ever adds rows: it reaches past the newest window and
+    // so cannot speak for what that window holds.
+    const replaced =
+      opts.since == null &&
+      (opts.fullWindow === true ||
+        !opts.cursor ||
+        opts.cursor.uidvalidity !== uidvalidity);
+    const currentUids = new Set(box.map((m) => m.uid));
+    const vanishedUids =
+      replaced || opts.since != null
+        ? []
+        : (opts.knownUids ?? []).filter((uid) => !currentUids.has(uid));
+    return {
+      replaced,
+      messages,
+      vanishedUids,
+      flagUpdates: replaced
+        ? []
+        : messages.map((m) => ({ uid: m.uid, seen: m.seen })),
+      cursor: {
+        uidvalidity,
+        highestModseq: String(this.nextUid.get(account.id) ?? 1),
+        uidnext: this.nextUid.get(account.id) ?? 1,
+        exists: box.length,
+      },
+      coveredSince: opts.since,
+    };
+  }
+
+  /** Tests bump this to force a uidvalidity wipe. */
+  setUidValidity(accountId: string, value: number): void {
+    this.uidValidity.set(accountId, value);
   }
 
   async searchMessages(
@@ -146,12 +226,13 @@ export class FixtureProvider implements MailProvider {
     const q = opts.query.toLowerCase();
     const folder = opts.folder ?? "INBOX";
     const limit = opts.limit ?? 50;
-    const msgs = this.ensureBox(account.id, account.email)
+    const matched = this.ensureBox(account.id, account.email)
       .filter((m) => m.folder === folder)
       .filter((m) => {
         const hay = `${m.subject} ${m.from} ${m.to} ${m.bodyText}`.toLowerCase();
         return hay.includes(q);
-      })
+      });
+    const msgs = applySince(matched, opts.since)
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
       .slice(0, limit);
     return msgs.map(toSummary);
@@ -185,7 +266,7 @@ export class FixtureProvider implements MailProvider {
     this.nextUid.set(account.id, uid + 1);
     const box = this.ensureBox(account.id, account.email);
     box.push({
-      id: makeId(account.id, uid),
+      id: makeId(account.id, "Sent", uid),
       accountId: account.id,
       uid,
       messageId,
@@ -202,10 +283,95 @@ export class FixtureProvider implements MailProvider {
       accountEmail: account.email,
     });
 
+    const copied = toSummary(box[box.length - 1]);
     return {
       messageId,
       accepted: input.to.split(",").map((s) => s.trim()),
+      copied,
+      sentFolder: "Sent",
     };
+  }
+
+  async moveMessage(
+    account: ProviderAccount,
+    messageId: string,
+    folder: string,
+  ): Promise<MoveResult> {
+    return this.move(account, messageId, folder);
+  }
+
+  async archiveMessage(
+    account: ProviderAccount,
+    messageId: string,
+  ): Promise<MoveResult> {
+    const found = this.find(account, messageId);
+    if (found?.folder === DRAFTS_FOLDER) {
+      throw new Error(
+        "a draft is not archived — edit or discard it with the draft tools",
+      );
+    }
+    return this.move(account, messageId, ARCHIVE_FOLDER);
+  }
+
+  /**
+   * Mirrors a UIDPLUS server: the message gets a NEW uid in the destination
+   * and the result names the new id. Keeping the old uid would let tests pass
+   * with ids the IMAP provider never preserves across a MOVE — the undo path
+   * must be exercised with an id that changed.
+   */
+  private move(
+    account: ProviderAccount,
+    messageId: string,
+    folder: string,
+  ): MoveResult {
+    const found = this.find(account, messageId);
+    if (!found) {
+      // The source folder is whatever the id claimed; an id that names no
+      // message names no folder either, so fall back to the id's own folder.
+      const parsed = this.parseFolder(messageId);
+      return { moved: false, fromFolder: parsed, toFolder: folder };
+    }
+    if (found.folder === folder) {
+      throw new Error(`message is already in ${folder}`);
+    }
+    // Same rule as the IMAP provider: the Drafts mailbox belongs to the draft
+    // tools, in both directions.
+    if (found.folder === DRAFTS_FOLDER) {
+      throw new Error(
+        `refusing to move a draft out of ${DRAFTS_FOLDER} — drafts are managed by the draft tools`,
+      );
+    }
+    if (folder === DRAFTS_FOLDER) {
+      throw new Error(
+        `refusing to move a message into ${DRAFTS_FOLDER} — drafts are managed by the draft tools`,
+      );
+    }
+    const fromFolder = found.folder;
+    const uid = this.nextUid.get(account.id) ?? 1;
+    this.nextUid.set(account.id, uid + 1);
+    found.folder = folder;
+    found.uid = uid;
+    found.id = makeId(account.id, folder, uid);
+    return { moved: true, fromFolder, toFolder: folder, id: found.id };
+  }
+
+  /** Best-effort source folder for an id that matched nothing. */
+  private parseFolder(messageId: string): string {
+    const parts = messageId.split(":");
+    return parts.length >= 3 ? decodeURIComponent(parts[1]) : "INBOX";
+  }
+
+  async trashMessage(
+    account: ProviderAccount,
+    messageId: string,
+  ): Promise<MoveResult> {
+    const found = this.find(account, messageId);
+    if (found?.folder === DRAFTS_FOLDER) {
+      throw new Error(
+        "a draft is not deleted from here. Discard it with the draft tools",
+      );
+    }
+    return this.move(account, messageId, TRASH_FOLDER);
   }
 
   async markRead(
@@ -240,7 +406,7 @@ export class FixtureProvider implements MailProvider {
     const messageId = `<${randomBytes(8).toString("hex")}@fixture.local>`;
     const text = input.text ?? "";
     box.push({
-      id: makeId(account.id, uid),
+      id: makeId(account.id, DRAFTS_FOLDER, uid),
       accountId: account.id,
       uid,
       messageId,
@@ -263,7 +429,7 @@ export class FixtureProvider implements MailProvider {
       accountEmail: account.email,
     });
     return {
-      id: makeId(account.id, uid),
+      id: makeId(account.id, DRAFTS_FOLDER, uid),
       accountId: account.id,
       uid,
       folder: DRAFTS_FOLDER,
@@ -328,6 +494,8 @@ export class FixtureProvider implements MailProvider {
 function specialUseOf(name: string): string | undefined {
   if (name === "Sent") return "\\Sent";
   if (name === DRAFTS_FOLDER) return "\\Drafts";
+  if (name === ARCHIVE_FOLDER) return "\\Archive";
+  if (name === TRASH_FOLDER) return "\\Trash";
   return undefined;
 }
 

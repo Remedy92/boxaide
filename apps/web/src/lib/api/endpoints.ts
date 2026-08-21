@@ -6,10 +6,9 @@
  *   GET /api/agent-connect  — its response embeds the full bearer token; the
  *     MCP snippet is built client-side from localStorage instead (§6.7).
  *
- * Called from exactly one place, under one condition:
- *   GET /api/local-bootstrap — hands out the token in plaintext. The wizard
- *     calls it only when the page is served same-origin from loopback, i.e.
- *     the page IS the server's own UI (getLocalBootstrap documents the guard).
+ * Called only with a desktop-shell capability:
+ *   GET /api/local-bootstrap — exchanges a one-time fragment secret for the
+ *     persistent token. Same-origin loopback alone is intentionally not enough.
  */
 
 import { query, request, stream } from "@/lib/api/client";
@@ -17,12 +16,20 @@ import { ApiError } from "@/lib/api/errors";
 import { DEFAULT_LIMIT } from "@/lib/constants";
 import type {
   AccountCredentials,
+  AgendaResponse,
   AgentPresence,
+  AgentChat,
+  AgentChatsResponse,
   AgentStateResponse,
   AgentTurn,
   ApiHealthResponse,
   Automation,
   AutomationRun,
+  CalendarAccount,
+  CalendarAccountsResponse,
+  Connector,
+  ConnectorCheck,
+  ConnectorsSnapshot,
   ConnectionTestResult,
   CreatedAccount,
   CrmContact,
@@ -32,21 +39,26 @@ import type {
   CrmNote,
   CrmOrganization,
   CrmPipelineBoard,
+  CreateMeetingResult,
   CrmSyncResult,
   DraftInput,
   DraftRef,
+  FreeSlotsResponse,
   HealthResponse,
   MailDraft,
   MailFolder,
   MailMessage,
   MailAccountMeta,
+  MeetingResult,
+  MeetingsResponse,
   MessageListResponse,
   MetaResponse,
+  MoveResult,
   OutboxRow,
   OutboxStatus,
   OutreachBadge,
-  OutreachCampaign,
-  CampaignStatus,
+  ReusableMailbox,
+  RsvpRefreshResult,
   SendResult,
   SuppressionRow,
   UpdateState,
@@ -92,16 +104,19 @@ export type LocalBootstrapResponse = {
 };
 
 /**
- * The token, in plaintext. The server only answers when the Host header is
- * loopback and the Origin is absent or loopback; the caller must additionally
- * hold to the client-side rule: only when the page's own origin IS `baseUrl`
- * and that origin is loopback. Anywhere else, a human pastes the token.
+ * The token, in plaintext. The server answers only on loopback when the caller
+ * presents the desktop shell's one-time capability. Anywhere else, a human
+ * pastes the token.
  */
-export function getLocalBootstrap(ctx: Ctx): Promise<LocalBootstrapResponse> {
+export function getLocalBootstrap(
+  ctx: Ctx,
+  capability: string,
+): Promise<LocalBootstrapResponse> {
   return request<LocalBootstrapResponse>("/api/local-bootstrap", {
     baseUrl: ctx.baseUrl,
     token: "",
     signal: ctx.signal,
+    headers: { "X-Boxaide-Bootstrap": capability },
   });
 }
 
@@ -305,12 +320,82 @@ export function markRead(
   );
 }
 
+/**
+ * Archive one message — a move into the account's Archive mailbox, never a
+ * delete. The result names the folder it left, which is what `moveMessage`
+ * below needs to put it back.
+ *
+ * 404 means the message had already left that folder. 400 means this account's
+ * server has no Archive mailbox at all; the message text says so.
+ */
+export function archiveMessage(
+  accountId: string,
+  messageId: string,
+  ctx: Ctx,
+): Promise<MoveResult> {
+  return request<MoveResult>(
+    `/api/messages/${encodeURIComponent(accountId)}/${encodeURIComponent(messageId)}/archive`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
+/**
+ * Delete one message: a move into the account's Trash mailbox, never an IMAP
+ * expunge. Like archive, the result names the folder it left, which is what
+ * `moveMessage` below needs to put it back.
+ *
+ * 404 means the message had already left that folder. 400 means this account's
+ * server has no Trash mailbox at all; the message text says so.
+ */
+export function trashMessage(
+  accountId: string,
+  messageId: string,
+  ctx: Ctx,
+): Promise<MoveResult> {
+  return request<MoveResult>(
+    `/api/messages/${encodeURIComponent(accountId)}/${encodeURIComponent(messageId)}/trash`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
+/** Move one message to a named mailbox. The undo of an archive posts here. */
+export function moveMessage(
+  accountId: string,
+  messageId: string,
+  folder: string,
+  ctx: Ctx,
+): Promise<MoveResult> {
+  return request<MoveResult>(
+    `/api/messages/${encodeURIComponent(accountId)}/${encodeURIComponent(messageId)}/move`,
+    {
+      method: "POST",
+      body: { folder },
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
 export type SendMessageBody = {
   /** Account id or alias. `from` is forced server-side to that account's address. */
   account: string;
   to: string;
   subject: string;
   text: string;
+  /** Forwarded HTML, already sanitised client-side. The reader never relays
+      what it would not run: see lib/mail/sanitize. */
+  html?: string;
   cc?: string;
   bcc?: string;
   inReplyTo?: string;
@@ -442,9 +527,92 @@ export async function listFolders(
 /* the agent conversation                                                     */
 /* -------------------------------------------------------------------------- */
 
-/** History plus presence. `after` asks for turns newer than a sequence number. */
-export function getAgentState(ctx: Ctx, after?: number): Promise<AgentStateResponse> {
-  return request<AgentStateResponse>(`/api/agent/state${query({ after })}`, {
+/**
+ * History plus presence. `after` asks for turns newer than a sequence number,
+ * `chat` for a conversation other than the active one.
+ */
+export function getAgentState(
+  ctx: Ctx,
+  after?: number,
+  chat?: string,
+): Promise<AgentStateResponse> {
+  return request<AgentStateResponse>(`/api/agent/state${query({ after, chat })}`, {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/* ---- chats ----------------------------------------------------------------
+   Whole list, no paging. One small row per conversation, and the rail's search
+   box would otherwise need a round trip per keystroke.
+   ------------------------------------------------------------------------ */
+
+export function listAgentChats(
+  ctx: Ctx,
+  includeArchived = false,
+): Promise<AgentChatsResponse> {
+  return request<AgentChatsResponse>(
+    `/api/agent/chats${query({ archived: includeArchived ? 1 : undefined })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+export function createAgentChat(ctx: Ctx): Promise<{ chat: AgentChat }> {
+  return request<{ chat: AgentChat }>("/api/agent/chats", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+export function selectAgentChat(id: string, ctx: Ctx): Promise<{ chat: AgentChat }> {
+  return request<{ chat: AgentChat }>(
+    `/api/agent/chats/${encodeURIComponent(id)}/select`,
+    { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+export function renameAgentChat(
+  id: string,
+  title: string,
+  ctx: Ctx,
+): Promise<{ renamed: boolean }> {
+  return request<{ renamed: boolean }>(`/api/agent/chats/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: { title },
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * Put a chat away, and take it back out. Neither touches its messages: the
+ * pair is a two-way move between the live list and the archive, and Delete is
+ * the only control that destroys anything.
+ */
+export function archiveAgentChat(id: string, ctx: Ctx): Promise<{ archived: boolean }> {
+  return request<{ archived: boolean }>(
+    `/api/agent/chats/${encodeURIComponent(id)}/archive`,
+    { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+export function unarchiveAgentChat(
+  id: string,
+  ctx: Ctx,
+): Promise<{ archived: boolean }> {
+  return request<{ archived: boolean }>(
+    `/api/agent/chats/${encodeURIComponent(id)}/unarchive`,
+    { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+export function deleteAgentChat(id: string, ctx: Ctx): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>(`/api/agent/chats/${encodeURIComponent(id)}`, {
+    method: "DELETE",
     baseUrl: ctx.baseUrl,
     token: ctx.token,
     signal: ctx.signal,
@@ -457,26 +625,121 @@ export function getAgentState(ctx: Ctx, after?: number): Promise<AgentStateRespo
  * The response carries presence as it was at the moment of the write, which is
  * what lets the composer say "no agent is listening" about THIS message rather
  * than about whatever the last stream frame happened to report.
+ *
+ * `chat` names the conversation the pane is showing. Without it the server
+ * writes to whatever chat is active, which is one row shared by every window.
  */
 export function sendAgentMessage(
   text: string,
   ctx: Ctx,
+  chat?: string,
 ): Promise<{ turn: AgentTurn; presence: AgentPresence }> {
   return request<{ turn: AgentTurn; presence: AgentPresence }>("/api/agent/messages", {
     method: "POST",
-    body: { text },
+    body: chat ? { text, chat } : { text },
     baseUrl: ctx.baseUrl,
     token: ctx.token,
     signal: ctx.signal,
   });
 }
 
-export function clearAgentConversation(ctx: Ctx): Promise<{ cleared: boolean }> {
+/**
+ * Stops the message the agent is answering right now.
+ *
+ * `seq` is the message the button was showing, and the server checks it: the
+ * run can end and the next one be claimed between the paint and the click, and
+ * `stopped` comes back false rather than killing that one instead. No `chat`
+ * argument — a seq names one message across every conversation.
+ */
+export function stopAgentTurn(
+  seq: number,
+  ctx: Ctx,
+): Promise<{ stopped: boolean; presence: AgentPresence }> {
+  return request<{ stopped: boolean; presence: AgentPresence }>("/api/agent/stop", {
+    method: "POST",
+    body: { seq },
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/** Same `chat` rule as sendAgentMessage: clear the pane's chat, not the active one. */
+export function clearAgentConversation(
+  ctx: Ctx,
+  chat?: string,
+): Promise<{ cleared: boolean }> {
   return request<{ cleared: boolean }>("/api/agent/clear", {
+    method: "POST",
+    body: chat ? { chat } : undefined,
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * An action an agent asked for and nobody has answered yet.
+ *
+ * Mirrors ApprovalView in src/agent/approvals.ts. The text is built on the
+ * server from the arguments that will actually be replayed, so what the card
+ * shows and what happens on Approve cannot drift apart.
+ */
+export type AgentApproval = {
+  id: string;
+  /** message_send, meeting_create or meeting_cancel. */
+  tool: string;
+  /** One line: what happens if the user says yes. */
+  title: string;
+  fields: { label: string; value: string }[];
+  /** The message or the meeting description. Null when the action has none. */
+  body: string | null;
+  /** Which launch asked: chat, driven, or run for a scheduled automation. */
+  profile: string;
+  agent: string | null;
+  chatId: string | null;
+  askedAt: string;
+};
+
+/**
+ * One run of archiving by one launched agent. `undoable` is lower than `count`
+ * on a server that archived without naming the message's new id, and the pane
+ * says so rather than promising a full undo it cannot deliver.
+ */
+export type AgentArchiveSweep = {
+  id: number;
+  agent: string | null;
+  chatId: string | null;
+  count: number;
+  undoable: number;
+  firstAt: string;
+  lastAt: string;
+};
+
+/** Move a whole sweep back. Partial success is normal; the counts say so. */
+export function undoAgentArchiveSweep(
+  id: number,
+  ctx: Ctx,
+): Promise<{ restored: number; failed: number; sweeps: AgentArchiveSweep[] }> {
+  return request(`/api/agent/archives/${id}/undo`, {
     method: "POST",
     baseUrl: ctx.baseUrl,
     token: ctx.token,
     signal: ctx.signal,
+  });
+}
+
+export function decideAgentApproval(
+  id: string,
+  decision: "approve" | "deny",
+  ctx: Ctx,
+): Promise<{ state: string; outcome: string; pending: AgentApproval[] }> {
+  return request(`/api/agent/approvals/${encodeURIComponent(id)}`, {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+    body: { decision },
   });
 }
 
@@ -486,7 +749,12 @@ export function clearAgentConversation(ctx: Ctx): Promise<{ cleared: boolean }> 
  */
 export function streamAgent(
   ctx: Ctx,
-  on: { turn: (turn: AgentTurn) => void; presence: (presence: AgentPresence) => void },
+  on: {
+    turn: (turn: AgentTurn) => void;
+    presence: (presence: AgentPresence) => void;
+    chats?: (chats: AgentChatsResponse) => void;
+    approvals?: (pending: AgentApproval[]) => void;
+  },
 ): Promise<void> {
   return stream("/api/agent/stream", {
     baseUrl: ctx.baseUrl,
@@ -496,6 +764,10 @@ export function streamAgent(
       try {
         if (event === "turn") on.turn(JSON.parse(data) as AgentTurn);
         else if (event === "presence") on.presence(JSON.parse(data) as AgentPresence);
+        else if (event === "chats") on.chats?.(JSON.parse(data) as AgentChatsResponse);
+        else if (event === "approvals") {
+          on.approvals?.(JSON.parse(data) as AgentApproval[]);
+        }
       } catch {
         // A frame we cannot parse is dropped rather than tearing down a live
         // conversation. The next one re-states presence anyway.
@@ -760,12 +1032,22 @@ export async function listAutomations(ctx: Ctx): Promise<Automation[]> {
 }
 
 /**
- * PATCH — a partial write. The UI sends only `enabled`; every other field is
- * the agent's to author. A bad cron or a duplicate name is a 400, not a 500.
+ * PATCH — a partial write. The UI sends only how a run happens (`enabled`,
+ * `agentId`, `model`); what it does — name, cron, prompt — is the agent's to
+ * author. A bad cron or a duplicate name is a 400, not a 500.
  */
 export async function updateAutomation(
   automationId: string,
-  patch: { enabled?: boolean; name?: string; cron?: string; prompt?: string },
+  // agentId and model take null to mean "back to the default", so an absent
+  // key and an explicit null are different requests — never collapse them.
+  patch: {
+    enabled?: boolean;
+    name?: string;
+    cron?: string;
+    prompt?: string;
+    agentId?: string | null;
+    model?: string | null;
+  },
   ctx: Ctx,
 ): Promise<Automation> {
   const data = await request<{ automation: Automation }>(
@@ -817,38 +1099,6 @@ export async function listAutomationRuns(
 /* -------------------------------------------------------------------------- */
 /* outreach — /api/outreach/*                                                 */
 /* -------------------------------------------------------------------------- */
-
-export async function listCampaigns(ctx: Ctx): Promise<OutreachCampaign[]> {
-  const data = await request<{ campaigns: OutreachCampaign[] }>(
-    "/api/outreach/campaigns",
-    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
-  );
-  return data.campaigns;
-}
-
-/**
- * Status only, from this app: steps may be replaced while a campaign is a
- * draft, but they are the agent's to author and no GET returns them, so the UI
- * has nothing to send back. Activating a campaign kicks the engine server-side,
- * which queues step 0 — as pending outbox rows, never as sent mail.
- */
-export async function updateCampaignStatus(
-  campaignId: string,
-  status: CampaignStatus,
-  ctx: Ctx,
-): Promise<OutreachCampaign> {
-  const data = await request<{ campaign: OutreachCampaign }>(
-    `/api/outreach/campaigns/${encodeURIComponent(campaignId)}`,
-    {
-      method: "PATCH",
-      body: { status },
-      baseUrl: ctx.baseUrl,
-      token: ctx.token,
-      signal: ctx.signal,
-    },
-  );
-  return data.campaign;
-}
 
 export async function listOutbox(
   o: { status?: OutboxStatus; limit?: number },
@@ -944,6 +1194,396 @@ export function getOutreachBadge(ctx: Ctx): Promise<OutreachBadge> {
 }
 
 /* -------------------------------------------------------------------------- */
+/* connectors: /api/connectors                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Metadata only: every key is masked to its last four characters. `checks`
+ * carries the last verdict each provider gave, so a reload shows what is
+ * working without asking any provider again.
+ */
+export function listConnectors(ctx: Ctx): Promise<ConnectorsSnapshot> {
+  return request<ConnectorsSnapshot>("/api/connectors", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * Asks the provider whether the key in force actually works. It checks an
+ * environment key as readily as a saved one, and answers with a verdict, never
+ * with the key.
+ */
+export function checkConnector(
+  id: string,
+  ctx: Ctx,
+): Promise<{ connector: Connector; check: ConnectorCheck }> {
+  return request<{ connector: Connector; check: ConnectorCheck }>(
+    `/api/connectors/${encodeURIComponent(id)}/check`,
+    {
+      method: "POST",
+      body: {},
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
+/** An empty `apiKey` clears the saved key, leaving any environment key in place. */
+export async function setConnectorKey(
+  id: string,
+  apiKey: string,
+  ctx: Ctx,
+): Promise<Connector> {
+  const data = await request<{ connector: Connector }>(
+    `/api/connectors/${encodeURIComponent(id)}`,
+    {
+      method: "PUT",
+      body: { apiKey },
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.connector;
+}
+
+/* -------------------------------------------------------------------------- */
+/* calendar — /api/calendar/*                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The whole body, not just `accounts`: it also carries `googleRedirectUri`,
+ * the URI this server hands Google. Only the server knows it — it is built from
+ * the address the server bound to, which this page cannot see — and Google
+ * rejects the sign-in unless the registered value matches it exactly.
+ */
+export function listCalendarAccounts(ctx: Ctx): Promise<CalendarAccountsResponse> {
+  return request<CalendarAccountsResponse>("/api/calendar/accounts", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/** CalDAV only. Google is an OAuth handshake — see startGoogleCalendarAuth. */
+export type CalDavAccountBody = {
+  alias: string;
+  serverUrl: string;
+  username: string;
+  password: string;
+};
+
+export async function createCalDavAccount(
+  body: CalDavAccountBody,
+  ctx: Ctx,
+): Promise<CalendarAccount> {
+  const data = await request<{ account: CalendarAccount }>(
+    "/api/calendar/accounts",
+    {
+      method: "POST",
+      body,
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.account;
+}
+
+/**
+ * A live CalDAV login, server-side, so it can take seconds. A failed test may
+ * come back as a 400 whose body is still {ok:false, error} — the same shape as
+ * /api/accounts/test — so the body is read before the failure is rethrown.
+ */
+export async function testCalDavAccount(
+  body: CalDavAccountBody,
+  ctx: Ctx,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    return await request<{ ok: boolean; error?: string }>(
+      "/api/calendar/accounts/test",
+      {
+        method: "POST",
+        body,
+        baseUrl: ctx.baseUrl,
+        token: ctx.token,
+        signal: ctx.signal,
+      },
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 400) {
+      const parsed = parseJson(err.raw);
+      if (parsed && typeof parsed === "object" && "ok" in parsed) {
+        return parsed as { ok: boolean; error?: string };
+      }
+    }
+    throw err;
+  }
+}
+
+/** A 404 means it was already gone; normalised rather than thrown. */
+export async function deleteCalendarAccount(
+  accountId: string,
+  ctx: Ctx,
+): Promise<{ deleted: boolean }> {
+  try {
+    return await request<{ deleted: boolean }>(
+      `/api/calendar/accounts/${encodeURIComponent(accountId)}`,
+      {
+        method: "DELETE",
+        baseUrl: ctx.baseUrl,
+        token: ctx.token,
+        signal: ctx.signal,
+      },
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return { deleted: false };
+    throw err;
+  }
+}
+
+/**
+ * Mailboxes whose stored password would also open a calendar. Read-only and
+ * cheap — the server makes no network call to answer — so it is safe beside the
+ * account list on every page load.
+ */
+export async function listReusableMailboxes(ctx: Ctx): Promise<ReusableMailbox[]> {
+  const data = await request<{ mailboxes: ReusableMailbox[] }>(
+    "/api/calendar/mailboxes",
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+  return data.mailboxes;
+}
+
+/**
+ * Connect one of them. The mailbox is named in the path and the password never
+ * crosses the wire in either direction — the server already holds it.
+ */
+export async function connectMailboxCalendar(
+  mailAccountId: string,
+  ctx: Ctx,
+  /**
+   * Set only after the person has read the duplicate warning the server sent
+   * back as a 409 and chosen to go ahead. Sending it unasked would silence the
+   * one question worth asking.
+   */
+  confirmOverlap = false,
+): Promise<CalendarAccount> {
+  const data = await request<{ account: CalendarAccount }>(
+    `/api/calendar/mailboxes/${encodeURIComponent(mailAccountId)}`,
+    {
+      method: "POST",
+      body: confirmOverlap ? { confirmOverlap: true } : {},
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.account;
+}
+
+/**
+ * Connect the calendars macOS already holds. There is nothing to send: the
+ * whole handshake is the system permission dialog, which this call raises and
+ * then waits on for as long as the person looks at it.
+ */
+export async function connectLocalCalendar(
+  ctx: Ctx,
+  /** Same rule as connectMailboxCalendar: only after the 409 was shown. */
+  confirmOverlap = false,
+): Promise<CalendarAccount> {
+  const data = await request<{ account: CalendarAccount }>(
+    "/api/calendar/local",
+    {
+      method: "POST",
+      body: confirmOverlap ? { confirmOverlap: true } : {},
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+  return data.account;
+}
+
+/**
+ * `clientId` and `clientSecret` are omitted when the server ships its own
+ * Google client — see `googleBuiltIn` on the accounts response. `alias` may be
+ * empty too: the callback falls back to the Google address it learns.
+ */
+export type GoogleCalendarStartBody = {
+  alias?: string;
+  clientId?: string;
+  clientSecret?: string;
+};
+
+/**
+ * Starts the handshake and returns nothing but a URL to send the person to.
+ * Google redirects back to the SERVER, which finishes the setup — this page is
+ * never told; it finds out by refetching the account list.
+ */
+export function startGoogleCalendarAuth(
+  body: GoogleCalendarStartBody,
+  ctx: Ctx,
+): Promise<{ authUrl: string }> {
+  return request<{ authUrl: string }>("/api/calendar/google/start", {
+    method: "POST",
+    body,
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * The merged agenda across every calendar account. `start` and `end` are ISO
+ * instants, and one failing account is an entry in `errors`, not an empty list.
+ */
+export function getAgenda(
+  window: { start: string; end: string },
+  ctx: Ctx,
+): Promise<AgendaResponse> {
+  return request<AgendaResponse>(
+    `/api/calendar/agenda${query({ start: window.start, end: window.end })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+/**
+ * Times nothing is booked over, for the meeting form's suggestions.
+ *
+ * Advisory only: nothing is held, so a slot can go stale between being offered
+ * and being used. A calendar that failed to answer appears in `errors` — its
+ * busy time is missing, so the suggestions may cover it.
+ */
+export function getFreeSlots(
+  o: {
+    durationMinutes: number;
+    start: string;
+    end: string;
+    maxSlots?: number;
+    /* The working day is read as a wall clock in this zone. Sent from the
+       browser so suggestions follow the viewer's own clock; omitted, the
+       server falls back to its own, which is rarely the same one. */
+    timeZone?: string;
+  },
+  ctx: Ctx,
+): Promise<FreeSlotsResponse> {
+  return request<FreeSlotsResponse>(
+    `/api/calendar/free-slots${query({
+      durationMinutes: o.durationMinutes,
+      start: o.start,
+      end: o.end,
+      maxSlots: o.maxSlots,
+      timeZone: o.timeZone,
+    })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+/**
+ * Meetings BOXAIDE created — not everything on the calendar.
+ *
+ * The whole body, not just `meetings`: `refreshError` tells the view whether
+ * the guest responses beside each meeting are current.
+ */
+export function listMeetings(ctx: Ctx): Promise<MeetingsResponse> {
+  return request<MeetingsResponse>("/api/calendar/meetings", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * Reads guest replies now, rather than waiting for the background scan.
+ *
+ * One pass over every meeting, not one meeting — the mailboxes and calendars
+ * are scanned together — so the count comes back for the whole list. A
+ * mailbox that could not be read is a string in `errors`, never a failure.
+ */
+export function refreshMeetingResponses(ctx: Ctx): Promise<RsvpRefreshResult> {
+  return request<RsvpRefreshResult>("/api/calendar/meetings/refresh-rsvps", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+export type CreateMeetingBody = {
+  title: string;
+  start: string;
+  end: string;
+  attendees: string[];
+  description?: string;
+  location?: string;
+  calendarAccountId?: string;
+  mailAccountId?: string;
+  includeMeetingLink?: boolean;
+  /* The zone the invitation text is written in — the times the guest reads.
+     The event itself is the absolute instants in `start` and `end`, so this
+     changes the wording, never when the meeting happens. */
+  timeZone?: string;
+};
+
+/**
+ * Writes the event AND sends the invitations, so a success can still be
+ * partial: `warnings` names what did not happen. Never report this as "invites
+ * sent" without reading them.
+ */
+export function createMeeting(
+  body: CreateMeetingBody,
+  ctx: Ctx,
+): Promise<CreateMeetingResult> {
+  return request<CreateMeetingResult>("/api/calendar/meetings", {
+    method: "POST",
+    body,
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/** Same partial-success rule as createMeeting: read `warnings`. */
+export function cancelMeeting(
+  meetingId: string,
+  ctx: Ctx,
+): Promise<MeetingResult> {
+  return request<MeetingResult>(
+    `/api/calendar/meetings/${encodeURIComponent(meetingId)}/cancel`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
+/**
+ * Forget a cancelled meeting. Boxaide's own record and its recorded replies go;
+ * nothing is sent and no calendar is touched. Cancelled meetings only — the
+ * server answers 400 for anything still scheduled.
+ */
+export function removeMeeting(
+  meetingId: string,
+  ctx: Ctx,
+): Promise<{ removed: boolean }> {
+  return request<{ removed: boolean }>(
+    `/api/calendar/meetings/${encodeURIComponent(meetingId)}`,
+    {
+      method: "DELETE",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* updates                                                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -962,8 +1602,20 @@ export function getUpdate(ctx: Ctx): Promise<UpdateState> {
   });
 }
 
-export function checkForUpdate(ctx: Ctx): Promise<UpdateState> {
-  return request<UpdateState>("/api/update/check", {
+/**
+ * `download` defaults to true on the server: a person who presses a check
+ * button wants the update, not a second button. Pass false for a check the
+ * user did not press — opening a page is not asking for a 100 MB transfer.
+ */
+export function checkForUpdate(
+  ctx: Ctx,
+  options: { download?: boolean } = {},
+): Promise<UpdateState> {
+  const path =
+    options.download === false
+      ? "/api/update/check?download=0"
+      : "/api/update/check";
+  return request<UpdateState>(path, {
     method: "POST",
     baseUrl: ctx.baseUrl,
     token: ctx.token,
@@ -1042,22 +1694,57 @@ export type LocalAgent = {
   available: boolean;
   /** This Boxaide build knows how to launch it. */
   supported: boolean;
+  /** It can carry a scheduled automation run, not only the chat loop. */
+  runsAutomations: boolean;
   /** Models the server lets you pick from. Empty means no picker. */
   models: LocalAgentModel[];
 };
+
+/**
+ * How much of the machine a launched agent may reach. Mirrors AgentAccess in
+ * src/agent/sandbox.ts.
+ *
+ * `workspace` confines it to its own directory and its own CLI's files, and is
+ * what every launch gets. `full` is unconfined; nothing in this app asks for
+ * it, and a launch only lands there when the install set it or the machine has
+ * no sandbox — in which case `accessNotice` says which.
+ */
+export type LocalAgentAccess = "workspace" | "full";
 
 export type RunningLocalAgent = {
   id: string;
   pid: number;
   startedAt: string;
   model: string | null;
+  /** What this launch was actually given, not what was asked for. */
+  access: LocalAgentAccess;
+  /**
+   * Why it is unconfined, when it is. Null on a confined launch, and absent on
+   * a server built before this field existed — both mean "say nothing".
+   */
+  accessNotice?: string | null;
 };
+
+/**
+ * Why the last launch ended. Mirrors ExitReason in src/agent/launcher.ts.
+ *
+ * The exit code cannot answer this: a driven agent has no process exit at all,
+ * and a child that was asked to stop dies on a signal with no code. Read the
+ * reason, not the code, to decide whether something went wrong.
+ */
+export type LocalAgentExitReason = "stopped" | "error" | "exited";
 
 export type LocalAgentExit = {
   id: string;
   code: number | null;
+  reason: LocalAgentExitReason;
   at: string;
   stderrTail: string;
+  /**
+   * The CLI is signed out — every answer failed for that one reason. Absent on
+   * a server built before this field existed, which reads as "not known".
+   */
+  authRequired?: boolean;
 };
 
 export type LocalAgentsResponse = {
@@ -1079,6 +1766,11 @@ export function startLocalAgent(
   ctx: Ctx,
   model?: string,
 ): Promise<{ running: RunningLocalAgent }> {
+  // Model only. Confinement is not a per-launch request any more: the server
+  // decides it from the install and the machine, and a field here would be a
+  // second place holding that opinion.
+  const body: { model?: string } = {};
+  if (model) body.model = model;
   return request<{ running: RunningLocalAgent }>(
     `/api/agents/${encodeURIComponent(id)}/start`,
     {
@@ -1086,9 +1778,26 @@ export function startLocalAgent(
       baseUrl: ctx.baseUrl,
       token: ctx.token,
       signal: ctx.signal,
-      body: model ? { model } : undefined,
+      body: Object.keys(body).length > 0 ? body : undefined,
     },
   );
+}
+
+/**
+ * Open the CLI's own login on the server's machine.
+ *
+ * 200 means Terminal was opened with the login command and the server will
+ * restart the agent by itself once the login lands — nothing is returned to
+ * wait on, so the caller watches GET /api/agents for `running` instead. A
+ * machine that has no Terminal to open answers 501 with a sentence.
+ */
+export function signInLocalAgent(ctx: Ctx): Promise<Record<string, never>> {
+  return request<Record<string, never>>("/api/agents/claude-code/signin", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
 }
 
 export function stopLocalAgent(ctx: Ctx): Promise<{ stopping: boolean }> {

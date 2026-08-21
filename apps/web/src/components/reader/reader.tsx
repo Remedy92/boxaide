@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { CircleAlert } from "lucide-react";
 import { BrandGlyph, TechnicalDetails } from "@/components/atoms";
 import { BodyText } from "@/components/reader/body-text";
+import { HtmlBody } from "@/components/reader/html-body";
 import { IdentityBlock } from "@/components/reader/identity-block";
 import { InlineReply, type Draft } from "@/components/reader/inline-reply";
 import { ReaderActionBar } from "@/components/reader/reader-action-bar";
@@ -13,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { ApiError, friendlyError } from "@/lib/api/errors";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useApp } from "@/lib/hooks/use-app-state";
+import { useArchive, useMoveTo } from "@/lib/hooks/use-move";
 import { useMarkRead } from "@/lib/hooks/use-mark-read";
 import { useMessage } from "@/lib/hooks/use-message";
 import { useMessageNavigation } from "@/lib/hooks/use-selection";
@@ -23,6 +25,8 @@ export function Reader() {
   const accounts = useAccounts();
   const nav = useMessageNavigation();
   const markRead = useMarkRead();
+  const archive = useArchive();
+  const moveTo = useMoveTo();
   const queryClient = useQueryClient();
   /** In-memory drafts, keyed by Boxaide message id. Never localStorage —
       drafts are message content. */
@@ -57,6 +61,31 @@ export function Reader() {
     });
   }, [markRead, selection, shown]);
 
+  /* The selection walks on by itself — useArchive moves it to the next row, so
+     the pane never sits on a message that has left the folder it was opened
+     from. */
+  const archiveMessage = React.useCallback(() => {
+    if (!selection) return;
+    archive.mutate({
+      accountId: selection.accountId,
+      messageId: selection.messageId,
+    });
+  }, [archive, selection]);
+
+  /* Same walk as archive: the message leaves the folder the reader opened it
+     from, so the pane must not keep showing it. useMoveTo does that part. */
+  const moveMessage = React.useCallback(
+    (folder: string) => {
+      if (!selection) return;
+      moveTo.mutate({
+        accountId: selection.accountId,
+        messageId: selection.messageId,
+        folder,
+      });
+    },
+    [moveTo, selection],
+  );
+
   if (!selection) {
     return (
       <div
@@ -88,6 +117,8 @@ export function Reader() {
         onReplyAll={() => (full ? app.requestReply("replyAll") : undefined)}
         onForward={() => (full ? app.requestReply("forward") : undefined)}
         onToggleRead={toggleRead}
+        onArchive={archiveMessage}
+        onMove={moveMessage}
         onPrevious={nav.previous}
         onNext={nav.next}
       />
@@ -171,7 +202,22 @@ export function Reader() {
             <IdentityBlock message={shown} alias={account?.alias ?? null} />
 
             {full ? (
-              <BodyText text={full.bodyText} hasHtml={!!full.bodyHtml} />
+              /* HTML mail renders sanitised in a sandboxed frame (SECURITY.md,
+                 "HTML mail rendering"); text-only mail keeps the plain-text
+                 reader, which is the only branch where there is no HTML at
+                 all and so nothing to point the reader at. */
+              full.bodyHtml ? (
+                /* Keyed: without it React keeps the instance across a
+                   selection change and the "Load images" consent leaks into
+                   the next sender's mail. */
+                <HtmlBody
+                  key={full.id}
+                  html={full.bodyHtml}
+                  text={full.bodyText}
+                />
+              ) : (
+                <BodyText text={full.bodyText} />
+              )
             ) : (
               <div className="mt-5 space-y-2">
                 <Skeleton className="h-3 w-[90%]" />

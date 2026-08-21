@@ -40,7 +40,7 @@ export type MailMessageSummary = {
 /** GET /api/messages/:accountId/:messageId → { message: MailMessage } */
 export type MailMessage = MailMessageSummary & {
   bodyText: string; // always present, may be "", truncated at 50 000 chars
-  bodyHtml?: string; // RAW UNSANITISED SENDER HTML. NEVER RENDER. NEVER dangerouslySetInnerHTML.
+  bodyHtml?: string; // RAW UNSANITISED SENDER HTML. Hostile input. Render ONLY via <HtmlBody> (DOMPurify + sandboxed frame). NEVER dangerouslySetInnerHTML. Why: SECURITY.md, "HTML mail rendering" (§6.4.6).
   cc?: string;
   bcc?: string; // declared but never populated on the read path — always undefined in practice
   references?: string; // space-separated Message-ID chain
@@ -59,6 +59,18 @@ export type AccountError = { account: string; error: string }; // `account` is t
 export type MessageListResponse = {
   messages: MailMessageSummary[];
   errors: AccountError[];
+};
+
+/**
+ * POST /api/messages/:accountId/:messageId/archive → this, 200.
+ * Also the body of POST …/move. 404 means the message had already left
+ * `fromFolder` — another client moved it first and nothing was written.
+ */
+export type MoveResult = {
+  moved: boolean;
+  fromFolder: string; // where it came from — an undo moves it back here
+  toFolder: string; // where it landed
+  id?: string; // its new id. ABSENT on a server without UIDPLUS, so no undo.
 };
 
 /** POST /api/messages/send 201 → { result: SendResult } */
@@ -147,15 +159,21 @@ export type AccountCredentials = {
 export type AgentTurn = {
   seq: number;
   at: string; // ISO 8601
+  /**
+   * The chat this turn belongs to. Absent on a server built before chats
+   * existed, where every turn was the one conversation.
+   */
+  chatId?: string;
   role: "user" | "agent" | "activity";
   text: string;
   /** MCP client name. Best effort — see AgentChannel.noteClient on the server. */
   agent: string | null;
   /**
-   * User turns: an agent has taken this one and no agent will be given it
-   * again. Absent on a server built before the field existed, and false on the
-   * live stream frame, which is written before the hand-off — the client also
-   * remembers what it saw claimed. See useAgent().claimed.
+   * User turns: an agent is holding this one, already answered it, or held it
+   * until it was dead-lettered. A live hold is a lease, not a permanent take —
+   * a vanished holder gives the row back. Absent on a server built before the
+   * field existed, and false on the live stream frame, which is written before
+   * the hand-off. See useAgent().claimed.
    */
   delivered?: boolean;
   /**
@@ -187,22 +205,83 @@ export type AgentPresence = {
    * field existed, which is why every reader treats absence as "not working".
    */
   working: AgentWork | null;
+  /**
+   * User seqs leased until the delivery cap and never answered. The pane
+   * warning is these. Absent on a server built before the field existed.
+   */
+  dropped?: number[];
 };
 
 /** The one thing Boxaide can prove about an agent's own work. */
 export type AgentWork = {
   /** The `seq` of the user turn being answered. */
   seq: number;
+  /** The chat that question was asked in. Absent on an older server. */
+  chatId?: string;
   since: string; // ISO 8601
   agent: string | null;
   /** The last mail tool called since the hand-off. */
   tool: { name: string; at: string } | null;
 };
 
+/**
+ * One conversation.
+ *
+ * `archivedAt` is set while the user has this chat put away: it is out of the
+ * rail and out of the live list, and every message it holds is still there.
+ * Unarchive clears it. `trimmedAt` is set when a limit took the messages, and
+ * it never clears itself. The two are independent, and a chat the user
+ * archived and the budget later emptied carries both.
+ */
+export type AgentChat = {
+  id: string;
+  title: string;
+  createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
+  archivedAt: string | null;
+  /** When a limit last dropped messages from this chat. ISO 8601, or null. */
+  trimmedAt: string | null;
+  /** The chat the composer writes to. Exactly one is active. */
+  active: boolean;
+  turns: number;
+  bytes: number;
+};
+
+/**
+ * What the storage line reads from. Bytes of conversation text, not disk.
+ *
+ * `chats` counts the conversations in the live list and `archived` the ones
+ * put away, so the two together are every chat there is.
+ */
+export type AgentChatStorage = {
+  bytes: number;
+  budget: number;
+  chats: number;
+  archived: number;
+};
+
+/** GET /api/agent/chats */
+export type AgentChatsResponse = {
+  chats: AgentChat[];
+  storage: AgentChatStorage;
+};
+
 /** GET /api/agent/state */
 export type AgentStateResponse = {
   turns: AgentTurn[];
   presence: AgentPresence;
+  /** The chat those turns came from. Absent on an older server. */
+  chat?: AgentChat;
+  /**
+   * Actions waiting on the user. Absent on a server built before agents could
+   * ask, which every reader treats as none.
+   */
+  approvals?: import("@/lib/api/endpoints").AgentApproval[];
+  /**
+   * What launched agents archived, newest run first. Absent on a server built
+   * before the log existed, which every reader treats as none.
+   */
+  archiveSweeps?: import("@/lib/api/endpoints").AgentArchiveSweep[];
 };
 
 /* -------------------------------------------------------------------------- */
@@ -308,6 +387,8 @@ export type Automation = {
   prompt: string;
   /** Launcher AgentSpec id. Null ⇒ the first available agent runs it. */
   agentId: string | null;
+  /** Model id for that agent's CLI. Null ⇒ the CLI's own default. */
+  model: string | null;
   enabled: boolean;
   createdAt: string;
   lastRunAt: string | null;
@@ -333,25 +414,6 @@ export type AutomationRun = {
 /* outreach — /api/outreach/*                                                 */
 /* -------------------------------------------------------------------------- */
 
-export type CampaignStatus = "draft" | "active" | "paused" | "done";
-
-/**
- * A campaign row from GET /api/outreach/campaigns. `counts` is keyed by
- * campaign-contact state ('active' | 'replied' | 'opted_out' | 'done' |
- * 'suppressed') and OMITS states with no rows — never read it as a full map.
- *
- * The sequence steps are not on this response. No GET returns them: they are
- * authored through the agent, and PATCH echoes them back.
- */
-export type OutreachCampaign = {
-  id: string;
-  name: string;
-  accountId: string;
-  status: CampaignStatus;
-  createdAt: string;
-  counts: Record<string, number>;
-};
-
 export type OutboxStatus =
   | "pending"
   | "approved"
@@ -371,9 +433,7 @@ export type OutboxStatus =
 export type OutboxRow = {
   id: string;
   accountId: string;
-  campaignId: string | null;
   contactId: string | null;
-  stepPosition: number | null;
   to: string;
   subject: string;
   body: string;
@@ -392,6 +452,52 @@ export type SuppressionRow = {
 
 /** GET /api/outreach/badge — a COUNT of pending rows and nothing else. */
 export type OutreachBadge = { pending: number };
+
+/**
+ * Which capability a connector's key switches on: finding new prospects,
+ * looking up an email address, or searching the web.
+ */
+export type ConnectorKind = "prospecting" | "enrichment" | "search";
+
+/**
+ * GET /api/connectors, and the body of PUT /api/connectors/:id.
+ *
+ * The server never returns a full key. `maskedKey` is the last four characters
+ * of whichever source won, and `source` says which one that was: a key saved
+ * here beats one in the server's environment, and clearing the saved key falls
+ * back to the environment rather than to nothing.
+ */
+export type Connector = {
+  id: string;
+  label: string;
+  kind: ConnectorKind;
+  configured: boolean;
+  source: "settings" | "env" | null;
+  maskedKey: string | null;
+};
+
+/**
+ * What the provider said when Boxaide last asked it about the key.
+ *
+ * Three answers, and the third is the one that stops a lie: "unreachable" is
+ * the vendor being down or slow, which says nothing at all about the key.
+ * `maskedKey` names the key the answer was about, so a verdict is dropped the
+ * moment the key it judged is replaced.
+ */
+export type ConnectorCheckVerdict = "works" | "rejected" | "unreachable";
+
+export type ConnectorCheck = {
+  verdict: ConnectorCheckVerdict;
+  reason: string | null;
+  checkedAt: string;
+  maskedKey: string;
+};
+
+/** GET /api/connectors: every connector, plus the verdicts still in force. */
+export type ConnectorsSnapshot = {
+  connectors: Connector[];
+  checks: Record<string, ConnectorCheck>;
+};
 
 /**
  * GET /api/update — the whole updater state, in one object.
@@ -424,6 +530,193 @@ export type UpdateState = {
   error: string | null;
   canInstall: boolean;
 };
+
+/* -------------------------------------------------------------------------- */
+/* calendar — /api/calendar/*                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Three providers, and they are not symmetrical. A CalDAV account is a URL, a
+ * username and an app password, so the UI can create one outright. Google is an
+ * OAuth handshake the server finishes after the browser has left for Google, so
+ * the UI can only start it — see startGoogleCalendarAuth. `local` is the
+ * calendars macOS already holds: there are no credentials at all, only a system
+ * permission the user grants once.
+ */
+export type CalendarProvider = "caldav" | "google" | "local";
+
+export type CalendarAccount = {
+  id: string;
+  alias: string;
+  provider: CalendarProvider;
+  /** Empty for `local`: that account is every account macOS holds. */
+  email: string;
+  createdAt: string;
+};
+
+/** What macOS reports about the local path, probed without prompting anyone. */
+export type LocalCalendarStatus = {
+  available: boolean;
+  /**
+   * Why the local path cannot be used, written for a person to read. Set when
+   * `available` is false, and also when the helper answers perfectly and macOS
+   * is simply refusing — a denial no click can clear, only System Settings.
+   */
+  reason?: string;
+  access?: "notDetermined" | "restricted" | "denied" | "fullAccess" | "writeOnly" | "authorized";
+};
+
+/**
+ * GET /api/calendar/accounts.
+ *
+ * `googleRedirectUri` is the URI the SERVER hands Google, built from the
+ * address it bound to. It is here because only the server knows it: the page
+ * can be served from another origin entirely, and Google rejects the sign-in
+ * unless the registered URI matches that string character for character.
+ *
+ * `local` and `googleBuiltIn` are the same kind of fact: which ways in this
+ * machine and this build can offer. Neither is derivable from anything the page
+ * can see, and both decide what the Add-calendar dialog puts first.
+ *
+ * All three are optional: a server built before them simply omits them, and the
+ * UI falls back to the paths that have always existed.
+ */
+export type CalendarAccountsResponse = {
+  accounts: CalendarAccount[];
+  googleRedirectUri?: string;
+  googleBuiltIn?: boolean;
+  local?: LocalCalendarStatus;
+};
+
+/**
+ * A mailbox whose stored password would also open a calendar. GET
+ * /api/calendar/mailboxes. No secret is in here — the password stays server
+ * side, which is the whole point of connecting by id.
+ */
+export type ReusableMailbox = {
+  mailAccountId: string;
+  email: string;
+  /** The calendar provider's name, for the button: "iCloud", "Fastmail". */
+  provider: string;
+  serverUrl: string;
+  suggestedAlias: string;
+  /**
+   * Set to the name macOS shows for an account that looks like this same
+   * calendar, when the Mac's calendars are connected. Present means connecting
+   * this would probably duplicate an agenda, not that it is forbidden — the
+   * server asks for confirmation rather than refusing.
+   */
+  onThisMac?: string;
+};
+
+export type CalendarEventStatus = "confirmed" | "tentative" | "cancelled";
+
+/**
+ * One event as the agenda returns it. `start` and `end` are instants; the local
+ * time a person reads is this browser's, not the calendar server's.
+ */
+export type CalendarEvent = {
+  id: string;
+  accountId: string;
+  accountAlias: string;
+  calendarId: string;
+  title: string;
+  start: string;
+  end: string;
+  allDay: boolean;
+  location?: string;
+  status: CalendarEventStatus;
+  busy: boolean;
+};
+
+/**
+ * `errors` is per calendar account: one unreachable server does not empty the
+ * agenda, it appears beside the events that did load. Same contract as the
+ * message list's partial-failure array.
+ */
+export type AgendaResponse = { events: CalendarEvent[]; errors: string[] };
+
+/**
+ * GET /api/calendar/free-slots — windows nothing is booked over.
+ *
+ * A suggestion, not a hold: nothing is reserved, and the same slot can be
+ * offered to two people. `errors` follows the agenda's rule — a calendar that
+ * did not answer is named rather than silently treated as empty, which would
+ * suggest times that are in fact taken.
+ */
+export type FreeSlot = { start: string; end: string };
+
+/**
+ * `timeZone` is the zone the working hours were read in — the one this app
+ * asked for, or the server's own when it asked for none. Always echoed, so the
+ * suggestion strip can name the clock it is quoting rather than assume it.
+ */
+export type FreeSlotsResponse = {
+  slots: FreeSlot[];
+  errors: string[];
+  timeZone: string;
+};
+
+export type MeetingStatus = "scheduled" | "cancelled";
+
+/**
+ * How one invited guest answered.
+ *
+ * "needs-action" is the resting state, not a failure: it is every guest the
+ * moment the invitation goes out. The server merges two sources — a guest's
+ * reply email wins where there is one, the calendar's own attendee list fills
+ * in the rest — and `source` says which one this entry came from.
+ */
+export type RsvpStatus = "accepted" | "declined" | "tentative" | "needs-action";
+
+export type AttendeeResponse = {
+  email: string;
+  status: RsvpStatus;
+  respondedAt: string | null;
+  source: string;
+};
+
+/** A meeting BOXAIDE created — not every event on the calendar. */
+export type Meeting = {
+  id: string;
+  uid: string;
+  title: string;
+  start: string;
+  end: string;
+  attendees: string[];
+  location: string | null;
+  meetingUrl: string | null;
+  status: MeetingStatus;
+  createdAt: string;
+  /** One entry per invited guest, in `attendees` order. Never partial. */
+  attendeeStatus: AttendeeResponse[];
+};
+
+/**
+ * `refreshError` is the last background reply-scan's failure, or null. The
+ * meetings themselves come from the server's own store and are never held up
+ * by that scan, so a failure here means the responses may be behind — not that
+ * the list is wrong.
+ */
+export type MeetingsResponse = {
+  meetings: Meeting[];
+  refreshError: string | null;
+};
+
+/** What one explicit "check for replies" pass did. */
+export type RsvpRefreshResult = { updated: number; errors: string[] };
+
+/**
+ * Creating or cancelling a meeting touches a calendar AND sends invitations, so
+ * a 200 can still carry partial failure: `warnings` is what did not happen.
+ */
+export type MeetingResult = { meeting: Meeting; warnings: string[] };
+
+/**
+ * Creating adds `timeZone`: the zone the invitation text was written in.
+ * Cancelling writes no times into an email, so it echoes none.
+ */
+export type CreateMeetingResult = MeetingResult & { timeZone: string };
 
 /** Union of every error body shape the server can emit. */
 export type ErrorBody =

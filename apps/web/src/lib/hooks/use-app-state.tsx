@@ -31,6 +31,13 @@ export type ComposeSeed = {
   bcc: string;
   subject: string;
   text: string;
+  /**
+   * Forward only: the source message's HTML part, sanitised, wrapped in the
+   * same forwarded-message header the text version carries. The composer
+   * cannot edit it, so it is always droppable in one click and the composer
+   * says out loud that it is there (§6.4).
+   */
+  html?: string;
   inReplyTo?: string;
   references?: string;
   /** True when the source message carried no Message-ID (§6.4). */
@@ -51,16 +58,49 @@ export type ComposeSeed = {
   outboxId?: string;
 };
 
+/**
+ * Text the agent composer should open with, from "Start conversation about this
+ * email". Nonce for the same reason ComposeSeed carries one: two rows in a row
+ * can seed the same sentence, and the composer has to notice the second.
+ *
+ * Nothing is sent. The user finishes the sentence and presses Enter themselves,
+ * because what they want to ask about a message is not something this app gets
+ * to guess.
+ */
+export type AgentSeed = {
+  nonce: number;
+  text: string;
+};
+
 export type DialogName =
   | "connect"
   | "compose"
-  | "settings"
   | "shortcuts"
   | "palette"
   | "capabilities"
+  | "chats"
   | "agent";
 
 export type SettingsFocus = "baseUrl" | "token" | null;
+
+/**
+ * Settings is a page, not a dialog — one section per row of its own sidebar.
+ *
+ * The order is the order of the sidebar. `connection` comes first among the
+ * technical ones because it is the only section that can leave the app with no
+ * mail in it.
+ */
+export const SETTINGS_SECTIONS = [
+  "general",
+  "connection",
+  "agents",
+  "connectors",
+  "appearance",
+  "updates",
+  "about",
+] as const;
+
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
 /**
  * Which view owns the workspace.
@@ -75,17 +115,23 @@ export type SettingsFocus = "baseUrl" | "token" | null;
  * `automations`, which is one column of schedules and their run history.
  *
  * `outreach` is two-pane again: the middle column is the approval queue (or the
- * campaigns and suppression lists), and the pane is the full text of the queued
+ * suppression list), and the pane is the full text of the queued
  * email a person is about to approve.
+ *
+ * `calendar` is one column for the same reason `automations` is: an agenda is a
+ * single ordered list, and a second track would be empty until a day was
+ * picked.
  */
 export type View =
   | "agent"
   | "mail"
   | "drafts"
+  | "calendar"
   | "people"
   | "pipeline"
   | "automations"
-  | "outreach";
+  | "outreach"
+  | "settings";
 
 /**
  * The views the CRM owns. With `settings.crm` off they are not reachable: the
@@ -102,11 +148,11 @@ export function isCrmView(view: View): boolean {
 }
 
 /**
- * Which list the Outreach middle column is showing. All three are the same
+ * Which list the Outreach middle column is showing. Both are the same
  * view — they share a pane and a keyboard map — so this is a filter, not a
  * route.
  */
-export type OutreachTab = "queue" | "campaigns" | "suppression";
+export type OutreachTab = "queue" | "suppression";
 
 export type Selection = { accountId: string; messageId: string };
 
@@ -209,9 +255,15 @@ type AppStateValue = {
   requestRemoveAccount: (account: MailAccountMeta) => void;
   clearRemovalTarget: () => void;
   settingsFocus: SettingsFocus;
-  /** Non-null ⇒ the settings dialog runs its connection test on open. */
+  /** Non-null ⇒ the Connection section runs its test as it mounts. */
   settingsAutoTest: number | null;
+  /** Which settings page is open. Null whenever `view` is not "settings". */
+  settingsSection: SettingsSection | null;
+  /** Opens the Settings page. A focus target implies the Connection section. */
   openSettings: (focus?: SettingsFocus, autoTest?: boolean) => void;
+  openSettingsSection: (section: SettingsSection) => void;
+  /** Leaves Settings for the view the user was in before it. */
+  closeSettings: () => void;
 
   /* first run */
   /** True while the full-screen setup wizard owns the viewport. */
@@ -223,6 +275,12 @@ type AppStateValue = {
   /* composer */
   composeSeed: ComposeSeed | null;
   openCompose: (seed?: Partial<ComposeSeed>) => void;
+  /** Non-null until the agent composer has taken it. */
+  agentSeed: AgentSeed | null;
+  /** Prefills the agent composer and switches to the Agent view. Sends nothing. */
+  seedAgentComposer: (text: string) => void;
+  /** The composer says it has the text, so a later remount cannot re-apply it. */
+  clearAgentSeed: () => void;
   /** Keyboard r / a / f: ask the reader to expand its inline composer. */
   replyRequest: ReplyRequest | null;
   requestReply: (mode: Exclude<ComposeMode, "new">) => void;
@@ -256,6 +314,17 @@ const PeopleQueryContext = React.createContext<string>("");
 export function usePeopleSearchQuery(): string {
   return React.useContext(PeopleQueryContext);
 }
+
+/**
+ * The Settings page, as a route.
+ *
+ * It is in the hash rather than in state because it has to be reachable from
+ * outside the page: the desktop app's "Check for updates…" points the window
+ * at `#/settings/updates`, and it has no other channel to do it with — there
+ * is no preload script and no IPC. Deep-linking a section also means the
+ * command palette's "Set access token" is one address, not one more flag.
+ */
+const SETTINGS_HASH_PATTERN = /^#\/settings(?:\/([a-z-]+))?$/;
 
 const HASH_PATTERN = /^#\/a\/([^/]+)\/m\/(.+)$/;
 /** Same shape, `d` instead of `m`. One hash, so a draft and a message can
@@ -315,6 +384,17 @@ function draftFromHash(hash: string): DraftSelection | null {
   }
 }
 
+/** Null for every hash that is not a settings route, including no hash. */
+function settingsFromHash(hash: string): SettingsSection | null {
+  const match = SETTINGS_HASH_PATTERN.exec(hash);
+  if (!match) return null;
+  const section = match[1] as SettingsSection | undefined;
+  if (!section) return "general";
+  // An unknown section is a typed or stale address, not a crash: the page
+  // opens on its first row.
+  return SETTINGS_SECTIONS.includes(section) ? section : "general";
+}
+
 function hashFor(selection: Selection): string {
   return `#/a/${encodeURIComponent(selection.accountId)}/m/${encodeURIComponent(
     selection.messageId,
@@ -364,6 +444,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [settingsFocus, setSettingsFocus] = React.useState<SettingsFocus>(null);
   const [settingsAutoTest, setSettingsAutoTest] = React.useState<number | null>(null);
   const [composeSeed, setComposeSeed] = React.useState<ComposeSeed | null>(null);
+  const [agentSeed, setAgentSeed] = React.useState<AgentSeed | null>(null);
   const [replyRequest, setReplyRequest] = React.useState<ReplyRequest | null>(null);
   const [narrow, setNarrow] = React.useState(false);
   const [medium, setMedium] = React.useState(false);
@@ -380,6 +461,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   );
   const selected = React.useMemo(() => selectionFromHash(hash), [hash]);
   const selectedDraft = React.useMemo(() => draftFromHash(hash), [hash]);
+  /* Derived, not mirrored into state: the hash IS which settings page is open,
+     so the browser's Back button, the palette and the desktop menu all move
+     the same one thing and no effect has to keep two copies in step. */
+  const settingsSection = React.useMemo(() => settingsFromHash(hash), [hash]);
 
   /* The browser's own Back button pops the pushed entry without going through
      clearSelection, so the flag has to follow the hash, not only our callers.
@@ -422,7 +507,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   );
 
   /* The pane belongs to the queue. Leaving a row open while the column shows
-     campaigns would put an approve button beside a list it is not about. */
+     suppression would put an approve button beside a list it is not about. */
   const setOutreachTab = React.useCallback((value: OutreachTab) => {
     setOutreachTabState(value);
     if (value !== "queue") setSelectedOutbox(null);
@@ -535,26 +620,75 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     clearSelectionRefForView.current = clearSelection;
   }, [clearSelection]);
 
-  const viewRef = React.useRef(view);
-  React.useEffect(() => {
-    viewRef.current = view;
-  }, [view]);
-
-  /* Read through a ref for the same reason viewRef exists: setView must stay
-     stable, and it is the one caller. */
+  /* Read through a ref for the same reason shownViewRef below does: setView
+     must stay stable, and it is the one caller. */
   const crmRef = React.useRef(settings.crm);
   React.useEffect(() => {
     crmRef.current = settings.crm;
   }, [settings.crm]);
 
+  /** Assigned once openSettingsSection exists, below. setView is its caller. */
+  const openSettingsRef = React.useRef<(section: SettingsSection) => void>(
+    () => {},
+  );
+
+  /* The pane the shell is actually rendering, which is not always `view`: a
+     settings route and an open message each outrank it, and both can be set
+     while `view` still holds whatever the user was on before. setView compares
+     against this rather than the raw state, because the row a person presses
+     is a navigation away from what they can SEE. Comparing against `view`
+     swallowed two of those: leaving Settings for the view behind it, and
+     leaving a message the menu-bar popover opened in a window that never left
+     the agent conversation. A ref rather than a dependency, so setView stays
+     stable for the many components that hold it. */
+  const shownViewRef = React.useRef(view);
+  React.useEffect(() => {
+    shownViewRef.current = settingsSection
+      ? "settings"
+      : selected
+        ? "mail"
+        : view;
+  }, [settingsSection, selected, view]);
+
+  /* A message opened from outside the mail pane commits the mail view. The
+     shown view is derived below, which is what paints the Reader on the first
+     frame, but on its own that left the raw state where it was: after a deep
+     link from the menu-bar popover, `view` still read "agent", the Inbox row
+     and `g i` early-returned against a pane already on screen, and closing the
+     message dropped the user back into the agent conversation. Writing the
+     state makes the link behave like a click on the row: what is underneath
+     the message is the list it came from.
+
+     Only when a selection ARRIVES, not whenever one is set: at phone width
+     clearSelection is a history.back() that lands a frame later, so a render
+     where the Agent row has moved `view` while the old hash is still up would
+     otherwise be pulled straight back to mail. Set during render, the
+     documented way to adjust state to a value from outside: React re-renders
+     at once, before any child commits on the stale view. */
+  const [seenSelection, setSeenSelection] = React.useState<Selection | null>(
+    null,
+  );
+  if (selected !== seenSelection) {
+    setSeenSelection(selected);
+    if (selected && !seenSelection && view !== "mail") setViewState("mail");
+  }
+
   const setView = React.useCallback((next: View) => {
+    // Settings is a route, not a view state — see openSettings.
+    if (next === "settings") {
+      openSettingsRef.current("general");
+      return;
+    }
     // The last gate before the shell renders a pane. Every surface that offers
     // a CRM row already hides it, so reaching here means a stale caller — a
     // held keybinding, another tab's palette — and the answer is to do nothing
     // rather than to show a view the rail cannot get back to.
     if (!crmRef.current && isCrmView(next)) return;
-    if (viewRef.current === next) return;
-    viewRef.current = next;
+    // Nothing to do only when the pane on screen is already the one asked for.
+    if (shownViewRef.current === next) return;
+    /* Ahead of the effect on purpose: a second call in the same tick, which a
+       held key produces, has to see the move that is already committed. */
+    shownViewRef.current = next;
     clearSelectionRefForView.current();
     // The contact pane is the People view's right column and nothing else's.
     // Leaving it set would restore a stale contact on the way back in.
@@ -626,10 +760,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const openDialog = React.useCallback((name: DialogName) => {
     setDialog(name);
     if (name === "palette") setPalettePage("root");
-    if (name !== "settings") {
-      setSettingsFocus(null);
-      setSettingsAutoTest(null);
-    }
+    // A pending "focus the token field" belongs to the press that asked for
+    // it. Anything else opening first has taken that press's place.
+    setSettingsFocus(null);
+    setSettingsAutoTest(null);
   }, []);
 
   const openPalette = React.useCallback((page: PalettePage = "root") => {
@@ -652,16 +786,80 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   );
   const clearRemovalTarget = React.useCallback(() => setRemovalTarget(null), []);
 
+  /**
+   * The selection Settings was opened over, so closing it can put the message
+   * back. Settings and the reading pane share the one hash slot, and taking a
+   * message off screen is not what opening a settings page means.
+   */
+  const hashBeforeSettings = React.useRef<string>("");
+
+  /**
+   * Write the settings route. `replaceState`, like a selection at desktop
+   * width: Settings is a place the user goes on purpose and leaves with a
+   * click, not a step in a trail they arrow back through.
+   */
+  const goToSettings = React.useCallback((section: SettingsSection) => {
+    if (typeof window === "undefined") return;
+    const current = window.location.hash;
+    // Only on the way in. Moving between sections must not record a settings
+    // route as the thing to go back to.
+    if (!SETTINGS_HASH_PATTERN.test(current)) {
+      hashBeforeSettings.current = current;
+    }
+    const next = `#/settings/${section}`;
+    window.history.replaceState(null, "", next);
+    window.dispatchEvent(new Event(HASH_EVENT));
+  }, []);
+
+  const openSettingsSection = React.useCallback(
+    (section: SettingsSection) => {
+      setSettingsFocus(null);
+      setSettingsAutoTest(null);
+      // An overlay over the page the user just asked for is nobody's intent —
+      // this is reached from the palette, which is one of them.
+      setDialog(null);
+      goToSettings(section);
+    },
+    [goToSettings],
+  );
+
+  React.useEffect(() => {
+    openSettingsRef.current = openSettingsSection;
+  }, [openSettingsSection]);
+
   const openSettings = React.useCallback(
     (focus: SettingsFocus = null, autoTest = false) => {
       setSettingsFocus(focus);
       // A nonce rather than a boolean: asking twice in a row must run the test
       // twice, and a boolean that is already true would not change.
       setSettingsAutoTest(autoTest ? Date.now() : null);
-      setDialog("settings");
+      setDialog(null);
+      // A focus target and the connection test are both about the server, so
+      // they name the section rather than needing one passed alongside.
+      goToSettings(focus || autoTest ? "connection" : "general");
     },
-    [],
+    [goToSettings],
   );
+
+  const closeSettings = React.useCallback(() => {
+    setSettingsFocus(null);
+    setSettingsAutoTest(null);
+    if (typeof window === "undefined") return;
+    // Back to the message that was open, if there was one. A bare path
+    // otherwise — and never a stale settings route, which would reopen the
+    // page this is closing.
+    const previous = hashBeforeSettings.current;
+    hashBeforeSettings.current = "";
+    const base = `${window.location.pathname}${window.location.search}`;
+    window.history.replaceState(
+      null,
+      "",
+      previous && !SETTINGS_HASH_PATTERN.test(previous)
+        ? `${base}${previous}`
+        : base,
+    );
+    window.dispatchEvent(new Event(HASH_EVENT));
+  }, []);
 
   const openCompose = React.useCallback((seed?: Partial<ComposeSeed>) => {
     setComposeSeed({
@@ -682,6 +880,19 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     });
     setDialog("compose");
   }, []);
+
+  /* The Agent view is one pane and it unmounts when the user leaves it, so the
+     seed is cleared by the composer that took it rather than left standing.
+     Otherwise coming back to the conversation an hour later would prefill the
+     same sentence about a message the user has long since dealt with. */
+  const seedAgentComposer = React.useCallback(
+    (text: string) => {
+      setAgentSeed({ nonce: Date.now(), text });
+      setView("agent");
+    },
+    [setView],
+  );
+  const clearAgentSeed = React.useCallback(() => setAgentSeed(null), []);
 
   /* ---- first run ------------------------------------------------------ */
   /* Gated on mount so the prerendered HTML — which reads the DEFAULT settings,
@@ -770,7 +981,14 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       clearSearch,
       query,
       searching: query.trim().length > 0,
-      view,
+      /* The settings route wins while it is set. The view underneath is kept,
+         not cleared, so leaving Settings returns to the pane the user left.
+         An open message wins for the same reason and in the same way: the
+         menu-bar popover raises the window on the row that was clicked, and
+         the app starts on the agent conversation, which has no reading pane
+         to show it in. The effect above then commits the mail view, so
+         closing the message lands on the list. */
+      view: settingsSection ? "settings" : selected ? "mail" : view,
       setView,
       /* Gated on mount for the same reason the wizard is: the hydration render
          reads DEFAULT_SETTINGS, where `crm` is true, so passing settings.crm
@@ -817,12 +1035,18 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       clearRemovalTarget,
       settingsFocus,
       settingsAutoTest,
+      settingsSection,
       openSettings,
+      openSettingsSection,
+      closeSettings,
       wizardOpen,
       openWizard,
       finishWizard,
       composeSeed,
       openCompose,
+      agentSeed,
+      seedAgentComposer,
+      clearAgentSeed,
       replyRequest,
       requestReply,
       clearReplyRequest,
@@ -875,12 +1099,18 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       clearRemovalTarget,
       settingsFocus,
       settingsAutoTest,
+      settingsSection,
       openSettings,
+      openSettingsSection,
+      closeSettings,
       wizardOpen,
       openWizard,
       finishWizard,
       composeSeed,
       openCompose,
+      agentSeed,
+      seedAgentComposer,
+      clearAgentSeed,
       replyRequest,
       requestReply,
       clearReplyRequest,

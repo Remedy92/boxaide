@@ -2,9 +2,10 @@
  * Boxaide desktop shell.
  *
  * The whole app is the Boxaide server started in this process plus a window
- * pointed at it. Because the window loads `http://127.0.0.1:<port>`, the page
- * is same-origin with the API: `/api/local-bootstrap` works exactly as it does
- * in a browser, so the token never has to be shown to the user.
+ * pointed at it. The window receives a one-time capability in its URL fragment
+ * and exchanges that for the server token. HTTP never receives fragments, so
+ * another local process cannot impersonate the desktop renderer merely by
+ * calling loopback.
  *
  * There is no preload script and no IPC. The renderer is the same static page
  * the browser gets, and it gets no Electron surface at all. That is also why
@@ -19,13 +20,16 @@ import {
   Menu,
   nativeImage,
   Notification,
+  powerMonitor,
   screen,
   shell,
   Tray,
 } from "electron";
+import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { appHashOf } from "./app-hash.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -61,6 +65,22 @@ const dockIconPng = join(here, "..", "build", "icon-dock.png");
 const webRoot = app.isPackaged
   ? join(process.resourcesPath, "web-next")
   : join(here, "..", "server", "web-next");
+
+/**
+ * The EventKit helper the server spawns to read this Mac's calendars.
+ *
+ * The server has no Electron import and so cannot know `process.resourcesPath`;
+ * the shell is the only thing that knows where its own bundle is, so the path
+ * is handed over with the rest of the configuration below. macOS only —
+ * elsewhere nothing is packed and the server reports the local calendar as
+ * unavailable, which is the truth.
+ */
+const calendarHelperPath =
+  process.platform === "darwin"
+    ? app.isPackaged
+      ? join(process.resourcesPath, "boxaide-calendar")
+      : join(here, "..", "build", "boxaide-calendar")
+    : undefined;
 
 /** @type {BrowserWindow | null} */
 let win = null;
@@ -102,9 +122,16 @@ let stagedUpdate = null;
  * The server's update service, held so the menu bar can ask for a check
  * without going back through HTTP. The window still reads it over
  * `/api/update` — that is the only path the renderer has.
- * @type {{ check: () => Promise<void> } | null}
+ * @type {{
+ *   check: () => Promise<void>,
+ *   checkAndDownload: () => Promise<void>,
+ *   checkIfStale: (maxAgeMs?: number) => Promise<void>,
+ *   state: () => { status: string, currentVersion: string, latestVersion: string | null, error: string | null },
+ * } | null}
  */
 let updateService = null;
+/** Set while a menu-driven check is running, so a second click is not a second check. */
+let checkingFromMenu = false;
 
 if (!app.requestSingleInstanceLock()) {
   // A second launch hands focus to the running one. Two instances would fight
@@ -122,9 +149,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("activate", () => {
-    if (serverUrl && BrowserWindow.getAllWindows().length === 0) {
-      createWindow(serverUrl);
-    }
+    if (serverUrl) openMainWindow();
   });
 
   // Quitting is held open once, long enough to close the SQLite handle and log
@@ -174,6 +199,7 @@ async function start() {
     app.dock?.setIcon(nativeImage.createFromPath(dockIconPng));
   }
   const { startServer } = await import("../server/dist/app.js");
+  const bootstrapCapability = randomBytes(32).toString("base64url");
   // host is pinned rather than read from BOXAIDE_HOST: a desktop app that binds
   // a non-loopback address would put decrypted mail credentials on the LAN.
   // Everything else — port, ~/.boxaide, the bearer token, the master key — is
@@ -190,19 +216,28 @@ async function start() {
     // compiled server inside the asar. Same number today; this is the one the
     // OS and Squirrel agree on.
     appVersion: app.getVersion(),
+    bootstrapCapability,
+    calendarHelperPath,
   });
   stopServer = started.stop;
   serverUrl = started.url;
   updateService = started.runtime.update;
-  createWindow(started.url);
+  createAppMenu();
+  createWindow(
+    started.url,
+    `#bootstrap=${encodeURIComponent(bootstrapCapability)}`,
+  );
   // Menu bar presence is macOS-scoped for now: that is where "glance at your
   // mail and your agents without the window" was asked for, and where the
   // template-image rendering below is known-correct.
   if (process.platform === "darwin") createTray(started.url);
   // The token is right here in the runtime config — the same file-backed bearer
-  // token the page picks up from /api/local-bootstrap — so the main process
-  // reads it directly rather than going through the renderer.
-  if (!smoke) startBadgePoll(started.url, started.runtime.config.bearerToken);
+  // token the page obtains through its one-time bootstrap capability — so the
+  // main process reads it directly rather than going through the renderer.
+  if (!smoke) {
+    startBadgePoll(started.url, started.runtime.config.bearerToken);
+    watchForStaleUpdate();
+  }
 }
 
 /**
@@ -234,9 +269,10 @@ let notifiedReadyFor = null;
  * release. Both files must be on the release for any of this to work —
  * scripts/ship.sh uploads them beside the dmg.
  *
- * Downloading is never automatic. The update is tens of megabytes over
- * somebody's connection, and it lands as a restart; both are the user's call,
- * made in the sidebar.
+ * The service starts the download as soon as a check finds a newer build.
+ * `autoDownload` stays off so electron-updater does not start a second
+ * transfer on a re-check. Restart stays a button; quit still applies a
+ * staged build.
  */
 function createUpdateDriver() {
   autoUpdater.autoDownload = false;
@@ -292,7 +328,12 @@ function createUpdateDriver() {
       // Close both before the process is replaced, then quit for real:
       // `quitAndInstall` runs the Squirrel handoff that `app.exit` skips.
       void shutdownServer().finally(() => {
-        autoUpdater.quitAndInstall(false, true);
+        try {
+          autoUpdater.quitAndInstall(false, true);
+        } catch (err) {
+          console.error("quit and install failed", err);
+          app.exit(0);
+        }
       });
     },
   };
@@ -326,12 +367,17 @@ function announceReady(version) {
   if (notifiedReadyFor === version) return;
   notifiedReadyFor = version;
   if (!Notification.isSupported()) return;
-  const notification = new Notification({
-    title: `Boxaide ${version} is ready`,
-    body: "Restart to finish updating.",
+  notify(`Boxaide ${version} is ready`, "Restart to finish updating.");
+}
+
+/**
+ * Sleep and Cmd-Tab are the moments a 15-minute poll is the wrong clock.
+ * The service drops a check that ran in the last minute.
+ */
+function watchForStaleUpdate() {
+  powerMonitor.on("resume", () => {
+    void updateService?.checkIfStale();
   });
-  notification.on("click", () => openMainWindow());
-  notification.show();
 }
 
 /* ---- approval badge ------------------------------------------------------ */
@@ -411,15 +457,185 @@ function applyBadge(pending) {
   notification.show();
 }
 
-/** Raise the main window, recreating it after a close. */
-function openMainWindow() {
+/**
+ * Raise the main window, recreating it after a close.
+ *
+ * `hash` names a page inside the app — `#/settings/updates`, say. The page
+ * routes on the URL hash, so this is the whole of the main process's ability
+ * to send the window somewhere: there is no preload and no IPC, by design.
+ * @param {string} [hash]
+ */
+function openMainWindow(hash) {
   if (win) {
     if (win.isMinimized()) win.restore();
     win.show();
     win.focus();
+    if (hash) navigateTo(hash);
     return;
   }
-  if (serverUrl) createWindow(serverUrl);
+  if (serverUrl) createWindow(serverUrl, hash);
+}
+
+/**
+ * Move the loaded page to a hash route without reloading it.
+ *
+ * The custom event is not belt-and-braces: assigning the same hash the window
+ * is already on fires no `hashchange`, and "Check for updates…" pressed twice
+ * from the Updates page is exactly that case.
+ * @param {string} hash
+ */
+function navigateTo(hash) {
+  if (!win) return;
+  void win.webContents
+    .executeJavaScript(
+      `window.location.hash = ${JSON.stringify(hash)};` +
+        `window.dispatchEvent(new Event("boxaide:hash"));`,
+    )
+    .catch(() => {
+      // A window mid-load has no document to route yet. It is loading the URL
+      // it was created with, which already carries the hash.
+    });
+}
+
+/**
+ * The menu item, end to end: show the page that reports updates, run the
+ * check, start the download if there is one, and say so when there is not.
+ *
+ * The old version checked and opened the window, which from the outside is a
+ * menu item that does nothing — the sidebar card it was opening the window for
+ * only appears when an update exists, and only after the check lands.
+ */
+async function checkForUpdatesFromMenu() {
+  if (!updateService || checkingFromMenu) return;
+  checkingFromMenu = true;
+  // Before the await: the window comes up on the Updates page, which shows
+  // "Checking for updates…" while this runs. That is the feedback.
+  openMainWindow("#/settings/updates");
+  try {
+    await updateService.checkAndDownload();
+  } finally {
+    checkingFromMenu = false;
+  }
+  const state = updateService.state();
+  // An update that was found is on screen — the page shows the version and a
+  // progress bar. Only the two outcomes with nothing to show get a line.
+  if (state.status === "up-to-date") {
+    notify("Boxaide is up to date", `You are on ${state.currentVersion}.`);
+    return;
+  }
+  if (state.status === "error") {
+    notify(
+      "Could not check for updates",
+      state.error ?? "The release feed did not answer.",
+    );
+  }
+}
+
+/**
+ * @param {string} title
+ * @param {string} body
+ */
+function notify(title, body) {
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({ title, body });
+  notification.on("click", () => openMainWindow("#/settings/updates"));
+  notification.show();
+}
+
+/* ---- application menu ---------------------------------------------------- */
+
+/**
+ * The default Electron menu has no way to reach settings and no way to ask for
+ * an update, so this replaces it. Everything else is a role, which is how the
+ * standard Edit and Window behaviour (copy, paste, minimise, the emoji picker)
+ * survives the replacement.
+ *
+ * Built once at start rather than per open: nothing in it reads state that
+ * changes. The tray menu, which does, is still rebuilt per click.
+ */
+function createAppMenu() {
+  const mac = process.platform === "darwin";
+  /** Shared by the app menu on macOS and the File menu everywhere else. */
+  const appItems = [
+    {
+      label: "Check for Updates…",
+      click: () => void checkForUpdatesFromMenu(),
+    },
+    { type: "separator" },
+    {
+      label: "Settings…",
+      accelerator: "CmdOrCtrl+,",
+      click: () => openMainWindow("#/settings"),
+    },
+    {
+      label: "Install Claude connector…",
+      click: () => installClaudeConnector(),
+    },
+  ];
+
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      ...(mac
+        ? [
+            {
+              label: app.name,
+              submenu: [
+                { role: "about" },
+                { type: "separator" },
+                ...appItems,
+                { type: "separator" },
+                { role: "services" },
+                { type: "separator" },
+                { role: "hide" },
+                { role: "hideOthers" },
+                { role: "unhide" },
+                { type: "separator" },
+                { role: "quit" },
+              ],
+            },
+          ]
+        : [
+            {
+              label: "File",
+              submenu: [...appItems, { type: "separator" }, { role: "quit" }],
+            },
+          ]),
+      { role: "editMenu" },
+      {
+        label: "View",
+        // No accelerators on these two. CmdOrCtrl+0 belongs to the resetZoom
+        // role three lines down, and CmdOrCtrl+, is already on Settings… in
+        // the menu above — a second registration takes the key away from the
+        // item that should have it.
+        submenu: [
+          { label: "Boxaide", click: () => openMainWindow() },
+          { label: "Settings", click: () => openMainWindow("#/settings") },
+          { type: "separator" },
+          { role: "reload" },
+          { role: "resetZoom" },
+          { role: "zoomIn" },
+          { role: "zoomOut" },
+          { type: "separator" },
+          { role: "togglefullscreen" },
+        ],
+      },
+      { role: "windowMenu" },
+      {
+        role: "help",
+        submenu: [
+          {
+            label: "Boxaide on GitHub",
+            click: () => openExternal("https://github.com/Remedy92/boxaide"),
+          },
+          {
+            label: "Releases",
+            click: () =>
+              openExternal("https://github.com/Remedy92/boxaide/releases"),
+          },
+        ],
+      },
+    ]),
+  );
 }
 
 /* ---- menu bar ------------------------------------------------------------ */
@@ -462,13 +678,15 @@ function createTray(url) {
           click: () => installClaudeConnector(),
         },
         {
-          // The check runs against the service directly; the window is where
-          // its answer is shown, so both happen on one click.
-          label: "Check for updates…",
-          click: () => {
-            void updateService?.check().catch(() => {});
-            openMainWindow();
-          },
+          label: "Settings…",
+          click: () => openMainWindow("#/settings"),
+        },
+        {
+          // Opens the Updates page, checks, and downloads what it finds. See
+          // checkForUpdatesFromMenu.
+          label: checkingFromMenu ? "Checking for updates…" : "Check for updates…",
+          enabled: !checkingFromMenu,
+          click: () => void checkForUpdatesFromMenu(),
         },
         { type: "separator" },
         {
@@ -525,14 +743,15 @@ function showPopover(url) {
       popover = null;
     });
 
-    // The page's "Open Boxaide" button and every mail row navigate to the
-    // server's root. That navigation IS the popover's exit: catch it, raise
-    // the real window, keep the popover parked on /tray/ for next time.
+    // The page's "Open Boxaide" button navigates to the server's root and a
+    // mail row to that message's hash. That navigation IS the popover's exit:
+    // catch it, raise the real window on the address it named, keep the
+    // popover parked on /tray/ for next time.
     popover.webContents.on("will-navigate", (event, target) => {
       event.preventDefault();
       if (originOf(target) === origin) {
         popover?.hide();
-        openMainWindow();
+        openMainWindow(appHashOf(target));
         return;
       }
       openExternal(target);
@@ -634,8 +853,11 @@ function installClaudeConnector() {
   });
 }
 
-/** @param {string} url */
-function createWindow(url) {
+/**
+ * @param {string} url
+ * @param {string} [hash] A page inside the app, e.g. `#/settings/updates`.
+ */
+function createWindow(url, hash) {
   const origin = new URL(url).origin;
 
   win = new BrowserWindow({
@@ -677,6 +899,11 @@ function createWindow(url) {
   win.on("closed", () => {
     win = null;
   });
+  if (!smoke) {
+    win.on("focus", () => {
+      void updateService?.checkIfStale();
+    });
+  }
 
   // Mail contains links. Anything that is not this server opens in the user's
   // real browser; nothing else gets an Electron window.
@@ -723,7 +950,7 @@ function createWindow(url) {
     );
   }
 
-  void win.loadURL(url);
+  void win.loadURL(hash ? `${url}${hash}` : url);
 }
 
 /** @param {string} target */

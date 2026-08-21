@@ -10,11 +10,11 @@ import {
 import { useApiCtx } from "@/lib/hooks/use-settings";
 
 /**
- * The Automations view's reads and its two writes.
+ * The Automations view's reads and its three writes.
  *
  * There is no create hook: automations are authored by talking to the agent
- * (spec: Web UI), so this app can toggle one, run one now, and read what
- * happened — nothing else.
+ * (spec: Web UI), so this app can only change how a run happens — pause it,
+ * run it now, choose the agent and model — and read what happened.
  */
 export function useAutomations(enabled = true) {
   const ctx = useApiCtx();
@@ -62,6 +62,34 @@ export function useToggleAutomation() {
     onSuccess: () => {
       // The server recomputes next_run_at on every save, so the whole list is
       // refetched rather than the one row patched in place.
+      void queryClient.invalidateQueries({ queryKey: ["automations"] });
+    },
+  });
+}
+
+/**
+ * Which CLI runs an automation, and on which model. Null for either means the
+ * default — the first installed agent, and that agent's own default model.
+ *
+ * Both go in one mutation because they are one decision: the server clears a
+ * stored model when the agent changes under it, so a UI that patched them
+ * separately would show a model the run will not use.
+ */
+export function useSetAutomationAgent() {
+  const ctx = useApiCtx();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      automationId: string;
+      agentId?: string | null;
+      model?: string | null;
+    }) =>
+      updateAutomation(
+        input.automationId,
+        { agentId: input.agentId, model: input.model },
+        ctx,
+      ),
+    onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["automations"] });
     },
   });

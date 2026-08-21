@@ -17,6 +17,8 @@ export type Automation = {
   prompt: string;
   /** AgentSpec id from the launcher registry; null = first available. */
   agentId: string | null;
+  /** Model id for that agent's CLI; null = the CLI's own default. */
+  model: string | null;
   enabled: boolean;
   createdAt: string;
   lastRunAt: string | null;
@@ -40,6 +42,7 @@ type AutomationRow = {
   cron: string;
   prompt: string;
   agent_id: string | null;
+  model: string | null;
   enabled: number;
   created_at: string;
   last_run_at: string | null;
@@ -61,6 +64,51 @@ export const LOG_LIMIT = 64 * 1024;
 
 /** What a reader (MCP tool, REST, UI) gets back per run. */
 export const LOG_TAIL_LIMIT = 4 * 1024;
+export const MAX_AUTOMATION_NAME_CHARS = 200;
+export const MAX_AUTOMATION_CRON_CHARS = 200;
+export const MAX_AUTOMATION_PROMPT_BYTES = 64 * 1024;
+export const MAX_AUTOMATION_AGENT_ID_CHARS = 100;
+export const MAX_AUTOMATION_MODEL_CHARS = 200;
+
+function assertAutomationFields(input: {
+  name: string;
+  cron: string;
+  prompt: string;
+  agentId?: string | null;
+  model?: string | null;
+}): void {
+  if (input.name.length > MAX_AUTOMATION_NAME_CHARS) {
+    throw new Error(
+      `name must be at most ${MAX_AUTOMATION_NAME_CHARS} characters`,
+    );
+  }
+  if (input.cron.length > MAX_AUTOMATION_CRON_CHARS) {
+    throw new Error(
+      `cron must be at most ${MAX_AUTOMATION_CRON_CHARS} characters`,
+    );
+  }
+  if (Buffer.byteLength(input.prompt, "utf8") > MAX_AUTOMATION_PROMPT_BYTES) {
+    throw new Error(`prompt must be at most ${MAX_AUTOMATION_PROMPT_BYTES} bytes`);
+  }
+  if (
+    input.agentId !== undefined &&
+    input.agentId !== null &&
+    input.agentId.length > MAX_AUTOMATION_AGENT_ID_CHARS
+  ) {
+    throw new Error(
+      `agentId must be at most ${MAX_AUTOMATION_AGENT_ID_CHARS} characters`,
+    );
+  }
+  if (
+    input.model !== undefined &&
+    input.model !== null &&
+    input.model.length > MAX_AUTOMATION_MODEL_CHARS
+  ) {
+    throw new Error(
+      `model must be at most ${MAX_AUTOMATION_MODEL_CHARS} characters`,
+    );
+  }
+}
 
 /**
  * Mirrors ONESHOT_TIMEOUT_MS in src/agent/launcher.ts. It is duplicated, not
@@ -120,6 +168,7 @@ export class AutomationStore {
         cron TEXT NOT NULL,
         prompt TEXT NOT NULL,
         agent_id TEXT,
+        model TEXT,
         enabled INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         last_run_at TEXT,
@@ -136,7 +185,22 @@ export class AutomationStore {
       );
       CREATE INDEX IF NOT EXISTS automation_runs_by_automation
         ON automation_runs (automation_id, started_at DESC);
+      -- claimRun counts live rows twice, several times a minute, and holds the
+      -- write lock while it does. Partial index: 'running' rows are a handful
+      -- at most, while the table grows without bound.
+      CREATE INDEX IF NOT EXISTS automation_runs_live
+        ON automation_runs (automation_id) WHERE status = 'running';
     `);
+
+    // Only reached by databases created before the model column existed. Null
+    // there means what it means everywhere: run on the CLI's own default, which
+    // is exactly what those automations already did.
+    const columns = this.db
+      .prepare(`PRAGMA table_info(automations)`)
+      .all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === "model")) {
+      this.db.exec(`ALTER TABLE automations ADD COLUMN model TEXT`);
+    }
   }
 
   create(input: {
@@ -144,12 +208,20 @@ export class AutomationStore {
     cron: string;
     prompt: string;
     agentId?: string | null;
+    model?: string | null;
     enabled?: boolean;
     now?: Date;
   }): Automation {
     const name = input.name.trim();
     if (!name) throw new Error("name is required");
     if (!input.prompt.trim()) throw new Error("prompt is required");
+    assertAutomationFields({
+      name,
+      cron: input.cron.trim(),
+      prompt: input.prompt,
+      agentId: input.agentId,
+      model: input.model,
+    });
     const now = input.now ?? new Date();
     // Validate before the INSERT: a stored automation with an unparseable cron
     // would be a row the scheduler can never schedule and never explain.
@@ -160,6 +232,7 @@ export class AutomationStore {
       cron: input.cron.trim(),
       prompt: input.prompt,
       agent_id: input.agentId ?? null,
+      model: input.model ?? null,
       enabled: input.enabled === false ? 0 : 1,
       created_at: now.toISOString(),
       last_run_at: null,
@@ -169,8 +242,8 @@ export class AutomationStore {
       this.db
         .prepare(
           `INSERT INTO automations
-             (id, name, cron, prompt, agent_id, enabled, created_at, last_run_at, next_run_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, name, cron, prompt, agent_id, model, enabled, created_at, last_run_at, next_run_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           row.id,
@@ -178,6 +251,7 @@ export class AutomationStore {
           row.cron,
           row.prompt,
           row.agent_id,
+          row.model,
           row.enabled,
           row.created_at,
           row.last_run_at,
@@ -201,6 +275,7 @@ export class AutomationStore {
       cron?: string;
       prompt?: string;
       agentId?: string | null;
+      model?: string | null;
       enabled?: boolean;
       now?: Date;
     },
@@ -208,6 +283,13 @@ export class AutomationStore {
     const current = this.get(id);
     if (!current) return null;
     const now = patch.now ?? new Date();
+    // A model id belongs to exactly one CLI, so switching agent without naming
+    // a model drops the old one. Keeping it would hand grok's model id to
+    // claude, and the run would fail at spawn instead of falling back.
+    const agentChanged =
+      patch.agentId !== undefined && patch.agentId !== current.agentId;
+    const model =
+      patch.model !== undefined ? patch.model : agentChanged ? null : current.model;
     const next: Automation = {
       ...current,
       name: patch.name?.trim() || current.name,
@@ -217,8 +299,10 @@ export class AutomationStore {
       // run with no prompt would spawn an agent carrying only the preamble.
       prompt: patch.prompt?.trim() ? patch.prompt : current.prompt,
       agentId: patch.agentId !== undefined ? patch.agentId : current.agentId,
+      model,
       enabled: patch.enabled ?? current.enabled,
     };
+    assertAutomationFields(next);
     // Recompute on every save, not only on a cron change: re-enabling a
     // long-disabled automation must not fire on a next_run_at from last month.
     next.nextRunAt = next.enabled
@@ -228,7 +312,8 @@ export class AutomationStore {
       this.db
         .prepare(
           `UPDATE automations
-              SET name = ?, cron = ?, prompt = ?, agent_id = ?, enabled = ?, next_run_at = ?
+              SET name = ?, cron = ?, prompt = ?, agent_id = ?, model = ?,
+                  enabled = ?, next_run_at = ?
             WHERE id = ?`,
         )
         .run(
@@ -236,6 +321,7 @@ export class AutomationStore {
           next.cron,
           next.prompt,
           next.agentId,
+          next.model,
           next.enabled ? 1 : 0,
           next.nextRunAt,
           id,
@@ -315,34 +401,50 @@ export class AutomationStore {
   }
 
   /**
-   * Takes the cross-process run lock and opens the run row, or returns null.
+   * Takes a cross-process run slot and opens the run row, or returns null.
    *
-   * The in-process FIFO only serializes runs inside one process, but a stdio
+   * The in-process FIFO only orders runs inside one process, but a stdio
    * `boxaide mcp` process has its own scheduler over the same SQLite file
-   * (automation_run_now), so two processes could overlap runs and break spec
-   * invariant 4. The 'running' row is therefore the lock: sweep dead rows,
+   * (automation_run_now), so two processes could break spec invariant 4
+   * between them. The 'running' rows are therefore the lock: sweep dead rows,
    * count live ones and insert, all in ONE transaction. Callers that get null
-   * must keep the job queued and retry — the lock holder is still working.
+   * must keep the job queued and retry — someone else holds the slot.
+   *
+   * Two refusals, and the order matters. A second run of the SAME automation is
+   * refused whatever the capacity: two copies of one prompt do the same work
+   * twice, which is worse than running late. Only then is the total capacity
+   * checked.
    */
   claimRun(
     automationId: string,
-    opts: { now?: Date; staleMs?: number } = {},
+    opts: { now?: Date; staleMs?: number; limit?: number } = {},
   ): AutomationRun | null {
     const now = opts.now ?? new Date();
     const staleMs = opts.staleMs ?? RUN_STALE_MS;
+    // The floor of 1 keeps a caller that computed a limit of 0 (or a negative
+    // one) from wedging the schedule silently — it would refuse every run
+    // forever with no row and no log to explain it.
+    const limit = Math.max(1, Math.trunc(opts.limit ?? 1));
     // .immediate(): a deferred transaction begins read-only and only takes the
     // write lock at the INSERT — precisely the window where the other process
-    // could read "nothing running" and insert as well. IMMEDIATE takes the
-    // write lock up front, so the count and the insert are one atomic step
+    // could read "there is room" and insert as well. IMMEDIATE takes the
+    // write lock up front, so the counts and the insert are one atomic step
     // against every other connection to this file.
     return this.db.transaction((): AutomationRun | null => {
       this.sweepStaleRunsAt(now, staleMs);
+      // Only fresh rows are left after the sweep, so any survivor is a run
+      // someone is really executing right now.
+      const mine = this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM automation_runs
+            WHERE status = 'running' AND automation_id = ?`,
+        )
+        .get(automationId) as { n: number };
+      if (mine.n > 0) return null;
       const live = this.db
         .prepare(`SELECT COUNT(*) AS n FROM automation_runs WHERE status = 'running'`)
         .get() as { n: number };
-      // Only fresh rows are left after the sweep, so any survivor is a run
-      // someone is really executing right now.
-      if (live.n > 0) return null;
+      if (live.n >= limit) return null;
       return this.startRun(automationId, now);
     }).immediate();
   }
@@ -448,6 +550,7 @@ function toAutomation(row: AutomationRow): Automation {
     cron: row.cron,
     prompt: row.prompt,
     agentId: row.agent_id,
+    model: row.model,
     enabled: row.enabled === 1,
     createdAt: row.created_at,
     lastRunAt: row.last_run_at,

@@ -4,7 +4,8 @@ import { existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { AgentChannel } from "../src/agent/channel.js";
+import { AgentChannel, MAX_DELIVERIES } from "../src/agent/channel.js";
+import { USER_TURN_TTL_MS } from "../src/db/store.js";
 import { createRuntime } from "../src/app.js";
 import { encryptSecret } from "../src/crypto/secrets.js";
 import { Store } from "../src/db/store.js";
@@ -30,6 +31,43 @@ afterEach(() => {
 });
 
 describe("AgentChannel", () => {
+  it("puts a line about another chat in that chat, and answers nothing with it", async () => {
+    const { channel } = make();
+    const asked = channel.activeChat().id;
+    const elsewhere = channel.createChat().id;
+    // The user is looking at the chat they asked in, and the agent is working
+    // on that question.
+    channel.selectChat(asked);
+    const question = channel.post({ role: "user", text: "send it", chatId: asked });
+    await channel.awaitUserTurn({ timeoutMs: 1_000 });
+
+    // Boxaide narrating about a request that came from the other chat — an
+    // approval note is the case this exists for.
+    channel.post({
+      role: "activity",
+      text: "Approved: message_send",
+      agent: "claude-code",
+      chatId: elsewhere,
+    });
+
+    const note = channel.history(undefined, elsewhere);
+    expect(note.map((t) => t.text)).toEqual(["Approved: message_send"]);
+    // Not stamped as a reply to a question in a different pane.
+    expect(note[0].replyTo).toBeNull();
+    // The chat being worked on did not get it, and the user was not moved.
+    expect(channel.history(undefined, asked).map((t) => t.text)).toEqual(["send it"]);
+    expect(channel.activeChat().id).toBe(asked);
+    // The agent is still holding the question it was handed.
+    expect(channel.presence().working?.seq).toBe(question.seq);
+  });
+
+  it("refuses a line for a chat that is not there", () => {
+    const { channel } = make();
+    expect(() =>
+      channel.post({ role: "activity", text: "note", chatId: "nope" }),
+    ).toThrowError(/no such chat/);
+  });
+
   it("hands a queued message to the first agent that asks", async () => {
     const { channel } = make();
     channel.post({ role: "user", text: "what came in today?" });
@@ -59,12 +97,16 @@ describe("AgentChannel", () => {
     expect(turn).toBeNull();
   });
 
-  it("never re-delivers a message that was already claimed", async () => {
+  it("does not hand a held message to a second agent", async () => {
     const { channel } = make();
     channel.post({ role: "user", text: "once" });
 
-    expect((await channel.awaitUserTurn({ timeoutMs: 1_000 }))?.text).toBe("once");
-    expect(await channel.awaitUserTurn({ timeoutMs: 1_000 })).toBeNull();
+    expect((await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" }))?.text).toBe(
+      "once",
+    );
+    // A different agent parking is not abandon. The first still holds it.
+    expect(await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "b" })).toBeNull();
+    expect(channel.history()[0].delivered).toBe(true);
   });
 
   it("keeps history in order and round-trips through encryption at rest", () => {
@@ -263,6 +305,10 @@ describe("AgentChannel", () => {
     // and the exit proves it — no reason to hold a spinner for five minutes.
     channel.setLaunchedAgent(null);
     expect(channel.presence().working).toBeNull();
+    expect(channel.history()[0].delivered).toBe(false);
+    expect((await channel.awaitUserTurn({ timeoutMs: 1_000 }))?.text).toBe(
+      "who emailed me?",
+    );
   });
 
   it("leaves another agent's claim alone when a launched agent exits", async () => {
@@ -294,6 +340,10 @@ describe("AgentChannel", () => {
 
       vi.advanceTimersByTime(5 * 60_000 + 1_000);
       expect(channel.presence().working).toBeNull();
+      expect(channel.history()[0].delivered).toBe(false);
+      expect(
+        (await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "b" }))?.text,
+      ).toBe("find the invoice");
     } finally {
       vi.useRealTimers();
     }
@@ -334,30 +384,231 @@ describe("AgentChannel", () => {
     expect(channel.presence().working?.tool?.name).toBe("Bash");
   });
 
-  it("reports a claimed message as delivered, so the UI never calls it queued", async () => {
+  it("reports a claimed message as delivered while the lease is held", async () => {
     const { channel } = make();
     channel.post({ role: "user", text: "who emailed me?" });
     expect(channel.history()[0].delivered).toBe(false);
 
-    await channel.awaitUserTurn({ timeoutMs: 500 });
+    await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
 
-    // The claim is permanent: this row is never handed to anybody again, so
-    // "waiting for an agent" would be a lie from here on.
     expect(channel.history()[0].delivered).toBe(true);
-    expect(await channel.awaitUserTurn({ timeoutMs: 500 })).toBeNull();
+    expect(channel.presence().dropped).toEqual([]);
   });
 
-  it("drops the work when the agent goes back to the loop unanswered", async () => {
+  it("hands the message back when the same agent returns unanswered", async () => {
     const { channel } = make();
-    const parked = channel.awaitUserTurn({ timeoutMs: 2_000 });
+    channel.post({ role: "user", text: "hello" });
+    const first = await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" });
+    expect(first?.deliveryCount).toBe(1);
+
+    const again = await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" });
+    expect(again?.text).toBe("hello");
+    expect(again?.deliveryCount).toBe(2);
+  });
+
+  it("keeps another agent's lease when a second agent parks", async () => {
+    const { channel } = make();
+    const parked = channel.awaitUserTurn({ timeoutMs: 2_000, agent: "a" });
     channel.post({ role: "user", text: "hello" });
     await parked;
     expect(channel.presence().working).not.toBeNull();
 
-    // Round two of the loop. Whatever happened to message one, it is over.
-    const next = channel.awaitUserTurn({ timeoutMs: 500 });
-    expect(channel.presence().working).toBeNull();
+    const next = channel.awaitUserTurn({ timeoutMs: 500, agent: "b" });
+    expect(channel.presence().working).not.toBeNull();
     await next;
+  });
+
+  it("drops a waiter when the request is aborted", async () => {
+    const { channel } = make();
+    const abort = new AbortController();
+    const parked = channel.awaitUserTurn({ timeoutMs: 60_000, signal: abort.signal });
+    expect(channel.presence().waiting).toBe(1);
+    abort.abort();
+    expect(await parked).toBeNull();
+    expect(channel.presence().waiting).toBe(0);
+  });
+
+  it("dead-letters a message after too many unanswered leases", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      expect(
+        (await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" }))?.text,
+      ).toBe("once");
+    }
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" })).toBeNull();
+    expect(channel.history()[0].delivered).toBe(true);
+    expect(channel.presence().dropped).toEqual([posted.seq]);
+  });
+
+  it("retires a message nobody picked up inside the window", async () => {
+    const { store, channel } = make();
+    const stale = store.appendTurn({
+      at: new Date(Date.now() - USER_TURN_TTL_MS - 1_000).toISOString(),
+      chatId: channel.activeChat().id,
+      role: "user",
+      text: "yesterday",
+      agent: null,
+    });
+
+    // An agent starting now must not be handed last night's question.
+    const handed = await channel.awaitUserTurn({ timeoutMs: 200, agent: "grok" });
+    expect(handed).toBeNull();
+    // Marked the same way a dropped message is, so the pane already says it.
+    expect(store.listDroppedUserSeqs()).toEqual([stale.seq]);
+  });
+
+  it("does not offer a retired message again when an agent starts", async () => {
+    const { store, channel } = make();
+    const stale = store.appendTurn({
+      at: new Date(Date.now() - USER_TURN_TTL_MS - 1_000).toISOString(),
+      chatId: channel.activeChat().id,
+      role: "user",
+      text: "yesterday",
+      agent: null,
+    });
+
+    // The requeue is what used to keep a backlog alive: every launch handed
+    // the same old questions back to the queue, forever.
+    channel.setLaunchedAgent("claude-code");
+
+    expect(channel.presence().dropped).toEqual([stale.seq]);
+    expect(await channel.awaitUserTurn({ timeoutMs: 200, agent: "claude-code" })).toBeNull();
+  });
+
+  it("serves the chat on screen before another chat's backlog", async () => {
+    const { channel } = make();
+    const other = channel.activeChat().id;
+    // Older, and in a chat the user is not looking at.
+    channel.post({ role: "user", text: "older, elsewhere", chatId: other });
+
+    const onScreen = channel.createChat().id;
+    channel.selectChat(onScreen);
+    const asked = channel.post({ role: "user", text: "just typed", chatId: onScreen });
+
+    const handed = await channel.awaitUserTurn({ timeoutMs: 500, agent: "grok" });
+    expect(handed?.seq).toBe(asked.seq);
+    expect(handed?.text).toBe("just typed");
+  });
+
+  it("offers a dropped message again to the agent that just started", async () => {
+    const { store, channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    // A CLI that cannot run at all burns every delivery without reading a word
+    // of the message. That is not a verdict on the message.
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "signed-out" });
+      channel.releaseLease(posted.seq);
+    }
+    expect(channel.presence().dropped).toEqual([posted.seq]);
+
+    channel.setLaunchedAgent("claude-code");
+
+    // The warning is gone and the message is queued again, with the full three
+    // deliveries: the ones before were spent on an agent that no longer exists.
+    expect(channel.presence().dropped).toEqual([]);
+    expect(store.listDroppedUserSeqs()).toEqual([]);
+    const handed = await channel.awaitUserTurn({ timeoutMs: 500, agent: "claude-code" });
+    expect(handed?.text).toBe("once");
+    expect(handed?.deliveryCount).toBe(1);
+  });
+
+  it("hands a requeued message straight to an agent already waiting", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "signed-out" });
+      channel.releaseLease(posted.seq);
+    }
+    const parked = channel.awaitUserTurn({ timeoutMs: 60_000, agent: "claude-code" });
+    expect(channel.presence().waiting).toBe(1);
+
+    // A requeue writes no new turn, so nothing else would wake this waiter: it
+    // would sit out its whole timeout beside a message it could have had.
+    expect(channel.requeueDropped()).toBe(1);
+    expect((await parked)?.text).toBe("once");
+  });
+
+  it("leaves an answered message alone, and reports nothing to requeue", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    const held = await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    channel.post({ role: "agent", text: "answered", replyTo: held!.seq });
+    channel.releaseLease(posted.seq);
+
+    // Requeuing an answered question would have a second agent answer it, which
+    // is the hole the lease exists to close.
+    expect(channel.requeueDropped()).toBe(0);
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "b" })).toBeNull();
+  });
+
+  it("drops a message again when the same agent keeps failing on it", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "the poison pill" });
+    channel.setLaunchedAgent("claude-code");
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "claude-code" });
+      channel.releaseLease(posted.seq);
+    }
+    // No relaunch in between, so the cap still means what it meant: a message
+    // that breaks the agent is not retried forever.
+    expect(channel.presence().dropped).toEqual([posted.seq]);
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "claude-code" })).toBeNull();
+  });
+
+  it("keeps the final lease out of the dropped list while it is live", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    for (let n = 0; n < MAX_DELIVERIES - 1; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    }
+
+    // The last allowed hand-off. On disk this row already looks dead-lettered,
+    // and the agent is answering it right now: the pane must not tell the user
+    // to send it again over a live attempt.
+    const last = await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    expect(last?.deliveryCount).toBe(MAX_DELIVERIES);
+    expect(channel.presence().working?.seq).toBe(posted.seq);
+    expect(channel.presence().dropped).toEqual([]);
+
+    // The lease ended with no answer. Now it really is dropped.
+    channel.releaseLease(posted.seq);
+    expect(channel.presence().working).toBeNull();
+    expect(channel.presence().dropped).toEqual([posted.seq]);
+  });
+
+  it("will not let an unnamed client take a named agent's lease", async () => {
+    const { channel } = make();
+    channel.post({ role: "user", text: "hello" });
+    const held = await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    expect(held?.deliveryCount).toBe(1);
+
+    // Neither an anonymous client nor a different name is the holder, so the
+    // lease stays with "a" and nobody else is handed the same message.
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: null })).toBeNull();
+    expect(channel.presence().working?.agent).toBe("a");
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "b" })).toBeNull();
+    expect(channel.presence().working?.agent).toBe("a");
+
+    // The holder itself returning unanswered still gives the message back.
+    const again = await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    expect(again?.text).toBe("hello");
+    expect(again?.deliveryCount).toBe(2);
+  });
+
+  it("lets an unnamed holder re-take its own lease after another was named", async () => {
+    const { channel } = make();
+    // A named client initialized first, so lastAgent is set before anyone asks.
+    channel.noteClient("claude-desktop");
+    channel.post({ role: "user", text: "hello" });
+
+    const held = await channel.awaitUserTurn({ timeoutMs: 500, agent: null });
+    expect(held?.deliveryCount).toBe(1);
+    expect(channel.presence().working?.agent).toBeNull();
+
+    const again = await channel.awaitUserTurn({ timeoutMs: 500, agent: null });
+    expect(again?.text).toBe("hello");
+    expect(again?.deliveryCount).toBe(2);
   });
 
   it("notifies presence subscribers when an agent parks or speaks", async () => {
@@ -521,6 +772,7 @@ describe("AgentChannel", () => {
       expect(listed).toHaveLength(1);
       expect(listed[0].text).toBe("old question");
       expect(listed[0].replyTo).toBeNull();
+      expect(listed[0].deliveryCount).toBe(0);
 
       const added = store.appendTurn({
         at: new Date().toISOString(),
@@ -606,6 +858,33 @@ describe("chat tools over MCP", () => {
     ]);
   });
 
+  it("asks for a chat name on the wait, and takes the one chat_say carries", async () => {
+    const service = mail();
+    const { channel } = make();
+
+    channel.post({ role: "user", text: "can you look at the acme thing" });
+    const awaited = payload(await call(service, channel, "chat_await_message"));
+    expect(awaited.needsTitle).toBe(true);
+    expect(awaited.hint).toContain("title");
+
+    await call(service, channel, "chat_say", {
+      text: "Their invoice is unpaid.",
+      title: "Refund for the Acme invoice",
+    });
+    expect(channel.chats()[0].title).toBe("Refund for the Acme invoice");
+
+    // Named once. The next wait does not ask again, and a title sent anyway is
+    // ignored rather than treated as a failed answer.
+    channel.post({ role: "user", text: "and the february one?" });
+    const second = payload(await call(service, channel, "chat_await_message"));
+    expect(second.needsTitle).toBe(false);
+    const said = payload(
+      await call(service, channel, "chat_say", { text: "Also unpaid.", title: "Something else" }),
+    );
+    expect(said.posted).toBe(true);
+    expect(channel.chats()[0].title).toBe("Refund for the Acme invoice");
+  });
+
   it("stamps chat_say with the launched agent, not a leftover MCP name", async () => {
     const service = mail();
     const { channel } = make();
@@ -638,6 +917,62 @@ describe("chat tools over MCP", () => {
     expect(body.timedOut).toBe(true);
     // The hint is the only thing telling the model to call again.
     expect(body.hint).toMatch(/again/i);
+  });
+
+  it("unclaims when the await request is aborted after the hand-off", async () => {
+    const service = mail();
+    const { channel } = make();
+    const abort = new AbortController();
+    const pending = handleMcpJsonRpc(
+      service,
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "chat_await_message", arguments: { timeoutSeconds: 30 } },
+      },
+      channel,
+      undefined,
+      abort.signal,
+    );
+    channel.post({ role: "user", text: "hello" });
+    abort.abort();
+    expect(await pending).toBeNull();
+    expect(channel.history()[0].delivered).toBe(false);
+  });
+
+  it("refuses the chat loop tools while a driver holds the conversation", async () => {
+    const service = mail();
+    const { channel } = make();
+    channel.post({ role: "user", text: "hello" });
+    channel.setDriven(true);
+
+    // No wait, no claim: the driver's own loop must stay the only asker.
+    const awaited = payload(await call(service, channel, "chat_await_message"));
+    expect(awaited.message).toBeNull();
+    expect(awaited.hint).toMatch(/handling this conversation/i);
+    expect(channel.history()[0].delivered).toBe(false);
+
+    const said = payload(await call(service, channel, "chat_say", { text: "mine!" }));
+    expect(said.posted).toBe(false);
+    expect(channel.history()).toHaveLength(1);
+
+    // Driver gone, tools back: the MCP tier is the fallback again.
+    channel.setDriven(false);
+    const after = payload(await call(service, channel, "chat_await_message"));
+    expect(after.message.text).toBe("hello");
+  });
+
+  it("marks a second hand-off of the same message as redelivered", async () => {
+    const service = mail();
+    const { channel } = make();
+    channel.post({ role: "user", text: "hello" });
+    expect(payload(await call(service, channel, "chat_await_message")).redelivered).toBe(
+      false,
+    );
+    const again = payload(await call(service, channel, "chat_await_message"));
+    expect(again.message.text).toBe("hello");
+    expect(again.redelivered).toBe(true);
   });
 
   it("refuses a chat tool on a server built without a channel", async () => {
@@ -803,6 +1138,138 @@ describe("agent HTTP routes", () => {
       headers: { Authorization: `Bearer ${TOKEN}` },
     });
     expect(((await state.json()) as { turns: unknown[] }).turns).toEqual([]);
+    rt.channel.close();
+  });
+
+  it("sends and clears the chat the pane named, not the active one", async () => {
+    const rt = build();
+    await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "in the first chat" }),
+    });
+    const first = rt.channel.chats()[0];
+    // Another window opens a chat, so the server-wide active row moves.
+    const second = rt.channel.createChat();
+
+    const posted = await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "still the first", chat: first.id }),
+    });
+    expect(posted.status).toBe(201);
+    expect(((await posted.json()) as { turn: { chatId: string } }).turn.chatId).toBe(first.id);
+    expect(rt.channel.history(undefined, second.id)).toHaveLength(0);
+
+    const cleared = await rt.app.request("/api/agent/clear", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ chat: first.id }),
+    });
+    expect(cleared.status).toBe(200);
+    expect(rt.channel.history(undefined, first.id)).toHaveLength(0);
+    rt.channel.close();
+  });
+
+  it("stops the message in flight, and says so when there is none", async () => {
+    const rt = build();
+    const posted = await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "read everything" }),
+    });
+    const { turn } = (await posted.json()) as { turn: { seq: number } };
+    // An agent takes it, exactly as chat_await_message would.
+    await rt.channel.awaitUserTurn({ timeoutMs: 1_000, agent: "claude-code" });
+    expect(rt.channel.presence().working?.seq).toBe(turn.seq);
+
+    const stop = await rt.app.request("/api/agent/stop", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ seq: turn.seq }),
+    });
+    expect(stop.status).toBe(200);
+    const body = (await stop.json()) as {
+      stopped: boolean;
+      presence: { working: unknown };
+    };
+    expect(body.stopped).toBe(true);
+    expect(body.presence.working).toBeNull();
+
+    // The conversation says what happened, under the question it happened to.
+    const last = rt.channel.history().at(-1)!;
+    expect(last.role).toBe("agent");
+    expect(last.text).toBe("Stopped.");
+    expect(last.replyTo).toBe(turn.seq);
+
+    // Pressing it again, with the run already over, is not an error.
+    const again = await rt.app.request("/api/agent/stop", { method: "POST", headers: auth });
+    expect(again.status).toBe(200);
+    expect(((await again.json()) as { stopped: boolean }).stopped).toBe(false);
+    rt.channel.close();
+  });
+
+  it("leaves a message alone when Stop names a different one", async () => {
+    const rt = build();
+    // The run the button was drawn for finished, and the next queued message
+    // was claimed behind it. Stopping that one would kill a run the user never
+    // looked at, in a conversation they are not reading.
+    const first = await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "the one that finished" }),
+    });
+    const { turn: finished } = (await first.json()) as { turn: { seq: number; chatId: string } };
+    await rt.channel.awaitUserTurn({ timeoutMs: 1_000, agent: "claude-code" });
+    rt.channel.answer({
+      seq: finished.seq,
+      chatId: finished.chatId,
+      text: "answered",
+      agent: "claude-code",
+    });
+    const second = await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "the one now running" }),
+    });
+    const { turn: running } = (await second.json()) as { turn: { seq: number } };
+    await rt.channel.awaitUserTurn({ timeoutMs: 1_000, agent: "claude-code" });
+    expect(rt.channel.presence().working?.seq).toBe(running.seq);
+
+    const stop = await rt.app.request("/api/agent/stop", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ seq: finished.seq }),
+    });
+    expect(stop.status).toBe(200);
+    expect(((await stop.json()) as { stopped: boolean }).stopped).toBe(false);
+    // Untouched: still being answered, and nothing was written about it.
+    expect(rt.channel.presence().working?.seq).toBe(running.seq);
+    expect(rt.channel.history().some((t) => t.text === "Stopped.")).toBe(false);
+
+    const bad = await rt.app.request("/api/agent/stop", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ seq: "1" }),
+    });
+    expect(bad.status).toBe(400);
+    rt.channel.close();
+  });
+
+  it("answers 404 for a send or clear aimed at a chat that is not there", async () => {
+    const rt = build();
+    const posted = await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "hello", chat: "c_nope" }),
+    });
+    expect(posted.status).toBe(404);
+    const cleared = await rt.app.request("/api/agent/clear", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ chat: "c_nope" }),
+    });
+    expect(cleared.status).toBe(404);
     rt.channel.close();
   });
 });

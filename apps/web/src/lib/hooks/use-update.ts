@@ -21,8 +21,8 @@ import type { UpdateState } from "@/lib/types";
  * exactly how a badge ends up outliving the update it announced.
  */
 
-/** Quiet by default: a release is not news that changes minute to minute. */
-const IDLE_POLL_MS = 60_000;
+/** Loopback and a few hundred bytes. Fast enough that a background download shows up. */
+const IDLE_POLL_MS = 10_000;
 /** A live progress bar. The request is loopback and the body is small. */
 const ACTIVE_POLL_MS = 1_000;
 /** Between "check" and its answer, which is one network round trip away. */
@@ -31,10 +31,19 @@ const CHECKING_POLL_MS = 2_000;
 export type UpdateHandle = {
   /** Null until the first answer, and for a server that has no updater. */
   state: UpdateState | null;
+  /** Presses the Check button: finds an update and starts downloading it. */
   check: () => void;
+  /** Asks the same question without starting a download. */
+  refresh: () => void;
   download: () => void;
   install: () => void;
-  /** True while a command is in flight, so a button can hold its press. */
+  /** True while a check is running. */
+  isChecking: boolean;
+  /** True while a download mutation is in flight. */
+  isDownloading: boolean;
+  /** True while an install command is in flight. */
+  isInstalling: boolean;
+  /** True while any command is in flight, so a button can hold its press. */
   busy: boolean;
   /**
    * Why the last button press did nothing. Separate from `state.error`, which
@@ -83,35 +92,60 @@ export function useUpdate(): UpdateHandle {
     // The answer is worth refreshing when somebody comes back to the window;
     // it is the moment they are most likely to act on it.
     refetchOnWindowFocus: true,
-    staleTime: 30_000,
+    staleTime: 0,
   });
 
   /** Every command answers with the new state, so write it straight in. */
   const adopt = (state: UpdateState) => client.setQueryData(key, state);
 
+  const resetErrors = () => {
+    check.reset();
+    refresh.reset();
+    download.reset();
+    install.reset();
+  };
+
   const check = useMutation({
     mutationFn: () => checkForUpdate(ctx),
+    onMutate: resetErrors,
+    onSuccess: adopt,
+  });
+  // Same endpoint, no download. Used where the check was not a button press.
+  const refresh = useMutation({
+    mutationFn: () => checkForUpdate(ctx, { download: false }),
+    onMutate: resetErrors,
     onSuccess: adopt,
   });
   const download = useMutation({
     mutationFn: () => downloadUpdate(ctx),
+    onMutate: resetErrors,
     onSuccess: adopt,
   });
   const install = useMutation({
     mutationFn: () => installUpdate(ctx),
+    onMutate: resetErrors,
     onSuccess: adopt,
   });
+
+  const isChecking = check.isPending || refresh.isPending;
+  const isDownloading = download.isPending;
+  const isInstalling = install.isPending;
+  const busy = isChecking || isDownloading || isInstalling;
 
   return {
     state: query.data ?? null,
     check: () => check.mutate(),
+    refresh: () => refresh.mutate(),
     download: () => download.mutate(),
     install: () => install.mutate(),
-    busy: check.isPending || download.isPending || install.isPending,
+    isChecking,
+    isDownloading,
+    isInstalling,
+    busy,
     // Derived, not stored: a mutation clears its own error on the next press,
     // so the line goes away exactly when the user tries again.
     commandError: messageOf(
-      download.error ?? install.error ?? check.error ?? null,
+      download.error ?? install.error ?? check.error ?? refresh.error ?? null,
     ),
   };
 }

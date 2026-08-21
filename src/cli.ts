@@ -53,7 +53,13 @@ async function main(): Promise<void> {
     }
     // stdio: no console.log on stdout. Platform tools included; platform
     // timers deliberately NOT started — the serve process owns those.
-    await runStdioMcp(runtime.mail, runtime.channel, runtime.platform);
+    await runStdioMcp(
+      runtime.mail,
+      runtime.channel,
+      runtime.platform,
+      process.env,
+      runtime.approvals,
+    );
     return;
   }
 
@@ -119,6 +125,28 @@ async function seedFixtureDemo(
       subject: "Flight confirmation NYC",
       from: "airlines@example.com",
       bodyText: "Your flight to Boston is on Tuesday 9am.",
+      seen: false,
+    },
+    {
+      subject: "Weekly digest with pictures",
+      from: "newsletter@example.com",
+      bodyText: "Your weekly digest. View this mail in an HTML client to see the charts.",
+      // Exercises the HTML reading path: an inline data: image (renders
+      // immediately, like a cid: attachment after mailparser inlines it) and
+      // a remote image (blocked until "Load images").
+      bodyHtml: [
+        '<div style="font-family: Georgia, serif; max-width: 480px">',
+        "<h1 style=\"color: #1a4d8f\">Weekly digest</h1>",
+        "<p>The inline chart below always renders; the remote photo waits for your say-so.</p>",
+        '<img alt="Inline chart" src="data:image/svg+xml;base64,',
+        Buffer.from(
+          '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="120"><rect width="480" height="120" fill="#e8f0fe"/><rect x="20" y="60" width="60" height="40" fill="#1a4d8f"/><rect x="100" y="40" width="60" height="60" fill="#4a7bbf"/><rect x="180" y="20" width="60" height="80" fill="#1a4d8f"/><text x="260" y="70" font-family="sans-serif" font-size="16" fill="#1a4d8f">inline image</text></svg>',
+        ).toString("base64"),
+        '">',
+        '<p><img alt="Remote photo" src="https://picsum.photos/480/160" width="480" height="160"></p>',
+        '<p><a href="https://example.com">Read the full story</a></p>',
+        "</div>",
+      ].join(""),
       seen: false,
     },
     {

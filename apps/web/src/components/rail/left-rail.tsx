@@ -2,10 +2,12 @@
 
 import * as React from "react";
 import {
+  CalendarDays,
   Columns3,
   FilePen,
   Inbox,
   MailOpen,
+  PenLine,
   Plus,
   Send,
   Sparkle,
@@ -16,12 +18,13 @@ import { WorkingMark } from "@/components/agent/agent-run";
 import { AccountRow, type AccountHealth } from "@/components/rail/account-row";
 import { AgentsSection } from "@/components/rail/agents-section";
 import { BrandMark } from "@/components/rail/brand-mark";
-import { ComposeButton } from "@/components/rail/compose-button";
+import { ChatsSection, NewChatButton } from "@/components/rail/chats-section";
 import { FolderList } from "@/components/rail/folder-list";
 import { NavItem } from "@/components/rail/nav-item";
 import { RailFooter } from "@/components/rail/rail-footer";
+import { RailSection } from "@/components/rail/rail-section";
 import { UpdateCard } from "@/components/rail/update-card";
-import { SectionLabel, StatusDot } from "@/components/atoms";
+import { StatusDot } from "@/components/atoms";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,6 +40,7 @@ import { useConnection } from "@/lib/hooks/use-connection";
 import { useHealth } from "@/lib/hooks/use-health";
 import { useMessages } from "@/lib/hooks/use-messages";
 import { useOutreachBadge } from "@/lib/hooks/use-outreach";
+import { useRailSections } from "@/lib/hooks/use-rail-sections";
 import type { MailAccountMeta } from "@/lib/types";
 
 /**
@@ -92,8 +96,66 @@ export function LeftRail({
     return { loaded, total };
   }, [app.account, errors.length, hasResponse, list.length]);
 
+  /* The collapsed rail's views popover is controlled so that navigating from
+     inside it can close it. Radix only dismisses on an outside click, and every
+     row in there is an inside one. */
+  const [viewsOpen, setViewsOpen] = React.useState(false);
+
+  /* The rail is shown in three surfaces that sit above the workspace: the sheet
+     below 760px, the overlay at the medium breakpoint, and this popover. A row
+     that changes the view has to drop whichever one it was clicked in, or the
+     pane it just opened stays hidden behind it. */
+  const dismiss = React.useCallback(() => {
+    setViewsOpen(false);
+    app.setRailSheetOpen(false);
+    app.setRailOverlay(false);
+  }, [app]);
+
+  /* Wraps every row that lands the workspace somewhere — a view, a folder, a
+     mailbox, the settings page. Rows that open a dialog are NOT wrapped: the
+     dialog stacks above the rail, closing both in one commit leaves focus on
+     nothing, and a composer dismissed with Escape should come back to the
+     sidebar it was started from. The all-chats dialog is the one exception —
+     it drops the rail itself, on the way out, because picking a chat there IS
+     a navigation. */
+  const go = React.useCallback(
+    <A extends unknown[]>(navigate: (...args: A) => void) =>
+      (...args: A) => {
+        dismiss();
+        navigate(...args);
+      },
+    [dismiss],
+  );
+
   const inMail = app.view === "mail";
   const pending = badge.data?.pending ?? 0;
+  const sections = useRailSections();
+  const chatCount = agent.storage.chats + agent.storage.archived;
+
+  /* Which sections start open.
+     Chats and Mail, because those are the two things somebody opens this app
+     to do. Mailboxes and Agents start folded: they are set up once and then
+     read as provenance, and they are also the two that grow — an install with
+     six mailboxes and four agent CLIs used to push everything else off the
+     bottom of the rail. Folding is what buys the room the chat list needs, and
+     it is why this is one sidebar and not two. */
+  const OPEN_BY_DEFAULT: Record<string, boolean> = {
+    chats: true,
+    mail: true,
+    crm: true,
+    mailboxes: false,
+    agents: false,
+  };
+  const isOpen = (id: string) => sections.isOpen(id, OPEN_BY_DEFAULT[id] ?? true);
+  const toggle = (id: string) => sections.toggle(id, OPEN_BY_DEFAULT[id] ?? true);
+
+  /** The count a folded header keeps showing. Folding never hides a signal. */
+  const foldedCount = (n: number) =>
+    n > 0 ? (
+      <span className="pr-1 text-[11px] leading-4 text-fg-tertiary tabular-nums">
+        {n}
+      </span>
+    ) : undefined;
 
   /* Three groups, not one stack of eight rows. Nothing in a flat list said
      that Inbox and Unread are the same kind of thing and Pipeline is not, and
@@ -117,7 +179,7 @@ export function LeftRail({
           icon={Sparkle}
           label="Agent"
           active={app.view === "agent"}
-          onClick={() => app.setView("agent")}
+          onClick={go(() => app.setView("agent"))}
           trailing={
             agent.presence.working ? (
               <span className="flex items-center pr-0.5">
@@ -129,29 +191,74 @@ export function LeftRail({
         />
       </div>
 
+      {/* The conversation list, directly under the row that opens it. Five
+          rows and a fixed footer, whatever the history holds — see
+          ChatsSection. */}
+      <RailSection
+        id="chats"
+        label="Chats"
+        open={isOpen("chats")}
+        onToggle={() => toggle("chats")}
+        summary={foldedCount(chatCount)}
+      >
+        <ChatsSection
+          onOpenAll={() => app.openDialog("chats")}
+          onNavigate={dismiss}
+        />
+      </RailSection>
+
+      {/* Unlabelled, like the Agent row above: a calendar is neither mail nor
+          CRM, and filing it under either would be a claim about where its
+          events come from. It stays in a mail-only install — the meetings this
+          view books are sent as email invitations. */}
       <div className="space-y-px">
-        {/* Not gated on `collapsed`: this block only ever renders at full
-            width — inline in the expanded rail, or inside the popover the
-            collapsed rail opens, which is 224px wide. */}
-        <SectionLabel>Mail</SectionLabel>
+        <NavItem
+          icon={CalendarDays}
+          label="Calendar"
+          active={app.view === "calendar"}
+          onClick={go(() => app.setView("calendar"))}
+        />
+      </div>
+
+      {/* Not gated on `collapsed`: this block only ever renders at full
+          width — inline in the expanded rail, or inside the popover the
+          collapsed rail opens, which is 224px wide. */}
+      <RailSection
+        id="mail"
+        label="Mail"
+        open={isOpen("mail")}
+        onToggle={() => toggle("mail")}
+      >
         <NavItem
           icon={Inbox}
           label="Inbox"
           active={inMail && app.account === "all" && !app.unreadOnly && !app.folder}
-          onClick={() => {
+          onClick={go(() => {
             app.setView("mail");
             app.setAccount("all");
             app.setUnreadOnly(false);
-          }}
+          })}
         />
         <NavItem
           icon={MailOpen}
           label="Unread"
           active={inMail && app.unreadOnly}
-          onClick={() => {
+          onClick={go(() => {
             app.setView("mail");
             app.setUnreadOnly(!app.unreadOnly);
-          }}
+          })}
+        />
+        {/* Writing a mail by hand is a mail action, so it sits with the other
+            mail actions rather than as the loudest control in the rail.
+            Disabled without a mailbox: `POST /api/messages/send` needs an
+            account, and the server forces `from` to that account's address, so
+            a composer with nothing to send from cannot succeed. */}
+        <NavItem
+          icon={PenLine}
+          label="Compose"
+          disabled={list.length === 0}
+          disabledReason="Connect a mailbox first"
+          onClick={() => app.openCompose({ account: list[0]?.alias })}
         />
         {/* Drafts is a view, not a folder: it comes from GET /api/drafts, which
             takes one mailbox at a time and is unified here rather than by the
@@ -160,7 +267,7 @@ export function LeftRail({
           icon={FilePen}
           label="Drafts"
           active={app.view === "drafts"}
-          onClick={() => app.setView("drafts")}
+          onClick={go(() => app.setView("drafts"))}
         />
         {/* Under Mail, and it stays in a mail-only install: an automation is a
             rule that runs over messages, which is exactly what somebody who
@@ -169,7 +276,7 @@ export function LeftRail({
           icon={Timer}
           label="Automations"
           active={app.view === "automations"}
-          onClick={() => app.setView("automations")}
+          onClick={go(() => app.setView("automations"))}
         />
 
         {/* Mail and Drafts only. Folders scope the MESSAGE list; in a
@@ -182,21 +289,34 @@ export function LeftRail({
             accountRef={app.account}
             activeFolder={app.folder}
             disabled={app.view === "drafts"}
-            onSelect={(path) => {
+            onSelect={go((path: string | undefined) => {
               app.setView("mail");
               app.setFolder(path);
-            }}
+            })}
           />
         )}
-      </div>
+      </RailSection>
 
       {/* The CRM, and only for somebody who asked for one. Off, these three
           rows are not rendered — not greyed, not behind a switch — because the
           setting is a claim about what this app is, not a filter over a list.
           The server keeps its contacts and deals either way. */}
       {app.crm && (
-        <div className="space-y-px">
-          <SectionLabel>CRM</SectionLabel>
+        <RailSection
+          id="crm"
+          label="CRM"
+          open={isOpen("crm")}
+          onToggle={() => toggle("crm")}
+          /* Folded, the approval queue still has to be visible. A count that
+             disappears when a section closes is a count nobody can trust. */
+          summary={
+            pending > 0 ? (
+              <Badge variant="accent" className="tnum mr-1 px-1.5">
+                {pending}
+              </Badge>
+            ) : undefined
+          }
+        >
           {/* People is a list and a detail pane, the same shape as mail;
               Pipeline is a board and takes the whole width. Neither carries a
               count: the endpoints return rows, not totals, and counting the
@@ -205,13 +325,13 @@ export function LeftRail({
             icon={Users}
             label="People"
             active={app.view === "people"}
-            onClick={() => app.setView("people")}
+            onClick={go(() => app.setView("people"))}
           />
           <NavItem
             icon={Columns3}
             label="Pipeline"
             active={app.view === "pipeline"}
-            onClick={() => app.setView("pipeline")}
+            onClick={go(() => app.setView("pipeline"))}
           />
           {/* The one count in this rail, and the one the spec asks for: emails
               an agent wrote that nobody has decided on. It is a number the
@@ -223,7 +343,7 @@ export function LeftRail({
             icon={Send}
             label="Outreach"
             active={app.view === "outreach"}
-            onClick={() => app.setView("outreach")}
+            onClick={go(() => app.setView("outreach"))}
             ariaLabel={
               pending > 0
                 ? `Outreach, ${pending} waiting for approval`
@@ -237,7 +357,7 @@ export function LeftRail({
               ) : undefined
             }
           />
-        </div>
+        </RailSection>
       )}
     </>
   );
@@ -253,12 +373,11 @@ export function LeftRail({
           fixture={health.data?.fixture ?? false}
           collapsed={collapsed}
         />
+        {/* The one pinned action. It is a chat, not a compose window: this app
+            answers mail through a conversation, and the button that starts one
+            has to be reachable at any scroll position. */}
         <div className="pb-3">
-          <ComposeButton
-            disabled={list.length === 0}
-            collapsed={collapsed}
-            onClick={() => app.openCompose({ account: list[0]?.alias })}
-          />
+          <NewChatButton collapsed={collapsed} onNavigate={dismiss} />
         </div>
       </div>
 
@@ -268,7 +387,7 @@ export function LeftRail({
         }`}
       >
         {collapsed ? (
-          <Popover>
+          <Popover open={viewsOpen} onOpenChange={setViewsOpen}>
             <Tooltip>
               <TooltipTrigger asChild>
                 <PopoverTrigger asChild>
@@ -307,55 +426,24 @@ export function LeftRail({
           viewsAndFolders
         )}
 
-        <div className="space-y-px">
-          {!collapsed && (
-            <SectionLabel
-              action={
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label="Connect a mailbox"
-                      onClick={() => app.openDialog("connect")}
-                    >
-                      <Plus className="size-3.5" strokeWidth={1.5} />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Connect a mailbox</TooltipContent>
-                </Tooltip>
-              }
-            >
-              Mailboxes
-            </SectionLabel>
-          )}
-
-          {accounts.isPending && !collapsed && (
-            <p className="px-2 py-1 text-[12px] text-fg-tertiary">Loading…</p>
-          )}
-
-          {!accounts.isPending && list.length === 0 && !collapsed && (
-            <p className="px-2 py-1 text-[12px] leading-4 text-fg-tertiary">
-              No mailboxes yet.
-            </p>
-          )}
-
-          {list.map((account) => (
-            <AccountRow
-              key={account.id}
-              account={account}
-              health={healthFor(account)}
-              selected={app.account === account.alias}
-              compact={app.density === "compact"}
-              collapsed={collapsed}
-              onSelect={(alias) =>
-                app.setAccount(app.account === alias ? "all" : alias)
-              }
-            />
-          ))}
-
-          {collapsed && (
+        {/* Folded by default at full width: mailboxes are set up once and then
+            read as provenance. The icon rail has no headers to fold, so there
+            the rows are simply the section. */}
+        {collapsed ? (
+          <div className="space-y-px">
+            {list.map((account) => (
+              <AccountRow
+                key={account.id}
+                account={account}
+                health={healthFor(account)}
+                selected={app.account === account.alias}
+                compact={app.density === "compact"}
+                collapsed
+                onSelect={go((alias: string) =>
+                  app.setAccount(app.account === alias ? "all" : alias),
+                )}
+              />
+            ))}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -371,14 +459,81 @@ export function LeftRail({
               </TooltipTrigger>
               <TooltipContent side="right">Connect a mailbox</TooltipContent>
             </Tooltip>
-          )}
-        </div>
+          </div>
+        ) : (
+          <RailSection
+            id="mailboxes"
+            label="Mailboxes"
+            open={isOpen("mailboxes")}
+            onToggle={() => toggle("mailboxes")}
+            summary={foldedCount(list.length)}
+            action={
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="Connect a mailbox"
+                    onClick={() => app.openDialog("connect")}
+                  >
+                    <Plus className="size-3.5" strokeWidth={1.5} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Connect a mailbox</TooltipContent>
+              </Tooltip>
+            }
+          >
+            {accounts.isPending && (
+              <p className="px-2 py-1 text-[12px] text-fg-tertiary">Loading…</p>
+            )}
 
-        <AgentsSection
-          collapsed={collapsed}
-          onOpenAgentConnect={() => app.openDialog("agent")}
-          onOpenCapabilities={() => app.openDialog("capabilities")}
-        />
+            {!accounts.isPending && list.length === 0 && (
+              <p className="px-2 py-1 text-[12px] leading-4 text-fg-tertiary">
+                No mailboxes yet.
+              </p>
+            )}
+
+            {list.map((account) => (
+              <AccountRow
+                key={account.id}
+                account={account}
+                health={healthFor(account)}
+                selected={app.account === account.alias}
+                compact={app.density === "compact"}
+                onSelect={go((alias: string) =>
+                  app.setAccount(app.account === alias ? "all" : alias),
+                )}
+              />
+            ))}
+          </RailSection>
+        )}
+
+        {collapsed ? (
+          <AgentsSection
+            collapsed
+            onOpenAgentConnect={() => app.openDialog("agent")}
+            onOpenCapabilities={() => app.openDialog("capabilities")}
+          />
+        ) : (
+          <RailSection
+            id="agents"
+            label="Agents"
+            open={isOpen("agents")}
+            onToggle={() => toggle("agents")}
+            summary={
+              agent.presence.launchedAgent ? (
+                <StatusDot tone="accent" className="mr-1.5" />
+              ) : undefined
+            }
+          >
+            <AgentsSection
+              hideLabel
+              onOpenAgentConnect={() => app.openDialog("agent")}
+              onOpenCapabilities={() => app.openDialog("capabilities")}
+            />
+          </RailSection>
+        )}
       </div>
 
       {/* Outside the scroll area, above the footer: an update is worth seeing
@@ -392,7 +547,7 @@ export function LeftRail({
         density={app.density}
         collapsed={collapsed}
         gPending={gPending}
-        onOpenSettings={() => app.openSettings()}
+        onOpenSettings={go(() => app.openSettings())}
         onToggleDensity={app.toggleDensity}
       />
     </div>

@@ -87,6 +87,10 @@ export function displayAgentName(name: string): string {
     grok: "Grok",
     cursor: "Cursor",
     codex: "Codex",
+    antigravity: "Antigravity",
+    agy: "Antigravity",
+    opencode: "OpenCode",
+    cli: "CLI",
   };
   const mapped = known[name.toLowerCase()];
   if (mapped) return mapped;

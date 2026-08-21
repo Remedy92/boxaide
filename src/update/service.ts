@@ -22,6 +22,7 @@
  *   - A failed check never erases an update that was already found. The
  *     error is reported beside it; the offer stands.
  */
+import { readableNotes } from "./notes.js";
 import { isNewer } from "./semver.js";
 import { appVersion } from "../version.js";
 
@@ -42,7 +43,7 @@ export type UpdateState = {
   currentVersion: string;
   /** The newest version seen, which may equal `currentVersion`. */
   latestVersion: string | null;
-  /** Release notes, trimmed and capped. Plain text or markdown. */
+  /** Release notes as plain text: flattened, trimmed and capped. */
   notes: string | null;
   releaseUrl: string | null;
   publishedAt: string | null;
@@ -94,11 +95,24 @@ export type UpdateOptions = {
   now?: () => Date;
 };
 
-/** Six hours. An update is not news that goes stale in minutes. */
-export const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/**
+ * Fifteen minutes. electron-updater has no timer of its own; this is the
+ * poll. A signed 1 KB YAML check at this rate is noise.
+ */
+export const CHECK_INTERVAL_MS = 15 * 60 * 1000;
 
-/** The first check waits this long so it never competes with app start. */
-export const FIRST_CHECK_DELAY_MS = 20_000;
+/**
+ * The launch check. Short enough that the answer is on screen while the user
+ * is still looking at a freshly opened window, long enough that it does not
+ * compete with the first mailbox refresh for the same socket.
+ */
+export const FIRST_CHECK_DELAY_MS = 2_000;
+
+/**
+ * A focus or wake that lands this soon after a check is the same answer.
+ * The fifteen-minute timer still fires on its own.
+ */
+export const STALE_AFTER_MS = 60_000;
 
 /** A release page can hold a very long changelog; the rail shows a summary. */
 const MAX_NOTES = 4_000;
@@ -170,15 +184,15 @@ export class UpdateService {
     };
   }
 
-  /** Check now, and every six hours. Safe to call twice. */
+  /** Check now, and every fifteen minutes. Safe to call twice. */
   start(): void {
     if (this.firstTimer || this.timer) return;
     this.firstTimer = setTimeout(() => {
       this.firstTimer = null;
-      void this.check().catch(() => {});
+      void this.checkAndDownload();
     }, FIRST_CHECK_DELAY_MS);
     this.timer = setInterval(() => {
-      void this.check().catch(() => {});
+      void this.checkAndDownload();
     }, CHECK_INTERVAL_MS);
     // Neither timer is a reason to keep a process alive.
     this.firstTimer.unref?.();
@@ -205,6 +219,42 @@ export class UpdateService {
       this.pending = null;
     });
     return this.pending;
+  }
+
+  /**
+   * Check, and start the download the moment the check finds something.
+   *
+   * The launch timer, the fifteen-minute timer, a wake, a window focus, the
+   * menu item and the Check button all call this. Restart stays a button;
+   * the bytes do not. A manual-channel server has nothing to download, and
+   * that is an answer, not a failure.
+   *
+   * Never throws.
+   */
+  async checkAndDownload(): Promise<void> {
+    await this.check().catch(() => {});
+    if (!this.driver) return;
+    if (this.status !== "available") return;
+    try {
+      this.download();
+    } catch {
+      // Raced with another caller that already started it. Nothing to report.
+    }
+  }
+
+  /**
+   * Same as `checkAndDownload`, unless a check ran inside `maxAgeMs`.
+   * Wake and focus use this so Cmd-Tab is not a feed request.
+   */
+  checkIfStale(maxAgeMs = STALE_AFTER_MS): Promise<void> {
+    if (this.status === "downloading" || this.status === "ready") {
+      return Promise.resolve();
+    }
+    if (this.checkedAt) {
+      const age = this.now().getTime() - Date.parse(this.checkedAt);
+      if (Number.isFinite(age) && age < maxAgeMs) return Promise.resolve();
+    }
+    return this.checkAndDownload();
   }
 
   /**
@@ -370,7 +420,7 @@ export class UpdateService {
    *
    * The rail draws its card from `status` alone, so blanking a known
    * "available" for the length of a round trip takes the card off screen and
-   * puts it back. The six-hour timer does that unprompted, and the tray's
+   * puts it back. The background timer does that unprompted, and the tray's
    * "Check for updates…" does it at the very moment it opens the window to
    * show the answer. A check that confirms what is already known changes
    * nothing the user should watch happen.
@@ -385,6 +435,7 @@ export class UpdateService {
    * found: the user can still act on it, and the next check will confirm it.
    */
   private fail(message: string): void {
+    this.checkedAt = this.now().toISOString();
     this.error = message;
     // A downloaded update is still installable whatever just failed.
     if (this.status === "ready") return;
@@ -418,10 +469,14 @@ function clampFraction(value: number): number {
   return Math.min(Math.max(value, 0), 1);
 }
 
+/**
+ * Both channels hand this raw release bodies — HTML from the desktop feed,
+ * markdown from the REST API — so the flattening happens here, before any
+ * state is stored. Nothing downstream ever sees a tag.
+ */
 function trimNotes(raw: unknown): string | null {
-  if (typeof raw !== "string") return null;
-  const text = raw.trim();
-  if (text.length === 0) return null;
+  const text = readableNotes(raw);
+  if (text === null) return null;
   if (text.length <= MAX_NOTES) return text;
   return `${text.slice(0, MAX_NOTES).trimEnd()}…`;
 }

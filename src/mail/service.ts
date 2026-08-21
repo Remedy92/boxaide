@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import addressparser from "nodemailer/lib/addressparser/index.js";
 import type { Store } from "../db/store.js";
 import { canonicalEmail } from "../outreach/opt-out.js";
+import { MailIndexStore } from "./index-store.js";
 import type {
   AccountCredentials,
   DraftInput,
@@ -13,6 +14,7 @@ import type {
   MailMessage,
   MailMessageSummary,
   MailProvider,
+  MoveResult,
   ProviderAccount,
   SearchMessagesOpts,
   SendMessageInput,
@@ -50,18 +52,61 @@ export type SendGuard = (recipients: string[], override: boolean) => void;
 
 export class MailService {
   private sendGuard: SendGuard | null = null;
+  readonly index: MailIndexStore;
+  private inflight = new Map<string, Promise<void>>();
+  private unwatch = new Map<string, () => void>();
+  private idleOn = false;
 
   constructor(
     private store: Store,
     private provider: MailProvider,
-  ) {}
+  ) {
+    this.index = new MailIndexStore(store.db, store.masterKey);
+  }
 
   setSendGuard(guard: SendGuard): void {
     this.sendGuard = guard;
   }
 
+  /**
+   * Keep INBOX in IDLE for every connected account. Serve-only: stdio MCP
+   * must not hold IMAP sessions open.
+   */
+  start(): void {
+    this.idleOn = true;
+    for (const a of this.store.listAccounts()) {
+      try {
+        this.watchAccount(this.resolve(a.id));
+      } catch (err) {
+        console.warn(
+          `[mail] failed to start watcher for ${a.alias} (${a.email}):`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+  }
+
+  stop(): void {
+    this.idleOn = false;
+    for (const unsub of this.unwatch.values()) unsub();
+    this.unwatch.clear();
+  }
+
   listAccounts() {
     return this.store.listAccounts();
+  }
+
+  /**
+   * One account with its stored password decrypted.
+   *
+   * Public because the calendar can reuse a mailbox's own credentials for
+   * CalDAV at the providers where the two are the same login (see
+   * src/calendar/mailbox-reuse.ts). It stays a narrow accessor rather than a
+   * handle on the Store: the caller gets one named account or an exception,
+   * never a way to walk every secret in the database.
+   */
+  accountWithCredentials(idOrAlias: string): ProviderAccount {
+    return this.resolve(idOrAlias);
   }
 
   async connectAccount(input: ConnectAccountInput) {
@@ -82,10 +127,18 @@ export class MailService {
       email: input.email.trim(),
       creds: input.creds,
     });
+    const account = this.resolve(id);
+    if (this.idleOn) this.watchAccount(account);
     return { id, alias, email: input.email.trim() };
   }
 
   removeAccount(idOrAlias: string): boolean {
+    const existing = this.store.getAccount(idOrAlias);
+    if (existing) {
+      this.unwatch.get(existing.id)?.();
+      this.unwatch.delete(existing.id);
+      this.index.deleteAccount(existing.id);
+    }
     return this.store.deleteAccount(idOrAlias);
   }
 
@@ -124,21 +177,63 @@ export class MailService {
   /**
    * Returns { messages, errors } — NOT a bare array. With accountRef "all",
    * unreachable accounts land in `errors` and the rest still return.
+   *
+   * After the first fill, this is a SQLite read. IMAP runs only when the
+   * folder is empty, shorter than the requested window, dirty, or stale.
    */
   async listMessages(
     accountRef: string | "all",
     opts: ListMessagesOpts = {},
   ): Promise<MessageListResult> {
-    if (accountRef === "all") {
-      return this.fanOut(
-        (account) => this.provider.listMessages(account, opts),
-        opts.limit ?? 50,
-      );
+    const folder = opts.folder ?? "INBOX";
+    const limit = opts.limit ?? 50;
+    const accounts =
+      accountRef === "all"
+        ? this.store.listAccounts()
+        : [this.store.getAccount(accountRef)].filter(
+            (a): a is NonNullable<typeof a> => a != null,
+          );
+    if (accountRef !== "all" && accounts.length === 0) {
+      throw new Error(`account not found: ${accountRef}`);
     }
-    const account = this.resolve(accountRef);
+
+    const errors: Array<{ account: string; error: string }> = [];
+    await Promise.all(
+      accounts.map(async (row) => {
+        try {
+          const account = this.resolve(row.id);
+          await this.ensureFresh(
+            account,
+            folder,
+            limit,
+            opts.refresh === true,
+            opts.since,
+          );
+        } catch (err) {
+          this.index.setLastError(row.id, folder, errText(err));
+          if (accountRef !== "all") throw err;
+          errors.push({ account: row.alias, error: errText(err) });
+        }
+      }),
+    );
+
+    for (const row of accounts) {
+      const last = this.index.getState(row.id, folder)?.lastError;
+      if (last && !errors.some((e) => e.account === row.alias)) {
+        errors.push({ account: row.alias, error: last });
+      }
+    }
+
     return {
-      messages: await this.provider.listMessages(account, opts),
-      errors: [],
+      messages: this.index.listMessages({
+        accountIds: accounts.map((a) => a.id),
+        folder,
+        limit,
+        offset: opts.offset,
+        unreadOnly: opts.unreadOnly,
+        since: opts.since,
+      }),
+      errors,
     };
   }
 
@@ -204,7 +299,13 @@ export class MailService {
         .filter((v) => v.includes("@"));
       this.sendGuard(recipients, opts.overrideSuppression === true);
     }
-    return this.provider.sendMessage(this.resolve(accountRef), input);
+    const account = this.resolve(accountRef);
+    const result = await this.provider.sendMessage(account, input);
+    if (result.copied) this.index.upsertSummary(result.copied);
+    else if (result.sentFolder) {
+      this.index.markDirty(account.id, result.sentFolder);
+    }
+    return result;
   }
 
   async markRead(
@@ -212,7 +313,111 @@ export class MailService {
     messageId: string,
     seen: boolean,
   ): Promise<boolean> {
-    return this.provider.markRead(this.resolve(accountRef), messageId, seen);
+    const account = this.resolve(accountRef);
+    const ok = await this.provider.markRead(account, messageId, seen);
+    if (ok) this.index.setSeen(account.id, messageId, seen);
+    return ok;
+  }
+
+  /**
+   * File one message into the account's Archive mailbox.
+   *
+   * Nothing is deleted: archiving is a move, and `fromFolder` in the result is
+   * what an undo moves it back to. A server with no Archive mailbox throws —
+   * see MailProvider.archiveMessage for why that is not guessed at.
+   */
+  async archiveMessage(
+    accountRef: string,
+    messageId: string,
+  ): Promise<MoveResult> {
+    const account = this.resolve(accountRef);
+    const result = await this.provider.archiveMessage(account, messageId);
+    this.applyMove(account.id, messageId, result);
+    return result;
+  }
+
+  /**
+   * File one message into the account's Trash mailbox.
+   *
+   * Delete means this and nothing else: no \Deleted flag and no expunge, so
+   * the message is still there to be moved back and `fromFolder` in the result
+   * says where back is. A server with no Trash mailbox throws, for the same
+   * reason a missing Archive mailbox does.
+   */
+  async trashMessage(
+    accountRef: string,
+    messageId: string,
+  ): Promise<MoveResult> {
+    const account = this.resolve(accountRef);
+    const result = await this.provider.trashMessage(account, messageId);
+    this.applyMove(account.id, messageId, result);
+    return result;
+  }
+
+  /** Move one message to a named mailbox. The undo of an archive goes here. */
+  async moveMessage(
+    accountRef: string,
+    messageId: string,
+    folder: string,
+  ): Promise<MoveResult> {
+    if (!folder.trim()) throw new Error("folder is required");
+    // ImapFlow's compiler already refuses CR/LF/NUL in a mailbox name, but
+    // with a wire-level "Unquotable character" error. Refuse here with a
+    // sentence the toast can show.
+    if (/[\0\r\n]/.test(folder)) {
+      throw new Error("folder name contains control characters");
+    }
+    const account = this.resolve(accountRef);
+    const result = await this.provider.moveMessage(account, messageId, folder);
+    this.applyMove(account.id, messageId, result);
+    return result;
+  }
+
+  /**
+   * Keep the index in step with a move that already happened on the server:
+   * the row leaves the folder it was in, and the folder it landed in is marked
+   * for a refresh rather than having a row fabricated into it — only the server
+   * knows the uid the message now has there.
+   */
+  private applyMove(
+    accountId: string,
+    messageId: string,
+    result: MoveResult,
+  ): void {
+    if (!result.moved) return;
+    this.index.removeMessage(accountId, messageId);
+    this.index.markDirty(accountId, result.toFolder);
+  }
+
+  /** The account id behind an alias or id. Throws when neither names one. */
+  accountId(accountRef: string): string {
+    return this.resolve(accountRef).id;
+  }
+
+  /**
+   * What a message is, in the terms a person judges it by, from the local
+   * index alone. Null when it was never indexed.
+   *
+   * No IMAP: the caller is the approval card, which is drawn while the user
+   * waits and may be drawn for a message that has since moved.
+   */
+  describeMessage(
+    accountRef: string,
+    messageId: string,
+  ): { subject: string; from: string; folder: string } | null {
+    let accountId: string;
+    try {
+      accountId = this.resolve(accountRef).id;
+    } catch {
+      return null;
+    }
+    const summary = this.index.getSummary(accountId, messageId);
+    if (!summary) return null;
+    return {
+      subject: summary.subject,
+      from: summary.from,
+      folder: summary.folder,
+    };
   }
 
   async listFolders(accountRef: string): Promise<MailFolder[]> {
@@ -255,5 +460,99 @@ export class MailService {
     creds: AccountCredentials,
   ): Promise<{ ok: boolean; error?: string }> {
     return this.provider.testConnection(creds);
+  }
+
+  private watchAccount(account: ProviderAccount): void {
+    if (!this.provider.watchMailbox) return;
+    this.unwatch.get(account.id)?.();
+    const unsub = this.provider.watchMailbox(account, "INBOX", () => {
+      this.index.markDirty(account.id, "INBOX");
+      void this.syncFolder(account, "INBOX", 50).catch((err) => {
+        this.index.setLastError(account.id, "INBOX", errText(err));
+      });
+    });
+    this.unwatch.set(account.id, unsub);
+  }
+
+  /**
+   * Empty or short window: wait for IMAP. Warm cache: return immediately and
+   * refresh in the background when dirty or older than 30s.
+   */
+  private async ensureFresh(
+    account: ProviderAccount,
+    folder: string,
+    limit: number,
+    force = false,
+    since?: string,
+  ): Promise<void> {
+    const state = this.index.getState(account.id, folder);
+    const refreshLater = () => {
+      if (!state?.dirty && !this.index.isStale(state)) return;
+      void this.syncFolder(account, folder, limit).catch((err) => {
+        this.index.setLastError(account.id, folder, errText(err));
+      });
+    };
+    // A dated ask is not a window ask, so the window rules below do not apply
+    // to it: holding the newest `limit` rows says nothing about whether the
+    // index reaches back to the instant the caller named. Fill by date once,
+    // then answer from SQLite for as long as that coverage stands.
+    if (since) {
+      if (this.index.needsSinceFill(state, since)) {
+        await this.syncFolder(account, folder, limit, { since });
+        return;
+      }
+      refreshLater();
+      return;
+    }
+    const count = this.index.count(account.id, folder);
+    const exists = state?.exists ?? 0;
+    const needsFill =
+      count === 0 || (count < limit && exists > 0 && count < exists);
+    if (force || needsFill) {
+      await this.syncFolder(account, folder, limit, { fullWindow: needsFill });
+      return;
+    }
+    refreshLater();
+  }
+
+  private async syncFolder(
+    account: ProviderAccount,
+    folder: string,
+    limit: number,
+    opts: { fullWindow?: boolean; since?: string } = {},
+  ): Promise<void> {
+    // A dated read answers a different question than a window read, so the
+    // two must not collapse into one another's in-flight promise.
+    const key = `${account.id}:${folder}:${opts.since ?? ""}`;
+    const existing = this.inflight.get(key);
+    if (existing) {
+      await existing;
+      if (!opts.fullWindow) return;
+      const count = this.index.count(account.id, folder);
+      if (count >= limit) return;
+    }
+    const run = (async () => {
+      const state = this.index.getState(account.id, folder);
+      const result = await this.provider.syncMailbox(account, {
+        folder,
+        limit,
+        since: opts.since,
+        fullWindow: opts.fullWindow,
+        knownUids: this.index.listUids(account.id, folder),
+        cursor: state
+          ? {
+              uidvalidity: state.uidvalidity,
+              highestModseq: state.highestModseq,
+              uidnext: state.uidnext,
+              exists: state.exists,
+            }
+          : null,
+      });
+      this.index.applySync(account.id, folder, result);
+    })().finally(() => {
+      this.inflight.delete(key);
+    });
+    this.inflight.set(key, run);
+    return run;
   }
 }

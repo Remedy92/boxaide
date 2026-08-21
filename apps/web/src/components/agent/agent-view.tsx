@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { ArrowDown, Menu, Plug, Trash2 } from "lucide-react";
+import { Archive, ArrowDown, Menu, Plug, Trash2 } from "lucide-react";
+import { AgentApprovals } from "@/components/agent/agent-approvals";
 import { AgentComposer } from "@/components/agent/agent-composer";
 import { AgentPresenceBadge } from "@/components/agent/agent-presence";
 import { AgentRunView, groupRuns } from "@/components/agent/agent-run";
@@ -11,6 +12,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useAgent } from "@/lib/hooks/use-agent";
 import { useApp } from "@/lib/hooks/use-app-state";
+import {
+  useEnsureAgentRunning,
+  usePickedAgent,
+} from "@/lib/hooks/use-local-agents";
 
 /**
  * The agent conversation — the app's first screen.
@@ -32,6 +37,15 @@ function gapFromBottom(node: HTMLElement) {
   return node.scrollHeight - node.scrollTop - node.clientHeight;
 }
 
+/**
+ * How long this view has to stay on screen before it starts an agent.
+ *
+ * Boxaide opens on the conversation, so this pane mounts on every launch,
+ * including the launches that head straight for mail. The wait is what tells
+ * those two apart: a pane that is gone before it elapses spawns nothing.
+ */
+const START_SETTLE_MS = 1_500;
+
 const SUGGESTIONS = [
   "What came in today that needs a reply?",
   "Summarise the unread mail in my work mailbox.",
@@ -49,6 +63,7 @@ export function AgentView({
   const app = useApp();
   const agent = useAgent();
   const accounts = useAccounts();
+  const ensureAgent = useEnsureAgentRunning();
   const scroller = React.useRef<HTMLDivElement | null>(null);
   const column = React.useRef<HTMLDivElement | null>(null);
 
@@ -83,6 +98,46 @@ export function AgentView({
     const node = scroller.current;
     if (node) node.scrollTop = node.scrollHeight;
   }, []);
+
+  /* Opening this view is also a start, so the agent is up before the first
+     question rather than after it. One attempt per mount; a send still starts
+     one below if this one fails.
+
+     Mounted is not on screen, and not every gate here is obvious:
+     `ensureAgent` does nothing until the launcher's list has answered, the
+     settle keeps a launch that only passes through on its way to mail from
+     spawning anything, and the wizard renders OVER this pane, where a spawn
+     would tell its last step an agent had been paired. `ensureAgent` is held
+     in a ref because it is rebuilt every render and would re-arm the timer
+     forever while a run streams. */
+  const { picked } = usePickedAgent();
+  const ensure = React.useRef(ensureAgent);
+  React.useEffect(() => {
+    ensure.current = ensureAgent;
+  });
+  const started = React.useRef(false);
+  const ready = picked !== null && !app.wizardOpen;
+  React.useEffect(() => {
+    if (!ready || started.current) return;
+    const timer = window.setTimeout(() => {
+      started.current = true;
+      void ensure.current();
+    }, START_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [ready]);
+
+  /* A send is also a start. The agent is picked in the composer now, not
+     started from the sidebar, so the first message on a quiet machine has to
+     bring one up. Post first, start second: the server queues a message nobody
+     is listening to and hands it over on arrival, and a start that fails must
+     not take the question down with it. */
+  const send = React.useCallback(
+    (text: string) => {
+      void agent.send(text);
+      void ensureAgent();
+    },
+    [agent, ensureAgent],
+  );
 
   const runs = React.useMemo(() => groupRuns(agent.turns), [agent.turns]);
   const work = agent.presence.working;
@@ -143,13 +198,34 @@ export function AgentView({
             <Menu className="size-4" strokeWidth={1.5} />
           </Button>
         )}
-        <h2 className="text-[13px] leading-[18px] font-medium text-fg">Agent</h2>
+        {/* The chat's own name, once there is one. Before that it is still the
+            Agent pane and says so, rather than showing a placeholder title
+            over a conversation that has not started. */}
+        <h2 className="min-w-0 truncate text-[13px] leading-[18px] font-medium text-fg">
+          {agent.chat && !empty ? agent.chat.title : "Agent"}
+        </h2>
 
         <div className="ml-auto flex items-center gap-1.5">
           <AgentPresenceBadge
             presence={agent.presence}
             connection={agent.connection}
           />
+          {agent.chat && !empty && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Archive this chat"
+                  onClick={() => void agent.archiveChat(agent.chat!.id)}
+                >
+                  <Archive className="size-4" strokeWidth={1.5} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Archive this chat</TooltipContent>
+            </Tooltip>
+          )}
           {!empty && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -191,10 +267,19 @@ export function AgentView({
                 listening={agent.presence.listening}
                 onConnectAgent={() => app.openDialog("agent")}
                 onConnectMailbox={() => app.openDialog("connect")}
-                onPick={(text) => void agent.send(text)}
+                onPick={send}
               />
             ) : (
               <div className="space-y-6 pt-4">
+                {/* Said once, at the top, where the missing messages were. The
+                    old behaviour dropped them silently and this conversation
+                    simply began in the middle. */}
+                {agent.chat?.trimmedAt && (
+                  <p className="rounded-[var(--radius-md)] bg-surface-hover px-3 py-2 text-[12px] leading-4 text-fg-tertiary">
+                    Older messages in this chat were dropped to keep it inside
+                    its limit.
+                  </p>
+                )}
                 {runs.map((run) => (
                   <AgentRunView
                     key={run.seq}
@@ -204,6 +289,12 @@ export function AgentView({
                     lastSeenAt={agent.presence.lastSeenAt}
                     claimed={
                       run.question !== null && agent.claimed.has(run.question.seq)
+                    }
+                    /* An agent is holding a message, and it is not this one —
+                       including one in another chat, which is the case that
+                       used to read as "no agent is listening". */
+                    busyElsewhere={
+                      work !== null && work.seq !== run.question?.seq
                     }
                   />
                 ))}
@@ -231,6 +322,9 @@ export function AgentView({
 
       <div className="shrink-0 px-5 pb-4">
         <div className="mx-auto w-full max-w-[720px]">
+          {/* Above the error and above the composer: this is the one thing on
+              the pane that another person is waiting on. */}
+          <AgentApprovals />
           {agent.error && (
             <div className="mb-2 rounded-[var(--radius-md)] border border-border-subtle bg-danger-bg px-3 py-2 text-[12px] leading-4 text-danger">
               {agent.error}
@@ -238,10 +332,23 @@ export function AgentView({
             </div>
           )}
           <AgentComposer
-            onSend={(text) => void agent.send(text)}
+            onSend={send}
             sending={agent.sending}
+            /* This chat's run, not any run. Stop belongs under the answer the
+               reader is waiting for; a message being answered in another
+               conversation is that conversation's to stop. The seq goes with
+               the click, so what is stopped is the run this button was drawn
+               for even if another one was claimed in between. */
+            onStop={work ? () => void agent.stop(work.seq) : undefined}
+            running={work !== null && work.chatId === agent.chat?.id}
+            stopping={agent.stopping}
             disabled={agent.connection === "unsupported"}
             autoFocus={!app.narrow}
+            /* "Start conversation about this email" seeds the box from the
+               message list and switches to this view. The composer clears the
+               seed once it has it, so coming back here later opens empty. */
+            seed={app.agentSeed}
+            onSeedTaken={app.clearAgentSeed}
           />
         </div>
       </div>

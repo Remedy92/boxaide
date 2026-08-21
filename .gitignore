@@ -1,4 +1,11 @@
-node_modules/
+# No trailing slash, deliberately. `node_modules/` matches a directory only,
+# so a SYMLINK named node_modules — what a worktree gets when somebody points
+# it at another checkout's install — sails past it and can be committed. That
+# happened once: the symlink reached master carrying an absolute path from one
+# machine, and every clone after it had a broken node_modules that npm and
+# Turbopack both refused. Without the slash this matches the name, whatever it
+# is.
+node_modules
 dist/
 *.log
 .DS_Store
@@ -29,7 +36,7 @@ master.salt
 # Next.js front end (apps/web keeps its own lockfile and its own install)
 apps/web/.next/
 apps/web/out/
-apps/web/node_modules/
+apps/web/node_modules
 
 # `npm run web:sync` copies apps/web/out here for the self-hosted server.
 web-next/
@@ -46,7 +53,8 @@ apps/desktop/server/
 .playwright-mcp/
 
 # Local agent fixtures (launch.json, worktrees)
-.claude/
+.claude/*
+!.claude/settings.json
 
 # Local build stamp and personal agent workflows. The name follows the
 # product; the two older ones are kept so an old checkout stays clean.

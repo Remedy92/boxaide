@@ -46,6 +46,24 @@ command -v node >/dev/null || die "node is not on PATH"
 command -v npm >/dev/null || die "npm is not on PATH"
 command -v xcrun >/dev/null || die "xcrun is not on PATH"
 
+# Which repository every gh call below means, named rather than guessed.
+#
+# A clone with a second remote — a contributor's fork added to fetch a branch —
+# leaves `gh` with no way to choose. Its read commands pick one anyway, so the
+# green-CI gate and the "already shipped" check can silently answer about the
+# fork, and `gh release create` refuses outright with "no default remote
+# repository has been set". That refusal arrived on 0.2.27 after the commit and
+# the tag were already pushed: master said 0.2.27, the download stayed 0.2.26,
+# and the twenty minutes of signing and notarising had to be thrown away.
+#
+# So: derive it from origin, which is the remote every other line here pushes
+# to, and pass it to gh explicitly. `gh repo set-default` then matters to
+# nobody, and a clone with ten remotes ships the same as a clone with one.
+REPO="$(git remote get-url origin 2>/dev/null |
+  sed -e 's#^git@github\.com:#https://github.com/#' \
+      -e 's#^https://github\.com/##' -e 's#\.git$##')"
+[ -n "$REPO" ] || die "no origin remote — gh cannot tell which repo to publish to"
+
 # A signed but un-notarised dmg installs nowhere. macOS says "Apple could not
 # verify Boxaide is free of malware" and offers no Open button. Refuse to
 # publish one. Mint the profile once with (profile name is historical):
@@ -77,14 +95,52 @@ if [ -n "$(git status --porcelain)" ]; then
   die "working tree is dirty"
 fi
 
-git fetch --quiet origin --tags || die "could not fetch origin"
+git fetch --quiet origin master --tags || die "could not fetch origin"
 
 HEAD="$(git rev-parse HEAD)"
 ORIGIN="$(git rev-parse origin/master)"
 [ "$HEAD" = "$ORIGIN" ] || die "HEAD is not origin/master — pull or push first"
 
-TAG="$(gh release view --json tagName --jq .tagName 2>/dev/null || true)"
+# CI is the only thing that has read this code as a whole, and the push below
+# does not consult it: ship.sh commits "Cut" straight onto master, and the
+# account running it has bypass rights, so branch protection never gets a
+# vote. Ask GitHub directly instead. Every workflow run on the commit being
+# released must have finished green before anything is committed, packed or
+# uploaded. Checked here, before the twenty-minute sign-and-notarise, so a red
+# master costs nothing.
+#
+# Runs are matched on this commit, not on the branch, so a green run for an
+# older master cannot pass a newer one. Only push-triggered workflows appear
+# (CI and CodeQL); dependency-review is pull_request-only and never runs on a
+# master commit, which is why the gate checks what did run rather than a list
+# of names it expects.
+SHORT="$(git rev-parse --short HEAD)"
+COUNT="$(gh run list -R "$REPO" --branch master --limit 50 --commit "$HEAD" \
+  --json databaseId --jq 'length')" \
+  || die "could not read workflow runs for $SHORT"
+if [ "$COUNT" -eq 0 ]; then
+  die "no workflow run for $SHORT yet; wait for CI to start and finish"
+fi
+BAD="$(gh run list -R "$REPO" --branch master --limit 50 --commit "$HEAD" \
+  --json workflowName,status,conclusion \
+  --jq '.[]
+    | select(.status != "completed"
+      or (.conclusion != "success" and .conclusion != "skipped"))
+    | "  " + .workflowName + ": "
+      + (if .status == "completed" then .conclusion else .status end)')" \
+  || die "could not read workflow runs for $SHORT"
+if [ -n "$BAD" ]; then
+  die "master $SHORT is not green:
+$BAD
+nothing was built or uploaded; fix it and push before shipping"
+fi
+printf 'ci   %s green (%s runs)\n' "$SHORT" "$COUNT"
+
+TAG="$(gh release view -R "$REPO" --json tagName --jq .tagName 2>/dev/null || true)"
 [ -n "$TAG" ] || die "no GitHub release yet — create the first one by hand"
+if ! git rev-parse -q --verify "${TAG}^{commit}" >/dev/null; then
+  die "release tag $TAG is not in this clone — fetch tags or pull origin"
+fi
 SHIPPED="$(git rev-parse "${TAG}^{commit}")"
 if [ "$SHIPPED" = "$HEAD" ]; then
   die "already shipped as $TAG"
@@ -101,7 +157,33 @@ DMG="apps/desktop/release/boxaide-mac.dmg"
 # says nothing about it.
 ZIP="apps/desktop/release/boxaide-mac.zip"
 FEED="apps/desktop/release/latest-mac.yml"
-NOTES="$(git log --format='- %s' "${TAG}..HEAD")"
+# The release body is what the app shows under "What is new", so it is written
+# for whoever is deciding whether to restart, not for whoever wrote the commit.
+# Four things go before it is one:
+#   - merges, which name a branch and no change;
+#   - the "Cut 0.2.24" commit, which is this script's own bookkeeping;
+#   - Dependabot's "Bump lodash from 4.17.20 to 4.17.21", which is true and is
+#     not what is new to the person deciding whether to restart;
+#   - the "(#84)" a squash-merge appends, which GitHub then expands into an
+#     anchor tag in the updater feed.
+# What is left is one sentence per change, in the words of the commit subject.
+# That makes the subject the release note: write it for a user, in the present
+# tense, saying what the app now does. check-subject.mjs below refuses to
+# publish a body that broke that rule; AGENTS.md has the whole rule.
+NOTES="$(git log --no-merges --format='- %s' "${TAG}..HEAD" \
+  | grep -v -E '^- Cut [0-9]+\.[0-9]+\.[0-9]+' \
+  | grep -v -E '^- Bump ' \
+  | sed -E 's/ *\(#[0-9]+\)$//')"
+[ -n "$NOTES" ] || NOTES="- Fixes and refinements."
+
+# The same rule CI enforced on each pull request title, applied once more to
+# what is about to be published. CI cannot see a commit pushed straight to
+# master, and this script's own push bypasses branch protection, so without
+# this a jargon subject reaches the release body unread. Checked before the
+# bump and the twenty-minute notarise: a bad line costs nothing here.
+if ! printf '%s\n' "$NOTES" | node scripts/lib/check-subject.mjs; then
+  die "the release body is not user-facing copy; reword the commits above"
+fi
 
 printf 'ship %s\n' "$VER"
 printf 'from %s (%s)\n' "$TAG" "$(git rev-parse --short "$SHIPPED")"
@@ -113,8 +195,6 @@ if [ "$DRY" -eq 1 ]; then
   exit 0
 fi
 
-node scripts/lib/bump-version.mjs "$VER"
-
 restore_versions() {
   git checkout -- \
     package.json package-lock.json \
@@ -123,20 +203,27 @@ restore_versions() {
     apps/mcpb/manifest.json
 }
 
+COMMITTED=0
+cleanup() {
+  if [ "$COMMITTED" -eq 0 ]; then
+    restore_versions
+  fi
+}
+trap cleanup EXIT INT TERM
+
+node scripts/lib/bump-version.mjs "$VER"
+
 # Pack first. A failed dmg must not leave a "Cut" commit on master.
 printf 'building server and UI\n'
 if ! npm run build; then
-  restore_versions
   die "build failed; version files restored"
 fi
 printf 'packing, signing and notarising the Mac dmg\n'
 if ! ( cd apps/desktop && npm run dist:mac ); then
-  restore_versions
   die "dist:mac failed; version files restored"
 fi
 for artifact in "$DMG" "$ZIP" "$FEED"; do
   [ -f "$artifact" ] || {
-    restore_versions
     die "expected $artifact"
   }
 done
@@ -147,14 +234,12 @@ done
 # Mac. Check it here, where the fix is free.
 FEED_VER="$(sed -n 's/^version: *//p' "$FEED" | head -1 | tr -d '\r')"
 [ "$FEED_VER" = "$VER" ] || {
-  restore_versions
   die "latest-mac.yml says $FEED_VER, shipping $VER — rebuild the dmg"
 }
 
 # dist:mac notarised and stapled. Prove it before anything reaches GitHub;
 # a bad dmg on the download page is far more expensive to undo.
 if ! xcrun stapler validate "$DMG"; then
-  restore_versions
   die "$DMG has no notarisation ticket; nothing was committed or uploaded"
 fi
 
@@ -164,16 +249,40 @@ git add package.json package-lock.json \
   apps/mcpb/manifest.json
 git commit -m "Cut $VER" -m "The download is now this commit."
 git tag -a "v$VER" -m "boxaide $VER"
+COMMITTED=1
+trap - EXIT INT TERM
 
 git push origin master
 git push origin "v$VER"
 
-BODY="$(printf '%s\n\n%s\n' "## What is new" "$NOTES")"
-gh release create "v$VER" \
+BODY_FILE="$(mktemp -t boxaide-notes)"
+printf '%s\n\n%s\n' "## What is new" "$NOTES" >"$BODY_FILE"
+
+BLOCKMAP="${ZIP}.blockmap"
+if [ -f "$BLOCKMAP" ]; then
+  set -- "$DMG" "$ZIP" "$FEED" "$BLOCKMAP"
+else
+  set -- "$DMG" "$ZIP" "$FEED"
+fi
+
+# The last step, and the only one that cannot be undone by restoring a file.
+# The commit and the tag are already public by the time it runs, so a failure
+# here is the one state this script can leave behind: master naming a version
+# nobody can download. Say what it costs and how to finish, because the
+# obvious move — run ship.sh again — cuts a further version instead, and
+# throws away a dmg that is signed, notarised and correct.
+if ! gh release create "v$VER" -R "$REPO" \
   --title "Boxaide $VER" \
-  --notes "$BODY" \
+  --notes-file "$BODY_FILE" \
   --latest \
-  "$DMG" "$ZIP" "$FEED"
+  "$@"; then
+  die "master and v$VER are pushed, the release is not up.
+Do not re-run this script: HEAD is the Cut commit already, and it would cut the
+next version over a build that is fine. Retry the upload alone:
+  gh release create v$VER -R $REPO --title 'Boxaide $VER' --latest \\
+    --notes-file $BODY_FILE $*"
+fi
+rm -f "$BODY_FILE"
 
 printf 'shipped https://github.com/Remedy92/boxaide/releases/latest/download/boxaide-mac.dmg\n'
 printf 'commit  %s\n' "$(git rev-parse --short HEAD)"

@@ -6,8 +6,10 @@ import { CopyBlock, SectionLabel, Spinner, StatusDot } from "@/components/atoms"
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -48,7 +50,31 @@ call chat_await_message again. Keep going until I tell you to stop.
 Everything I read appears in the Boxaide window, so every answer must go through
 chat_say — do not answer here. A chat_await_message that returns no message is
 normal; call it again. Use chat_activity for anything slow. Draft rather than
-send unless I ask you to send.`;
+send unless I ask you to send.
+
+Outreach chain: 1 find prospects with the prospect_ tools, or import a list with
+crm_contacts_import. 2 save the company with crm_org_upsert. 3 get the address:
+on a prospect_find_people hit pass reveal true, and use enrich_find_email only
+when the reveal comes back with emailStatus 'locked' or 'absent', using the
+enrichFindEmail arguments the hit carries. 4 now save the person with
+crm_contact_upsert, which is keyed by the address and cannot be called before
+you hold one, then check it with enrich_verify_email. 5 read up on the person
+with web_search and web_fetch so the first line is about them. 6 queue with
+outbox_queue_draft, and a human approves every send.
+
+Before you pay to look one named person up, call crm_contacts_search: buying
+again what the CRM already holds is wasted credit. The prospect_ searches are
+the exception, because you cannot search the CRM for somebody you have not found
+yet; run those first, then check the CRM before you reveal or enrich.
+
+Before you queue anything, call crm_outreach_state on the contacts and queue only
+those where contactable is true. It is the only correct source for that: never
+decide from tags. Having an address is not permission to mail it.
+
+Cold outreach never goes through message_send or draft_create, whatever I have
+said about sending: those are for mail in a conversation that already exists.
+Anything to somebody who has not written to us goes through outbox_queue_draft,
+which adds the opt-out footer and honours the suppression list.`;
 
 export function AgentConnectDialog({
   open,
@@ -76,12 +102,8 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
 
   return (
     <Dialog open onOpenChange={onOpenChange}>
-      {/* Header and footer are fixed; only the middle scrolls, so "Done" is
-          always on screen and overflowing content slides under it. The dialog's
-          own padding moves onto the three bands so the scrollbar and the footer
-          rule both span the full width. */}
-      <DialogContent className="flex max-h-[86vh] max-w-[560px] flex-col gap-0 overflow-hidden p-0">
-        <div className="flex shrink-0 flex-col gap-4 p-5 pb-0">
+      <DialogContent className="max-w-[560px]">
+        <div className="flex shrink-0 flex-col gap-4">
           <DialogHeader>
             <DialogTitle className="title-15">Connect your agent</DialogTitle>
             <DialogDescription>
@@ -95,7 +117,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
           <div
             role="tablist"
             aria-label="Agent client"
-            className="flex flex-wrap gap-1 border-b border-border-subtle pb-2"
+            className="-mx-(--dialog-px) flex flex-wrap gap-1 border-b border-border-subtle px-(--dialog-px) pb-2"
             onKeyDown={(event) => {
               const delta =
                 event.key === "ArrowRight"
@@ -145,8 +167,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
           </div>
         </div>
 
-        {/* The only scrolling element. `pane-scroll` styles its scrollbar. */}
-        <div className="pane-scroll min-h-0 flex-1 space-y-4 overflow-y-auto p-5 [&>*]:min-w-0">
+        <DialogBody>
           <div
             role="tabpanel"
             id={`agent-panel-${target.id}`}
@@ -222,11 +243,15 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
               <li>Read and search mail in every connected mailbox.</li>
               <li>Write, update, list and discard drafts.</li>
               <li>Mark messages read or unread.</li>
-              <li>Send mail — a separate tool, and the escalation.</li>
+              <li>Archive mail into your own Archive mailbox.</li>
+              <li>Send mail, and move mail between folders. Both ask you first.</li>
             </ul>
             <p className="text-[12px] leading-4 text-fg-tertiary">
-              It cannot connect or remove a mailbox, and it cannot archive,
-              delete, move or label mail. Those endpoints do not exist.
+              It cannot connect or remove a mailbox, and it cannot delete, label
+              or star mail. Archiving is a move, so nothing it does removes a
+              message, and the Agent view offers one button that moves a whole
+              run of them back. A move to any other folder waits for you to
+              approve it.
             </p>
           </div>
 
@@ -269,11 +294,10 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
               )}
             </div>
           </div>
-        </div>
+        </DialogBody>
 
-        {/* Pinned: never scrolls away, never disabled. The matching background
-            and top rule make content visibly pass underneath it. */}
-        <div className="flex shrink-0 justify-end border-t border-border-subtle bg-surface-2 p-5">
+        {/* Never disabled: whatever else fails, the dialog can be dismissed. */}
+        <DialogFooter>
           <Button
             type="button"
             onClick={() => {
@@ -283,7 +307,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
           >
             Done
           </Button>
-        </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

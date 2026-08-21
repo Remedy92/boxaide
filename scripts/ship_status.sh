@@ -36,12 +36,20 @@ fail() {
 command -v git >/dev/null || fail "git is not on PATH"
 command -v gh >/dev/null || fail "gh is not on PATH"
 
+# Named, not guessed: with a contributor's fork added as a second remote, gh
+# picks a repository on its own and this script would report that fork's latest
+# release as the download. Same reason as ship.sh, same derivation.
+REPO="$(git remote get-url origin 2>/dev/null |
+  sed -e 's#^git@github\.com:#https://github.com/#' \
+      -e 's#^https://github\.com/##' -e 's#\.git$##')"
+[ -n "$REPO" ] || fail "no origin remote — cannot tell which repo publishes"
+
 # Tags and origin/master must be current, or a stale status looks like a ship.
 if ! git fetch --quiet origin --tags; then
   fail "could not fetch origin"
 fi
 
-TAG="$(gh release view --json tagName --jq .tagName 2>/dev/null || true)"
+TAG="$(gh release view -R "$REPO" --json tagName --jq .tagName 2>/dev/null || true)"
 if [ -z "$TAG" ]; then
   fail "no GitHub release — the download button 404s"
 fi
@@ -63,7 +71,17 @@ if [ "$SHIPPED" = "$MASTER" ]; then
   exit 0
 fi
 
-say "not shipped — run ./scripts/ship.sh"
+# A tag on master that has no release is a ship that died on the upload: the
+# "Cut" commit and the tag are public, the dmg never went up. Running ship.sh
+# then cuts a further version over a build that was already signed and
+# notarised, so name the tag and ask for the upload instead.
+STRANDED="$(git tag --points-at "$MASTER" 2>/dev/null | head -1)"
+if [ -n "$STRANDED" ]; then
+  say "not shipped — $STRANDED is tagged and pushed but has no release."
+  say "             finish that upload; do NOT run ship.sh, it would cut another version"
+else
+  say "not shipped — run ./scripts/ship.sh"
+fi
 if [ "$HOOK" -eq 1 ]; then
   exit 0
 fi

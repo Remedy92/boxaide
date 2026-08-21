@@ -14,6 +14,7 @@ import type {
   MailMessage,
   MailMessageSummary,
   MailProvider,
+  MoveResult,
   ProviderAccount,
   SearchMessagesOpts,
   SendMessageInput,
@@ -71,6 +72,23 @@ class FlakyProvider implements MailProvider {
     return [summary(account.id, "Good account mail")];
   }
 
+  async syncMailbox(account: ProviderAccount) {
+    this.guard(account);
+    const messages = [summary(account.id, "Good account mail")];
+    return {
+      replaced: true,
+      messages,
+      vanishedUids: [],
+      flagUpdates: [],
+      cursor: {
+        uidvalidity: 1,
+        highestModseq: null,
+        uidnext: 2,
+        exists: 1,
+      },
+    };
+  }
+
   async searchMessages(
     account: ProviderAccount,
     _opts: SearchMessagesOpts,
@@ -89,6 +107,19 @@ class FlakyProvider implements MailProvider {
 
   async markRead(): Promise<boolean> {
     return false;
+  }
+
+  // A move is per-account too, for the same reason as the drafts below.
+  async moveMessage(): Promise<MoveResult> {
+    throw new Error("not used");
+  }
+
+  async archiveMessage(): Promise<MoveResult> {
+    throw new Error("not used");
+  }
+
+  async trashMessage(): Promise<MoveResult> {
+    throw new Error("not used");
   }
 
   async listFolders(): Promise<MailFolder[]> {
@@ -216,3 +247,68 @@ describe("read state: getMessage vs markRead (fixture/IMAP parity)", () => {
     expect(await mail.markRead("personal", "no-such-id", true)).toBe(false);
   });
 });
+
+describe("MailService survives corrupted account credentials row (P0)", () => {
+  it("does not crash start() on a bad account row and continues watching others", async () => {
+    const store = new Store(randomBytes(32), ":memory:");
+    const watched: string[] = [];
+    const provider = new FixtureProvider();
+    provider.watchMailbox = (account) => {
+      watched.push(account.alias);
+      return () => {};
+    };
+    const mail = new MailService(store, provider);
+
+    await mail.connectAccount({
+      alias: "good",
+      email: "good@test.com",
+      creds: { ...baseCreds, auth: { kind: "password", user: "good@test.com", pass: "ok" } },
+    });
+    store.db
+      .prepare(
+        `INSERT INTO accounts (
+          id, alias, email, imap_host, imap_port, imap_secure,
+          smtp_host, smtp_port, smtp_secure, username, password_enc, auth_kind, created_at
+        ) VALUES (
+          'bad-id', 'corrupt', 'corrupt@test.com', 'imap.test', 993, 1,
+          'smtp.test', 465, 1, 'corrupt@test.com', 'not-a-valid-encrypted-blob', 'password', ?
+        )`,
+      )
+      .run(new Date().toISOString());
+
+    expect(() => mail.start()).not.toThrow();
+    expect(watched).toEqual(["good"]);
+    mail.stop();
+  });
+
+  it("isolates decryption failure in listMessages('all')", async () => {
+    const store = new Store(randomBytes(32), ":memory:");
+    const provider = new FixtureProvider();
+    const mail = new MailService(store, provider);
+
+    const good = await mail.connectAccount({
+      alias: "good",
+      email: "good@test.com",
+      creds: { ...baseCreds, auth: { kind: "password", user: "good@test.com", pass: "ok" } },
+    });
+    provider.seedAccount(good.id, "good@test.com", [
+      { subject: "Good mail", from: "a@b.c", bodyText: "hi" },
+    ]);
+    store.db
+      .prepare(
+        `INSERT INTO accounts (
+          id, alias, email, imap_host, imap_port, imap_secure,
+          smtp_host, smtp_port, smtp_secure, username, password_enc, auth_kind, created_at
+        ) VALUES (
+          'bad-id', 'corrupt', 'corrupt@test.com', 'imap.test', 993, 1,
+          'smtp.test', 465, 1, 'corrupt@test.com', 'not-a-valid-encrypted-blob', 'password', ?
+        )`,
+      )
+      .run(new Date().toISOString());
+
+    const res = await mail.listMessages("all", { limit: 20 });
+    expect(res.messages.map((m) => m.subject)).toEqual(["Good mail"]);
+    expect(res.errors.map((e) => e.account)).toEqual(["corrupt"]);
+  });
+});
+

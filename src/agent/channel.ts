@@ -19,8 +19,11 @@
  * elicitation would be a cleaner fit on paper, and almost nothing implements
  * them.
  *
- * A message is delivered to exactly ONE waiting agent. Two agents pointed at
- * the same Boxaide would otherwise both answer every message.
+ * A message is leased to exactly ONE waiting agent. Two agents pointed at
+ * the same Boxaide would otherwise both answer every message. The lease ends
+ * at `chat_say`, or when the holder is gone — abort, expiry, process exit,
+ * or the same agent returning to the loop unanswered. After a few failed
+ * leases the row is dead-lettered and the UI asks the user to send it again.
  *
  * ## Why this polls its own database
  *
@@ -36,12 +39,121 @@
  * drain immediately, so the common case costs nothing in latency and the
  * interval is only there for the cross-process one.
  */
-import type { Store, StoredTurn } from "../db/store.js";
+import {
+  MAX_DELIVERIES,
+  type ChatSession,
+  type Store,
+  type StoredChat,
+  type StoredTurn,
+  type UnclaimResult,
+} from "../db/store.js";
 
 export type Turn = StoredTurn;
+export type Chat = StoredChat;
+export { MAX_DELIVERIES };
 
-/** Turns kept on disk. Older ones are dropped as new ones arrive. */
+/** Turns kept on disk PER CHAT. Older ones are dropped as new ones arrive. */
 const HISTORY_LIMIT = 500;
+
+/**
+ * Bytes of conversation text kept before old chats are trimmed.
+ *
+ * Chat text is small — this is tens of thousands of messages, not a disk
+ * pressure valve. It is here so the store cannot grow without a number the
+ * user can see, and so trimming is a rule rather than a surprise.
+ */
+const DEFAULT_BUDGET_BYTES = 50 * 1024 * 1024;
+
+function budgetBytes(): number {
+  const raw = process.env.BOXAIDE_CHAT_BUDGET_MB;
+  const mb = raw === undefined ? NaN : Number(raw);
+  if (!Number.isFinite(mb) || mb <= 0) return DEFAULT_BUDGET_BYTES;
+  return Math.round(mb * 1024 * 1024);
+}
+
+/** Longest a title derived from a first message may be. */
+const TITLE_CHARS = 60;
+
+/**
+ * A chat's name, taken from its first message.
+ *
+ * First line only, and cut on a word. The alternative is asking the user to
+ * name a conversation before they have had it.
+ */
+function titleFrom(text: string): string {
+  const line = text.split("\n").find((part) => part.trim().length > 0) ?? text;
+  return shorten(line.trim().replace(/\s+/g, " "));
+}
+
+/**
+ * One line, cut to length on a word, and marked where it was cut.
+ *
+ * Every title in the rail goes through this, whoever wrote it. A cut that is
+ * not marked reads as a name somebody chose, and the reader cannot tell a
+ * short title from the front half of a long one.
+ */
+function shorten(clean: string): string {
+  if (clean.length <= TITLE_CHARS) return clean;
+  const cut = clean.slice(0, TITLE_CHARS);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > 20 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
+/**
+ * Longest a model's answer may be and still be read as a title.
+ *
+ * Asked for four words, a model sometimes writes a sentence about the chat
+ * instead. Cutting that to 60 characters would put half a sentence in the rail,
+ * which reads worse than the first line the user typed. Past this it is prose,
+ * and prose is refused rather than trimmed.
+ */
+const TITLE_MAX_RAW = 120;
+
+/**
+ * A model's answer, turned into a title or into nothing.
+ *
+ * Models wrap titles in quotes, bold them, and prefix them with "Title:" no
+ * matter how the question is put, so all three come off here. What is left is
+ * one line of plain text, or nothing — and nothing keeps the title the first
+ * message gave the chat.
+ */
+/** Drops the characters that would break a single-line label. */
+function stripControl(text: string): string {
+  let out = "";
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    out += code < 0x20 || code === 0x7f ? " " : ch;
+  }
+  return out;
+}
+
+export function cleanTitle(raw: string): string | null {
+  const line = raw.split("\n").find((part) => part.trim().length > 0);
+  if (!line) return null;
+  let clean = stripControl(line)
+    .trim()
+    .replace(/^#+\s*/, "")
+    .replace(/^(?:title|chat|name)\s*[:\-\u2014]\s*/i, "")
+    .replace(/[*_`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Quotes come off in pairs only: a title that is one half of a quotation is
+  // more likely to be using the character than wrapped in it.
+  const quoted =
+    /^(["'])(.*)\1$/.exec(clean) ?? /^[\u201c\u2018](.*)[\u201d\u2019]$/.exec(clean);
+  if (quoted) clean = (quoted[2] ?? quoted[1] ?? "").trim();
+  clean = clean.replace(/[.。]+$/, "").trim();
+  if (!clean || clean.length > TITLE_MAX_RAW) return null;
+  return shorten(clean) || null;
+}
+
+/** What the storage line in the rail reads from. */
+export type ChatStorage = {
+  bytes: number;
+  budget: number;
+  chats: number;
+  archived: number;
+};
 
 /** Default long-poll, in ms. Under the 60s tool timeout common in MCP clients. */
 export const DEFAULT_WAIT_MS = 25_000;
@@ -62,12 +174,13 @@ const PRESENCE_WINDOW_MS = 40_000;
 
 /**
  * How long a claimed message may stay unanswered, WITHOUT PROOF the agent
- * holding it is alive, before we stop saying an agent is working on it.
+ * holding it is alive, before we give the lease back.
  *
  * An agent that took a message and then died leaves no trace: the claim is a
  * database flag, not an open request. Rather than show a spinner forever, the
- * claim expires, and expiring it tells the user the message is gone and must
- * be sent again.
+ * lease expires and the next waiting agent is offered the same message.
+ * After MAX_DELIVERIES failed leases it stays claimed, and the UI tells the
+ * user it will not be handed over again.
  *
  * The clock runs from the last proof, not from the hand-off. Timing the
  * hand-off would call a live agent dead for the only reason an answer ever
@@ -95,6 +208,15 @@ const WORK_MAX_MS = 5 * 60_000;
 const ACTIVITY_EMIT_MS = 5_000;
 
 /**
+ * What the transcript says where the stopped answer would have been.
+ *
+ * Written as an agent turn rather than as a status line: it is what closes the
+ * lease (see `cancelWork`), and a run that ends on nothing at all reads as a
+ * question the agent never came back to.
+ */
+export const STOPPED_TEXT = "Stopped.";
+
+/**
  * What an agent is doing right now, when it is doing anything.
  *
  * This is the one thing about an agent's own work that Boxaide can prove. A
@@ -106,6 +228,12 @@ const ACTIVITY_EMIT_MS = 5_000;
 export type Work = {
   /** The user turn that was claimed. */
   seq: number;
+  /**
+   * The chat that turn came from. The answer goes back here, not to whatever
+   * the user has since clicked on: a question asked in one conversation must
+   * not be answered in another.
+   */
+  chatId: string;
   /** When it was handed over. */
   since: string;
   /** The claiming agent's client name, when it gave one. */
@@ -136,6 +264,14 @@ export type Presence = {
   launchedAgent: string | null;
   /** Set while a claimed message is unanswered. Null the rest of the time. */
   working: Work | null;
+  /**
+   * User seqs leased until the delivery cap and never answered. The warning
+   * in the pane is these, not a row that is still queued or still in flight.
+   * Absent on a server built before the field existed — treat as none.
+   */
+  dropped: number[];
+  /** The chat the composer writes to. */
+  activeChatId: string;
 };
 
 type Waiter = {
@@ -143,11 +279,16 @@ type Waiter = {
   timer: ReturnType<typeof setTimeout>;
   /** Client name of the parked agent, for the work record it may claim. */
   agent: string | null;
+  /** Present when the MCP request that parked this waiter can be cancelled. */
+  signal?: AbortSignal;
+  /** Remove the abort listener, if one was attached. */
+  cleanup?: () => void;
 };
 
 export class AgentChannel {
   private listeners = new Set<(turn: Turn) => void>();
   private presenceListeners = new Set<() => void>();
+  private chatListeners = new Set<() => void>();
   private waiters: Waiter[] = [];
   private lastSeen: number | null = null;
   /** When a launched agent's stream last pushed presence. See ACTIVITY_EMIT_MS. */
@@ -163,14 +304,34 @@ export class AgentChannel {
   private askers = new Set<string>();
   /** Highest seq handed to listeners. Advanced only by drain(). */
   private broadcastSeq: number;
+  /**
+   * What the chat list looked like when it was last emitted.
+   *
+   * A rename writes no turn, so the drain cannot see one. This is compared on
+   * the same poll, and it is how a title written by `boxaide mcp` reaches a
+   * browser attached to `boxaide serve`.
+   */
+  private chatsFingerprint: string;
   private poll: ReturnType<typeof setInterval> | null = null;
   private closed = false;
+  /**
+   * True while an in-process driver holds the chat loop. The MCP chat tools
+   * are refused for the duration: a driven CLI that still called
+   * `chat_await_message` would present as the same holder the driver uses,
+   * take the lease out from under it, and answer twice. A prompt telling the
+   * model not to is a sentence; this is the gate.
+   */
+  private drivenFlag = false;
 
   constructor(private store: Store) {
     // Start from the end of history: attaching a listener replays nothing, it
     // only follows. The UI fetches history separately.
     const tail = this.store.listTurns({ limit: 1 });
     this.broadcastSeq = tail.length > 0 ? tail[tail.length - 1].seq : 0;
+    this.chatsFingerprint = this.store.chatsFingerprint();
+    // This process just started. Any lease in the file is held by nobody —
+    // the previous process's in-memory work died with it.
+    this.store.releaseOrphanLeases();
   }
 
   /* ---- writing ---------------------------------------------------------- */
@@ -181,41 +342,324 @@ export class AgentChannel {
    * A user turn is offered to one waiting agent; if none is waiting it stays
    * unclaimed on disk until one asks, which is what makes "type first, start
    * the agent second" work.
+   *
+   * `chatId` is the pane naming the conversation it is showing. Two windows can
+   * have different chats open, and the active chat is one server-wide row, so a
+   * send that trusted it would land in whichever chat was selected last and
+   * vanish from the pane that typed it. The named chat also becomes the active
+   * one: the hand-off and every later default follow the user's latest send.
+   * Callers must check `writable` first — this refuses an unknown or archived
+   * chat rather than quietly writing somewhere else.
    */
-  post(input: { role: Turn["role"]; text: string; agent?: string | null }): Turn {
+  post(input: {
+    role: Turn["role"];
+    text: string;
+    agent?: string | null;
+    chatId?: string;
+    /**
+     * The question this answers, when the caller knows it. Set by `answer`,
+     * which has the turn in hand; left off by the MCP tier, where an agent may
+     * volunteer a line with no question open at all.
+     */
+    answerTo?: { seq: number; chatId: string };
+  }): Turn {
     const text = input.text.trim();
     if (!text) throw new Error("text is required");
+    if (input.chatId && !this.writable(input.chatId)) {
+      throw new Error("no such chat");
+    }
+    // Only a user turn moves the active chat. A line about some other chat says
+    // where it goes without saying where the user should be looking.
+    if (input.role === "user" && input.chatId) this.selectChat(input.chatId);
     if (input.role !== "user") this.touch(input.agent ?? null);
     // Stamp before clearing: the claimed seq is the owner, even if another
     // user turn arrived while this work was open.
-    const replyTo =
-      (input.role === "agent" || input.role === "activity") && this.work
-        ? this.work.seq
-        : null;
+    const answering = input.role === "agent" || input.role === "activity";
+    // The question this line answers, if it answers one: named by the caller
+    // that has the turn in hand, or the message the agent is working through.
+    const answered =
+      input.answerTo ??
+      (answering && this.work
+        ? { seq: this.work.seq, chatId: this.work.chatId }
+        : null);
+    // The chat it belongs to, most specific first. A caller naming a chat is
+    // saying where the line goes and is taken at its word: an approval note
+    // belongs to the request it is about, not to whatever the agent happens to
+    // be working on, and not to whichever chat the user has open. Only a line
+    // that names nothing and answers nothing lands wherever the user is now.
+    const chatId =
+      (answering ? input.chatId : undefined) ??
+      answered?.chatId ??
+      this.store.ensureActiveChat().id;
+    // A line in a different conversation from the question answers nothing, so
+    // it is not stamped as a reply to it — a reply_to across chats would put an
+    // answer under a message that is not in the same pane.
+    const replyTo = answered && answered.chatId === chatId ? answered.seq : null;
     // The answer is what ends the work. An activity line does not: the agent
     // is narrating mid-task and is still holding the message.
     if (input.role === "agent") this.work = null;
 
     const turn = this.store.appendTurn({
       at: new Date().toISOString(),
+      chatId,
       role: input.role,
       text,
       agent: input.agent ?? null,
       replyTo,
     });
-    this.store.trimTurns(HISTORY_LIMIT);
+    // The first thing said in a chat names it, so the row is never blank while
+    // the agent is still reading. The agent replaces that guess once, with a
+    // name written from the whole exchange — see nameChat. Nothing renames it
+    // after that: a list whose rows change under the reader is not a list.
+    if (input.role === "user" && this.store.isUntitled(chatId)) {
+      this.store.renameChat(chatId, titleFrom(text), "auto");
+    }
+    this.store.trimTurns(chatId, HISTORY_LIMIT);
+    this.enforceBudget();
 
     // Listeners first: the UI should paint the message before it is handed to
     // an agent, not after.
     this.drain();
+    this.emitChats();
     if (input.role === "user") this.handOff();
     return turn;
   }
 
+  /**
+   * Posts a model's answer to the question it answers, or drops it.
+   *
+   * False means dropped, and the only way that happens is the user emptying,
+   * deleting or archiving the chat while the model was still working on it.
+   * `post` alone would land that answer wherever the user is now, under no
+   * question at all: a reply to a message nobody can see, in a conversation it
+   * was never asked in. The user removed the question; the answer goes with
+   * it. Archiving keeps the question but not the work: the chat is not
+   * writable while it is put away, and `archiveChat` has already released the
+   * lease, so a reply landing there would be one nothing shows.
+   */
+  answer(input: {
+    seq: number;
+    chatId: string;
+    text: string;
+    agent?: string | null;
+  }): boolean {
+    if (
+      !this.store.answerable(input.seq, input.chatId) ||
+      !this.writable(input.chatId)
+    ) {
+      // Nothing is being worked on any more either way.
+      if (this.work?.seq === input.seq) this.work = null;
+      this.emitPresence();
+      return false;
+    }
+    this.post({
+      role: "agent",
+      text: input.text,
+      agent: input.agent,
+      answerTo: { seq: input.seq, chatId: input.chatId },
+    });
+    return true;
+  }
+
+  /**
+   * Takes the messages off old chats until the store is back inside its budget.
+   *
+   * Archived chats go first and the oldest go first within each group, the
+   * active chat is never touched, and the record is always kept. The user is
+   * told after the fact rather than asked beforehand: a prompt that appears
+   * because of a byte count is a prompt somebody dismisses without reading. A
+   * chat that was archived and is now trimmed stays archived: the user put it
+   * away, and the budget taking its messages does not take that back.
+   */
+  private enforceBudget(): void {
+    const budget = budgetBytes();
+    let bytes = this.store.chatBytes();
+    if (bytes <= budget) return;
+    for (const candidate of this.store.trimCandidates()) {
+      if (bytes <= budget) break;
+      if (this.store.trimChat(candidate.id)) bytes -= candidate.bytes;
+    }
+  }
+
   /* ---- reading ---------------------------------------------------------- */
 
-  history(afterSeq?: number): Turn[] {
-    return this.store.listTurns({ afterSeq, limit: HISTORY_LIMIT });
+  /** Turns of one chat, or of the active one when no id is given. */
+  history(afterSeq?: number, chatId?: string): Turn[] {
+    const id = chatId ?? this.store.ensureActiveChat().id;
+    return this.store.listTurns({ afterSeq, chatId: id, limit: HISTORY_LIMIT });
+  }
+
+  /* ---- chats ------------------------------------------------------------ */
+
+  chats(options: { includeArchived?: boolean } = {}): Chat[] {
+    // Reading the list is also the moment to guarantee there is one to read.
+    this.store.ensureActiveChat();
+    return this.store.listChats(options);
+  }
+
+  storage(): ChatStorage {
+    const all = this.store.listChats({ includeArchived: true });
+    return {
+      bytes: this.store.chatBytes(),
+      budget: budgetBytes(),
+      chats: all.filter((chat) => chat.archivedAt === null).length,
+      archived: all.filter((chat) => chat.archivedAt !== null).length,
+    };
+  }
+
+  activeChat(): Chat {
+    return this.store.ensureActiveChat();
+  }
+
+  /**
+   * Whether a chat may be written to. Routes ask this to answer 404 before
+   * they hand an id to `post` or `clear`.
+   *
+   * An archived chat is not writable, and it keeps every message it had. Those
+   * two go together on purpose: a chat somebody is typing into is not one they
+   * have put away, so the way to write to an archived chat is to open it,
+   * which unarchives it. The alternative, a third read-only state, would
+   * have to be understood by every write path in the app to buy nothing the
+   * user asked for.
+   */
+  writable(id: string): boolean {
+    const chat = this.store.getChat(id);
+    return chat !== null && chat.archivedAt === null;
+  }
+
+  createChat(): Chat {
+    const chat = this.store.createChat();
+    this.emitChats();
+    this.emitPresence();
+    return chat;
+  }
+
+  selectChat(id: string): boolean {
+    const ok = this.store.selectChat(id);
+    if (ok) {
+      this.emitChats();
+      this.emitPresence();
+    }
+    return ok;
+  }
+
+  renameChat(id: string, title: string): boolean {
+    const ok = this.store.renameChat(id, title.trim().slice(0, TITLE_CHARS));
+    if (ok) this.emitChats();
+    return ok;
+  }
+
+  /**
+   * Whether this chat is still waiting for a name worth reading.
+   *
+   * The agent asks — through the MCP payload, or through the driver — so that a
+   * chat the user has already named costs nobody a second thought.
+   */
+  needsTitle(id: string): boolean {
+    return this.store.titleSource(id) === "auto";
+  }
+
+  /**
+   * The agent's name for a chat, from having read the exchange.
+   *
+   * Offered, not imposed: a chat the user renamed keeps the user's name, and a
+   * chat already named this way keeps the first one, so the row does not move
+   * under a reader who has learned where it is. A name that survives sanitising
+   * to nothing is no name, and the derived one stands.
+   */
+  nameChat(id: string, title: string): boolean {
+    const clean = cleanTitle(title);
+    if (!clean) return false;
+    const ok = this.store.renameChat(id, clean, "agent");
+    if (ok) this.emitChats();
+    return ok;
+  }
+
+  /**
+   * The CLI session a chat's turns are answered in.
+   *
+   * Straight through to the store, and deliberately so: two processes launch
+   * agents, and an id kept in whichever one is running would be lost the moment
+   * that agent restarted — leaving the model to answer the next message with no
+   * memory of the conversation it is in.
+   */
+  chatSession(chatId: string, agent: string): ChatSession {
+    return this.store.chatSession(chatId, agent);
+  }
+
+  saveChatSession(
+    chatId: string,
+    agent: string,
+    sessionId: string,
+    epoch: number,
+  ): void {
+    this.store.saveChatSession(chatId, agent, sessionId, epoch);
+  }
+
+  clearChatSession(chatId: string): void {
+    this.store.clearChatSession(chatId);
+  }
+
+  /**
+   * Puts a chat away with its messages intact, and undoes that.
+   *
+   * Archiving is treated like a removal by everything downstream: the row
+   * leaves the live list, so an agent holding a question in it has nothing to
+   * answer any more and the user must not be left looking at it. Unarchiving
+   * only puts the row back, and leaves the pane where it is.
+   */
+  archiveChat(id: string): boolean {
+    const ok = this.store.archiveChat(id);
+    if (ok) this.afterChatRemoved(id);
+    return ok;
+  }
+
+  unarchiveChat(id: string): boolean {
+    const ok = this.store.unarchiveChat(id);
+    if (ok) {
+      this.emitChats();
+      this.emitPresence();
+    }
+    return ok;
+  }
+
+  deleteChat(id: string): boolean {
+    const ok = this.store.deleteChat(id);
+    if (ok) this.afterChatRemoved(id);
+    return ok;
+  }
+
+  /**
+   * A chat just left the live list, or lost its messages. If an agent was
+   * answering one of them, that lease is over: the question it was holding
+   * is no longer one this app will let anybody answer.
+   */
+  private afterChatRemoved(id: string): void {
+    if (this.work?.chatId === id) this.work = null;
+    this.store.ensureActiveChat();
+    this.emitChats();
+    this.emitPresence();
+  }
+
+  /** Chat list changes, for the SSE route. */
+  subscribeChats(listener: () => void): () => void {
+    this.chatListeners.add(listener);
+    return () => {
+      this.chatListeners.delete(listener);
+    };
+  }
+
+  private emitChats(): void {
+    // Taken before notifying, so a change made in this process is not reported
+    // a second time by the poll that watches for changes made in another.
+    this.chatsFingerprint = this.store.chatsFingerprint();
+    for (const listener of this.chatListeners) {
+      try {
+        listener();
+      } catch {
+        // Same rule as drain: a broken SSE writer must not fail the call.
+      }
+    }
   }
 
   /** Live turns, for the SSE route. */
@@ -253,7 +697,7 @@ export class AgentChannel {
     // itself ends the claim, so nothing here has to guess.
     const held = this.work !== null && this.streamSpeaksForWork();
     if (this.work && !held && now - this.work.provenAt > WORK_MAX_MS) {
-      this.work = null;
+      this.releaseWork();
     }
     return {
       waiting: this.waiters.length,
@@ -265,11 +709,21 @@ export class AgentChannel {
       working: this.work
         ? {
             seq: this.work.seq,
+            chatId: this.work.chatId,
             since: this.work.since,
             agent: this.work.agent,
             tool: this.work.tool,
           }
         : null,
+      activeChatId: this.store.ensureActiveChat().id,
+      // The final lease looks identical on disk to a dead-lettered one — the
+      // count is already at the cap the moment it is handed over. Only the
+      // in-memory hold tells the two apart, so the message being worked right
+      // now is never in the warning. It joins the list when that lease ends
+      // unanswered, and not a second earlier.
+      dropped: this.store
+        .listDroppedUserSeqs()
+        .filter((seq) => seq !== this.work?.seq),
     };
   }
 
@@ -326,28 +780,44 @@ export class AgentChannel {
 
   /**
    * Resolves with the next unclaimed user message, or null once `timeoutMs`
-   * passes with nothing to hand over.
+   * passes with nothing to hand over, or once `signal` aborts.
    *
    * Null is a normal result, not an error: it exists so the agent's client sees
    * a completed tool call well inside its request timeout and can immediately
    * call again. The tool description tells the agent to do exactly that.
+   *
+   * A second agent parking does not take the open lease. The same agent
+   * returning unanswered does: that is abandon, and the message goes back
+   * on the queue (or to another waiter) rather than sitting delivered forever.
    */
   awaitUserTurn(
-    options: { timeoutMs?: number; agent?: string | null } = {},
+    options: {
+      timeoutMs?: number;
+      agent?: string | null;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<Turn | null> {
     const agent = options.agent ?? null;
+    const signal = options.signal;
     // Asking is what makes a client a candidate for the next hand-off, so this
     // is the point where a second agent becomes real. An unnamed client counts
     // as one name: two anonymous clients are still two agents.
     this.askers.add(agent ?? "");
     this.touch(agent);
-    // Back at the loop means done with the last message, answered or abandoned.
-    this.work = null;
+    if (this.sameHolder(agent)) this.releaseWork();
     if (this.closed) return Promise.resolve(null);
+    if (signal?.aborted) return Promise.resolve(null);
 
-    // Anything typed before the agent got here is already on disk.
-    const pending = this.store.claimNextUserTurn();
+    // Anything typed before the agent got here is already on disk. The chat on
+    // screen goes first — see handOff, which is the same rule on the other
+    // path, and both have to carry it or the order depends on whether an agent
+    // happened to be parked when the message landed.
+    const pending = this.store.claimNextUserTurn(this.store.ensureActiveChat().id);
     if (pending) {
+      if (signal?.aborted) {
+        this.releaseLease(pending.seq, { revertAttempt: true });
+        return Promise.resolve(null);
+      }
       this.beginWork(pending, agent);
       this.emitPresence();
       return Promise.resolve(pending);
@@ -360,12 +830,21 @@ export class AgentChannel {
     return new Promise<Turn | null>((resolve) => {
       const waiter: Waiter = {
         agent,
+        signal,
         resolve,
         timer: setTimeout(() => {
           this.drop(waiter);
           resolve(null);
         }, ms),
       };
+      if (signal) {
+        const onAbort = () => {
+          this.drop(waiter);
+          resolve(null);
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        waiter.cleanup = () => signal.removeEventListener("abort", onAbort);
+      }
       this.waiters.push(waiter);
       this.ensurePoll();
       this.emitPresence();
@@ -398,15 +877,48 @@ export class AgentChannel {
     }
   }
 
-  /** Hands the oldest unclaimed user turn to the longest-waiting agent. */
+  /**
+   * Pushes the chat list when another process has changed it.
+   *
+   * The turn drain covers everything that writes a row. Renaming does not
+   * write one: a chat named through `chat_say` in the stdio MCP process would
+   * otherwise sit under its old name in the rail until the user typed again or
+   * reloaded, which is the whole feature failing quietly.
+   */
+  private drainChats(): void {
+    if (this.chatListeners.size === 0) return;
+    const now = this.store.chatsFingerprint();
+    if (now === this.chatsFingerprint) return;
+    this.emitChats();
+  }
+
+  /**
+   * Hands the next unclaimed user turn to the longest-waiting agent.
+   *
+   * Next, not oldest: the chat the user is looking at is served first, and only
+   * then the rest, oldest first. Whichever pane is open is the one where the
+   * user is waiting for an answer, and an agent quietly working another chat's
+   * backlog is indistinguishable from an agent that does not work.
+   */
   private handOff(): void {
     let handed = false;
     while (this.waiters.length > 0) {
-      const turn = this.store.claimNextUserTurn();
+      this.pruneAbortedWaiters();
+      if (this.waiters.length === 0) break;
+      const turn = this.store.claimNextUserTurn(this.store.ensureActiveChat().id);
       if (!turn) break;
       const waiter = this.waiters.shift();
-      if (!waiter) break;
+      if (!waiter) {
+        this.store.unclaimUserTurn(turn.seq, { revertAttempt: true });
+        break;
+      }
       clearTimeout(waiter.timer);
+      waiter.cleanup?.();
+      if (waiter.signal?.aborted) {
+        this.store.unclaimUserTurn(turn.seq, { revertAttempt: true });
+        waiter.resolve(null);
+        continue;
+      }
       this.beginWork(turn, waiter.agent);
       waiter.resolve(turn);
       handed = true;
@@ -414,14 +926,109 @@ export class AgentChannel {
     if (handed) this.emitPresence();
   }
 
+  /**
+   * Ends the in-memory hold and writes that to disk. A released row is offered
+   * to the next waiter; a dead-lettered one stays claimed for the UI warning.
+   *
+   * The result is returned because a driven loop needs it: `dead_lettered` is
+   * this channel saying the message will never be handed over again, which is
+   * the one failure retrying cannot fix.
+   */
+  releaseLease(seq: number, options: { revertAttempt?: boolean } = {}): UnclaimResult {
+    if (this.work?.seq === seq) this.work = null;
+    // Closed is shutdown, and the store may already be closed with it — the same
+    // reason awaitUserTurn answers null rather than reaching for a row. A driver
+    // parked here is being stopped, and the next process releases orphan leases.
+    if (this.closed) return "missing";
+    const result = this.store.unclaimUserTurn(seq, options);
+    if (result === "released") this.handOff();
+    else this.emitPresence();
+    return result;
+  }
+
+  /**
+   * Ends the message in flight because the user pressed Stop.
+   *
+   * The lease is closed by answering it, not by releasing it. A released row
+   * goes straight back on the queue and is handed to the very agent that was
+   * just stopped, which is the one outcome Stop must not produce. Answering it
+   * also puts a line in the transcript where the reply would have been, so the
+   * conversation says what happened rather than ending on a question.
+   *
+   * `seq` is the message the caller means, and it is checked rather than
+   * assumed: the run in flight can end and the next one be claimed between the
+   * button being painted and the click arriving, and stopping whatever happens
+   * to be running then would kill a message the user never looked at.
+   *
+   * Returns the work that was cancelled, or null when nothing was in flight —
+   * or when what is in flight is not the message asked for.
+   */
+  cancelWork(seq?: number): Work | null {
+    const work = this.work;
+    if (!work) return null;
+    if (seq !== undefined && seq !== work.seq) return null;
+    this.work = null;
+    // False means the chat was emptied or deleted under the run. Nothing to
+    // write there, and `answer` has already cleared the presence for it.
+    this.answer({
+      seq: work.seq,
+      chatId: work.chatId,
+      text: STOPPED_TEXT,
+      agent: work.agent,
+    });
+    this.emitPresence();
+    return work;
+  }
+
+  private releaseWork(options: { revertAttempt?: boolean } = {}): void {
+    if (!this.work) return;
+    this.releaseLease(this.work.seq, options);
+  }
+
+  /**
+   * The same client that holds the lease is asking for a message again.
+   *
+   * Compared on the literal name each caller gave, with no fall back to the
+   * last name seen. Filling an unnamed caller in with `lastAgent` would let
+   * any anonymous client match a named holder, take the lease away mid-answer,
+   * and be handed the same message — the double-answer hole this lease exists
+   * to close. An unnamed caller is the holder only when the holder is unnamed
+   * too, which is the case where they really are the one client asking.
+   */
+  private sameHolder(agent: string | null): boolean {
+    if (!this.work) return false;
+    return (agent ?? "") === (this.work.agent ?? "");
+  }
+
+  private pruneAbortedWaiters(): void {
+    const live: Waiter[] = [];
+    for (const waiter of this.waiters) {
+      if (!waiter.signal?.aborted) {
+        live.push(waiter);
+        continue;
+      }
+      clearTimeout(waiter.timer);
+      waiter.cleanup?.();
+      waiter.resolve(null);
+    }
+    if (live.length === this.waiters.length) return;
+    this.waiters = live;
+    this.maybeStopPoll();
+    this.emitPresence();
+  }
+
   /** One agent now holds one message. Ends at its next answer, or by expiry. */
   private beginWork(turn: Turn, agent: string | null): void {
     this.work = {
       seq: turn.seq,
+      chatId: turn.chatId,
       since: new Date().toISOString(),
       // The hand-off is itself the first proof: the agent asked, and got one.
       provenAt: Date.now(),
-      agent: agent ?? this.lastAgent,
+      // The caller's own name, borrowed from nobody. `sameHolder` compares
+      // against this, so stamping an unnamed claimant with `lastAgent` would
+      // hand its lease to whoever that name belongs to.
+      agent,
       tool: null,
     };
   }
@@ -459,6 +1066,7 @@ export class AgentChannel {
     if (this.poll || this.closed) return;
     this.poll = setInterval(() => {
       this.drain();
+      this.drainChats();
       this.handOff();
     }, POLL_MS);
     // Never hold the process open for a poll that exists to serve attachments.
@@ -475,6 +1083,7 @@ export class AgentChannel {
   private drop(waiter: Waiter): void {
     const index = this.waiters.indexOf(waiter);
     if (index >= 0) this.waiters.splice(index, 1);
+    waiter.cleanup?.();
     this.maybeStopPoll();
     if (index >= 0) this.emitPresence();
   }
@@ -527,12 +1136,50 @@ export class AgentChannel {
     // started may be long gone, and a name from then must not mute the stream
     // for the rest of the session.
     this.askers.clear();
+    // A new agent is the one event that makes a dropped message worth offering
+    // again: the run that dropped it is over, and this one has not failed at
+    // anything yet. See requeueDropped.
+    if (!stopped) this.requeueDropped();
     // It took a message and exited without answering. That is the case the
     // expiry was built for, and the exit proves it outright — so say it now
     // instead of leaving a spinner up for five more minutes. An agent that
     // answered first cleared this on the way out and there is nothing here.
-    if (stopped && wasOurs && this.work) this.work = null;
+    if (stopped && wasOurs && this.work) this.releaseWork();
+    else this.emitPresence();
+  }
+
+  /**
+   * Offers every dropped message to the agent that just started.
+   *
+   * A message is dropped when three agents in a row took it and answered
+   * nothing, and the pane says so. That reads as a verdict on the message, and
+   * usually it is not one: a CLI that cannot run — signed out is the case this
+   * was built for — burns all three deliveries of every message queued behind
+   * it without ever seeing them. Leaving those marked "never answered" while a
+   * working agent sits idle beside them is the wrong end of the trade.
+   *
+   * Called on the launch, not on the exit, so the requeue and the agent that
+   * will answer arrive together: a reset with nobody running would clear the
+   * warning and change nothing else.
+   */
+  requeueDropped(): number {
+    // Retire the stale ones before offering anything back. A launch is exactly
+    // when a backlog would otherwise be resurrected wholesale, and this is the
+    // moment the user finds out: the messages nobody picked up in time are
+    // marked, the pane says so, and the agent starts on what is still current
+    // instead of on last night.
+    const expired = this.store.expireStaleUserTurns();
+    const requeued = this.store.requeueDroppedUserTurns();
+    if (requeued === 0) {
+      if (expired > 0) this.emitPresence();
+      return 0;
+    }
+    // A requeued row writes no turn, so nothing else would notice it: the
+    // warning has to be recalculated, and a waiter already parked would
+    // otherwise sit through its whole timeout beside a message it can have.
+    this.handOff();
     this.emitPresence();
+    return requeued;
   }
 
   /** Who new agent turns are stamped as: the launched CLI, else last initialize. */
@@ -542,11 +1189,28 @@ export class AgentChannel {
 
   /* ---- lifecycle -------------------------------------------------------- */
 
-  clear(): void {
-    this.store.clearTurns();
-    this.broadcastSeq = 0;
+  setDriven(on: boolean): void {
+    this.drivenFlag = on;
+  }
+
+  get driven(): boolean {
+    return this.drivenFlag;
+  }
+
+  /**
+   * Empties one chat and keeps it. Other chats are untouched.
+   *
+   * `chatId` is the pane naming what it is showing, for the same reason `post`
+   * takes one: without it a clear empties whatever chat is active server-wide.
+   * Callers must check `writable` first.
+   */
+  clear(chatId?: string): void {
+    if (chatId && !this.writable(chatId)) throw new Error("no such chat");
+    const id = chatId ?? this.store.ensureActiveChat().id;
+    this.store.clearTurns(id);
     // The claimed message went with the history; nothing is being answered.
-    this.work = null;
+    if (this.work?.chatId === id) this.work = null;
+    this.emitChats();
     this.emitPresence();
   }
 
@@ -560,9 +1224,11 @@ export class AgentChannel {
     const parked = this.waiters.splice(0);
     for (const waiter of parked) {
       clearTimeout(waiter.timer);
+      waiter.cleanup?.();
       waiter.resolve(null);
     }
     this.listeners.clear();
+    this.chatListeners.clear();
     if (this.poll) {
       clearInterval(this.poll);
       this.poll = null;
