@@ -253,6 +253,10 @@ CREATE TABLE IF NOT EXISTS automations (
   last_run_at TEXT,
   next_run_at TEXT                -- recomputed on save and after each run
 );
+CREATE TABLE IF NOT EXISTS automation_runs_seen (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  seen_at TEXT NOT NULL           -- when the Automations view was last open
+);
 CREATE TABLE IF NOT EXISTS automation_runs (
   id TEXT PRIMARY KEY,
   automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
@@ -587,7 +591,12 @@ POST `/api/crm/sync`.
 
 Automations: GET/POST `/api/automations`, PATCH/DELETE `/api/automations/:id`,
 POST `/api/automations/:id/run`, GET `/api/automations/:id/runs`,
-GET `/api/automations/runs` (recent across all).
+GET `/api/automations/runs` (recent across all),
+GET `/api/automations/badge` → `{ unseen: n, failed: n }` (runs finished since
+the view was last open, and how many of those failed; the rail polls this),
+POST `/api/automations/runs/seen` (the view marks itself seen; answers the
+badge). Every automation in a list or single read also carries
+`lastRunStatus`, the newest run's status or null.
 
 Outreach: GET `/api/outreach/outbox`
 (`?status=`), POST `/api/outreach/outbox/:id/approve`,
@@ -613,8 +622,10 @@ patterns exactly: client components, hooks in `lib/hooks` calling
   notes, interaction timeline, deals. Create/edit contact and note.
 - **Pipeline** — kanban board of stages; drag or button-move deals between
   stages; deal create/edit dialog.
-- **Automations** — list with enabled toggle, next/last run, run-now button,
-  run history with log viewer. Creation happens by talking to the agent —
+- **Automations** — list with enabled toggle, next/last run and its outcome,
+  run-now button, run history with log viewer. The rail row carries the
+  `unseen` count from `/api/automations/badge` (poll every 30s), red when any
+  of those runs failed; opening the view posts `runs/seen` and clears it. Creation happens by talking to the agent —
   the empty state says exactly that and offers to open the Agent view; no
   create form.
 - **Outreach** — the **approval queue**:

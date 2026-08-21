@@ -78,7 +78,7 @@ export const AUTOMATION_TOOLS: ToolDef[] = [
   {
     name: "automations_list",
     description:
-      "List every automation with its schedule, prompt, and last/next run times.",
+      "List every automation with its schedule, prompt, last/next run times, and the outcome of its last run.",
     inputSchema: {
       type: "object" as const,
       properties: {},
