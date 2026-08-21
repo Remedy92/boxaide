@@ -573,6 +573,30 @@ export function createApi(
   });
 
   /**
+   * Delete one message: a move into the account's Trash mailbox, never an IMAP
+   * expunge. The response names both mailboxes, so the caller can offer an undo
+   * that puts the message back where it came from.
+   *
+   * 404 means the uid was already gone from the source folder, and nothing was
+   * written. 400 carries the reason a server with no Trash mailbox refused.
+   */
+  app.post("/api/messages/:accountId/:messageId/trash", async (c) => {
+    try {
+      const result = await mail.trashMessage(
+        c.req.param("accountId"),
+        decodeURIComponent(c.req.param("messageId")),
+      );
+      if (!result.moved) return c.json({ error: "not found" }, 404);
+      return c.json(result);
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
+    }
+  });
+
+  /**
    * Move one message to a named mailbox. This is what an archive's Undo posts,
    * with the `fromFolder` the archive handed back.
    */
@@ -878,11 +902,22 @@ function registerAgentRoutes(
     return c.json({ renamed: true });
   });
 
+  /* Archiving keeps every message and Unarchive is its undo, so both are plain
+     state changes on the row rather than anything that touches the turns. A
+     chat that is already in the state being asked for answers 404: the caller
+     is working from a list that has moved on. */
   app.post("/api/agent/chats/:id/archive", (c) => {
     if (!channel.archiveChat(c.req.param("id"))) {
       return c.json({ error: "no such chat" }, 404);
     }
     return c.json({ archived: true, storage: channel.storage() });
+  });
+
+  app.post("/api/agent/chats/:id/unarchive", (c) => {
+    if (!channel.unarchiveChat(c.req.param("id"))) {
+      return c.json({ error: "no such chat" }, 404);
+    }
+    return c.json({ archived: false, storage: channel.storage() });
   });
 
   app.delete("/api/agent/chats/:id", (c) => {

@@ -15,13 +15,16 @@ import { ListSkeleton } from "@/components/list/list-skeleton";
 import { MessageRow } from "@/components/list/message-row";
 import { Button } from "@/components/ui/button";
 import { useAccounts } from "@/lib/hooks/use-accounts";
+import { useAgent } from "@/lib/hooks/use-agent";
 import { useApp } from "@/lib/hooks/use-app-state";
 import { useConnection, useMeta } from "@/lib/hooks/use-connection";
 import { usePrefetchMessage } from "@/lib/hooks/use-message";
 import { useMessages } from "@/lib/hooks/use-messages";
+import { useArchive, useTrash } from "@/lib/hooks/use-move";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { DEFAULT_LIMIT } from "@/lib/constants";
 import { hostLabel } from "@/lib/settings";
+import type { MailMessageSummary } from "@/lib/types";
 
 /**
  * §6.3. The list is capped at 200 rows by the server (`MAX_LIMIT`) and there is
@@ -43,6 +46,9 @@ export function MessageList({
   const meta = useMeta();
   const queryClient = useQueryClient();
   const prefetch = usePrefetchMessage();
+  const agent = useAgent();
+  const archive = useArchive();
+  const trash = useTrash();
 
   const messages = useMessages({
     account: app.account,
@@ -119,6 +125,41 @@ export function MessageList({
       else rowRefs.current.delete(id);
     },
     [],
+  );
+
+  /* The three row actions, built once and handed down as primitives for the
+     same reason `select` and `registerRow` are: a fresh closure per render
+     would defeat React.memo on every row in the list. */
+  const archiveMutate = archive.mutate;
+  const trashMutate = trash.mutate;
+  const onArchive = React.useCallback(
+    (message: MailMessageSummary) =>
+      archiveMutate({ accountId: message.accountId, messageId: message.id }),
+    [archiveMutate],
+  );
+  const onTrash = React.useCallback(
+    (message: MailMessageSummary) =>
+      trashMutate({ accountId: message.accountId, messageId: message.id }),
+    [trashMutate],
+  );
+
+  /* "Start conversation about this email" opens a new chat and prefills the
+     composer with something the agent can act on: the id its message_get tool
+     takes, and the subject and sender so the user can see which mail they are
+     asking about. Nothing is sent. The question is the user's to write, and
+     the caret is waiting after the last line for them to write it. */
+  const newChat = agent.newChat;
+  const seedAgentComposer = app.seedAgentComposer;
+  const onAskAgent = React.useCallback(
+    (message: MailMessageSummary) => {
+      void newChat();
+      seedAgentComposer(
+        `About this email: "${message.subject}" from ${message.from}.\n` +
+          `Read it first with message_get, account "${message.accountId}", ` +
+          `messageId "${message.id}".\n\n`,
+      );
+    },
+    [newChat, seedAgentComposer],
   );
 
   const refresh = React.useCallback(() => {
@@ -210,6 +251,9 @@ export function MessageList({
             registerRow={registerRow}
             onSelect={select}
             onPrefetch={prefetch}
+            onArchive={onArchive}
+            onTrash={onTrash}
+            onAskAgent={onAskAgent}
           />
         ))}
       </ul>

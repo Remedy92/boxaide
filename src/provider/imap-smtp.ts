@@ -697,6 +697,31 @@ export function archiveMailboxPath(
 }
 
 /**
+ * SPECIAL-USE \\Trash first, then Gmail's own Trash path, and only then the
+ * common names. Gmail advertises the mailbox and spells it Bin in some locales,
+ * which is why the path check carries both spellings.
+ *
+ * Returns null rather than a guess, for the same reason archiveMailboxPath
+ * does, and with more at stake: a message filed into a mailbox the user's own
+ * client does not treat as Trash is a message nobody will find again. Exported
+ * for tests.
+ */
+export function trashMailboxPath(
+  boxes: { name: string; path: string; specialUse?: string }[],
+): string | null {
+  const special = boxes.find((b) => b.specialUse === "\\Trash");
+  if (special) return special.path;
+  const byPath = boxes.find((b) => /^\[gmail\]\/(trash|bin)$/i.test(b.path));
+  if (byPath) return byPath.path;
+  const byName = boxes.find((b) =>
+    /^(trash|bin|deleted|deleted items|deleted messages|papierkorb|corbeille|papelera|prullenbak|cestino|lixeira|kosz|roskakori|papperskorg)$/i.test(
+      b.name,
+    ),
+  );
+  return byName?.path ?? null;
+}
+
+/**
  * MOVE one uid out of its folder, on an already-connected client. Exported for
  * tests: nothing else exercises the uidMap handling without a live server.
  *
@@ -755,11 +780,12 @@ export async function moveUid(
   }
 }
 
-/** How long a resolved Archive/Drafts location is trusted before LIST reruns. */
+/** How long a resolved Archive/Trash/Drafts location is trusted before LIST reruns. */
 const MAILBOX_PATH_TTL_MS = 5 * 60_000;
 
 type CachedMailboxPaths = {
   archive: string | null;
+  trash: string | null;
   drafts: string | null;
   at: number;
 };
@@ -772,19 +798,25 @@ type CachedMailboxPaths = {
 const mailboxPathCache = new Map<string, CachedMailboxPaths>();
 
 /**
- * Where this account's Archive and Drafts mailboxes live, from cache when it
- * is fresh. One LIST resolves both, so an archive after the first costs MOVE
- * alone instead of paying a full folder LIST every time.
+ * Where this account's Archive, Trash and Drafts mailboxes live, from cache
+ * when it is fresh. One LIST resolves all three, so an archive or a delete
+ * after the first costs MOVE alone instead of paying a full folder LIST every
+ * time.
  *
- * A missing Archive mailbox is deliberately not remembered: the fix the error
- * tells the user to make — create one — must be picked up on the very next
- * archive, not when a TTL runs out. Exported for tests, which is also why
- * `now` is injectable.
+ * A missing Archive or Trash mailbox is deliberately not remembered: the fix
+ * the error tells the user to make, create one, must be picked up on the very
+ * next archive or delete, not when a TTL runs out. Exported for tests, which is
+ * also why `now` is injectable.
  */
 export async function accountMailboxPaths(
   client: Pick<ImapFlow, "list">,
   accountId: string,
-  opts: { force?: boolean; needArchive?: boolean; now?: number } = {},
+  opts: {
+    force?: boolean;
+    needArchive?: boolean;
+    needTrash?: boolean;
+    now?: number;
+  } = {},
 ): Promise<CachedMailboxPaths> {
   const now = opts.now ?? Date.now();
   const hit = mailboxPathCache.get(accountId);
@@ -792,13 +824,15 @@ export async function accountMailboxPaths(
     !opts.force &&
     hit &&
     now - hit.at <= MAILBOX_PATH_TTL_MS &&
-    !(opts.needArchive === true && hit.archive == null)
+    !(opts.needArchive === true && hit.archive == null) &&
+    !(opts.needTrash === true && hit.trash == null)
   ) {
     return hit;
   }
   const boxes = await client.list();
   const fresh: CachedMailboxPaths = {
     archive: archiveMailboxPath(boxes),
+    trash: trashMailboxPath(boxes),
     drafts: draftsMailboxPath(boxes),
     at: now,
   };
@@ -1528,6 +1562,42 @@ export class ImapSmtpProvider implements MailProvider {
         });
         if (!fresh.archive || fresh.archive === paths.archive) throw err;
         return moveUid(client, account.id, parsed, fresh.archive);
+      }
+    });
+  }
+
+  async trashMessage(
+    account: ProviderAccount,
+    messageId: string,
+  ): Promise<MoveResult> {
+    const parsed = parseId(messageId, account.id);
+    if (!parsed) throw new Error(`invalid message id: ${messageId}`);
+    return withImap(account.id, account.creds, async (client) => {
+      const paths = await accountMailboxPaths(client, account.id, {
+        needTrash: true,
+      });
+      if (!paths.trash) {
+        throw new Error(
+          "no Trash mailbox found on this account. Create one named Trash in your mail provider",
+        );
+      }
+      if (paths.drafts && parsed.folder === paths.drafts) {
+        throw new Error(
+          "a draft is not deleted from here. Discard it with the draft tools",
+        );
+      }
+      try {
+        return await moveUid(client, account.id, parsed, paths.trash);
+      } catch (err) {
+        // Same reasoning as archiveMessage: the cached location can outlive the
+        // mailbox, one fresh LIST decides whether that is what happened, and
+        // any other failure re-throws unchanged.
+        const fresh = await accountMailboxPaths(client, account.id, {
+          force: true,
+          needTrash: true,
+        });
+        if (!fresh.trash || fresh.trash === paths.trash) throw err;
+        return moveUid(client, account.id, parsed, fresh.trash);
       }
     });
   }

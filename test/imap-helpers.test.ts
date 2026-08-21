@@ -11,6 +11,7 @@ import {
   indexedUidRange,
   draftsMailboxPath,
   archiveMailboxPath,
+  trashMailboxPath,
   accountMailboxPaths,
   moveUid,
   draftFromImapSource,
@@ -222,6 +223,59 @@ describe("archiveMailboxPath (where an archived message lands)", () => {
   });
 });
 
+describe("trashMailboxPath (where a deleted message lands)", () => {
+  it("prefers the SPECIAL-USE \\Trash mailbox over any name", () => {
+    expect(
+      trashMailboxPath([
+        { name: "Trash", path: "Trash" },
+        { name: "Papierkorb", path: "Papierkorb", specialUse: "\\Trash" },
+      ]),
+    ).toBe("Papierkorb");
+  });
+
+  it("finds Gmail's Trash and its Bin spelling by path", () => {
+    expect(
+      trashMailboxPath([
+        { name: "INBOX", path: "INBOX" },
+        { name: "Trash", path: "[Gmail]/Trash" },
+      ]),
+    ).toBe("[Gmail]/Trash");
+    expect(
+      trashMailboxPath([
+        { name: "INBOX", path: "INBOX" },
+        { name: "Bin", path: "[Gmail]/Bin" },
+      ]),
+    ).toBe("[Gmail]/Bin");
+  });
+
+  it("falls back to a common name, case-insensitively", () => {
+    expect(
+      trashMailboxPath([
+        { name: "INBOX", path: "INBOX" },
+        { name: "TRASH", path: "INBOX.TRASH" },
+      ]),
+    ).toBe("INBOX.TRASH");
+    expect(
+      trashMailboxPath([{ name: "Deleted Items", path: "Deleted Items" }]),
+    ).toBe("Deleted Items");
+    expect(trashMailboxPath([{ name: "Corbeille", path: "Corbeille" }])).toBe(
+      "Corbeille",
+    );
+  });
+
+  it("returns null rather than deleting into Archive, Sent or Junk", () => {
+    // The whole point of Delete being a move is that the message is somewhere
+    // the user can find it again. A guess here puts it where they never look.
+    expect(
+      trashMailboxPath([
+        { name: "Archive", path: "Archive", specialUse: "\\Archive" },
+        { name: "Sent", path: "Sent", specialUse: "\\Sent" },
+        { name: "Junk", path: "Junk", specialUse: "\\Junk" },
+      ]),
+    ).toBeNull();
+  });
+});
+
 /**
  * A hand-rolled ImapFlow double: just the members moveUid touches. This is
  * the only exercise the uidMap/COPYUID handling gets without a live server,
@@ -332,6 +386,7 @@ describe("accountMailboxPaths (the per-account LIST cache)", () => {
   const withArchive = [
     { name: "INBOX", path: "INBOX" },
     { name: "Archive", path: "Archive", specialUse: "\\Archive" },
+    { name: "Trash", path: "Trash", specialUse: "\\Trash" },
     { name: "Drafts", path: "Drafts", specialUse: "\\Drafts" },
   ];
 
@@ -339,7 +394,12 @@ describe("accountMailboxPaths (the per-account LIST cache)", () => {
     const { client, count } = lister(withArchive);
     const a = await accountMailboxPaths(client, "cache-1", { now: 1_000 });
     const b = await accountMailboxPaths(client, "cache-1", { now: 2_000 });
-    expect(a).toEqual({ archive: "Archive", drafts: "Drafts", at: 1_000 });
+    expect(a).toEqual({
+      archive: "Archive",
+      trash: "Trash",
+      drafts: "Drafts",
+      at: 1_000,
+    });
     expect(b).toBe(a);
     expect(count()).toBe(1);
   });
@@ -369,6 +429,22 @@ describe("accountMailboxPaths (the per-account LIST cache)", () => {
     expect(count()).toBe(2);
     // A caller that does not need Archive keeps reading the cached entry.
     await accountMailboxPaths(client, "cache-3", { now: 2 });
+    expect(count()).toBe(2);
+  });
+
+  it("never remembers a missing Trash mailbox either", async () => {
+    // Same rule as Archive above, and the same fix: create the folder and the
+    // very next delete has to see it.
+    const { client, count } = lister([{ name: "INBOX", path: "INBOX" }]);
+    const first = await accountMailboxPaths(client, "cache-4", {
+      now: 0,
+      needTrash: true,
+    });
+    expect(first.trash).toBeNull();
+    await accountMailboxPaths(client, "cache-4", { now: 1, needTrash: true });
+    expect(count()).toBe(2);
+    // A caller that does not need Trash keeps reading the cached entry.
+    await accountMailboxPaths(client, "cache-4", { now: 2 });
     expect(count()).toBe(2);
   });
 });

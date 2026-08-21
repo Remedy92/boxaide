@@ -345,6 +345,30 @@ export function archiveMessage(
   );
 }
 
+/**
+ * Delete one message: a move into the account's Trash mailbox, never an IMAP
+ * expunge. Like archive, the result names the folder it left, which is what
+ * `moveMessage` below needs to put it back.
+ *
+ * 404 means the message had already left that folder. 400 means this account's
+ * server has no Trash mailbox at all; the message text says so.
+ */
+export function trashMessage(
+  accountId: string,
+  messageId: string,
+  ctx: Ctx,
+): Promise<MoveResult> {
+  return request<MoveResult>(
+    `/api/messages/${encodeURIComponent(accountId)}/${encodeURIComponent(messageId)}/trash`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
 /** Move one message to a named mailbox. The undo of an archive posts here. */
 export function moveMessage(
   accountId: string,
@@ -565,9 +589,24 @@ export function renameAgentChat(
   });
 }
 
+/**
+ * Put a chat away, and take it back out. Neither touches its messages: the
+ * pair is a two-way move between the live list and the archive, and Delete is
+ * the only control that destroys anything.
+ */
 export function archiveAgentChat(id: string, ctx: Ctx): Promise<{ archived: boolean }> {
   return request<{ archived: boolean }>(
     `/api/agent/chats/${encodeURIComponent(id)}/archive`,
+    { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+export function unarchiveAgentChat(
+  id: string,
+  ctx: Ctx,
+): Promise<{ archived: boolean }> {
+  return request<{ archived: boolean }>(
+    `/api/agent/chats/${encodeURIComponent(id)}/unarchive`,
     { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
   );
 }

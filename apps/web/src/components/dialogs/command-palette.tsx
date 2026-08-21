@@ -49,7 +49,12 @@ import {
 import { DialogBody } from "@/components/ui/dialog";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useApp } from "@/lib/hooks/use-app-state";
-import { useArchive } from "@/lib/hooks/use-archive";
+import {
+  moveDestinations,
+  useArchive,
+  useMoveTo,
+  useTrash,
+} from "@/lib/hooks/use-move";
 import { useFolders } from "@/lib/hooks/use-folders";
 import { useMarkRead } from "@/lib/hooks/use-mark-read";
 import { useMcpTools } from "@/lib/hooks/use-mcp-tools";
@@ -59,12 +64,14 @@ import { genericMcpSnippet } from "@/lib/agent-config";
 import { rememberCommand } from "@/lib/settings";
 import { copyToClipboard } from "@/lib/utils";
 
-type Page = "root" | "folders" | "remove";
+type Page = "root" | "folders" | "move" | "remove";
 
 /**
- * §6.8. Every command is backed by a real call. Archive is here because it has
- * an endpoint; there is no Delete, Snooze, Label, Star or Undo row, because
- * there is none behind any of those.
+ * §6.8. Every command is backed by a real call. Archive, Delete and Move to
+ * folder are here because each has an endpoint behind it, and all three are
+ * moves: Delete files the message in Trash and never expunges it. There is no
+ * Snooze, Label, Star or Undo row, because there is nothing behind any of
+ * those.
  */
 export function CommandPalette({
   open,
@@ -97,6 +104,8 @@ function Palette({
   const nav = useMessageNavigation();
   const markRead = useMarkRead();
   const archive = useArchive();
+  const trash = useTrash();
+  const moveTo = useMoveTo();
   const mcp = useMcpTools();
   const queryClient = useQueryClient();
   const { theme, setTheme } = useTheme();
@@ -109,9 +118,11 @@ function Palette({
   const pageTitle =
     page === "folders"
       ? `Folders in ${app.account}`
-      : page === "remove"
-        ? "Pick a mailbox to remove"
-        : "All commands";
+      : page === "move"
+        ? "Pick a folder to move this message to"
+        : page === "remove"
+          ? "Pick a mailbox to remove"
+          : "All commands";
 
   const goToPage = (next: Page) => {
     setSearch("");
@@ -120,6 +131,15 @@ function Palette({
 
   const list = accounts.data ?? [];
   const selected = nav.current ?? null;
+
+  /* The move page lists the SELECTED MESSAGE's own mailbox, not `app.account`:
+     that reads "all" in the unified inbox and /api/folders 400s on it, so a
+     picker keyed to it would be empty exactly where mail from several mailboxes
+     is on screen. Asked for only once the page is open. */
+  const moveFolders = useFolders(
+    page === "move" && selected ? selected.accountId : "",
+  );
+  const destinations = moveDestinations(moveFolders.data, selected?.folder);
 
   /** Closing always resets the page and the query — no effect needed. */
   const close = (next: boolean) => {
@@ -219,6 +239,24 @@ function Palette({
       action: () => {
         if (!selected) return;
         archive.mutate({
+          accountId: selected.accountId,
+          messageId: selected.id,
+        });
+      },
+    },
+    {
+      id: "trash",
+      group: "Mail",
+      label: "Delete",
+      icon: <Trash2 />,
+      hint: "#",
+      disabled: !selected,
+      reason: "Open a message first",
+      // A move into the account's Trash mailbox, with the same Undo the
+      // archive toast carries. Nothing is expunged from here or anywhere else.
+      action: () => {
+        if (!selected) return;
+        trash.mutate({
           accountId: selected.accountId,
           messageId: selected.id,
         });
@@ -492,9 +530,11 @@ function Palette({
         placeholder={
           page === "folders"
             ? "Search folders"
-            : page === "remove"
-              ? "Pick a mailbox to remove"
-              : "Search commands, mailboxes, folders"
+            : page === "move"
+              ? "Search folders to move to"
+              : page === "remove"
+                ? "Pick a mailbox to remove"
+                : "Search commands, mailboxes, folders"
         }
       />
       <p role="status" className="sr-only">
@@ -575,12 +615,22 @@ function Palette({
                     )}
 
                     {group === "Mail" && (
-                      <Row
-                        icon={<Search />}
-                        label="Search mail…"
-                        hint="/"
-                        onSelect={() => run("focus-search", app.focusSearch)}
-                      />
+                      <>
+                        <Row
+                          icon={<Folder />}
+                          label="Move to folder"
+                          trailing={<ChevronRight className="size-3.5" />}
+                          disabled={!selected}
+                          reason="Open a message first"
+                          onSelect={() => goToPage("move")}
+                        />
+                        <Row
+                          icon={<Search />}
+                          label="Search mail…"
+                          hint="/"
+                          onSelect={() => run("focus-search", app.focusSearch)}
+                        />
+                      </>
                     )}
                   </CommandGroup>
                 );
@@ -600,6 +650,43 @@ function Palette({
                   }
                 />
               ))}
+            </CommandGroup>
+          )}
+
+          {page === "move" && selected && (
+            <CommandGroup heading="Move this message to">
+              {moveFolders.isPending ? (
+                <Row icon={<Folder />} label="Loading folders…" disabled />
+              ) : moveFolders.isError ? (
+                <Row
+                  icon={<Folder />}
+                  label="Could not load this mailbox’s folders"
+                  disabled
+                />
+              ) : destinations.length === 0 ? (
+                <Row
+                  icon={<Folder />}
+                  label="No other folder on this mailbox"
+                  disabled
+                />
+              ) : (
+                destinations.map((folder) => (
+                  <Row
+                    key={folder.path}
+                    icon={<Folder />}
+                    label={folder.path}
+                    onSelect={() =>
+                      run(`move-${folder.path}`, () =>
+                        moveTo.mutate({
+                          accountId: selected.accountId,
+                          messageId: selected.id,
+                          folder: folder.path,
+                        }),
+                      )
+                    }
+                  />
+                ))
+              )}
             </CommandGroup>
           )}
 
@@ -642,7 +729,8 @@ function Row({
   trailing?: React.ReactNode;
   disabled?: boolean;
   reason?: string;
-  onSelect: () => void;
+  /** Absent on the placeholder rows that only say why a list is empty. */
+  onSelect?: () => void;
 }) {
   return (
     <CommandItem

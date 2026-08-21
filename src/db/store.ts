@@ -111,9 +111,12 @@ export type StoredTurn = {
  * the user's first message, and that message is as likely to name a customer as
  * anything else in this file.
  *
- * `trimmed` is sticky. Once a chat has lost turns to its own limit, the pane
- * says so for the rest of the chat's life — the alternative is a conversation
- * that quietly starts in the middle.
+ * Archived and trimmed are two different things, and a chat can be both.
+ * Archiving is the user putting a conversation away: every turn stays, and
+ * Unarchive brings it back exactly as it was. Trimming is the store enforcing a
+ * limit: the record stays and the messages go. `trimmedAt` is sticky, so a chat
+ * that lost turns says so for the rest of its life. The alternative is a
+ * conversation that quietly starts in the middle.
  */
 export type StoredChat = {
   id: string;
@@ -121,9 +124,10 @@ export type StoredChat = {
   createdAt: string;
   /** Last turn written. What the list sorts on. */
   updatedAt: string;
-  /** Set when the messages were dropped and only this record was kept. */
+  /** Set while the user has this chat put away. Its turns are untouched. */
   archivedAt: string | null;
-  trimmed: boolean;
+  /** When a limit last dropped turns from this chat. Null while none has. */
+  trimmedAt: string | null;
   /** The one chat new turns are written to. Exactly one row has this. */
   active: boolean;
   turns: number;
@@ -229,7 +233,7 @@ type ChatRow = {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
-  trimmed: number;
+  trimmedAt: string | null;
   active: number;
   turns: number;
   bytes: number;
@@ -403,7 +407,7 @@ export class Store {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         archived_at TEXT,
-        trimmed INTEGER NOT NULL DEFAULT 0,
+        trimmed_at TEXT,
         active INTEGER NOT NULL DEFAULT 0,
         title_source TEXT NOT NULL DEFAULT 'auto',
         session_agent TEXT,
@@ -468,6 +472,41 @@ export class Store {
         `ALTER TABLE agent_chats ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0`,
       );
     }
+    // Splitting archiving from trimming. `trimmed` was a sticky flag meaning
+    // "a limit dropped turns from this chat", and archiving used to do exactly
+    // that: it stamped archived_at and then deleted every turn. Those are two
+    // different promises to the user, so they are now two columns with two
+    // meanings: archived_at is the user putting a conversation away with its
+    // messages intact, and trimmed_at is when a limit took the messages.
+    //
+    // Which makes every row archived by the old build a trimmed row: its turns
+    // are already gone, and archived_at is exactly when they went. Those rows
+    // stay archived as well, on purpose. The user has been reading them under
+    // Archived, they hold nothing to come back to, and putting empty
+    // conversations back in the rail would be a worse surprise than leaving
+    // them where they were left. Unarchive is one click away for anyone who
+    // wants the row back in the list.
+    //
+    // Rows the per-chat cap trimmed are dated by updated_at. It is not the
+    // moment the turns went, but it is the closest date the row holds, and the
+    // flag it replaces carried no date at all.
+    //
+    // The old `trimmed` column is left on the table rather than dropped.
+    // Nothing reads it after this, and a failed DROP on a database this
+    // process must open is a mail client that will not start over a column
+    // that costs one byte a row.
+    if (!chatCols.some((c) => c.name === "trimmed_at")) {
+      this.db.transaction(() => {
+        this.db.exec(`ALTER TABLE agent_chats ADD COLUMN trimmed_at TEXT`);
+        this.db.exec(
+          `UPDATE agent_chats SET trimmed_at = archived_at WHERE archived_at IS NOT NULL`,
+        );
+        this.db.exec(
+          `UPDATE agent_chats SET trimmed_at = updated_at
+           WHERE trimmed = 1 AND trimmed_at IS NULL`,
+        );
+      })();
+    }
     if (!turnCols.some((c) => c.name === "chat_id")) {
       this.db.exec(`ALTER TABLE agent_turns ADD COLUMN chat_id TEXT`);
     }
@@ -511,7 +550,7 @@ export class Store {
       .prepare(
         `SELECT c.id, c.title_enc as titleEnc, c.created_at as createdAt,
                 c.updated_at as updatedAt, c.archived_at as archivedAt,
-                c.trimmed, c.active, c.title_source as titleSource,
+                c.trimmed_at as trimmedAt, c.active, c.title_source as titleSource,
                 COUNT(t.seq) as turns,
                 COALESCE(SUM(LENGTH(t.text_enc)), 0) as bytes
          FROM agent_chats c
@@ -529,7 +568,7 @@ export class Store {
       .prepare(
         `SELECT c.id, c.title_enc as titleEnc, c.created_at as createdAt,
                 c.updated_at as updatedAt, c.archived_at as archivedAt,
-                c.trimmed, c.active, c.title_source as titleSource,
+                c.trimmed_at as trimmedAt, c.active, c.title_source as titleSource,
                 COUNT(t.seq) as turns,
                 COALESCE(SUM(LENGTH(t.text_enc)), 0) as bytes
          FROM agent_chats c
@@ -590,14 +629,25 @@ export class Store {
     return this.createChat();
   }
 
+  /**
+   * Opens a chat, archived or not, and brings it back out of the archive.
+   *
+   * Selecting a chat is the user coming back to it, and a conversation
+   * somebody is reading and typing into is not one they have put away. Doing
+   * it here rather than asking callers to unarchive first is what makes it
+   * impossible to end up with an archived chat as the active one, which every
+   * write path assumes cannot happen.
+   */
   selectChat(id: string): boolean {
     const exists = this.db
-      .prepare(`SELECT 1 as hit FROM agent_chats WHERE id = ? AND archived_at IS NULL`)
+      .prepare(`SELECT 1 as hit FROM agent_chats WHERE id = ?`)
       .get(id) as { hit: number } | undefined;
     if (!exists) return false;
     this.db.transaction(() => {
       this.db.prepare(`UPDATE agent_chats SET active = 0`).run();
-      this.db.prepare(`UPDATE agent_chats SET active = 1 WHERE id = ?`).run(id);
+      this.db
+        .prepare(`UPDATE agent_chats SET active = 1, archived_at = NULL WHERE id = ?`)
+        .run(id);
     })();
     return true;
   }
@@ -633,22 +683,29 @@ export class Store {
    * invisible to the browser attached to `boxaide serve`. This is what the
    * poll compares to notice it. `title_enc` earns its place here: encryption
    * uses a fresh nonce every time, so re-encrypting the same title still
-   * changes the string, and a rename cannot slip past unnoticed.
+   * changes the string, and a rename cannot slip past unnoticed. `trimmed_at`
+   * is here for the same reason: a budget sweep in one process deletes turns
+   * without writing one, so nothing else in this string would move.
    */
   chatsFingerprint(): string {
     const rows = this.db
       .prepare(
-        `SELECT id, title_enc as titleEnc, archived_at as archivedAt, active
+        `SELECT id, title_enc as titleEnc, archived_at as archivedAt,
+                trimmed_at as trimmedAt, active
          FROM agent_chats ORDER BY id`,
       )
       .all() as Array<{
       id: string;
       titleEnc: string;
       archivedAt: string | null;
+      trimmedAt: string | null;
       active: number;
     }>;
     return rows
-      .map((r) => `${r.id}:${r.titleEnc.slice(0, 16)}:${r.archivedAt ?? ""}:${r.active}`)
+      .map(
+        (r) =>
+          `${r.id}:${r.titleEnc.slice(0, 16)}:${r.archivedAt ?? ""}:${r.trimmedAt ?? ""}:${r.active}`,
+      )
       .join("|");
   }
 
@@ -673,17 +730,61 @@ export class Store {
   }
 
   /**
+   * Puts a chat away, with every turn it holds.
+   *
+   * Nothing is deleted here, and that is the whole point: the user asked to
+   * tidy their list, not to lose a conversation. The row leaves the live list
+   * and stops being the active one; `unarchiveChat` puts it back, messages and
+   * all. Deleting is a separate control, and it is the only one that destroys.
+   */
+  archiveChat(id: string): boolean {
+    const res = this.db
+      .prepare(
+        `UPDATE agent_chats SET archived_at = ?, active = 0
+         WHERE id = ? AND archived_at IS NULL`,
+      )
+      .run(new Date().toISOString(), id);
+    return res.changes > 0;
+  }
+
+  /**
+   * Puts an archived chat back in the list, exactly as it was.
+   *
+   * The chat is not selected as part of this: the user may be tidying the
+   * archive rather than reading it, and moving the pane they are looking at
+   * would be an answer to a question nobody asked. Opening the chat is what
+   * selects it, and that unarchives it too. See selectChat.
+   */
+  unarchiveChat(id: string): boolean {
+    const res = this.db
+      .prepare(
+        `UPDATE agent_chats SET archived_at = NULL
+         WHERE id = ? AND archived_at IS NOT NULL`,
+      )
+      .run(id);
+    return res.changes > 0;
+  }
+
+  /**
    * Drops a chat's messages and keeps the record: title, dates, and the fact
    * that it existed. This is the step the budget takes on its own, so it is
    * deliberately not deletion — the user's own list does not lose rows to a
    * housekeeping rule they did not run.
+   *
+   * The CLI session goes with the messages, for the same reason `clearTurns`
+   * drops it: a model resuming a transcript this chat no longer holds would
+   * answer the next message from history the store has already thrown away.
+   * The epoch moves with it, so a turn still running in this chat cannot save
+   * the session it started with.
    */
-  archiveChat(id: string): boolean {
+  trimChat(id: string): boolean {
     return this.db.transaction((): boolean => {
       const res = this.db
         .prepare(
-          `UPDATE agent_chats SET archived_at = ?, active = 0
-           WHERE id = ? AND archived_at IS NULL`,
+          `UPDATE agent_chats
+           SET trimmed_at = ?, session_agent = NULL, session_id = NULL,
+               session_epoch = session_epoch + 1
+           WHERE id = ?`,
         )
         .run(new Date().toISOString(), id);
       if (res.changes === 0) return false;
@@ -790,19 +891,26 @@ export class Store {
   }
 
   /**
-   * Live chats holding messages, oldest first. The order the budget archives in.
+   * Chats holding messages the budget may take, in the order it should take
+   * them. Archived first, then oldest first.
+   *
+   * Archived comes first because the user has already said they are done with
+   * those conversations, and the budget taking one of them costs less than it
+   * taking a chat still in the list. Within each group the oldest goes first,
+   * which is the same rule as before.
+   *
    * The active chat is never returned: the budget must not empty the
    * conversation somebody is in the middle of.
    */
-  archiveCandidates(): Array<{ id: string; bytes: number }> {
+  trimCandidates(): Array<{ id: string; bytes: number }> {
     return this.db
       .prepare(
         `SELECT c.id, COALESCE(SUM(LENGTH(t.text_enc)), 0) as bytes
          FROM agent_chats c
          JOIN agent_turns t ON t.chat_id = c.id
-         WHERE c.archived_at IS NULL AND c.active = 0
+         WHERE c.active = 0
          GROUP BY c.id
-         ORDER BY c.updated_at ASC`,
+         ORDER BY (c.archived_at IS NULL) ASC, c.updated_at ASC`,
       )
       .all() as Array<{ id: string; bytes: number }>;
   }
@@ -814,7 +922,7 @@ export class Store {
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       archivedAt: row.archivedAt,
-      trimmed: row.trimmed === 1,
+      trimmedAt: row.trimmedAt,
       active: row.active === 1,
       turns: row.turns,
       bytes: row.bytes,
@@ -996,6 +1104,12 @@ export class Store {
    *
    * Stale messages are retired first, in the same transaction, so a claim can
    * never hand over one this store would refuse to keep queued.
+   *
+   * A message in an archived chat is not handed over either. Archiving keeps
+   * the turns, so an unanswered question sits there undelivered, and an agent
+   * started later would otherwise work a conversation the rail does not show.
+   * It is still queued: opening the chat unarchives it, and the claim after
+   * that picks the message up.
    */
   claimNextUserTurn(activeChatId?: string | null): StoredTurn | null {
     const claim = this.db.transaction((): StoredTurn | null => {
@@ -1006,6 +1120,9 @@ export class Store {
                   reply_to as replyTo, COALESCE(delivery_count, 0) as deliveryCount
            FROM agent_turns
            WHERE role = 'user' AND delivered = 0
+             AND chat_id NOT IN (
+               SELECT id FROM agent_chats WHERE archived_at IS NOT NULL
+             )
            ORDER BY (chat_id IS NOT NULL AND chat_id = ?) DESC, seq ASC
            LIMIT 1`,
         )
@@ -1100,7 +1217,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE agent_chats
-         SET trimmed = 0, session_agent = NULL, session_id = NULL,
+         SET trimmed_at = NULL, session_agent = NULL, session_id = NULL,
              session_epoch = session_epoch + 1
          WHERE id = ?`,
       )
@@ -1123,7 +1240,9 @@ export class Store {
       )
       .run({ chatId, keep: Math.max(keep, 1) });
     if (res.changes === 0) return false;
-    this.db.prepare(`UPDATE agent_chats SET trimmed = 1 WHERE id = ?`).run(chatId);
+    this.db
+      .prepare(`UPDATE agent_chats SET trimmed_at = ? WHERE id = ?`)
+      .run(new Date().toISOString(), chatId);
     return true;
   }
 

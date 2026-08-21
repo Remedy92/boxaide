@@ -336,6 +336,24 @@ export class MailService {
     return result;
   }
 
+  /**
+   * File one message into the account's Trash mailbox.
+   *
+   * Delete means this and nothing else: no \Deleted flag and no expunge, so
+   * the message is still there to be moved back and `fromFolder` in the result
+   * says where back is. A server with no Trash mailbox throws, for the same
+   * reason a missing Archive mailbox does.
+   */
+  async trashMessage(
+    accountRef: string,
+    messageId: string,
+  ): Promise<MoveResult> {
+    const account = this.resolve(accountRef);
+    const result = await this.provider.trashMessage(account, messageId);
+    this.applyMove(account.id, messageId, result);
+    return result;
+  }
+
   /** Move one message to a named mailbox. The undo of an archive goes here. */
   async moveMessage(
     accountRef: string,

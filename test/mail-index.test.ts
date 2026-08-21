@@ -406,6 +406,34 @@ describe("local mail index", () => {
     expect(state.dirty).toBe(true);
   });
 
+  it("drops a deleted row from the index and fabricates no Trash row", async () => {
+    const before = await mail.listMessages("personal", { limit: 20 });
+    const target = before.messages.find((m) => m.subject === "Already read")!;
+    const existsBefore = mail.index.getState(accountId, "INBOX")!.exists;
+
+    const result = await mail.trashMessage("personal", target.id);
+    expect(result).toMatchObject({ moved: true, toFolder: "Trash" });
+
+    // Delete goes through the same index bookkeeping as archive, because on
+    // the server it is the same operation: the row leaves INBOX at once, so
+    // the list cannot paint a message that is no longer there.
+    expect(mail.index.count(accountId, "INBOX")).toBe(existsBefore - 1);
+    const state = mail.index.getState(accountId, "INBOX")!;
+    expect(state.exists).toBe(existsBefore - 1);
+    expect(state.dirty).toBe(true);
+    // Nothing is fabricated into Trash: only the server knows the uid the
+    // message has there, so that mailbox stays unknown until it is listed.
+    expect(mail.index.getState(accountId, "Trash")).toBeNull();
+  });
+
+  it("does not touch the index when the delete moved nothing", async () => {
+    await mail.listMessages("personal", { limit: 20 });
+    const countBefore = mail.index.count(accountId, "INBOX");
+    const result = await mail.trashMessage("personal", `${accountId}:9999`);
+    expect(result.moved).toBe(false);
+    expect(mail.index.count(accountId, "INBOX")).toBe(countBefore);
+  });
+
   it("does not touch the index when the archive moved nothing", async () => {
     await mail.listMessages("personal", { limit: 20 });
     const countBefore = mail.index.count(accountId, "INBOX");

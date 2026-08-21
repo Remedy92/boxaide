@@ -58,6 +58,20 @@ export type ComposeSeed = {
   outboxId?: string;
 };
 
+/**
+ * Text the agent composer should open with, from "Start conversation about this
+ * email". Nonce for the same reason ComposeSeed carries one: two rows in a row
+ * can seed the same sentence, and the composer has to notice the second.
+ *
+ * Nothing is sent. The user finishes the sentence and presses Enter themselves,
+ * because what they want to ask about a message is not something this app gets
+ * to guess.
+ */
+export type AgentSeed = {
+  nonce: number;
+  text: string;
+};
+
 export type DialogName =
   | "connect"
   | "compose"
@@ -261,6 +275,12 @@ type AppStateValue = {
   /* composer */
   composeSeed: ComposeSeed | null;
   openCompose: (seed?: Partial<ComposeSeed>) => void;
+  /** Non-null until the agent composer has taken it. */
+  agentSeed: AgentSeed | null;
+  /** Prefills the agent composer and switches to the Agent view. Sends nothing. */
+  seedAgentComposer: (text: string) => void;
+  /** The composer says it has the text, so a later remount cannot re-apply it. */
+  clearAgentSeed: () => void;
   /** Keyboard r / a / f: ask the reader to expand its inline composer. */
   replyRequest: ReplyRequest | null;
   requestReply: (mode: Exclude<ComposeMode, "new">) => void;
@@ -424,6 +444,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [settingsFocus, setSettingsFocus] = React.useState<SettingsFocus>(null);
   const [settingsAutoTest, setSettingsAutoTest] = React.useState<number | null>(null);
   const [composeSeed, setComposeSeed] = React.useState<ComposeSeed | null>(null);
+  const [agentSeed, setAgentSeed] = React.useState<AgentSeed | null>(null);
   const [replyRequest, setReplyRequest] = React.useState<ReplyRequest | null>(null);
   const [narrow, setNarrow] = React.useState(false);
   const [medium, setMedium] = React.useState(false);
@@ -599,13 +620,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     clearSelectionRefForView.current = clearSelection;
   }, [clearSelection]);
 
-  const viewRef = React.useRef(view);
-  React.useEffect(() => {
-    viewRef.current = view;
-  }, [view]);
-
-  /* Read through a ref for the same reason viewRef exists: setView must stay
-     stable, and it is the one caller. */
+  /* Read through a ref for the same reason shownViewRef below does: setView
+     must stay stable, and it is the one caller. */
   const crmRef = React.useRef(settings.crm);
   React.useEffect(() => {
     crmRef.current = settings.crm;
@@ -616,13 +632,46 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     () => {},
   );
 
-  /* Settings owns the hash while it is open, so leaving it is a hash change
-     even when the view underneath never moved. Read through a ref for the
-     same reason viewRef exists: setView must stay stable. */
-  const settingsRef = React.useRef(settingsSection);
+  /* The pane the shell is actually rendering, which is not always `view`: a
+     settings route and an open message each outrank it, and both can be set
+     while `view` still holds whatever the user was on before. setView compares
+     against this rather than the raw state, because the row a person presses
+     is a navigation away from what they can SEE. Comparing against `view`
+     swallowed two of those: leaving Settings for the view behind it, and
+     leaving a message the menu-bar popover opened in a window that never left
+     the agent conversation. A ref rather than a dependency, so setView stays
+     stable for the many components that hold it. */
+  const shownViewRef = React.useRef(view);
   React.useEffect(() => {
-    settingsRef.current = settingsSection;
-  }, [settingsSection]);
+    shownViewRef.current = settingsSection
+      ? "settings"
+      : selected
+        ? "mail"
+        : view;
+  }, [settingsSection, selected, view]);
+
+  /* A message opened from outside the mail pane commits the mail view. The
+     shown view is derived below, which is what paints the Reader on the first
+     frame, but on its own that left the raw state where it was: after a deep
+     link from the menu-bar popover, `view` still read "agent", the Inbox row
+     and `g i` early-returned against a pane already on screen, and closing the
+     message dropped the user back into the agent conversation. Writing the
+     state makes the link behave like a click on the row: what is underneath
+     the message is the list it came from.
+
+     Only when a selection ARRIVES, not whenever one is set: at phone width
+     clearSelection is a history.back() that lands a frame later, so a render
+     where the Agent row has moved `view` while the old hash is still up would
+     otherwise be pulled straight back to mail. Set during render, the
+     documented way to adjust state to a value from outside: React re-renders
+     at once, before any child commits on the stale view. */
+  const [seenSelection, setSeenSelection] = React.useState<Selection | null>(
+    null,
+  );
+  if (selected !== seenSelection) {
+    setSeenSelection(selected);
+    if (selected && !seenSelection && view !== "mail") setViewState("mail");
+  }
 
   const setView = React.useCallback((next: View) => {
     // Settings is a route, not a view state — see openSettings.
@@ -635,11 +684,11 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     // held keybinding, another tab's palette — and the answer is to do nothing
     // rather than to show a view the rail cannot get back to.
     if (!crmRef.current && isCrmView(next)) return;
-    // Standing in Settings, the row the user pressed may be the view behind
-    // it. That is a navigation — the early return below would swallow it and
-    // leave Settings on screen.
-    if (viewRef.current === next && settingsRef.current === null) return;
-    viewRef.current = next;
+    // Nothing to do only when the pane on screen is already the one asked for.
+    if (shownViewRef.current === next) return;
+    /* Ahead of the effect on purpose: a second call in the same tick, which a
+       held key produces, has to see the move that is already committed. */
+    shownViewRef.current = next;
     clearSelectionRefForView.current();
     // The contact pane is the People view's right column and nothing else's.
     // Leaving it set would restore a stale contact on the way back in.
@@ -832,6 +881,19 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     setDialog("compose");
   }, []);
 
+  /* The Agent view is one pane and it unmounts when the user leaves it, so the
+     seed is cleared by the composer that took it rather than left standing.
+     Otherwise coming back to the conversation an hour later would prefill the
+     same sentence about a message the user has long since dealt with. */
+  const seedAgentComposer = React.useCallback(
+    (text: string) => {
+      setAgentSeed({ nonce: Date.now(), text });
+      setView("agent");
+    },
+    [setView],
+  );
+  const clearAgentSeed = React.useCallback(() => setAgentSeed(null), []);
+
   /* ---- first run ------------------------------------------------------ */
   /* Gated on mount so the prerendered HTML — which reads the DEFAULT settings,
      where `onboarded` is false — never paints the wizard over a browser that is
@@ -920,8 +982,13 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       query,
       searching: query.trim().length > 0,
       /* The settings route wins while it is set. The view underneath is kept,
-         not cleared, so leaving Settings returns to the pane the user left. */
-      view: settingsSection ? "settings" : view,
+         not cleared, so leaving Settings returns to the pane the user left.
+         An open message wins for the same reason and in the same way: the
+         menu-bar popover raises the window on the row that was clicked, and
+         the app starts on the agent conversation, which has no reading pane
+         to show it in. The effect above then commits the mail view, so
+         closing the message lands on the list. */
+      view: settingsSection ? "settings" : selected ? "mail" : view,
       setView,
       /* Gated on mount for the same reason the wizard is: the hydration render
          reads DEFAULT_SETTINGS, where `crm` is true, so passing settings.crm
@@ -977,6 +1044,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       finishWizard,
       composeSeed,
       openCompose,
+      agentSeed,
+      seedAgentComposer,
+      clearAgentSeed,
       replyRequest,
       requestReply,
       clearReplyRequest,
@@ -1038,6 +1108,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       finishWizard,
       composeSeed,
       openCompose,
+      agentSeed,
+      seedAgentComposer,
+      clearAgentSeed,
       replyRequest,
       requestReply,
       clearReplyRequest,
