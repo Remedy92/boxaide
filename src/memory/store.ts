@@ -8,6 +8,20 @@
  * through the REST routes (src/memory/routes.ts). Agents write with their own
  * native file tools, not through here.
  *
+ * Every path here is opened as if the agent were hostile, because the agent
+ * writes these files and this server reads them. A note is not only content:
+ * it is a name the agent chose in a directory the agent owns. Left to plain
+ * `readFile`, `memory/company.md` could be a symlink at `../../boxaide/
+ * bearer.token`, and this process — which is NOT sandboxed and holds the
+ * master credential's own filesystem rights — would dereference it and paste
+ * the result into the next prompt. The sandbox cannot stop that: the read is
+ * ours, made on the agent's behalf, which is the whole shape of a confused
+ * deputy. So: O_NOFOLLOW on every open, a regular-file check on the handle
+ * itself, symlinks skipped rather than listed, and the memory directory
+ * proven to be a real directory that still sits inside the agent subtree
+ * before any of it. Name validation answers a different question and never
+ * this one — `MEMORY.md` is a perfectly valid name for a symlink.
+ *
  * The files are deliberately PLAINTEXT, which is safe for one reason worth
  * restating wherever they are touched: they live inside the agent-owned
  * subtree (`<agentWorkDir>/memory/`, see src/agent/paths.ts), outside the data
@@ -17,10 +31,20 @@
  * into the data directory, and no encrypted variant is wanted — an agent that
  * cannot read its own notes has none.
  */
-import { existsSync, readFileSync, statSync, type Stats } from "node:fs";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { agentWorkDir } from "../agent/paths.js";
+import {
+  closeSync,
+  writeFileSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  type Stats,
+} from "node:fs";
+import { mkdir, readdir } from "node:fs/promises";
+import { join, relative, isAbsolute } from "node:path";
+import { agentRoot, agentWorkDir } from "../agent/paths.js";
 
 /** The index file an agent keeps at the root of its memory directory. */
 export const MEMORY_INDEX = "MEMORY.md";
@@ -61,11 +85,94 @@ function assertName(name: string): void {
 }
 
 /**
+ * The memory directory, proven safe to read from, or null when there is not
+ * one yet.
+ *
+ * Two things are checked and both are about the agent owning this subtree.
+ * `lstat` rather than `stat`, so a `memory` symlink is refused instead of
+ * followed — pointing it at the data directory would make every note read a
+ * read of whatever sits there. And the resolved path must still be inside the
+ * agent root, which catches the same trick played one level up, on `workdir`.
+ * The root itself is the anchor because its parent is not writable by any
+ * launch: replacing it would take rights the sandbox does not grant.
+ *
+ * Real paths on both sides of the comparison, because macOS reaches its
+ * temporary directory through a symlink and an install rooted there is the
+ * normal case in tests.
+ */
+function safeMemoryDir(dataDir: string): string | null {
+  const dir = memoryDir(dataDir);
+  let stats: Stats;
+  try {
+    stats = lstatSync(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  if (!stats.isDirectory()) {
+    throw new Error("memory directory is not a directory");
+  }
+  const real = realpathSync(dir);
+  const root = realpathSync(agentRoot(dataDir));
+  const step = relative(root, real);
+  if (step.startsWith("..") || isAbsolute(step)) {
+    throw new Error("memory directory escapes the agent subtree");
+  }
+  return real;
+}
+
+/**
+ * One note's text, read through a handle that refuses to follow a symlink and
+ * is checked to be a regular file after opening — the check has to be on the
+ * handle, not on the path, or it answers about a file that was there a moment
+ * ago. Null for a note that is not there; a symlink or a device or a
+ * directory throws, because those are not absent, they are planted.
+ */
+function readNoteAt(dir: string, name: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(
+      join(dir, name),
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+    );
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    // ELOOP is what O_NOFOLLOW answers on a symlink. Say what it means.
+    if (code === "ELOOP" || code === "EMLINK") {
+      throw new Error(`memory file is a symlink, refusing to read: ${name}`);
+    }
+    throw err;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) {
+      throw new Error(`memory file is not a regular file: ${name}`);
+    }
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * True when MEMORY.md exists — i.e. the agent has already built its notes.
- * Sync because prompt building at launch is sync and asks exactly this.
+ * Sync because prompt building at launch is sync and asks exactly this. A
+ * symlink standing in for the index does not count as having notes; the read
+ * that follows would refuse it anyway.
  */
 export function hasMemoryIndex(dataDir: string): boolean {
-  return existsSync(join(memoryDir(dataDir), MEMORY_INDEX));
+  let dir: string | null;
+  try {
+    dir = safeMemoryDir(dataDir);
+  } catch {
+    return false;
+  }
+  if (!dir) return false;
+  try {
+    return lstatSync(join(dir, MEMORY_INDEX)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -78,13 +185,7 @@ export async function readMemoryFile(
   dataDir: string,
   name: string,
 ): Promise<string | null> {
-  assertName(name);
-  try {
-    return await readFile(join(memoryDir(dataDir), name), "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
+  return readMemoryFileSync(dataDir, name);
 }
 
 /**
@@ -92,12 +193,9 @@ export async function readMemoryFile(
  */
 export function readMemoryFileSync(dataDir: string, name: string): string | null {
   assertName(name);
-  try {
-    return readFileSync(join(memoryDir(dataDir), name), "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
+  const dir = safeMemoryDir(dataDir);
+  if (!dir) return null;
+  return readNoteAt(dir, name);
 }
 
 /**
@@ -119,9 +217,37 @@ export async function writeMemoryFile(
       `memory file too large: ${bytes} bytes (max ${MAX_MEMORY_FILE_BYTES})`,
     );
   }
-  const dir = memoryDir(dataDir);
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  await writeFile(join(dir, name), content, { encoding: "utf8", mode: 0o600 });
+  await mkdir(memoryDir(dataDir), { recursive: true, mode: 0o700 });
+  const dir = safeMemoryDir(dataDir);
+  if (!dir) throw new Error("memory directory could not be created");
+  // O_NOFOLLOW on the write too, and for the worse half of the same trick: a
+  // symlink here would have this process truncate and overwrite whatever it
+  // names, with the server's rights, on a person pressing Save.
+  let fd: number;
+  try {
+    fd = openSync(
+      join(dir, name),
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_TRUNC |
+        fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ELOOP" || code === "EMLINK") {
+      throw new Error(`memory file is a symlink, refusing to write: ${name}`);
+    }
+    throw err;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) {
+      throw new Error(`memory file is not a regular file: ${name}`);
+    }
+    writeFileSync(fd, content, "utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export type MemoryFileEntry = {
@@ -140,7 +266,8 @@ export type MemoryFileEntry = {
 export async function listMemoryFiles(
   dataDir: string,
 ): Promise<MemoryFileEntry[]> {
-  const dir = memoryDir(dataDir);
+  const dir = safeMemoryDir(dataDir);
+  if (!dir) return [];
   let entries: string[];
   try {
     entries = await readdir(dir);
@@ -154,7 +281,11 @@ export async function listMemoryFiles(
     const path = join(dir, entry);
     let stats: Stats;
     try {
-      stats = statSync(path);
+      // lstat: a symlink is skipped rather than described by whatever it
+      // points at. Offering it as a row would invite a click the reader then
+      // refuses, and listing its target's size would leak that the target is
+      // there at all.
+      stats = lstatSync(path);
     } catch {
       continue; // Removed between the readdir and the stat.
     }

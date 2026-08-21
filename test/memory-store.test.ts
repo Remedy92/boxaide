@@ -7,7 +7,9 @@
 import {
   existsSync,
   mkdirSync,
+  readFileSync,
   statSync,
+  symlinkSync,
   writeFileSync,
   mkdtempSync,
   rmSync,
@@ -244,5 +246,91 @@ describe("listMemoryFiles", () => {
 
     const files = await listMemoryFiles(dataDir);
     expect(files.map((file) => file.name)).toEqual(["keep.md"]);
+  });
+});
+
+/**
+ * The confused-deputy suite.
+ *
+ * The agent writes these files; this server reads them, unsandboxed, with
+ * rights the agent does not have. So a note is not only content — it is a
+ * name the agent chose, and a name can be a symlink to `bearer.token`. Name
+ * validation cannot answer that: `MEMORY.md` is a perfectly valid name for
+ * one. These are about what the open does, not what the name looks like.
+ */
+describe("a note that is really a symlink", () => {
+  /** A secret outside the agent subtree, as bearer.token is. */
+  function plantSecret(dataDir: string): string {
+    const path = join(dataDir, "bearer.token");
+    writeFileSync(path, "SUPER-SECRET-TOKEN\n");
+    return path;
+  }
+
+  it("refuses to read one, rather than dereferencing it", async () => {
+    const dataDir = tempDataDir();
+    const secret = plantSecret(dataDir);
+    mkdirSync(memoryDir(dataDir), { recursive: true });
+    symlinkSync(secret, join(memoryDir(dataDir), "company.md"));
+
+    expect(() => readMemoryFileSync(dataDir, "company.md")).toThrow(/symlink/);
+    await expect(readMemoryFile(dataDir, "company.md")).rejects.toThrow(
+      /symlink/,
+    );
+  });
+
+  it("refuses the index too, and does not count it as having notes", () => {
+    const dataDir = tempDataDir();
+    const secret = plantSecret(dataDir);
+    mkdirSync(memoryDir(dataDir), { recursive: true });
+    symlinkSync(secret, join(memoryDir(dataDir), MEMORY_INDEX));
+
+    expect(hasMemoryIndex(dataDir)).toBe(false);
+    expect(() => readMemoryFileSync(dataDir, MEMORY_INDEX)).toThrow(/symlink/);
+  });
+
+  it("never lists one", async () => {
+    const dataDir = tempDataDir();
+    const secret = plantSecret(dataDir);
+    await writeMemoryFile(dataDir, "real.md", "genuine\n");
+    symlinkSync(secret, join(memoryDir(dataDir), "planted.md"));
+
+    const files = await listMemoryFiles(dataDir);
+    expect(files.map((file) => file.name)).toEqual(["real.md"]);
+  });
+
+  /* The worse half: a save would otherwise truncate whatever it points at. */
+  it("refuses to write through one", async () => {
+    const dataDir = tempDataDir();
+    const secret = plantSecret(dataDir);
+    mkdirSync(memoryDir(dataDir), { recursive: true });
+    symlinkSync(secret, join(memoryDir(dataDir), "voice.md"));
+
+    await expect(
+      writeMemoryFile(dataDir, "voice.md", "overwritten\n"),
+    ).rejects.toThrow(/symlink/);
+    expect(readFileSync(secret, "utf8")).toBe("SUPER-SECRET-TOKEN\n");
+  });
+
+  it("refuses a memory directory that is itself a symlink", async () => {
+    const dataDir = tempDataDir();
+    plantSecret(dataDir);
+    mkdirSync(join(dataDir + "-agents", "workdir"), { recursive: true });
+    // The same trick one level up: point the whole directory at the secrets.
+    symlinkSync(dataDir, memoryDir(dataDir));
+
+    expect(() => readMemoryFileSync(dataDir, "company.md")).toThrow(
+      /not a directory|escapes/,
+    );
+    await expect(listMemoryFiles(dataDir)).rejects.toThrow(
+      /not a directory|escapes/,
+    );
+  });
+
+  it("refuses a note that is a directory", async () => {
+    const dataDir = tempDataDir();
+    mkdirSync(join(memoryDir(dataDir), "company.md"), { recursive: true });
+    expect(() => readMemoryFileSync(dataDir, "company.md")).toThrow(
+      /not a regular file|EISDIR/,
+    );
   });
 });

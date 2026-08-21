@@ -660,6 +660,16 @@ joined onto a filesystem path — plus `MEMORY.md` itself, which the listing put
 first and a person opens first. Listing and reading answer that same question,
 so no row is offered that the reader would refuse.
 
+Names answer nothing about what a name POINTS at, and the agent writes these
+files while this server reads them, unsandboxed, with rights the agent does not
+have — a `company.md` symlinked at `bearer.token` would otherwise be read by us
+and pasted into the next prompt, and a save through one would truncate whatever
+it named. So every open is `O_NOFOLLOW` with a regular-file check on the handle
+itself, symlinks are skipped by the listing rather than described by their
+target, and the memory directory is proven to be a real directory still inside
+the agent root before any of it (`src/memory/store.ts`). This is the one place
+the sandbox cannot help: the read is ours, made on the agent's behalf.
+
 ## REST surface (all inside `createApi` after auth)
 
 CRM: GET/POST `/api/crm/contacts`, GET/DELETE `/api/crm/contacts/:id`,
