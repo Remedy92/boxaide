@@ -742,14 +742,15 @@ function showPopover(url) {
       popover = null;
     });
 
-    // The page's "Open Boxaide" button and every mail row navigate to the
-    // server's root. That navigation IS the popover's exit: catch it, raise
-    // the real window, keep the popover parked on /tray/ for next time.
+    // The page's "Open Boxaide" button navigates to the server's root and a
+    // mail row to that message's hash. That navigation IS the popover's exit:
+    // catch it, raise the real window on the address it named, keep the
+    // popover parked on /tray/ for next time.
     popover.webContents.on("will-navigate", (event, target) => {
       event.preventDefault();
       if (originOf(target) === origin) {
         popover?.hide();
-        openMainWindow();
+        openMainWindow(appHashOf(target));
         return;
       }
       openExternal(target);
@@ -956,6 +957,22 @@ function openExternal(target) {
   const protocol = protocolOf(target);
   if (protocol !== "http:" && protocol !== "https:") return;
   void shell.openExternal(target);
+}
+
+/**
+ * The hash a tray navigation asked for, empty unless it names a page inside
+ * the app. Every route the app has starts `#/`, so the test also keeps a
+ * fragment that is anything else out of the main window.
+ * @param {string} value
+ * @returns {string}
+ */
+function appHashOf(value) {
+  try {
+    const { hash } = new URL(value);
+    return hash.startsWith("#/") ? hash : "";
+  } catch {
+    return "";
+  }
 }
 
 /** @param {string} value */

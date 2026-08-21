@@ -599,13 +599,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     clearSelectionRefForView.current = clearSelection;
   }, [clearSelection]);
 
-  const viewRef = React.useRef(view);
-  React.useEffect(() => {
-    viewRef.current = view;
-  }, [view]);
-
-  /* Read through a ref for the same reason viewRef exists: setView must stay
-     stable, and it is the one caller. */
+  /* Read through a ref for the same reason shownViewRef below does: setView
+     must stay stable, and it is the one caller. */
   const crmRef = React.useRef(settings.crm);
   React.useEffect(() => {
     crmRef.current = settings.crm;
@@ -616,13 +611,23 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     () => {},
   );
 
-  /* Settings owns the hash while it is open, so leaving it is a hash change
-     even when the view underneath never moved. Read through a ref for the
-     same reason viewRef exists: setView must stay stable. */
-  const settingsRef = React.useRef(settingsSection);
+  /* The pane the shell is actually rendering, which is not always `view`: a
+     settings route and an open message each outrank it, and both can be set
+     while `view` still holds whatever the user was on before. setView compares
+     against this rather than the raw state, because the row a person presses
+     is a navigation away from what they can SEE. Comparing against `view`
+     swallowed two of those: leaving Settings for the view behind it, and
+     leaving a message the menu-bar popover opened in a window that never left
+     the agent conversation. A ref rather than a dependency, so setView stays
+     stable for the many components that hold it. */
+  const shownViewRef = React.useRef(view);
   React.useEffect(() => {
-    settingsRef.current = settingsSection;
-  }, [settingsSection]);
+    shownViewRef.current = settingsSection
+      ? "settings"
+      : selected
+        ? "mail"
+        : view;
+  }, [settingsSection, selected, view]);
 
   const setView = React.useCallback((next: View) => {
     // Settings is a route, not a view state — see openSettings.
@@ -635,11 +640,11 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     // held keybinding, another tab's palette — and the answer is to do nothing
     // rather than to show a view the rail cannot get back to.
     if (!crmRef.current && isCrmView(next)) return;
-    // Standing in Settings, the row the user pressed may be the view behind
-    // it. That is a navigation — the early return below would swallow it and
-    // leave Settings on screen.
-    if (viewRef.current === next && settingsRef.current === null) return;
-    viewRef.current = next;
+    // Nothing to do only when the pane on screen is already the one asked for.
+    if (shownViewRef.current === next) return;
+    /* Ahead of the effect on purpose: a second call in the same tick, which a
+       held key produces, has to see the move that is already committed. */
+    shownViewRef.current = next;
     clearSelectionRefForView.current();
     // The contact pane is the People view's right column and nothing else's.
     // Leaving it set would restore a stale contact on the way back in.
@@ -920,8 +925,12 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       query,
       searching: query.trim().length > 0,
       /* The settings route wins while it is set. The view underneath is kept,
-         not cleared, so leaving Settings returns to the pane the user left. */
-      view: settingsSection ? "settings" : view,
+         not cleared, so leaving Settings returns to the pane the user left.
+         An open message wins for the same reason and in the same way: the
+         menu-bar popover raises the window on the row that was clicked, and
+         the app starts on the agent conversation, which has no reading pane
+         to show it in. Closing the message returns to the view underneath. */
+      view: settingsSection ? "settings" : selected ? "mail" : view,
       setView,
       /* Gated on mount for the same reason the wizard is: the hydration render
          reads DEFAULT_SETTINGS, where `crm` is true, so passing settings.crm
