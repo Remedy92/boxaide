@@ -1172,6 +1172,61 @@ exec /bin/sleep 60
     launcher.close();
   });
 
+  /**
+   * A scheduled run loses the network: everything but loopback is denied by
+   * the sandbox, and its way out is the allowlisting proxy. macOS only, like
+   * every other confinement assertion — off macOS a workspace launch is
+   * refused outright, which test/agent-sandbox.test.ts covers.
+   */
+  it.skipIf(process.platform !== "darwin")(
+    "points a confined run at its own loopback proxy",
+    async () => {
+      // The fake CLI reports the two things this is about: whether it was
+      // handed a proxy, and whether it can still reach Boxaide directly.
+      const bin = fakeBinDir(
+        "fake-agent",
+        '#!/bin/sh\necho "proxy=$HTTPS_PROXY"\necho "direct=$NO_PROXY"\n',
+      );
+      const launcher = new AgentLauncher(
+        { ...CTX, access: "workspace" as const },
+        specs({ runArgs: () => [] }),
+        { PATH: "" },
+        [bin],
+      );
+      const result = await launcher.runOnce({
+        runId: "r-net",
+        prompt: "do the thing",
+        closeGraceMs: 200,
+      });
+      launcher.close();
+      expect(result.log).toMatch(/proxy=http:\/\/127\.0\.0\.1:\d+/);
+      expect(result.log).toContain("direct=127.0.0.1,localhost,::1");
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "leaves the network alone when the operator turned the boundary off",
+    async () => {
+      const bin = fakeBinDir(
+        "fake-agent",
+        '#!/bin/sh\necho "proxy=$HTTPS_PROXY"\n',
+      );
+      const launcher = new AgentLauncher(
+        { ...CTX, access: "workspace" as const },
+        specs({ runArgs: () => [] }),
+        { PATH: "", BOXAIDE_RUN_NETWORK: "open" },
+        [bin],
+      );
+      const result = await launcher.runOnce({
+        runId: "r-net-open",
+        prompt: "do the thing",
+        closeGraceMs: 200,
+      });
+      launcher.close();
+      expect(result.log).toContain("proxy=\n");
+    },
+  );
+
   it("asks the chat agent for its event stream, and a run for plain text", () => {
     // The stream is how the Agent pane knows a launched CLI is still working
     // while it does its own file and shell work, calling nothing here.

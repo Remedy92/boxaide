@@ -67,6 +67,12 @@ import {
   OUTREACH_CHAIN,
   OUTREACH_CHAIN_ONE_LINE,
 } from "./guidance.js";
+import {
+  allowedHostsFor,
+  egressDisabled,
+  EgressProxy,
+  egressEnv,
+} from "./egress.js";
 import { chatMemoryBlock, runMemoryBlock } from "./memory-context.js";
 import { OpenCodeDriver, serveBaseUrl } from "./opencode-driver.js";
 import {
@@ -80,6 +86,7 @@ import {
 import { scopeToolNames, type ScopeProfile } from "../mcp/scope.js";
 import {
   confineCommand,
+  type NetworkAccess,
   plainCommand,
   resolveAccess,
   type AgentAccess,
@@ -1821,6 +1828,18 @@ export const ONESHOT_KILLED_NOTE =
   "[boxaide] killed: the run was stopped before it finished.";
 
 /**
+ * What a confined run's refused connections read as in its log.
+ *
+ * Two audiences, one line. For a person whose automation broke, it names the
+ * host their CLI wanted so BOXAIDE_RUN_NETWORK_ALLOW can answer it. For a
+ * person reading a run that worked, it is the record that something in there
+ * tried to reach an address nobody listed.
+ */
+export function egressRefusedNote(hosts: readonly string[]): string {
+  return `[boxaide] network: refused ${hosts.join(", ")} — a scheduled run reaches its model provider and Boxaide, nothing else. Add a host with BOXAIDE_RUN_NETWORK_ALLOW if the CLI needs it.`;
+}
+
+/**
  * The tail is what gets kept, not the head: a run that failed says why in its
  * last lines, and the interesting part of a run that succeeded is the summary
  * it prints at the end.
@@ -2392,6 +2411,8 @@ export class AgentLauncher {
     let child: ChildProcess;
     let render: RenderRunLine | undefined;
     let workDir: string;
+    /** This run's way out, when it is confined. Closed by finish(). */
+    let egress: EgressProxy | null = null;
     try {
       const spec = this.resolveRunSpec(opts.agentId);
       const bin = this.resolveBin(spec.bin);
@@ -2430,23 +2451,39 @@ export class AgentLauncher {
         : `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
 
       // A scheduled run is the case this matters most for: nobody is watching
-      // it, and the mail it reads was written by strangers.
+      // it, and the mail it reads was written by strangers. So it is the one
+      // launch that also loses the network: everything but loopback is denied
+      // and its way out is the allowlisting proxy below (src/agent/egress.ts).
+      // An unconfined install keeps what it had — with no sandbox there is
+      // nothing holding the run to the proxy, and a boundary that can be
+      // stepped around should not be claimed.
+      const access = resolveAccess(this.ctx.access ?? "workspace").access;
+      const confined = access !== "full" && !egressDisabled(this.env);
+      if (confined) {
+        egress = new EgressProxy(allowedHostsFor(spec.id, this.env));
+        await egress.start();
+      }
       const command = this.confine(
         spec,
         bin,
         workDir,
-        resolveAccess(this.ctx.access ?? "workspace").access,
+        access,
+        confined ? "loopback" : "open",
       );
       child = spawn(command.bin, [...command.prefix, ...spec.runArgs!(ctx, prompt, workDir, model)], {
         cwd: workDir,
-        env: this.childEnvFor(spec, workDir, ctx),
+        env: {
+          ...this.childEnvFor(spec, workDir, ctx),
+          ...(egress ? egressEnv(egress.url()) : {}),
+        },
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (err) {
       // No child, so nothing else will ever release this reservation — or the
-      // credential it was about to use.
+      // credential it was about to use, or the door the proxy is holding open.
       this.starting.delete(opts.runId);
       grant?.revoke();
+      egress?.stop();
       throw err;
     }
 
@@ -2541,8 +2578,14 @@ export class AgentLauncher {
         // best evidence of what the run was doing when it died.
         split?.flush();
         // Before anything that can throw: this run's credential must not
-        // outlive it, and a SIGKILLed child may still be draining pipes.
+        // outlive it, and a SIGKILLed child may still be draining pipes. The
+        // proxy goes with it, and what it turned away goes in the log — a run
+        // that failed because its CLI needed a host nobody listed must say so,
+        // or the boundary is indistinguishable from a broken install.
         grant?.revoke();
+        const refused = egress?.refusals() ?? [];
+        egress?.stop();
+        if (refused.length > 0) note(egressRefusedNote(refused));
         // The slot is freed before the directory is removed: a failure to clean
         // up disk must not cost this launcher a run slot for the rest of the
         // process's life.
@@ -2739,12 +2782,14 @@ export class AgentLauncher {
     bin: string,
     workDir: string,
     access: AgentAccess,
+    network: NetworkAccess = "open",
   ): LaunchCommand {
     if (access === "full") return plainCommand(bin);
     const extra = spec.sandbox?.(this.ctx, workDir, this.env) ?? {};
     return confineCommand({
       bin,
       access,
+      network,
       write: [workDir, agentRoot(this.ctx.dataDir), ...(extra.write ?? [])],
       // The credential and the mail store. `:memory:` names no directory, so
       // there is nothing on disk to keep the agent out of.

@@ -359,6 +359,18 @@ Scheduler (`AutomationScheduler`):
   is watching a scheduled run and the mail it reads was written by strangers,
   so there is no per-run opt-out; `BOXAIDE_AGENT_ACCESS=full` turns it off for
   the install, and a machine with no sandbox runs unconfined and reports it.
+- Network access: a confined run reaches this machine and nothing else
+  (`network: "loopback"` in `src/agent/sandbox.ts`). Its only way out is the
+  proxy in `src/agent/egress.ts`, which reads the host off the CONNECT line and
+  allows only that CLI's own provider — no TLS is terminated and no body is
+  read. This is what answers exfiltration for an unattended run: refusing an
+  MCP tool would not, because the launched CLIs run shell commands and `curl`
+  is not ours to withhold. Seatbelt accepts only `*` or `localhost` as a
+  network address, which is why the host decision lives in a proxy rather than
+  in the profile. Every refusal is written into the run's log with the host it
+  wanted; `BOXAIDE_RUN_NETWORK_ALLOW` adds hosts a CLI turns out to need and
+  `BOXAIDE_RUN_NETWORK=open` turns the boundary off. An unconfined install
+  (`full`, or no sandbox) keeps an open network and claims nothing.
 
 ### OutreachStore
 
