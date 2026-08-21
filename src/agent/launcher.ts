@@ -147,7 +147,7 @@ ${OUTREACH_CHAIN}`;
  * a draft instead of retrying the wall.
  */
 export const AUTOMATION_RUN_PREAMBLE =
-  "You are a scheduled Boxaide automation. Do the task below using the Boxaide MCP tools, then exit. You cannot talk to the user: do not call chat tools; write nothing to the user. Never send email; the chain below says where outreach goes. " +
+  "You are a scheduled Boxaide automation. Do the task below using the Boxaide MCP tools, then exit. You cannot talk to the user: do not call chat tools; write nothing to the user. Never send email; the chain below says where outreach goes. Nobody is watching this run, so it is walled off from the network: web_fetch is not yours to call and neither is anything else that names an address, and web_search is how you read about somebody. " +
   OUTREACH_CHAIN_ONE_LINE;
 
 /**
@@ -1835,8 +1835,27 @@ export const ONESHOT_KILLED_NOTE =
  * person reading a run that worked, it is the record that something in there
  * tried to reach an address nobody listed.
  */
-export function egressRefusedNote(hosts: readonly string[]): string {
-  return `[boxaide] network: refused ${hosts.join(", ")} — a scheduled run reaches its model provider and Boxaide, nothing else. Add a host with BOXAIDE_RUN_NETWORK_ALLOW if the CLI needs it.`;
+export function egressRefusedNote(
+  hosts: readonly string[],
+  total = hosts.length,
+): string {
+  const extra = total > hosts.length ? ` (and ${total - hosts.length} more)` : "";
+  return `[boxaide] network: refused ${hosts.join(", ")}${extra} — a scheduled run reaches its model provider and Boxaide, nothing else. Add a host with BOXAIDE_RUN_NETWORK_ALLOW if the CLI needs it.`;
+}
+
+/**
+ * Written into a confined run's log before the CLI says anything.
+ *
+ * Refusals are only recorded for connections that came through the proxy. A
+ * CLI that ignores the proxy variables goes straight at the network, is
+ * refused by the sandbox instead, and reports whatever a connection error
+ * looks like to it — with nothing of ours in the log to explain it. So the
+ * boundary announces itself at the top of every run it applies to: the person
+ * reading a broken automation is then one line away from the reason, whether
+ * or not this proxy ever saw the attempt.
+ */
+export function egressActiveNote(hosts: readonly string[]): string {
+  return `[boxaide] network: this run reaches ${hosts.length > 0 ? hosts.join(", ") : "no external host"} and Boxaide, nothing else. A connection error naming another host is this boundary. BOXAIDE_RUN_NETWORK_ALLOW adds one; BOXAIDE_RUN_NETWORK=open turns it off.`;
 }
 
 /**
@@ -2413,6 +2432,8 @@ export class AgentLauncher {
     let workDir: string;
     /** This run's way out, when it is confined. Closed by finish(). */
     let egress: EgressProxy | null = null;
+    /** What that way out allows, kept for the note the run log opens with. */
+    let egressAllow: string[] = [];
     try {
       const spec = this.resolveRunSpec(opts.agentId);
       const bin = this.resolveBin(spec.bin);
@@ -2460,7 +2481,8 @@ export class AgentLauncher {
       const access = resolveAccess(this.ctx.access ?? "workspace").access;
       const confined = access !== "full" && !egressDisabled(this.env);
       if (confined) {
-        egress = new EgressProxy(allowedHostsFor(spec.id, this.env));
+        egressAllow = allowedHostsFor(spec.id, this.env);
+        egress = new EgressProxy(egressAllow);
         await egress.start();
       }
       const command = this.confine(
@@ -2495,6 +2517,10 @@ export class AgentLauncher {
     const note = (line: string) => {
       capture(`${log && !log.endsWith("\n") ? "\n" : ""}${line}\n`);
     };
+    // The boundary says so before the CLI speaks, so a run broken by it is
+    // one line from its reason even when the CLI never reached the proxy.
+    if (egress) note(egressActiveNote(egressAllow));
+
     // Which status a kill produces. A deadline or a manual kill is 'killed';
     // the watchdog is 'error', because a run that never spoke did not start.
     let forced: "killed" | "error" | null = null;
@@ -2584,8 +2610,9 @@ export class AgentLauncher {
         // or the boundary is indistinguishable from a broken install.
         grant?.revoke();
         const refused = egress?.refusals() ?? [];
+        const refusedTotal = egress?.refusedTotal() ?? 0;
         egress?.stop();
-        if (refused.length > 0) note(egressRefusedNote(refused));
+        if (refused.length > 0) note(egressRefusedNote(refused, refusedTotal));
         // The slot is freed before the directory is removed: a failure to clean
         // up disk must not cost this launcher a run slot for the rest of the
         // process's life.

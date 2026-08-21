@@ -330,10 +330,21 @@ describe("agent scopes", () => {
   it("gives every profile the web and the lookups, and the CSV import to none but a person's session", async () => {
     for (const profile of SCOPE_PROFILES) {
       expect(scopeAllows(profile, "web_search")).toBe(true);
-      expect(scopeAllows(profile, "web_fetch")).toBe(true);
       expect(scopeAllows(profile, "enrich_find_email")).toBe(true);
       expect(scopeAllows(profile, "enrich_verify_email")).toBe(true);
     }
+    /**
+     * The exception, and it is about egress rather than reading: web_fetch
+     * names a destination and is fetched by THIS process, outside the sandbox
+     * and outside the run's egress proxy (src/agent/egress.ts). A watched
+     * launch keeps it — a person reads what comes back. An unattended run
+     * does not, because a URL is a channel and the mail that suggested it was
+     * written by a stranger.
+     */
+    expect(scopeAllows("run", "web_fetch")).toBe(false);
+    expect(scopeAllows("chat", "web_fetch")).toBe(true);
+    expect(scopeAllows("driven", "web_fetch")).toBe(true);
+
     // A scheduled run has nobody to hand it a file, so bulk import is not its.
     expect(scopeAllows("run", "crm_contacts_import")).toBe(false);
     expect(scopeAllows("chat", "crm_contacts_import")).toBe(true);

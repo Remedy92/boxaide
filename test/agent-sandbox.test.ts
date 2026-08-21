@@ -158,8 +158,10 @@ describe("the macOS profile", () => {
     });
     expect(profile).toContain("(deny network*)");
     expect(profile).toContain('(allow network-outbound (remote ip "localhost:*"))');
-    // A CLI that runs a local server for its own driver still binds.
-    expect(profile).toContain('(allow network-bind (local ip "localhost:*"))');
+    // Deliberately NOT a bind allowance: one was tried and does not work —
+    // a loopback listen still fails under (deny network*). No run spec binds,
+    // and a line that claims otherwise is worse than its absence.
+    expect(profile).not.toContain("network-bind");
     // Name resolution and helper processes go over unix sockets and never
     // leave the machine, so denying them would break the run for nothing.
     expect(profile).toContain("(allow network-outbound (remote unix-socket))");

@@ -17,15 +17,30 @@
  *    (`network: "loopback"` in sandbox.ts). Seatbelt cannot express "this
  *    host": it accepts only `*` or `localhost` as an address, which is what
  *    makes the second half necessary rather than a nicety.
- *  - This proxy listens on loopback and is the only way out. It reads the
- *    hostname off the CONNECT line and refuses every host that is not on the
- *    run's allowlist. No certificate is forged and no body is read: a proxy
- *    that terminated TLS would be a second place holding the user's mail.
+ *  - This proxy listens on loopback and is the only way out of the sandbox.
+ *    It reads the hostname off the CONNECT line and refuses every host that
+ *    is not on the run's allowlist. No certificate is forged and no body is
+ *    read: a proxy that terminated TLS would be a second place holding the
+ *    user's mail.
+ *
+ * The sandbox is not the whole perimeter, and the third piece is in
+ * src/mcp/scope.ts: an MCP tool is executed by the SERVER process, which is
+ * not confined, so a tool whose argument names an address would fetch it from
+ * outside all of this. `web_fetch` is exactly that tool, and a `run` no longer
+ * has it. Any future tool that takes a URL has to answer the same question
+ * before it is given to a run.
  *
  * What that leaves reachable is the model provider the CLI must talk to, and
  * Boxaide itself. A run can still say anything it likes TO the model — that is
  * the conversation it exists to have — but it cannot post a mailbox to an
  * address a stranger chose.
+ *
+ * What it does NOT reach: a CLI that never consults the proxy variables goes
+ * straight at the network and is refused by the sandbox instead, which means
+ * the failure arrives as that CLI's own connection error and never as a
+ * refusal here. `NODE_USE_ENV_PROXY` below buys the Node CLIs back; the rest
+ * is answered by the run log announcing the boundary before the CLI starts
+ * (`egressActiveNote`), not by pretending every attempt is recorded.
  *
  * The allowlist is per CLI and written from what each one needs to sign in and
  * run. It is the part most likely to be wrong for a CLI nobody here has run in
@@ -90,10 +105,21 @@ export function hostAllowed(host: string, allow: readonly string[]): boolean {
   });
 }
 
+/**
+ * How many distinct refused hosts are kept. A run told to loop over random
+ * addresses would otherwise build a set with no ceiling, and the line it
+ * produces in the run log would evict the log — the evidence of what the run
+ * actually did — through the 64 KiB tail cap. The count keeps going up after
+ * this; only the names stop being collected.
+ */
+export const MAX_REFUSALS_KEPT = 20;
+
 export class EgressProxy {
   private server: Server | null = null;
   private sockets = new Set<Duplex>();
+  private upstreams = new Set<Duplex>();
   private refused = new Set<string>();
+  private refusedCount = 0;
 
   constructor(private allow: readonly string[]) {}
 
@@ -111,10 +137,12 @@ export class EgressProxy {
    * between two runs and hand the second run the first's allowlist.
    */
   async start(): Promise<void> {
-    const server = createServer((_req, res) => {
+    const server = createServer((req, res) => {
       // Only CONNECT is proxying here. A plain proxied request would mean an
       // http:// target, which no CLI needs and which this would have to read
-      // to forward.
+      // to forward. Recorded like any other refusal: `curl http://…` is the
+      // same attempt as `curl https://…` and must read the same in the log.
+      this.refuse(plainTarget(req.url ?? "", req.headers.host));
       res.writeHead(405, { "content-type": "text/plain" });
       res.end("this proxy only tunnels https\n");
     });
@@ -141,7 +169,7 @@ export class EgressProxy {
     // is a provider, and a port list would refuse it while stopping nothing —
     // a host nobody named is already refused on every port.
     if (!host || !Number.isInteger(port) || port <= 0 || !hostAllowed(host, this.allow)) {
-      this.refused.add(`${host || "?"}:${rawPort || "?"}`);
+      this.refuse(`${host || "?"}:${rawPort || "?"}`);
       client.end("HTTP/1.1 403 Forbidden\r\n\r\n");
       return;
     }
@@ -151,12 +179,24 @@ export class EgressProxy {
       upstream.pipe(client);
       client.pipe(upstream);
     });
+    // Tracked, because destroying the client does not end this: a quiet TLS
+    // tunnel to a provider survives its own run otherwise, and notices only
+    // when the far end next writes into a socket nobody is reading.
+    this.upstreams.add(upstream);
     const drop = () => {
+      this.upstreams.delete(upstream);
       upstream.destroy();
       client.destroy();
     };
     upstream.on("error", drop);
+    upstream.on("close", () => this.upstreams.delete(upstream));
     client.on("error", drop);
+  }
+
+  /** One refusal, remembered up to the cap and counted past it. */
+  private refuse(what: string): void {
+    this.refusedCount += 1;
+    if (this.refused.size < MAX_REFUSALS_KEPT) this.refused.add(what);
   }
 
   /** Hosts this run asked for and did not get. The run log's evidence. */
@@ -164,12 +204,32 @@ export class EgressProxy {
     return [...this.refused].sort();
   }
 
-  /** Closes the door behind the run, whatever state its sockets are in. */
+  /** How many attempts were refused, including the ones past the cap. */
+  refusedTotal(): number {
+    return this.refusedCount;
+  }
+
+  /**
+   * Closes the door behind the run. The listener goes first: destroying
+   * sockets while it is still accepting leaves a window where a connection
+   * arriving in between gets a tunnel out of a run that has already ended.
+   */
   stop(): void {
-    for (const socket of this.sockets) socket.destroy();
-    this.sockets.clear();
     this.server?.close();
     this.server = null;
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
+    for (const socket of this.upstreams) socket.destroy();
+    this.upstreams.clear();
+  }
+}
+
+/** What a non-CONNECT proxied request was aiming at, as best it can be told. */
+function plainTarget(url: string, hostHeader: string | undefined): string {
+  try {
+    return new URL(url).host || hostHeader || "?";
+  } catch {
+    return hostHeader || "?";
   }
 }
 
@@ -190,6 +250,12 @@ function splitAuthority(target: string): [string, string] {
  */
 export function egressEnv(proxyUrl: string): Record<string, string> {
   return {
+    // Node ignores the proxy variables below unless told to read them, and
+    // two of the launched CLIs are Node programs. Without this they do not
+    // fail loudly through the proxy — they go straight at the network, hit
+    // the sandbox's deny, and report a connection error that names no host.
+    // Unknown to older runtimes, which ignore it.
+    NODE_USE_ENV_PROXY: "1",
     HTTP_PROXY: proxyUrl,
     HTTPS_PROXY: proxyUrl,
     http_proxy: proxyUrl,

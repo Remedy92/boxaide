@@ -1201,6 +1201,10 @@ exec /bin/sleep 60
       launcher.close();
       expect(result.log).toMatch(/proxy=http:\/\/127\.0\.0\.1:\d+/);
       expect(result.log).toContain("direct=127.0.0.1,localhost,::1");
+      // The boundary announces itself, because a CLI that ignores the proxy
+      // variables is refused by the sandbox instead and says nothing useful.
+      expect(result.log).toContain("[boxaide] network:");
+      expect(result.log).toContain("BOXAIDE_RUN_NETWORK_ALLOW");
     },
   );
 
@@ -1224,6 +1228,7 @@ exec /bin/sleep 60
       });
       launcher.close();
       expect(result.log).toContain("proxy=\n");
+      expect(result.log).not.toContain("[boxaide] network:");
     },
   );
 

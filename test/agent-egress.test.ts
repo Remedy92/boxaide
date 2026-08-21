@@ -14,6 +14,7 @@ import {
   egressDisabled,
   egressEnv,
   hostAllowed,
+  MAX_REFUSALS_KEPT,
 } from "../src/agent/egress.js";
 
 const cleanups: (() => void)[] = [];
@@ -127,10 +128,45 @@ describe("EgressProxy", () => {
     expect(answer).toContain("403 Forbidden");
   });
 
-  it("answers a plain proxied request with a refusal, not a fetch", async () => {
+  it("answers a plain proxied request with a refusal, and records it", async () => {
     const egress = await proxy(["127.0.0.1"]);
-    const res = await fetch(`${egress.url()}/`, { method: "GET" });
+    const res = await fetch(`${egress.url()}/`, {
+      method: "GET",
+      headers: { host: "mallory.example" },
+    });
     expect(res.status).toBe(405);
+    // http:// is the same attempt as https:// and must read the same later.
+    expect(egress.refusals().length).toBe(1);
+    expect(egress.refusedTotal()).toBe(1);
+  });
+
+  /* A run told to loop over random hosts must not be able to push the log
+     itself out of the 64 KiB tail the run keeps. */
+  it("stops collecting refused names at the cap but keeps counting", async () => {
+    const egress = await proxy([".anthropic.com"]);
+    for (let i = 0; i < MAX_REFUSALS_KEPT + 5; i += 1) {
+      await connect(egress.url(), `h${i}.mallory.example:443`);
+    }
+    expect(egress.refusals().length).toBe(MAX_REFUSALS_KEPT);
+    expect(egress.refusedTotal()).toBe(MAX_REFUSALS_KEPT + 5);
+  });
+
+  it("closes its listener and its tunnels when the run ends", async () => {
+    const port = await upstream();
+    const egress = await proxy(["127.0.0.1"]);
+    const url = egress.url();
+    await connect(url, `127.0.0.1:${port}`);
+    egress.stop();
+    // Nothing is accepting any more: a connection after the run cannot get a
+    // tunnel out of it.
+    await expect(connect(url, `127.0.0.1:${port}`)).rejects.toThrow();
+  });
+
+  it("tells Node to read the proxy variables at all", () => {
+    // Node ignores HTTPS_PROXY unless asked, and two run-capable CLIs are
+    // Node programs: without this they bypass the proxy and die on the
+    // sandbox instead, with nothing of ours in the log.
+    expect(egressEnv("http://127.0.0.1:1").NODE_USE_ENV_PROXY).toBe("1");
   });
 
   it("keeps Boxaide's own loopback call off the proxy", () => {

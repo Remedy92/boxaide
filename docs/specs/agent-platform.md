@@ -360,17 +360,28 @@ Scheduler (`AutomationScheduler`):
   so there is no per-run opt-out; `BOXAIDE_AGENT_ACCESS=full` turns it off for
   the install, and a machine with no sandbox runs unconfined and reports it.
 - Network access: a confined run reaches this machine and nothing else
-  (`network: "loopback"` in `src/agent/sandbox.ts`). Its only way out is the
-  proxy in `src/agent/egress.ts`, which reads the host off the CONNECT line and
-  allows only that CLI's own provider — no TLS is terminated and no body is
-  read. This is what answers exfiltration for an unattended run: refusing an
-  MCP tool would not, because the launched CLIs run shell commands and `curl`
-  is not ours to withhold. Seatbelt accepts only `*` or `localhost` as a
-  network address, which is why the host decision lives in a proxy rather than
-  in the profile. Every refusal is written into the run's log with the host it
-  wanted; `BOXAIDE_RUN_NETWORK_ALLOW` adds hosts a CLI turns out to need and
-  `BOXAIDE_RUN_NETWORK=open` turns the boundary off. An unconfined install
-  (`full`, or no sandbox) keeps an open network and claims nothing.
+  (`network: "loopback"` in `src/agent/sandbox.ts`). Its way out of the sandbox
+  is the proxy in `src/agent/egress.ts`, which reads the host off the CONNECT
+  line and allows only that CLI's own provider — no TLS is terminated and no
+  body is read. The sandbox alone would not do it, because the launched CLIs
+  run shell commands and `curl` is not ours to withhold; Seatbelt accepts only
+  `*` or `localhost` as a network address, which is why the host decision lives
+  in a proxy rather than in the profile.
+- The perimeter has a third side: an MCP tool runs in the SERVER process, which
+  is not sandboxed, so a tool whose argument names an address fetches from
+  outside all of the above. `web_fetch` is that tool and a `run` does not get
+  it (`src/mcp/scope.ts`); `web_search` stays, because its query reaches the
+  configured search vendor and nowhere else. Any future tool taking a URL has
+  to answer this before a run may call it.
+- What is claimed and what is not: refusals seen by the proxy are written into
+  the run's log with the host wanted, capped so a loop cannot evict the log. A
+  CLI that ignores the proxy variables is refused by the sandbox instead, and
+  that arrives as its own connection error — so every confined run opens its
+  log with a line naming the boundary. `BOXAIDE_RUN_NETWORK_ALLOW` adds hosts a
+  CLI turns out to need; `BOXAIDE_RUN_NETWORK=open` turns the boundary off. An
+  unconfined install (`full`, or no sandbox) keeps an open network and claims
+  nothing. The per-CLI host lists are written from what each CLI is believed to
+  need; the mechanism is tested, the completeness of those lists is not.
 
 ### OutreachStore
 
