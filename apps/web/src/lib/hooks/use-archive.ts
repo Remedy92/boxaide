@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { archiveMessage, moveMessage } from "@/lib/api/endpoints";
@@ -60,6 +61,14 @@ export function useArchive() {
   const app = useApp();
   const nav = useMessageNavigation();
   const queryClient = useQueryClient();
+
+  /* The pane on screen when a request answers, not when it was sent: the
+     mutation's callbacks are bound at mutate time, and the user may have left
+     mail in between. A ref rather than state so the hook's identity stays. */
+  const viewRef = React.useRef(app.view);
+  React.useEffect(() => {
+    viewRef.current = app.view;
+  }, [app.view]);
 
   /* Bound at render time, so onMutate reads the rows as they were before its
      own optimistic removal takes one out. */
@@ -136,7 +145,13 @@ export function useArchive() {
       for (const [key, data] of context?.listSnapshots ?? []) {
         queryClient.setQueryData(key, data);
       }
-      if (context?.selection) app.select(context.selection);
+      // Only while the user is still in mail. A selection is a hash, and the
+      // shell shows the mail pane for any message it names, so restoring one
+      // after the user had moved to another view would drag them back into
+      // the reader over a request that failed.
+      if (context?.selection && viewRef.current === "mail") {
+        app.select(context.selection);
+      }
       toast.error("Could not archive that message", {
         description: friendlyError(
           error instanceof Error ? error.message : error,
