@@ -12,7 +12,7 @@ import { ApiError, friendlyError } from "@/lib/api/errors";
 import { useApp } from "@/lib/hooks/use-app-state";
 import { useMessageNavigation } from "@/lib/hooks/use-selection";
 import { useApiCtx } from "@/lib/hooks/use-settings";
-import type { MessageListResponse, MoveResult } from "@/lib/types";
+import type { MailFolder, MessageListResponse, MoveResult } from "@/lib/types";
 
 /**
  * Archive, Delete and Move to folder are one thing on the server: a MOVE out of
@@ -70,6 +70,25 @@ function deletedLabel(folder: string): string {
  */
 const inflight = new Set<string>();
 
+/**
+ * The folders a message may be moved to, out of everything the mailbox lists.
+ *
+ * Two are left out because the server refuses the move: the folder the message
+ * is already in, and Drafts, which `moveMessage` declines by name so that a
+ * message filed there does not become a draft nobody wrote. Offering either
+ * would paint the row gone and then bring it back with an error the picker
+ * could have predicted.
+ */
+export function moveDestinations(
+  folders: MailFolder[] | undefined,
+  currentFolder: string | undefined,
+): MailFolder[] {
+  return (folders ?? []).filter(
+    (folder) =>
+      folder.path !== currentFolder && folder.specialUse !== "\\Drafts",
+  );
+}
+
 /** Every one of these actions names one message in one mailbox. */
 export type MoveTarget = {
   accountId: string;
@@ -108,6 +127,14 @@ function useFiling<I extends MoveTarget>(copy: {
   const ctx = useApiCtx();
   const nav = useMessageNavigation();
   const queryClient = useQueryClient();
+
+  /* The pane on screen when a request answers, not when it was sent: the
+     mutation's callbacks are bound at mutate time, and the user may have left
+     mail in between. A ref rather than state so the hook's identity stays. */
+  const viewRef = React.useRef(app.view);
+  React.useEffect(() => {
+    viewRef.current = app.view;
+  }, [app.view]);
 
   /* Bound at render time, so onMutate reads the rows as they were before its
      own optimistic removal takes one out. */
@@ -183,7 +210,13 @@ function useFiling<I extends MoveTarget>(copy: {
       for (const [key, data] of context?.listSnapshots ?? []) {
         queryClient.setQueryData(key, data);
       }
-      if (context?.selection) app.select(context.selection);
+      // Only while the user is still in mail. A selection is a hash, and the
+      // shell shows the mail pane for any message it names, so restoring one
+      // after the user had moved to another view would drag them back into
+      // the reader over a request that failed.
+      if (context?.selection && viewRef.current === "mail") {
+        app.select(context.selection);
+      }
       toast.error(copy.failed, {
         description: friendlyError(
           error instanceof Error ? error.message : error,

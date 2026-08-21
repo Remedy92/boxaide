@@ -49,7 +49,12 @@ import {
 import { DialogBody } from "@/components/ui/dialog";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useApp } from "@/lib/hooks/use-app-state";
-import { useArchive, useMoveTo, useTrash } from "@/lib/hooks/use-move";
+import {
+  moveDestinations,
+  useArchive,
+  useMoveTo,
+  useTrash,
+} from "@/lib/hooks/use-move";
 import { useFolders } from "@/lib/hooks/use-folders";
 import { useMarkRead } from "@/lib/hooks/use-mark-read";
 import { useMcpTools } from "@/lib/hooks/use-mcp-tools";
@@ -130,15 +135,11 @@ function Palette({
   /* The move page lists the SELECTED MESSAGE's own mailbox, not `app.account`:
      that reads "all" in the unified inbox and /api/folders 400s on it, so a
      picker keyed to it would be empty exactly where mail from several mailboxes
-     is on screen. Asked for only once the page is open. The folder the message
-     is already in is left out, because a move there is the one the server
-     refuses. */
+     is on screen. Asked for only once the page is open. */
   const moveFolders = useFolders(
     page === "move" && selected ? selected.accountId : "",
   );
-  const destinations = (moveFolders.data ?? []).filter(
-    (folder) => folder.path !== selected?.folder,
-  );
+  const destinations = moveDestinations(moveFolders.data, selected?.folder);
 
   /** Closing always resets the page and the query — no effect needed. */
   const close = (next: boolean) => {

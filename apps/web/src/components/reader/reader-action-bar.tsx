@@ -33,6 +33,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useFolders } from "@/lib/hooks/use-folders";
+import { moveDestinations } from "@/lib/hooks/use-move";
 import { copyToClipboard } from "@/lib/utils";
 import type { MailMessage } from "@/lib/types";
 
@@ -87,11 +88,7 @@ export function ReaderActionBar({
      reading mail costs no folder LIST at all, and the answer is cached for five
      minutes after that. */
   const folders = useFolders(menuOpen && message ? message.accountId : "");
-  /* A move into the folder the message is already in is the one destination
-     the server refuses, so it is not offered. */
-  const destinations = (folders.data ?? []).filter(
-    (folder) => folder.path !== message?.folder,
-  );
+  const destinations = moveDestinations(folders.data, message?.folder);
 
   const copy = async (value: string, label: string) => {
     const ok = await copyToClipboard(value);

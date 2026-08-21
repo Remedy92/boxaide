@@ -112,6 +112,10 @@ export function AgentComposer({
     setText(seed.text);
     const node = ref.current;
     if (node) {
+      // The DOM first: setText has only been queued, and a selection set
+      // against the old value is clamped to it. Same string React commits a
+      // moment later, so nothing is written twice.
+      node.value = seed.text;
       node.focus();
       node.setSelectionRange(seed.text.length, seed.text.length);
     }
