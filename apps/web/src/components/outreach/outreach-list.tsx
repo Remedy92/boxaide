@@ -5,7 +5,6 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Menu, RefreshCw } from "lucide-react";
 import { ConnectionStateBlock } from "@/components/list/list-empty";
 import { ListSkeleton } from "@/components/list/list-skeleton";
-import { CampaignList } from "@/components/outreach/campaign-list";
 import { OutboxQueueRow } from "@/components/outreach/outbox-row";
 import { SuppressionPanel } from "@/components/outreach/suppression-panel";
 import { Button } from "@/components/ui/button";
@@ -19,16 +18,15 @@ import { cn } from "@/lib/utils";
 
 const TABS: Array<{ id: OutreachTab; label: string }> = [
   { id: "queue", label: "Queue" },
-  { id: "campaigns", label: "Campaigns" },
   { id: "suppression", label: "Suppressed" },
 ];
 
 /**
  * The Outreach middle column.
  *
- * Three lists, one column, because they are three views of one thing: what an
- * agent wants to send, who it is sending to, and who must never be written to.
- * Only the queue drives the reading pane — the other two are self-contained,
+ * Two lists, one column, because they are two views of one thing: what an
+ * agent wants to send, and who must never be written to.
+ * Only the queue drives the reading pane — the other is self-contained,
  * which is why switching away from Queue closes the pane rather than leaving an
  * Approve button beside a list it is not about.
  */
@@ -75,7 +73,6 @@ export function OutreachList({
 
   const refresh = React.useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["outreach-outbox"] });
-    void queryClient.invalidateQueries({ queryKey: ["outreach-campaigns"] });
     void queryClient.invalidateQueries({ queryKey: ["outreach-suppression"] });
     void queryClient.invalidateQueries({ queryKey: ["outreach-badge"] });
   }, [queryClient]);
@@ -96,8 +93,6 @@ export function OutreachList({
         }}
       />
     );
-  } else if (tab === "campaigns") {
-    body = <CampaignList />;
   } else if (tab === "suppression") {
     body = <SuppressionPanel />;
   } else if (queue.isError) {

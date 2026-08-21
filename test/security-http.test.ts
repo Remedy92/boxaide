@@ -497,7 +497,7 @@ describe("CORS allowlist over HTTP", () => {
     expect(res.headers.get("vary")).toBe("Origin");
     expect(res.headers.get("access-control-allow-methods")).toContain("POST");
     expect(res.headers.get("access-control-allow-methods")).toContain("DELETE");
-    // The UI edits automations and campaigns with PATCH; a preflight that
+    // The UI edits automations with PATCH; a preflight that
     // omits it locks an allowlisted hosted origin out of those routes.
     expect(res.headers.get("access-control-allow-methods")).toContain("PATCH");
     expect(res.headers.get("access-control-allow-headers")).toContain(

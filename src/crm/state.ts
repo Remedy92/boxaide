@@ -16,11 +16,9 @@
  * contact this person", "never contact this person" — and that is stored
  * explicitly, with a timestamp, by src/crm/store.ts.
  *
- * Read-only, and the mirror of src/outreach/crm-read.ts: that module reads CRM
- * tables from the outreach engine, this one reads outreach tables from the CRM
- * side. Both go through the single shared handle and neither writes across the
- * seam. Tables can legitimately be absent (a harness that wires one module
- * alone), so every read is guarded.
+ * Read-only across the seam: this module reads outreach tables from the CRM
+ * side and never writes them. Tables can legitimately be absent (a harness
+ * that wires one module alone), so every read is guarded.
  */
 import type Database from "better-sqlite3";
 import { canonicalEmail } from "../outreach/opt-out.js";

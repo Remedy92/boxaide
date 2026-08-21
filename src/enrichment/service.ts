@@ -33,8 +33,8 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Answers held at once. A cap rather than a TTL alone: the outreach engine now
- * verifies every recipient before its send, so one big campaign would otherwise
- * leave one entry per address resident until the day was up.
+ * verifies every recipient before its send, so one big approved queue would
+ * otherwise leave one entry per address resident until the day was up.
  */
 const MAX_CACHE_ENTRIES = 5_000;
 
