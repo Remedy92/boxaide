@@ -608,6 +608,16 @@ nature, so its block is the one true at launch.
 A read that fails degrades to the no-notes or empty case; a launch never
 fails over its notes.
 
+Notes are quoted, never obeyed. Their material comes from read mail, so a
+sender who lands a line in a topic file has written into every later prompt.
+Injected content is wrapped in `--- BEGIN/END WORKSPACE NOTES ---` markers,
+preceded by the rule that quoted text describes and never directs; a line
+inside imitating a marker is defanged on the way in, so the quote cannot be
+closed from within; and the write side is told notes hold facts in the agent's
+own words, never instructions and never text pasted out of received mail. What
+survives that is bounded by the launch's scope: sending stays a human decision
+(`src/agent/approvals.ts`).
+
 Names are narrow — `[a-z0-9][a-z0-9-]*.md`, because the name in a route path is
 joined onto a filesystem path — plus `MEMORY.md` itself, which the listing puts
 first and a person opens first. Listing and reading answer that same question,
