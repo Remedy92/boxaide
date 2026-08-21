@@ -588,9 +588,24 @@ export function renameAgentChat(
   });
 }
 
+/**
+ * Put a chat away, and take it back out. Neither touches its messages: the
+ * pair is a two-way move between the live list and the archive, and Delete is
+ * the only control that destroys anything.
+ */
 export function archiveAgentChat(id: string, ctx: Ctx): Promise<{ archived: boolean }> {
   return request<{ archived: boolean }>(
     `/api/agent/chats/${encodeURIComponent(id)}/archive`,
+    { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+export function unarchiveAgentChat(
+  id: string,
+  ctx: Ctx,
+): Promise<{ archived: boolean }> {
+  return request<{ archived: boolean }>(
+    `/api/agent/chats/${encodeURIComponent(id)}/unarchive`,
     { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
   );
 }
