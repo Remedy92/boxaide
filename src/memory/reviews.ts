@@ -9,6 +9,13 @@
  * the model obeying anything: a note reaches an unattended automation run
  * only after a human has seen the exact bytes it holds.
  *
+ * What is written here decides what `runMemoryBlock` puts in a prompt, and a
+ * prompt is not the only way to a file. The other half of the same rule is in
+ * the sandbox: a run is denied the memory directory outright (`confine` in
+ * src/agent/launcher.ts), so a CLI running shell commands cannot walk to a
+ * note this file withheld, or leave one for the next session to read. Neither
+ * half is sufficient alone.
+ *
  * Review is recorded as a hash of the reviewed content, not a flag. A flag
  * would survive the agent rewriting the file underneath it, which is the one
  * event that must un-review a note. Same-bytes-as-approved is the whole

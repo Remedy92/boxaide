@@ -1208,6 +1208,44 @@ exec /bin/sleep 60
     },
   );
 
+  /**
+   * The review gate filters the PROMPT. It says nothing on its own about a
+   * CLI that runs shell commands from a run directory two levels under the
+   * notes — so the sandbox has to say it instead, or an unreviewed note is
+   * one `cat` away from the run it was written to be kept from.
+   */
+  it.skipIf(process.platform !== "darwin")(
+    "keeps a scheduled run out of the notes on disk",
+    async () => {
+      const memory = join(`${AGENT_DATA_DIR}-agents`, "workdir", "memory");
+      mkdirSync(memory, { recursive: true });
+      writeFileSync(join(memory, "company.md"), "UNREVIEWED-SECRET\n");
+
+      // The run stands in workdir/runs/<id>, so the notes are ../../memory.
+      const bin = fakeBinDir(
+        "fake-agent",
+        // Absolute path: this launcher runs with an empty PATH.
+        '#!/bin/sh\n/bin/cat ../../memory/company.md 2>&1 || true\n',
+      );
+      const launcher = new AgentLauncher(
+        { ...CTX, access: "workspace" as const },
+        specs({ runArgs: () => [] }),
+        { PATH: "" },
+        [bin],
+      );
+      const result = await launcher.runOnce({
+        runId: "r-notes",
+        prompt: "do the thing",
+        closeGraceMs: 200,
+      });
+      launcher.close();
+      // The run must have actually tried: a log with neither the secret nor a
+      // refusal means the probe never ran and this test proves nothing.
+      expect(result.log).toMatch(/not permitted|Operation not permitted|No such file/i);
+      expect(result.log).not.toContain("UNREVIEWED-SECRET");
+    },
+  );
+
   it.skipIf(process.platform !== "darwin")(
     "leaves the network alone when the operator turned the boundary off",
     async () => {

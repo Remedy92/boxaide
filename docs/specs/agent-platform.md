@@ -633,7 +633,12 @@ nature, so its block is the one true at launch.
 A read that fails degrades to the no-notes or empty case; a launch never
 fails over its notes.
 
-A note reaches an automation run only after a human has read it. Review is
+A note reaches an automation run only after a human has read it, and that
+holds on disk as well as in the prompt: a run's sandbox profile denies the
+memory directory and narrows its writable share of the agent root to the CLI
+config homes (`confine` in `src/agent/launcher.ts`), so a CLI running shell
+commands can neither read a note the gate withheld nor plant one for the next
+chat session. The prompt filter alone would have been a claim, not a boundary. Review is
 recorded as a hash of the reviewed bytes in `<dataDir>/memory-reviews.json`
 (`src/memory/reviews.ts`), deliberately outside the subtree the agent can
 write: a note the agent rewrites after it passed goes back to unreviewed on its

@@ -74,6 +74,7 @@ import {
   egressEnv,
 } from "./egress.js";
 import { chatMemoryBlock, runMemoryBlock } from "./memory-context.js";
+import { memoryDir } from "../memory/store.js";
 import { OpenCodeDriver, serveBaseUrl } from "./opencode-driver.js";
 import {
   fetchModels,
@@ -2491,6 +2492,7 @@ export class AgentLauncher {
         workDir,
         access,
         confined ? "loopback" : "open",
+        "run",
       );
       child = spawn(command.bin, [...command.prefix, ...spec.runArgs!(ctx, prompt, workDir, model)], {
         cwd: workDir,
@@ -2800,9 +2802,21 @@ export class AgentLauncher {
    * `DriveOptions.command`) every turn a driver starts. That is the same shape
    * as the tool scope: one place decides, and a spec cannot opt out of it.
    *
-   * Writable: the launch's own directory and the agent root, which holds the
-   * CLI config homes that are shared across launches. Denied last: the data
-   * directory, whatever else named it.
+   * Writable: the launch's own directory, plus the shared CLI config homes.
+   * Denied last: the data directory, whatever else named it.
+   *
+   * A chat launch additionally owns the whole agent root, because the notes in
+   * `workdir/memory/` are its to write and a person is reading what it says
+   * about them. A scheduled run is the opposite case on both counts, so it
+   * gets `kind: "run"`: the allow-back narrows to `agent-homes`, and the
+   * memory directory is named in the deny list outright.
+   *
+   * That deny is the difference between a claim and a boundary. The review
+   * gate (src/memory/reviews.ts) filters what `runMemoryBlock` puts in the
+   * PROMPT; it says nothing about a CLI that runs shell commands and can walk
+   * `../../memory/` from its own run directory. Without this, an unreviewed
+   * note was one `cat` away from the run it was written to be kept from, and
+   * a run could plant one for the next chat session to read.
    */
   private confine(
     spec: AgentSpec,
@@ -2810,17 +2824,25 @@ export class AgentLauncher {
     workDir: string,
     access: AgentAccess,
     network: NetworkAccess = "open",
+    kind: "chat" | "run" = "chat",
   ): LaunchCommand {
     if (access === "full") return plainCommand(bin);
     const extra = spec.sandbox?.(this.ctx, workDir, this.env) ?? {};
+    const root = agentRoot(this.ctx.dataDir);
+    const shared = kind === "run" ? join(root, "agent-homes") : root;
     return confineCommand({
       bin,
       access,
       network,
-      write: [workDir, agentRoot(this.ctx.dataDir), ...(extra.write ?? [])],
+      write: [workDir, shared, ...(extra.write ?? [])],
       // The credential and the mail store. `:memory:` names no directory, so
-      // there is nothing on disk to keep the agent out of.
-      deny: this.ctx.dataDir === ":memory:" ? [] : [this.ctx.dataDir],
+      // there is nothing on disk to keep the agent out of. A run adds the
+      // notes: an agent-root deny would take its own config homes with it, so
+      // the one directory is named instead.
+      deny: [
+        ...(this.ctx.dataDir === ":memory:" ? [] : [this.ctx.dataDir]),
+        ...(kind === "run" ? [memoryDir(this.ctx.dataDir)] : []),
+      ],
       home: this.env.HOME || undefined,
     });
   }
