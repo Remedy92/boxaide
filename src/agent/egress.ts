@@ -23,12 +23,13 @@
  *    read: a proxy that terminated TLS would be a second place holding the
  *    user's mail.
  *
- * The sandbox is not the whole perimeter, and the third piece is in
- * src/mcp/scope.ts: an MCP tool is executed by the SERVER process, which is
- * not confined, so a tool whose argument names an address would fetch it from
- * outside all of this. `web_fetch` is exactly that tool, and a `run` no longer
- * has it. Any future tool that takes a URL has to answer the same question
- * before it is given to a run.
+ * What this does NOT close, and it is deliberate: an MCP tool is executed by
+ * the SERVER process, which is not confined, so `web_fetch` reaches whatever
+ * address its argument names however tightly the sandbox is drawn. A run keeps
+ * that tool because researching a person is most of what a run does. So this
+ * boundary is honestly described as: it stops the shell, the CLI's own web
+ * tools, and anything else the agent process itself would open. It does not
+ * stop a tool this server runs on the agent's behalf.
  *
  * What that leaves reachable is the model provider the CLI must talk to, and
  * Boxaide itself. A run can still say anything it likes TO the model — that is

@@ -367,12 +367,14 @@ Scheduler (`AutomationScheduler`):
   run shell commands and `curl` is not ours to withhold; Seatbelt accepts only
   `*` or `localhost` as a network address, which is why the host decision lives
   in a proxy rather than in the profile.
-- The perimeter has a third side: an MCP tool runs in the SERVER process, which
-  is not sandboxed, so a tool whose argument names an address fetches from
-  outside all of the above. `web_fetch` is that tool and a `run` does not get
-  it (`src/mcp/scope.ts`); `web_search` stays, because its query reaches the
-  configured search vendor and nowhere else. Any future tool taking a URL has
-  to answer this before a run may call it.
+- Known gap, accepted deliberately: an MCP tool runs in the SERVER process,
+  which is not sandboxed, so `web_fetch` reaches whatever address its argument
+  names whatever the profile above denies. A run keeps it anyway — an outreach
+  agent that can only read search snippets is not the product, and what it
+  costs is a targeted attack on a self-hosted single-user install. The bounded
+  version, if this is ever worth closing: let a run fetch only a URL returned
+  verbatim by one of its own `web_search` calls, so the agent chooses among
+  links rather than composing an address it could hide data in.
 - What is claimed and what is not: refusals seen by the proxy are written into
   the run's log with the host wanted, capped so a loop cannot evict the log. A
   CLI that ignores the proxy variables is refused by the sandbox instead, and

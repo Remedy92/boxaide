@@ -147,7 +147,7 @@ ${OUTREACH_CHAIN}`;
  * a draft instead of retrying the wall.
  */
 export const AUTOMATION_RUN_PREAMBLE =
-  "You are a scheduled Boxaide automation. Do the task below using the Boxaide MCP tools, then exit. You cannot talk to the user: do not call chat tools; write nothing to the user. Never send email; the chain below says where outreach goes. Nobody is watching this run, so it is walled off from the network: web_fetch is not yours to call and neither is anything else that names an address, and web_search is how you read about somebody. " +
+  "You are a scheduled Boxaide automation. Do the task below using the Boxaide MCP tools, then exit. You cannot talk to the user: do not call chat tools; write nothing to the user. Never send email; the chain below says where outreach goes. " +
   OUTREACH_CHAIN_ONE_LINE;
 
 /**

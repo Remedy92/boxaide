@@ -25,12 +25,7 @@
  * No profile sends mail or books a meeting. Every profile may ASK to, and a
  * person answers — see src/agent/approvals.ts for why that replaced taking the
  * tools away.
- *
- * One tool IS taken away, from `run` alone: web_fetch. It is the only tool
- * whose argument names a destination and whose request leaves from this
- * process rather than from the sandboxed agent, so it is the one thing an
- * unattended run could use to carry a mailbox past the network boundary
- * src/agent/egress.ts puts around it.
+
  *
  * A caller with no profile — the master bearer, or the stdio server a user
  * wired into their own desktop client — is unrestricted, exactly as before.
@@ -150,21 +145,15 @@ export function scopeToolNames(profile: ScopeProfile): string[] {
   for (const name of CALENDAR_READ_TOOL_NAMES) names.add(name);
   for (const name of CALENDAR_SEND_TOOL_NAMES) names.add(name);
   // Reading the public web is a read in every profile, including a scheduled
-  // run: a run that cannot look anything up has to guess instead. With one
-  // exception, and it is not about reading.
-  //
-  // web_fetch takes a URL and fetches it FROM THIS SERVER PROCESS, which is
-  // not the sandbox and not behind the run's egress proxy
-  // (src/agent/egress.ts). For a watched launch that is fine: a person is
-  // reading what comes back. For a scheduled run it is a hole straight
-  // through the boundary that run is given — the URL is a channel, and mail
-  // written by a stranger is what put it there. So a run searches and cannot
-  // fetch: a search query reaches the configured search vendor and nowhere
-  // else, while a fetch reaches wherever the argument says.
-  for (const name of RESEARCH_TOOL_NAMES) {
-    if (profile === "run" && name === "web_fetch") continue;
-    names.add(name);
-  }
+  // run: a run that cannot look anything up has to guess instead, and looking
+  // somebody up is most of what a run is for. web_fetch was taken off `run`
+  // for a while and put back: the tool is fetched by THIS process, so a run
+  // can name any address and reach it whatever the sandbox says, and that is
+  // a real channel — but an outreach agent that can only read search snippets
+  // is not the product, and the exfiltration it prevents is a targeted attack
+  // on a self-hosted single-user install. The bounded version of the idea is
+  // in docs/specs/agent-platform.md; until it exists, a run researches.
+  for (const name of RESEARCH_TOOL_NAMES) names.add(name);
   // Paid lookups reach a vendor and bill the operator. Every profile gets
   // them, a run included, because the cap that matters is the vendor's own
   // quota and the answers are cached for a day.
