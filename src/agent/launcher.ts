@@ -50,8 +50,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
+import { agentRoot, agentWorkDir } from "./paths.js";
 import {
   lineSplitter,
   readGrokEvent,
@@ -66,6 +67,7 @@ import {
   OUTREACH_CHAIN,
   OUTREACH_CHAIN_ONE_LINE,
 } from "./guidance.js";
+import { chatMemoryBlock, runMemoryBlock } from "./memory-context.js";
 import { OpenCodeDriver, serveBaseUrl } from "./opencode-driver.js";
 import {
   fetchModels,
@@ -140,6 +142,20 @@ ${OUTREACH_CHAIN}`;
 export const AUTOMATION_RUN_PREAMBLE =
   "You are a scheduled Boxaide automation. Do the task below using the Boxaide MCP tools, then exit. You cannot talk to the user: do not call chat tools; write nothing to the user. Never send email; the chain below says where outreach goes. " +
   OUTREACH_CHAIN_ONE_LINE;
+
+/**
+ * KICKOFF plus whatever this install's workspace memory adds to it.
+ *
+ * Every chat launch — Grok, Antigravity, Codex — gets the same prompt, so the
+ * block is appended here once rather than at each spec's args builder.
+ * Appended rather than folded into the const: KICKOFF is exported and mirrored
+ * in the connect dialog, and neither copy should change shape because one
+ * install has notes and another does not.
+ */
+function kickoffPrompt(ctx: LaunchContext): string {
+  const memory = chatMemoryBlock(ctx.dataDir);
+  return memory ? `${KICKOFF}\n\n${memory}` : KICKOFF;
+}
 
 /**
  * The allowlists a CLI is given on its command line.
@@ -425,7 +441,7 @@ export function claudeTurnArgs(
       drivenPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
       // The chat agent owns the shared workdir: it is the only launch that
       // uses it, and its session outlives any single turn.
-      agentWorkDir(ctx),
+      agentWorkDir(ctx.dataDir),
       { nativeWebTools: nativeWebAllowed(ctx), model },
     ),
     // What is left of KICKOFF once Boxaide runs the loop: the reply text is the
@@ -464,6 +480,9 @@ function claudeDrive(
   return new ClaudeDriver({
     channel: ctx.channel,
     agent: "claude-code",
+    // The workspace-memory block for this install, computed now: the reads
+    // are sync and the notes described are the ones that existed at launch.
+    memorySystem: chatMemoryBlock(ctx.dataDir),
     // The launch's command, not the bare binary: Claude Code has no long-lived
     // child, so these per-turn spawns are the whole agent. Spawning `opts.bin`
     // here would leave every turn outside the sandbox the launch asked for.
@@ -564,7 +583,7 @@ function claudeFlagsFor(
  * renamed (writeSecret / copySecret).
  */
 function claudeConfigHomeFor(ctx: LaunchContext): string {
-  return join(agentRoot(ctx), "agent-homes", "claude");
+  return join(agentRoot(ctx.dataDir), "agent-homes", "claude");
 }
 
 function claudeChildEnv(
@@ -780,7 +799,7 @@ function grokHomeFor(workDir: string): string {
 
 function grokArgs(ctx: LaunchContext, model?: string): string[] {
   return [
-    ...grokArgsFor(KICKOFF, chatPreapprovedToolNames(), {
+    ...grokArgsFor(kickoffPrompt(ctx), chatPreapprovedToolNames(), {
       // Boxaide's own web_search is what the chat agent should reach for, so
       // the CLI's index stays off while a search connector exists. With none
       // configured there is nothing to prefer, and Grok keeps its own.
@@ -1008,13 +1027,13 @@ function tempPathFor(path: string): string {
 function antigravityArgs(ctx: LaunchContext, model?: string): string[] {
   return [
     "-p",
-    KICKOFF,
+    kickoffPrompt(ctx),
     // Without this agy does not read the .agents/ directory it is standing in,
     // and Boxaide's server is simply absent from the session — verified
     // against agy: the same launch lists the server only when the directory is
     // named here.
     "--add-dir",
-    agentWorkDir(ctx),
+    agentWorkDir(ctx.dataDir),
     "--dangerously-skip-permissions",
     // The user's own slash commands and skills are not part of a session
     // Boxaide is responsible for.
@@ -1163,7 +1182,7 @@ const ANTIGRAVITY_LISTER: ModelLister = {
  * servers. Auth stays in the default data dir so the process still has keys.
  */
 function opencodeHomeFor(ctx: LaunchContext): string {
-  return join(agentRoot(ctx), "agent-homes", "opencode");
+  return join(agentRoot(ctx.dataDir), "agent-homes", "opencode");
 }
 
 /**
@@ -1209,6 +1228,8 @@ function opencodeDrive(
   return new OpenCodeDriver({
     channel: ctx.channel,
     agent: "opencode",
+    // Same block the Claude driver gets: computed once, at launch.
+    memorySystem: chatMemoryBlock(ctx.dataDir),
     baseUrl: serveBaseUrl(opts.child),
     directory: opts.workDir,
     password: opts.childEnv.OPENCODE_SERVER_PASSWORD ?? null,
@@ -1330,8 +1351,8 @@ function codexHomeFor(workDir: string): string {
   return join(workDir, "codex-home");
 }
 
-function codexArgs(_ctx: LaunchContext, model?: string): string[] {
-  return codexArgsFor(KICKOFF, model);
+function codexArgs(ctx: LaunchContext, model?: string): string[] {
+  return codexArgsFor(kickoffPrompt(ctx), model);
 }
 
 function codexRunArgs(
@@ -1475,36 +1496,14 @@ const CLAUDE_MODELS: ModelOption[] = [
 ];
 
 /**
- * Everything an agent is pointed at lives under here, and it is deliberately
- * NOT inside the data directory.
- *
- * The data directory holds `bearer.token` and `master.key`. An agent used to
- * stand in `<dataDir>/agent-workdir`, so `cat ../bearer.token` handed it the
- * master credential the scope exists to keep away from it, and
- * `cat ../master.key` decrypted the mail store. Three of the CLIs launched
- * here run shell commands with approval turned off, and a prompt-injected
- * email is enough to ask for that read.
- *
- * A sibling directory, so nothing the agent is handed — its cwd, its config
- * home, the env vars naming them — walks up into the secrets. On its own that
- * only removes the escalation that needs no guessing; an absolute path still
- * reaches the data directory. `src/agent/sandbox.ts` is what closes that, and
- * this layout is what makes its rule expressible: one subtree the agent owns,
- * one it must never see, and no overlap between them.
+ * The agent-owned subtree — `agentRoot`/`agentWorkDir`, and why it sits
+ * outside the data directory — is defined in ./paths.ts and shared with the
+ * modules that reason about the same layout.
  */
-function agentRoot(ctx: LaunchContext): string {
-  if (ctx.dataDir === ":memory:") return join(tmpdir(), "boxaide-agent");
-  return `${ctx.dataDir.replace(/[/\\]+$/, "")}-agents`;
-}
-
-/** The chat agent's working directory. One per install; it owns it alone. */
-function agentWorkDir(ctx: LaunchContext): string {
-  return join(agentRoot(ctx), "workdir");
-}
 
 /** Where every automation run's own directory is created. */
 function runWorkDirRoot(ctx: LaunchContext): string {
-  return join(agentWorkDir(ctx), "runs");
+  return join(agentWorkDir(ctx.dataDir), "runs");
 }
 
 /**
@@ -2419,7 +2418,16 @@ export class AgentLauncher {
       this.assertClosed();
       render = spec.renderRunLine;
       workDir = this.prepareWorkDir(spec, ctx, runWorkDir(ctx, opts.runId));
-      const prompt = `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
+      // Workspace memory rides between the preamble and the task: the
+      // preamble states the boundaries, the notes give the background, and
+      // the task stays last. A run gets neither the ask-first offer (nobody
+      // is here to consent to a skim) nor the update duty (its directory is
+      // not the workdir the notes live in), so an install without notes adds
+      // nothing at all.
+      const memory = runMemoryBlock(ctx.dataDir);
+      const prompt = memory
+        ? `${AUTOMATION_RUN_PREAMBLE}\n\n${memory}\n\n${opts.prompt}`
+        : `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
 
       // A scheduled run is the case this matters most for: nobody is watching
       // it, and the mail it reads was written by strangers.
@@ -2656,7 +2664,7 @@ export class AgentLauncher {
     ctx: LaunchContext,
     dir?: string,
   ): string {
-    const workDir = dir ?? agentWorkDir(ctx);
+    const workDir = dir ?? agentWorkDir(ctx.dataDir);
     mkdirSync(workDir, { recursive: true });
     // `ctx`, not `this.ctx`: prepare writes the credential into the CLI's
     // config file, and the credential is this launch's scoped token.
@@ -2677,7 +2685,7 @@ export class AgentLauncher {
    * credential is per-launch it is not.
    */
   private listWorkDir(spec: AgentSpec): string {
-    const dir = join(agentRoot(this.ctx), "model-list", spec.id);
+    const dir = join(agentRoot(this.ctx.dataDir), "model-list", spec.id);
     try {
       return this.prepareWorkDir(spec, this.listCtx(), dir);
     } catch {
@@ -2737,7 +2745,7 @@ export class AgentLauncher {
     return confineCommand({
       bin,
       access,
-      write: [workDir, agentRoot(this.ctx), ...(extra.write ?? [])],
+      write: [workDir, agentRoot(this.ctx.dataDir), ...(extra.write ?? [])],
       // The credential and the mail store. `:memory:` names no directory, so
       // there is nothing on disk to keep the agent out of.
       deny: this.ctx.dataDir === ":memory:" ? [] : [this.ctx.dataDir],

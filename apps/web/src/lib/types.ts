@@ -492,6 +492,30 @@ export type ConnectorsSnapshot = {
   checks: Record<string, ConnectorCheck>;
 };
 
+/* -------------------------------------------------------------------------- */
+/* workspace memory — /api/memory                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One markdown file in the agent's own workspace, as GET /api/memory lists it.
+ * The agent owns the set — names match [a-z0-9][a-z0-9-]*\.md, MEMORY.md is
+ * the index — so this UI can read and correct the rows but never create,
+ * rename or delete them.
+ */
+export type MemoryFile = {
+  name: string;
+  bytes: number;
+  updatedAt: string;
+};
+
+export type MemoryListResponse = { files: MemoryFile[] };
+
+/** GET /api/memory/:name — the whole body, not wrapped in a key. */
+export type MemoryFileDetail = {
+  name: string;
+  content: string;
+};
+
 /**
  * GET /api/update — the whole updater state, in one object.
  *

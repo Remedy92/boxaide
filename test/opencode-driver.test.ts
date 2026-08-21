@@ -8,6 +8,7 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentChannel } from "../src/agent/channel.js";
+import { DRIVEN_SYSTEM } from "../src/agent/driver.js";
 import { OpenCodeDriver } from "../src/agent/opencode-driver.js";
 import { Store } from "../src/db/store.js";
 
@@ -188,6 +189,30 @@ describe("OpenCodeDriver", () => {
     // Working directory travels as a query parameter on every call.
     expect(message!.path).toContain(`directory=${encodeURIComponent("/tmp/boxaide-agent")}`);
     expect(message!.auth).toBe(`Basic ${Buffer.from("opencode:pw").toString("base64")}`);
+  });
+
+  it("rides the workspace-memory block on the system framing", async () => {
+    const fake = await startFake(() => ({
+      status: 200,
+      body: { parts: [{ type: "text", text: "answered" }] },
+    }));
+    cleanup.push(fake.close);
+    const { channel } = make();
+    const driver = new OpenCodeDriver({
+      channel,
+      agent: "opencode",
+      baseUrl: fake.url,
+      directory: "/tmp/boxaide-agent",
+      waitMs: 1_000,
+      memorySystem: "MEMORY BLOCK",
+    }).start();
+    cleanup.push(() => driver.stop());
+
+    channel.post({ role: "user", text: "what came in today?" });
+    await until(() => channel.history().some((t) => t.role === "agent"));
+
+    const message = fake.calls.find((c) => c.path.includes("/message"))!;
+    expect(message.body.system).toBe(`${DRIVEN_SYSTEM}\n\nMEMORY BLOCK`);
   });
 
   it("names the chat from the exchange, once, and never at the answer's expense", async () => {

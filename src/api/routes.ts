@@ -14,6 +14,7 @@ import type { MailService } from "../mail/service.js";
 import type { Platform } from "../platform.js";
 import { registerCrmRoutes } from "../crm/routes.js";
 import { registerAutomationRoutes } from "../automation/routes.js";
+import { registerMemoryRoutes } from "../memory/routes.js";
 import { registerOutreachRoutes } from "../outreach/routes.js";
 import { registerConnectorRoutes } from "../connectors/routes.js";
 import {
@@ -725,6 +726,7 @@ export function createApi(
   if (platform) {
     registerCrmRoutes(app, platform);
     registerAutomationRoutes(app, platform);
+    registerMemoryRoutes(app, platform);
     registerOutreachRoutes(app, platform);
     registerConnectorRoutes(app, platform);
     registerCalendarRoutes(app, platform, address ?? { host: "127.0.0.1", port: 8787 });

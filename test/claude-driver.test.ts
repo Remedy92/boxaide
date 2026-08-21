@@ -219,6 +219,7 @@ function drive(
     stopGraceMs: number;
     healAuth: () => boolean;
     onStop: (error: string | null, cause: { authRequired: boolean }) => void;
+    memorySystem: string;
   }> = {},
 ): ClaudeDriver {
   const driver = new ClaudeDriver({
@@ -289,6 +290,25 @@ describe("ClaudeDriver", () => {
     // conversation instead of meeting the user for the first time.
     const resumed = userCalls(fake)[1];
     expect(resumed[resumed.indexOf("--resume") + 1]).toBe("ses-1");
+
+    driver.stop();
+    await driver.done;
+  });
+
+  it("appends the workspace-memory block to the framing of every turn", async () => {
+    const fake = fakeCli([{ answer: "noted" }]);
+    const { channel } = make();
+    const driver = drive(channel, fake, { memorySystem: "MEMORY BLOCK" });
+
+    channel.post({ role: "user", text: "what came in today?" });
+    await until(() => channel.history().some((t) => t.role === "agent"));
+
+    const opened = userCalls(fake)[0];
+    // The block rides DRIVEN_SYSTEM, not the user's message: the framing is
+    // re-sent every turn, so the notes are too.
+    expect(opened[opened.indexOf("--append-system-prompt") + 1]).toBe(
+      `${DRIVEN_SYSTEM}\n\nMEMORY BLOCK`,
+    );
 
     driver.stop();
     await driver.done;

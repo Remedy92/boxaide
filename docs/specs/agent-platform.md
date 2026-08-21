@@ -577,6 +577,34 @@ of `invalid` fails the row with the address in the error and it leaves the
 queue; `risky`, `unknown` and a verifier that is down do not block anything.
 The day-long cache means a row held back by the daily cap is not billed twice.
 
+## Workspace memory
+
+The agent keeps its own notes as plaintext markdown in
+`<dataDir>-agents/workdir/memory/` (`src/memory/store.ts`; the layout rule that
+keeps them out of the data directory is `src/agent/paths.ts`) — `MEMORY.md` as
+the index plus the topic files it names. Agents read and write them with their
+native file tools; the REST routes under `/api/memory` exist for a human
+editing the same files.
+
+Every launch is told what exists there, computed at launch time
+(`src/agent/memory-context.ts`):
+
+- **Chat and driven sessions, no `MEMORY.md` yet** — one ask-first block: the
+  agent may offer, once, to skim mailbox, CRM and calendar (~15 tool calls)
+  and only after the user agrees write the index plus `company.md`,
+  `voice.md`, `people.md`. Every fact names its source; no passwords or keys.
+- **Chat and driven sessions, notes exist** — the index, capped at ~2000
+  characters with the tail marked, plus the duty to keep the files current
+  itself.
+- **Automation runs** — never the ask (nobody is there to consent) and never
+  the update duty (a run's directory is not the workdir): the capped index
+  with `company.md` and `voice.md` inlined, each capped at ~1500 characters,
+  inserted between the run preamble and the task. No notes stored, nothing
+  injected.
+
+A read that fails degrades to the no-notes or empty case; a launch never
+fails over its notes.
+
 ## REST surface (all inside `createApi` after auth)
 
 CRM: GET/POST `/api/crm/contacts`, GET/DELETE `/api/crm/contacts/:id`,

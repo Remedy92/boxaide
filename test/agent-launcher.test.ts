@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
   AgentLauncher,
+  AUTOMATION_RUN_PREAMBLE,
   KNOWN_AGENTS,
   LaunchError,
   claudeCopyCredentials,
@@ -1095,6 +1096,69 @@ exec /bin/sleep 60
     const grokArgs = grok.args!(CTX);
     expect(grokArgs).toContain("MCPTool(boxaide__automation_create)");
     expect(grokArgs).toContain("MCPTool(boxaide__crm_contact_upsert)");
+  });
+
+  it("appends the workspace-memory block to every chat kickoff", () => {
+    const dataDir = tempDir();
+    const ctx = {
+      mcpUrl: "http://127.0.0.1:8787/mcp",
+      bearerToken: "secret-token-xyz",
+      dataDir,
+    };
+    const prompt = (id: string) =>
+      KNOWN_AGENTS.find((s) => s.id === id)!.args!(ctx).join("\n");
+
+    // No notes yet: the ask-first offer rides every chat launch, because a
+    // person is at the other end to answer it.
+    for (const id of ["grok", "antigravity", "codex"]) {
+      expect(prompt(id)).toContain("want me to?");
+      expect(prompt(id)).toContain("./memory/");
+    }
+
+    // Notes exist: the index travels instead, and the offer is gone — an
+    // agent that already wrote its notes must not be asked to write them
+    // again. The index is the agent's own file, so a plain write.
+    const memory = join(`${dataDir}-agents`, "workdir", "memory");
+    mkdirSync(memory, { recursive: true });
+    writeFileSync(join(memory, "MEMORY.md"), "# Memory\nAcme ships boats.\n");
+    for (const id of ["grok", "antigravity", "codex"]) {
+      expect(prompt(id)).toContain("Acme ships boats.");
+      expect(prompt(id)).not.toContain("want me to?");
+    }
+  });
+
+  it("inlines workspace memory between the run preamble and the task", async () => {
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
+    let seenPrompt = "";
+    const dataDir = tempDir();
+    const launcher = new AgentLauncher(
+      { ...CTX, dataDir },
+      specs({
+        runArgs: (_ctx, prompt) => {
+          seenPrompt = prompt;
+          return [];
+        },
+      }),
+      { PATH: "" },
+      [bin],
+    );
+
+    // No notes: exactly the old shape, preamble then task.
+    await launcher.runOnce({ runId: "r1", prompt: "do the thing", closeGraceMs: 200 });
+    expect(seenPrompt).toBe(`${AUTOMATION_RUN_PREAMBLE}\n\ndo the thing`);
+
+    // With notes: preamble, then the notes as background, and the task still
+    // last — never the ask-first offer, which a run has nobody to answer.
+    const memory = join(`${dataDir}-agents`, "workdir", "memory");
+    mkdirSync(memory, { recursive: true });
+    writeFileSync(join(memory, "MEMORY.md"), "- company.md — what Acme does\n");
+    writeFileSync(join(memory, "company.md"), "Acme ships boats.\n");
+    await launcher.runOnce({ runId: "r2", prompt: "do the thing", closeGraceMs: 200 });
+    expect(seenPrompt.startsWith(`${AUTOMATION_RUN_PREAMBLE}\n\n`)).toBe(true);
+    expect(seenPrompt).toContain("Acme ships boats.");
+    expect(seenPrompt).not.toContain("want me to?");
+    expect(seenPrompt.endsWith("\n\ndo the thing")).toBe(true);
+    launcher.close();
   });
 
   it("asks the chat agent for its event stream, and a run for plain text", () => {

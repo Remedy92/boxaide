@@ -27,7 +27,7 @@ import type { ChildProcess } from "node:child_process";
 import {
   abortablePause,
   backoffMs,
-  DRIVEN_SYSTEM,
+  drivenSystemWithMemory,
   RETRY_BASE_MS,
   runDrivenLoop,
   STOPPED_BY_USER,
@@ -76,6 +76,13 @@ export type OpenCodeDriverOptions = {
   password?: string | null;
   /** Registry model id, or null for the server's own default. */
   model?: string | null;
+  /**
+   * The workspace-memory block for this install, appended to DRIVEN_SYSTEM on
+   * every prompt. Computed once per launch by the launcher and handed in
+   * whole, so this driver touches no filesystem. Absent means none, which is
+   * what tests construct.
+   */
+  memorySystem?: string;
   /** Overridable for tests. */
   fetchImpl?: typeof fetch;
   waitMs?: number;
@@ -286,7 +293,7 @@ export class OpenCodeDriver implements AgentDriver {
         `/session/${session}/message`,
         {
           parts: [{ type: "text", text }],
-          system: DRIVEN_SYSTEM,
+          system: drivenSystemWithMemory(this.opts.memorySystem),
           tools: Object.fromEntries(DISABLED_TOOLS.map((name) => [name, false])),
           ...(this.opts.model ? { model: splitModel(this.opts.model) } : {}),
         },
