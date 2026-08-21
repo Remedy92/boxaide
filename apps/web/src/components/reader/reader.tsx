@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { ApiError, friendlyError } from "@/lib/api/errors";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useApp } from "@/lib/hooks/use-app-state";
-import { useArchive } from "@/lib/hooks/use-archive";
+import { useArchive, useMoveTo } from "@/lib/hooks/use-move";
 import { useMarkRead } from "@/lib/hooks/use-mark-read";
 import { useMessage } from "@/lib/hooks/use-message";
 import { useMessageNavigation } from "@/lib/hooks/use-selection";
@@ -26,6 +26,7 @@ export function Reader() {
   const nav = useMessageNavigation();
   const markRead = useMarkRead();
   const archive = useArchive();
+  const moveTo = useMoveTo();
   const queryClient = useQueryClient();
   /** In-memory drafts, keyed by Boxaide message id. Never localStorage —
       drafts are message content. */
@@ -71,6 +72,20 @@ export function Reader() {
     });
   }, [archive, selection]);
 
+  /* Same walk as archive: the message leaves the folder the reader opened it
+     from, so the pane must not keep showing it. useMoveTo does that part. */
+  const moveMessage = React.useCallback(
+    (folder: string) => {
+      if (!selection) return;
+      moveTo.mutate({
+        accountId: selection.accountId,
+        messageId: selection.messageId,
+        folder,
+      });
+    },
+    [moveTo, selection],
+  );
+
   if (!selection) {
     return (
       <div
@@ -103,6 +118,7 @@ export function Reader() {
         onForward={() => (full ? app.requestReply("forward") : undefined)}
         onToggleRead={toggleRead}
         onArchive={archiveMessage}
+        onMove={moveMessage}
         onPrevious={nav.previous}
         onNext={nav.next}
       />

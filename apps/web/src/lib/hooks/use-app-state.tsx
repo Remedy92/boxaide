@@ -58,6 +58,20 @@ export type ComposeSeed = {
   outboxId?: string;
 };
 
+/**
+ * Text the agent composer should open with, from "Start conversation about this
+ * email". Nonce for the same reason ComposeSeed carries one: two rows in a row
+ * can seed the same sentence, and the composer has to notice the second.
+ *
+ * Nothing is sent. The user finishes the sentence and presses Enter themselves,
+ * because what they want to ask about a message is not something this app gets
+ * to guess.
+ */
+export type AgentSeed = {
+  nonce: number;
+  text: string;
+};
+
 export type DialogName =
   | "connect"
   | "compose"
@@ -261,6 +275,12 @@ type AppStateValue = {
   /* composer */
   composeSeed: ComposeSeed | null;
   openCompose: (seed?: Partial<ComposeSeed>) => void;
+  /** Non-null until the agent composer has taken it. */
+  agentSeed: AgentSeed | null;
+  /** Prefills the agent composer and switches to the Agent view. Sends nothing. */
+  seedAgentComposer: (text: string) => void;
+  /** The composer says it has the text, so a later remount cannot re-apply it. */
+  clearAgentSeed: () => void;
   /** Keyboard r / a / f: ask the reader to expand its inline composer. */
   replyRequest: ReplyRequest | null;
   requestReply: (mode: Exclude<ComposeMode, "new">) => void;
@@ -424,6 +444,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [settingsFocus, setSettingsFocus] = React.useState<SettingsFocus>(null);
   const [settingsAutoTest, setSettingsAutoTest] = React.useState<number | null>(null);
   const [composeSeed, setComposeSeed] = React.useState<ComposeSeed | null>(null);
+  const [agentSeed, setAgentSeed] = React.useState<AgentSeed | null>(null);
   const [replyRequest, setReplyRequest] = React.useState<ReplyRequest | null>(null);
   const [narrow, setNarrow] = React.useState(false);
   const [medium, setMedium] = React.useState(false);
@@ -860,6 +881,19 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     setDialog("compose");
   }, []);
 
+  /* The Agent view is one pane and it unmounts when the user leaves it, so the
+     seed is cleared by the composer that took it rather than left standing.
+     Otherwise coming back to the conversation an hour later would prefill the
+     same sentence about a message the user has long since dealt with. */
+  const seedAgentComposer = React.useCallback(
+    (text: string) => {
+      setAgentSeed({ nonce: Date.now(), text });
+      setView("agent");
+    },
+    [setView],
+  );
+  const clearAgentSeed = React.useCallback(() => setAgentSeed(null), []);
+
   /* ---- first run ------------------------------------------------------ */
   /* Gated on mount so the prerendered HTML — which reads the DEFAULT settings,
      where `onboarded` is false — never paints the wizard over a browser that is
@@ -1010,6 +1044,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       finishWizard,
       composeSeed,
       openCompose,
+      agentSeed,
+      seedAgentComposer,
+      clearAgentSeed,
       replyRequest,
       requestReply,
       clearReplyRequest,
@@ -1071,6 +1108,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       finishWizard,
       composeSeed,
       openCompose,
+      agentSeed,
+      seedAgentComposer,
+      clearAgentSeed,
       replyRequest,
       requestReply,
       clearReplyRequest,

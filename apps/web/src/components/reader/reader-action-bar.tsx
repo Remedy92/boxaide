@@ -26,17 +26,26 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useFolders } from "@/lib/hooks/use-folders";
+import { moveDestinations } from "@/lib/hooks/use-move";
 import { copyToClipboard } from "@/lib/utils";
 import type { MailMessage } from "@/lib/types";
 
 /**
  * §6.4.1. Only these controls, because these are the only mutations the API
- * has: send (reply / reply all / forward), mark read, and archive — a move
- * into the account's Archive mailbox. There is no delete, star, snooze or
- * label anywhere behind this bar, so none is drawn — not even greyed out.
+ * has: send (reply / reply all / forward), mark read, archive, and move to a
+ * named folder. There is no star, snooze or label anywhere behind this bar, so
+ * none is drawn, not even greyed out.
+ *
+ * Delete is not a button here either, though the API now has it. It is a move
+ * to Trash, it is on the row's right-click menu and on `#`, and a bar this
+ * narrow earns its calm by not putting a bin next to Reply.
  */
 export function ReaderActionBar({
   message,
@@ -49,6 +58,7 @@ export function ReaderActionBar({
   onForward,
   onToggleRead,
   onArchive,
+  onMove,
   onPrevious,
   onNext,
 }: {
@@ -62,12 +72,23 @@ export function ReaderActionBar({
   onForward: () => void;
   onToggleRead: () => void;
   onArchive: () => void;
+  /** The mailbox path, as listFolders spells it. */
+  onMove: (folder: string) => void;
   onPrevious: () => void;
   onNext: () => void;
 }) {
   const [source, setSource] = React.useState<"text" | "html" | null>(null);
+  const [menuOpen, setMenuOpen] = React.useState(false);
   const seen = message?.seen ?? false;
   const disabled = !message;
+
+  /* Folders are per mailbox, and the mailbox is the open message's own rather
+     than `app.account`, which reads "all" in the unified inbox and is exactly
+     the value /api/folders 400s on. Asked for only while the menu is open, so
+     reading mail costs no folder LIST at all, and the answer is cached for five
+     minutes after that. */
+  const folders = useFolders(menuOpen && message ? message.accountId : "");
+  const destinations = moveDestinations(folders.data, message?.folder);
 
   const copy = async (value: string, label: string) => {
     const ok = await copyToClipboard(value);
@@ -161,7 +182,7 @@ export function ReaderActionBar({
         <TooltipContent>Archive (e)</TooltipContent>
       </Tooltip>
 
-      <DropdownMenu>
+      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
           <Button
             type="button"
@@ -174,6 +195,33 @@ export function ReaderActionBar({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-56">
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger disabled={!message}>
+              Move to folder
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="max-h-[320px] w-64 overflow-y-auto">
+              {folders.isPending ? (
+                <DropdownMenuItem disabled>Loading folders…</DropdownMenuItem>
+              ) : folders.isError ? (
+                <DropdownMenuItem disabled>
+                  Could not load this mailbox&rsquo;s folders
+                </DropdownMenuItem>
+              ) : destinations.length === 0 ? (
+                <DropdownMenuItem disabled>
+                  No other folder on this mailbox
+                </DropdownMenuItem>
+              ) : (
+                destinations.map((folder) => (
+                  <DropdownMenuItem
+                    key={folder.path}
+                    onSelect={() => onMove(folder.path)}
+                  >
+                    {folder.path}
+                  </DropdownMenuItem>
+                ))
+              )}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
           <DropdownMenuItem
             disabled={!message?.messageId}
             onSelect={() =>

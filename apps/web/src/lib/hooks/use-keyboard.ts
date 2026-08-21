@@ -9,11 +9,12 @@ import * as React from "react";
  * a textarea or a contenteditable, when any overlay is open, and when a
  * modifier other than the one listed is held.
  *
- * `e` archives, exactly as it does in Gmail, because the backend can perform
- * that one: it moves the message into the account's Archive mailbox.
+ * `e` archives and `#` deletes, exactly as they do in Gmail, because the
+ * backend can perform both: each moves the message, into the account's Archive
+ * mailbox or into its Trash. Nothing is expunged by either.
  *
- * Explicitly unbound and staying that way: s, h, #, !, z, x, l, v. Each maps to
- * a Gmail or Superhuman action this backend cannot perform, and a shortcut that
+ * Explicitly unbound and staying that way: s, h, !, z, x, l, v. Each maps to a
+ * Gmail or Superhuman action this backend cannot perform, and a shortcut that
  * toasts "not supported" is worse than a key that does nothing.
  */
 
@@ -24,6 +25,8 @@ export type KeyboardHandlers = {
   escape: () => void;
   toggleRead: () => void;
   archive: () => void;
+  /** `#`, and a move to Trash rather than a delete. */
+  trash: () => void;
   reply: () => void;
   replyAll: () => void;
   forward: () => void;
@@ -164,6 +167,12 @@ export function useKeyboard(
         case "e":
           event.preventDefault();
           h.archive();
+          return;
+        // Shift is allowed through: `#` is Shift+3 on most layouts, the same
+        // way `?` is Shift+/ below.
+        case "#":
+          event.preventDefault();
+          h.trash();
           return;
         case "r":
           event.preventDefault();
