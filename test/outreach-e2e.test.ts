@@ -8,7 +8,7 @@
  * that leave the machine: the SMTP transport (FixtureProvider) and the global
  * fetch every vendor adapter calls.
  *
- * State A asserts the whole campaign path still works with nothing bought,
+ * State A asserts the whole outreach path still works with nothing bought,
  * and that not one vendor request is made on it. State B saves keys through
  * the connectors service, which is the settings-beats-environment path, and
  * asserts what those keys turn on: the pre-send verdict that fails a dead
@@ -148,8 +148,8 @@ describe("outreach end to end, with and without connector keys", () => {
     return res.status;
   }
 
-  /** Import one contact, run one campaign, and hand back the queued row id. */
-  async function queueFirstStep(email: string, name: string): Promise<string> {
+  /** Import one contact, queue one draft, and hand back the queued row id. */
+  async function queueDraft(email: string, name: string): Promise<string> {
     const imported = await callTool("crm_contacts_import", {
       csv: `email,name,org,orgDomain\n${email},${name},Acme,acme.example\n`,
     });
@@ -157,21 +157,15 @@ describe("outreach end to end, with and without connector keys", () => {
     expect(imported.payload.importedCount).toBe(1);
     const contactId = imported.payload.imported[0].contactId;
 
-    const created = await callTool("campaign_create", {
-      name: `camp-${email}`,
+    const queued = await callTool("outbox_queue_draft", {
       account: accountId,
-      steps: [{ subject: "Hi {{name}}", body: "About {{org}}." }],
+      to: email,
+      subject: `Hi ${name.split(" ")[0]}`,
+      body: "About Acme.",
+      contactId,
     });
-    expect(created.ok).toBe(true);
-    const campaignId = created.payload.campaign.id;
-    await callTool("campaign_update", { campaignId, status: "active" });
-    const added = await callTool("campaign_add_contacts", {
-      campaignId,
-      contactIds: [contactId],
-    });
-    expect(added.payload.added).toBe(1);
+    expect(queued.ok).toBe(true);
 
-    await platform.engine.tick();
     const pending = platform.outreachStore.listOutbox({ status: "pending" });
     expect(pending).toHaveLength(1);
     return pending[0].id;
@@ -179,12 +173,12 @@ describe("outreach end to end, with and without connector keys", () => {
 
   /* ---- state A: nothing bought ---------------------------------------- */
 
-  it("runs the whole campaign path with no keys, and calls no vendor", async () => {
-    const rowId = await queueFirstStep("ada@acme.example", "Ada Lovelace");
-    const queued = platform.outreachStore.getOutbox(rowId)!;
-    expect(queued.to).toBe("ada@acme.example");
-    expect(queued.subject).toBe("Hi Ada");
-    expect(queued.body).toBe(`About Acme.${OPT_OUT_FOOTER}`);
+  it("runs the whole outreach path with no keys, and calls no vendor", async () => {
+    const rowId = await queueDraft("ada@acme.example", "Ada Lovelace");
+    const queuedRow = platform.outreachStore.getOutbox(rowId)!;
+    expect(queuedRow.to).toBe("ada@acme.example");
+    expect(queuedRow.subject).toBe("Hi Ada");
+    expect(queuedRow.body).toBe(`About Acme.${OPT_OUT_FOOTER}`);
     // Queued is not sent: the row waits for a person (spec invariant 1).
     expect(provider.getSent()).toHaveLength(0);
 
@@ -282,7 +276,7 @@ describe("outreach end to end, with and without connector keys", () => {
   }
 
   it("fails an approved row when the key says the address is dead", async () => {
-    const rowId = await queueFirstStep("gone@acme.example", "Gone Person");
+    const rowId = await queueDraft("gone@acme.example", "Gone Person");
     configureKeys();
     replyWith({ "gone@acme.example": { result: "undeliverable", score: 0 } });
 
@@ -300,7 +294,7 @@ describe("outreach end to end, with and without connector keys", () => {
   });
 
   it("verifies and then sends when the key says the address is good", async () => {
-    const rowId = await queueFirstStep("ada@acme.example", "Ada Lovelace");
+    const rowId = await queueDraft("ada@acme.example", "Ada Lovelace");
     configureKeys();
     replyWith({ "ada@acme.example": { result: "deliverable", score: 97 } });
 
@@ -563,22 +557,24 @@ describe("outreach end to end, with and without connector keys", () => {
     expect(savedGrace.ok).toBe(true);
     expect(savedGrace.payload.contact.name).toBe("Grace Hopper");
 
-    // 5. Both into one campaign. Nothing here sends anything.
-    const created = await callTool("campaign_create", {
-      name: "belgian logistics",
+    // 5. Both queued for review. Nothing here sends anything.
+    const adaQueued = await callTool("outbox_queue_draft", {
       account: accountId,
-      steps: [{ subject: "Hi {{name}}", body: "About {{org}}." }],
+      to: "ada@acme.example",
+      subject: "Hi Ada",
+      body: "About Acme Logistics.",
+      contactId: savedAda.payload.contact.id,
     });
-    expect(created.ok).toBe(true);
-    const campaignId = created.payload.campaign.id;
-    await callTool("campaign_update", { campaignId, status: "active" });
-    const added = await callTool("campaign_add_contacts", {
-      campaignId,
-      contactIds: [savedAda.payload.contact.id, savedGrace.payload.contact.id],
+    expect(adaQueued.ok).toBe(true);
+    const graceQueued = await callTool("outbox_queue_draft", {
+      account: accountId,
+      to: "grace@acme.example",
+      subject: "Hi Grace",
+      body: "About Acme Logistics.",
+      contactId: savedGrace.payload.contact.id,
     });
-    expect(added.payload.added).toBe(2);
+    expect(graceQueued.ok).toBe(true);
 
-    await platform.engine.tick();
     const pending = platform.outreachStore.listOutbox({ status: "pending" });
     expect(pending).toHaveLength(2);
     // Queued is not sent. A discovered prospect is still nobody's permission.
@@ -587,8 +583,6 @@ describe("outreach end to end, with and without connector keys", () => {
     // 6. One human decision, on one row.
     const adaRow = pending.find((row) => row.to === "ada@acme.example")!;
     const graceRow = pending.find((row) => row.to === "grace@acme.example")!;
-    // {{name}} is the first name by design, and the org came off the record
-    // Apollo returned, not off anything a person typed.
     expect(adaRow.subject).toBe("Hi Ada");
     expect(adaRow.body).toBe(`About Acme Logistics.${OPT_OUT_FOOTER}`);
 
@@ -633,7 +627,7 @@ describe("outreach end to end, with and without connector keys", () => {
     expect(vendorCalls).toEqual([]);
 
     // And the rest of the outreach path is untouched by Apollo being absent.
-    const rowId = await queueFirstStep("ada@acme.example", "Ada Lovelace");
+    const rowId = await queueDraft("ada@acme.example", "Ada Lovelace");
     expect(await approve(rowId)).toBe(200);
     await platform.engine.tick();
     expect(platform.outreachStore.getOutbox(rowId)?.status).toBe("sent");

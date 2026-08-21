@@ -1,19 +1,17 @@
 /**
- * Outreach engine: sequence advancement, reply/opt-out detection, and the
- * approved-send loop. Rules: docs/specs/agent-platform.md (OutreachEngine).
+ * Outreach engine: the approved-send loop. Rules:
+ * docs/specs/agent-platform.md (OutreachEngine).
  *
  * Invariants enforced here, not by agent goodwill:
  * - Only rows a human approved are ever sent.
  * - Engine sends respect BOXAIDE_SEND_DAILY_CAP per account per UTC day and
  *   are spaced >= 60s with +-20s jitter.
- * - Every queued body carries the plain-text opt-out footer. No tracking.
+ * - Every queued body carries the plain-text opt-out footer (written at queue
+ *   time, by the store). No tracking.
  */
-import type { OutreachStore, ContactState } from "./store.js";
-import type { CrmStore } from "../crm/store.js";
+import type { OutreachStore } from "./store.js";
 import type { MailService } from "../mail/service.js";
 import { envNamed } from "../config.js";
-import { inboundSince, readContact, type CrmContact } from "./crm-read.js";
-import { optOutIntent } from "./opt-out.js";
 
 const DEFAULT_DAILY_CAP = 50;
 
@@ -25,12 +23,10 @@ const DEFAULT_DAILY_CAP = 50;
 const SEND_GAP_MS = 60_000;
 const SEND_JITTER_MS = 20_000;
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
 /**
  * Injection seam for tests. Production passes nothing and gets the real clock
- * and a real sleep; a test passes a fixed clock and a no-op sleep so a
- * multi-day sequence and a 60s send gap cost no wall time.
+ * and a real sleep; a test passes a fixed clock and a no-op sleep so a 60s
+ * send gap costs no wall time.
  */
 export type EngineDeps = {
   now?: () => Date;
@@ -53,19 +49,6 @@ export type RecipientVerdict = {
   confidence: number;
 };
 
-/** {{name}} / {{email}} / {{org}} substitution. Unknown fields stay as-is. */
-export function renderTemplate(text: string, contact: CrmContact): string {
-  // {{name}} falls back to the email local part: a bare "Hi ," reads worse
-  // than a login-ish first name, and the CRM often has no display name.
-  const first =
-    (contact.name ?? "").trim().split(/\s+/)[0] ||
-    contact.email.split("@")[0];
-  return text
-    .replace(/\{\{\s*name\s*\}\}/g, first)
-    .replace(/\{\{\s*email\s*\}\}/g, contact.email)
-    .replace(/\{\{\s*org\s*\}\}/g, contact.org ?? "");
-}
-
 export class OutreachEngine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastSendMs: number | null = null;
@@ -75,7 +58,6 @@ export class OutreachEngine {
 
   constructor(
     private store: OutreachStore,
-    private crm: CrmStore,
     private mail: MailService,
     deps: EngineDeps = {},
   ) {
@@ -104,11 +86,11 @@ export class OutreachEngine {
   }
 
   /**
-   * One pass: queue due steps, then send approved rows. Ticks coalesce: the
-   * hourly timer and the on-demand kicks from the REST routes (approve,
-   * contact add, campaign activation) may overlap, and two send loops walking
-   * the same 'approved' rows would deliver them twice. A tick that arrives
-   * while one runs waits for it and schedules exactly one follow-up pass.
+   * One pass: send approved rows. Ticks coalesce: the hourly timer and the
+   * on-demand kicks from the REST routes (approve) may overlap, and two send
+   * loops walking the same 'approved' rows would deliver them twice. A tick
+   * that arrives while one runs waits for it and schedules exactly one
+   * follow-up pass.
    */
   async tick(): Promise<void> {
     if (this.inFlight) {
@@ -118,10 +100,6 @@ export class OutreachEngine {
     this.inFlight = (async () => {
       do {
         this.rerun = false;
-        // No opt-out sweep here: suppression is written at flag time by the
-        // CRM sync's sink (src/platform.ts). A sweep over stored flags would
-        // resurrect suppressions a human removed.
-        this.advanceSequences();
         await this.sendApproved();
       } while (this.rerun);
     })();
@@ -131,124 +109,6 @@ export class OutreachEngine {
       this.inFlight = null;
     }
   }
-
-  /* ---- sequences ------------------------------------------------------ */
-
-  /**
-   * Queue the next due step for every active contact of every active
-   * campaign. Nothing is sent here: every row lands 'pending' and waits for a
-   * human (spec invariant 1).
-   */
-  advanceSequences(): number {
-    const nowIso = this.deps.now().toISOString();
-    let queued = 0;
-    for (const campaign of this.store.listActiveCampaigns()) {
-      const steps = this.store.listSteps(campaign.id);
-      if (steps.length === 0) continue;
-      for (const cc of this.store.dueContacts(campaign.id, nowIso)) {
-        const contact = readContact(this.crm.db, cc.contactId);
-        if (!contact) continue;
-
-        // Reply check first: a human answered, so the sequence has done its
-        // job and any further step would talk over them.
-        if (cc.lastSentAt) {
-          const state = this.replyState(cc.contactId, cc.lastSentAt, contact);
-          if (state) {
-            this.store.setContactState(campaign.id, cc.contactId, state);
-            continue;
-          }
-        }
-
-        if (this.store.isSuppressed(contact.email)) {
-          this.store.setContactState(campaign.id, cc.contactId, "suppressed");
-          continue;
-        }
-
-        const next = cc.currentStep + 1;
-        const step = steps.find((s) => s.position === next);
-        if (!step) {
-          this.store.setContactState(campaign.id, cc.contactId, "done");
-          continue;
-        }
-
-        this.store.queueOutbox({
-          accountId: campaign.accountId,
-          to: contact.email,
-          subject: renderTemplate(step.subject, contact),
-          body: renderTemplate(step.body, contact),
-          campaignId: campaign.id,
-          contactId: cc.contactId,
-          stepPosition: step.position,
-          createdAt: nowIso,
-        });
-        queued += 1;
-
-        const following = steps.find((s) => s.position === next + 1);
-        this.store.advanceContact(campaign.id, cc.contactId, {
-          currentStep: next,
-          // Queue time, not send time: it is the earliest moment a reply could
-          // be an answer to this step, and the send date is not known yet.
-          lastSentAt: nowIso,
-          nextDueAt: following
-            ? new Date(
-                this.deps.now().getTime() + following.waitDays * DAY_MS,
-              ).toISOString()
-            : null,
-          state: following ? "active" : "done",
-        });
-      }
-    }
-    return queued;
-  }
-
-  /**
-   * 'opted_out' (and a suppression entry) when an inbound message asks to
-   * stop, 'replied' for any other inbound message, null when silence.
-   */
-  private replyState(
-    contactId: string,
-    sinceIso: string,
-    contact: CrmContact,
-  ): ContactState | null {
-    const inbound = inboundSince(this.crm.db, contactId, sinceIso);
-    if (inbound.length === 0) return null;
-    for (const row of inbound) {
-      // The flag is the authority: CRM sync saw the whole body, this class
-      // only ever sees a subject and a truncated snippet. The field checks
-      // run ONLY when the column itself is absent (optOut null, a process
-      // reading a pre-migration database) — a stored 0 is a judgement, by
-      // the sync or by the human who cleared the flag on un-suppressing,
-      // and second-guessing it from the snippet would resurrect removals.
-      // Each field is tested on its own — a joined string fabricates
-      // phrases across the seam between subject and snippet.
-      const optedOut =
-        row.optOut === 1 ||
-        (row.optOut === null &&
-          (optOutIntent(this.decryptField(row.subjectEnc), "subject") ||
-            optOutIntent(this.decryptField(row.snippetEnc), "body")));
-      if (optedOut) {
-        this.store.addSuppression(contact.email, "reply-stop");
-        return "opted_out";
-      }
-    }
-    return "replied";
-  }
-
-  /** Decrypt one optional field; an absent or unreadable one reads as empty. */
-  private decryptField(payload: string | null): string {
-    return payload ? this.safeDecrypt(payload) : "";
-  }
-
-  /** A row we cannot decrypt must not abort the tick for every other contact. */
-  private safeDecrypt(payload: string): string {
-    try {
-      return this.store.decryptText(payload);
-    } catch {
-      return "";
-    }
-  }
-
-  /* ---- approved sends -------------------------------------------------- */
 
   /**
    * Send the rows a human approved, oldest first, respecting the per-account

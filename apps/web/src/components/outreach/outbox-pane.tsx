@@ -185,11 +185,6 @@ export function OutboxPane() {
                 <time dateTime={isoAttr(row.createdAt)} title={isoTitle(row.createdAt)}>
                   {formatReaderDate(row.createdAt)}
                 </time>
-                {row.stepPosition !== null && (
-                  <span className="text-fg-tertiary">
-                    {" · "}step {row.stepPosition + 1}
-                  </span>
-                )}
               </dd>
             </div>
           </dl>
@@ -216,8 +211,7 @@ export function OutboxPane() {
           <AlertDialogHeader>
             <AlertDialogTitle>Reject this email?</AlertDialogTitle>
             <AlertDialogDescription>
-              It stays on record as rejected and can never be sent. If the
-              campaign has a next step, that step is still queued later.
+              It stays on record as rejected and can never be sent.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

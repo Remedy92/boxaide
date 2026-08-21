@@ -1,6 +1,6 @@
 /**
  * Outreach tables and queries. DDL: docs/specs/agent-platform.md.
- * Owns: campaigns, sequence_steps, campaign_contacts, outbox, suppression.
+ * Owns: outbox, suppression.
  * Subjects and bodies are encrypted (_enc).
  */
 import { randomUUID } from "node:crypto";
@@ -14,54 +14,17 @@ import { OPT_OUT_FOOTER, canonicalEmail } from "./opt-out.js";
  */
 export { OPT_OUT_FOOTER } from "./opt-out.js";
 
-export type CampaignStatus = "draft" | "active" | "paused" | "done";
 export type OutboxStatus =
   | "pending"
   | "approved"
   | "sent"
   | "rejected"
   | "failed";
-export type ContactState =
-  | "active"
-  | "replied"
-  | "opted_out"
-  | "done"
-  | "suppressed";
-
-export type Campaign = {
-  id: string;
-  name: string;
-  accountId: string;
-  status: CampaignStatus;
-  createdAt: string;
-};
-
-export type StepInput = { subject: string; body: string; waitDays?: number };
-
-export type SequenceStep = {
-  id: string;
-  campaignId: string;
-  position: number;
-  waitDays: number;
-  subject: string;
-  body: string;
-};
-
-export type CampaignContact = {
-  campaignId: string;
-  contactId: string;
-  state: ContactState;
-  currentStep: number;
-  lastSentAt: string | null;
-  nextDueAt: string | null;
-};
 
 export type OutboxRow = {
   id: string;
   accountId: string;
-  campaignId: string | null;
   contactId: string | null;
-  stepPosition: number | null;
   to: string;
   subject: string;
   body: string;
@@ -74,11 +37,8 @@ export type OutboxRow = {
 
 export type SuppressionRow = { email: string; reason: string; at: string };
 
-export const MAX_CAMPAIGN_NAME_CHARS = 200;
-export const MAX_CAMPAIGN_STEPS = 50;
 export const MAX_OUTREACH_SUBJECT_BYTES = 4 * 1024;
 export const MAX_OUTREACH_BODY_BYTES = 128 * 1024;
-export const MAX_CAMPAIGN_CONTACTS_PER_REQUEST = 1_000;
 const MAX_IDENTIFIER_CHARS = 200;
 const MAX_EMAIL_CHARS = 320;
 const MAX_SUPPRESSION_REASON_CHARS = 1_000;
@@ -89,68 +49,15 @@ function assertOutreachText(label: string, value: string, maxBytes: number): voi
   }
 }
 
-function assertSteps(steps: StepInput[]): void {
-  if (steps.length > MAX_CAMPAIGN_STEPS) {
-    throw new Error(`steps must contain at most ${MAX_CAMPAIGN_STEPS} entries`);
-  }
-  for (const step of steps) {
-    assertOutreachText(
-      "step subject",
-      String(step.subject ?? ""),
-      MAX_OUTREACH_SUBJECT_BYTES,
-    );
-    assertOutreachText(
-      "step body",
-      String(step.body ?? ""),
-      MAX_OUTREACH_BODY_BYTES,
-    );
-  }
-}
-
-const CAMPAIGN_STATUSES: ReadonlySet<string> = new Set([
-  "draft",
-  "active",
-  "paused",
-  "done",
-]);
-
 /** Idempotent: a body that already carries the footer is left alone. */
 export function withOptOutFooter(body: string): string {
   return body.includes(OPT_OUT_FOOTER) ? body : `${body}${OPT_OUT_FOOTER}`;
 }
 
-type CampaignRow = {
-  id: string;
-  name: string;
-  account_id: string;
-  status: string;
-  created_at: string;
-};
-
-type StepRow = {
-  id: string;
-  campaign_id: string;
-  position: number;
-  wait_days: number;
-  subject_enc: string;
-  body_enc: string;
-};
-
-type ContactRow = {
-  campaign_id: string;
-  contact_id: string;
-  state: string;
-  current_step: number;
-  last_sent_at: string | null;
-  next_due_at: string | null;
-};
-
 type OutboxDbRow = {
   id: string;
   account_id: string;
-  campaign_id: string | null;
   contact_id: string | null;
-  step_position: number | null;
   to_addr: string;
   subject_enc: string;
   body_enc: string;
@@ -178,37 +85,10 @@ export class OutreachStore {
 
   private migrate(): void {
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS campaigns (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE,
-        account_id TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'draft',
-        created_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS sequence_steps (
-        id TEXT PRIMARY KEY,
-        campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-        position INTEGER NOT NULL,
-        wait_days INTEGER NOT NULL DEFAULT 0,
-        subject_enc TEXT NOT NULL,
-        body_enc TEXT NOT NULL,
-        UNIQUE (campaign_id, position)
-      );
-      CREATE TABLE IF NOT EXISTS campaign_contacts (
-        campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-        contact_id TEXT NOT NULL,
-        state TEXT NOT NULL DEFAULT 'active',
-        current_step INTEGER NOT NULL DEFAULT -1,
-        last_sent_at TEXT,
-        next_due_at TEXT,
-        PRIMARY KEY (campaign_id, contact_id)
-      );
       CREATE TABLE IF NOT EXISTS outbox (
         id TEXT PRIMARY KEY,
         account_id TEXT NOT NULL,
-        campaign_id TEXT,
         contact_id TEXT,
-        step_position INTEGER,
         to_addr TEXT NOT NULL,
         subject_enc TEXT NOT NULL,
         body_enc TEXT NOT NULL,
@@ -225,6 +105,16 @@ export class OutreachStore {
       );
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status, created_at);
       CREATE INDEX IF NOT EXISTS idx_outbox_sent ON outbox(account_id, sent_at);
+    `);
+
+    // Campaigns shipped and were removed: drop their tables. The outbox
+    // columns campaign_id and step_position are left in existing databases —
+    // SQLite cannot drop a column without a table rewrite, and an unread
+    // column costs nothing.
+    this.db.exec(`
+      DROP TABLE IF EXISTS campaign_contacts;
+      DROP TABLE IF EXISTS sequence_steps;
+      DROP TABLE IF EXISTS campaigns;
     `);
 
     // Rows written before canonicalEmail existed hold trim+lowercase keys;
@@ -257,15 +147,6 @@ export class OutreachStore {
 
   private dec(payload: string): string {
     return decryptSecret(this.masterKey, payload);
-  }
-
-  /**
-   * Decrypt a payload written by any store that shares this master key.
-   * The engine needs it for CRM interaction subjects/snippets: its constructor
-   * deps are fixed by src/platform.ts and carry no key of their own.
-   */
-  decryptText(payload: string): string {
-    return this.dec(payload);
   }
 
   /* ---- suppression ---------------------------------------------------- */
@@ -319,350 +200,20 @@ export class OutreachStore {
     return res.changes > 0;
   }
 
-  /* ---- campaigns ------------------------------------------------------ */
-
-  createCampaign(input: {
-    name: string;
-    accountId: string;
-    steps: StepInput[];
-  }): Campaign {
-    const name = input.name.trim();
-    if (!name) throw new Error("name is required");
-    if (name.length > MAX_CAMPAIGN_NAME_CHARS) {
-      throw new Error(
-        `name must be at most ${MAX_CAMPAIGN_NAME_CHARS} characters`,
-      );
-    }
-    if (!input.accountId.trim()) throw new Error("account is required");
-    if (input.accountId.trim().length > MAX_IDENTIFIER_CHARS) {
-      throw new Error("account is too long");
-    }
-    if (!input.steps.length) throw new Error("at least one step is required");
-    assertSteps(input.steps);
-    const campaign: Campaign = {
-      id: randomUUID(),
-      name,
-      accountId: input.accountId.trim(),
-      status: "draft",
-      createdAt: new Date().toISOString(),
-    };
-    const write = this.db.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO campaigns (id, name, account_id, status, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
-        )
-        .run(
-          campaign.id,
-          campaign.name,
-          campaign.accountId,
-          campaign.status,
-          campaign.createdAt,
-        );
-      this.writeSteps(campaign.id, input.steps);
-    });
-    write();
-    return campaign;
-  }
-
-  private writeSteps(campaignId: string, steps: StepInput[]): void {
-    this.db
-      .prepare(`DELETE FROM sequence_steps WHERE campaign_id = ?`)
-      .run(campaignId);
-    const insert = this.db.prepare(
-      `INSERT INTO sequence_steps
-         (id, campaign_id, position, wait_days, subject_enc, body_enc)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    );
-    steps.forEach((step, position) => {
-      // Step 0 is the initial email: it goes out as soon as the contact is due,
-      // so any wait the caller passed for it is meaningless and dropped.
-      const waitDays = position === 0 ? 0 : Math.max(0, Number(step.waitDays ?? 0));
-      insert.run(
-        randomUUID(),
-        campaignId,
-        position,
-        waitDays,
-        this.enc(String(step.subject ?? "")),
-        this.enc(String(step.body ?? "")),
-      );
-    });
-  }
-
-  getCampaign(id: string): Campaign | null {
-    const row = this.db
-      .prepare(`SELECT * FROM campaigns WHERE id = ?`)
-      .get(id) as CampaignRow | undefined;
-    return row ? this.toCampaign(row) : null;
-  }
-
-  private toCampaign(row: CampaignRow): Campaign {
-    return {
-      id: row.id,
-      name: row.name,
-      accountId: row.account_id,
-      status: row.status as CampaignStatus,
-      createdAt: row.created_at,
-    };
-  }
-
-  listCampaigns(): Array<Campaign & { counts: Record<string, number> }> {
-    const rows = this.db
-      .prepare(`SELECT * FROM campaigns ORDER BY created_at DESC`)
-      .all() as CampaignRow[];
-    const counts = this.db
-      .prepare(
-        `SELECT campaign_id, state, COUNT(*) AS n
-           FROM campaign_contacts GROUP BY campaign_id, state`,
-      )
-      .all() as Array<{ campaign_id: string; state: string; n: number }>;
-    return rows.map((row) => {
-      const perState: Record<string, number> = {};
-      for (const c of counts) {
-        if (c.campaign_id === row.id) perState[c.state] = c.n;
-      }
-      return { ...this.toCampaign(row), counts: perState };
-    });
-  }
-
-  listActiveCampaigns(): Campaign[] {
-    const rows = this.db
-      .prepare(`SELECT * FROM campaigns WHERE status = 'active'`)
-      .all() as CampaignRow[];
-    return rows.map((r) => this.toCampaign(r));
-  }
-
-  /**
-   * Steps may only be replaced while the campaign is still a draft: contacts
-   * already partway through a sequence would otherwise silently receive a
-   * different mail than the one the human approved the campaign for. The check
-   * reads the status BEFORE this update, so "activate and set final steps" in
-   * one call is allowed.
-   */
-  updateCampaign(
-    id: string,
-    patch: { name?: string; status?: CampaignStatus; steps?: StepInput[] },
-  ): Campaign | null {
-    const current = this.getCampaign(id);
-    if (!current) return null;
-    // Both callers (MCP tool, REST PATCH) cast unchecked input to
-    // CampaignStatus, so the write itself is the last place to stop a bogus
-    // status from landing in the row and hiding the campaign from every
-    // status-filtered query.
-    if (patch.status !== undefined && !CAMPAIGN_STATUSES.has(patch.status)) {
-      throw new Error(`unknown status: ${patch.status}`);
-    }
-    if (patch.name !== undefined && !patch.name.trim()) {
-      throw new Error("name is required");
-    }
-    if (
-      patch.name !== undefined &&
-      patch.name.trim().length > MAX_CAMPAIGN_NAME_CHARS
-    ) {
-      throw new Error(
-        `name must be at most ${MAX_CAMPAIGN_NAME_CHARS} characters`,
-      );
-    }
-    if (patch.steps) {
-      if (current.status !== "draft") {
-        throw new Error("steps can only be replaced while the campaign is draft");
-      }
-      if (!patch.steps.length) throw new Error("at least one step is required");
-      assertSteps(patch.steps);
-    }
-    const write = this.db.transaction(() => {
-      if (patch.name !== undefined) {
-        this.db
-          .prepare(`UPDATE campaigns SET name = ? WHERE id = ?`)
-          .run(patch.name.trim(), id);
-      }
-      if (patch.status !== undefined) {
-        this.db
-          .prepare(`UPDATE campaigns SET status = ? WHERE id = ?`)
-          .run(patch.status, id);
-      }
-      if (patch.steps) this.writeSteps(id, patch.steps);
-    });
-    write();
-    return this.getCampaign(id);
-  }
-
-  deleteCampaign(id: string): boolean {
-    return (
-      this.db.prepare(`DELETE FROM campaigns WHERE id = ?`).run(id).changes > 0
-    );
-  }
-
-  listSteps(campaignId: string): SequenceStep[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM sequence_steps WHERE campaign_id = ? ORDER BY position`,
-      )
-      .all(campaignId) as StepRow[];
-    return rows.map((r) => ({
-      id: r.id,
-      campaignId: r.campaign_id,
-      position: r.position,
-      waitDays: r.wait_days,
-      subject: this.dec(r.subject_enc),
-      body: this.dec(r.body_enc),
-    }));
-  }
-
-  /* ---- campaign contacts ---------------------------------------------- */
-
-  addCampaignContacts(campaignId: string, contactIds: string[]): number {
-    if (contactIds.length > MAX_CAMPAIGN_CONTACTS_PER_REQUEST) {
-      throw new Error(
-        `contactIds must contain at most ${MAX_CAMPAIGN_CONTACTS_PER_REQUEST} entries`,
-      );
-    }
-    if (contactIds.some((id) => id.length > MAX_IDENTIFIER_CHARS)) {
-      throw new Error("contactId is too long");
-    }
-    const insert = this.db.prepare(
-      `INSERT INTO campaign_contacts
-         (campaign_id, contact_id, state, current_step)
-       VALUES (?, ?, 'active', -1)
-       ON CONFLICT(campaign_id, contact_id) DO UPDATE SET
-         state = 'active',
-         current_step = -1,
-         last_sent_at = NULL,
-         next_due_at = NULL
-       WHERE campaign_contacts.state IN ('opted_out', 'suppressed')`,
-    );
-    const write = this.db.transaction(() => {
-      let added = 0;
-      for (const contactId of contactIds) {
-        added += insert.run(campaignId, contactId).changes;
-      }
-      return added;
-    });
-    return write();
-  }
-
-  listCampaignContacts(campaignId: string): CampaignContact[] {
-    const rows = this.db
-      .prepare(`SELECT * FROM campaign_contacts WHERE campaign_id = ?`)
-      .all(campaignId) as ContactRow[];
-    return rows.map((r) => this.toCampaignContact(r));
-  }
-
-  private toCampaignContact(row: ContactRow): CampaignContact {
-    return {
-      campaignId: row.campaign_id,
-      contactId: row.contact_id,
-      state: row.state as ContactState,
-      currentStep: row.current_step,
-      lastSentAt: row.last_sent_at,
-      nextDueAt: row.next_due_at,
-    };
-  }
-
-  /** Active contacts that have never been queued, or whose wait has elapsed. */
-  dueContacts(campaignId: string, nowIso: string): CampaignContact[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM campaign_contacts
-          WHERE campaign_id = ? AND state = 'active'
-            AND (current_step = -1 OR next_due_at IS NULL OR next_due_at <= ?)
-          ORDER BY contact_id`,
-      )
-      .all(campaignId, nowIso) as ContactRow[];
-    return rows.map((r) => this.toCampaignContact(r));
-  }
-
-  setContactState(
-    campaignId: string,
-    contactId: string,
-    state: ContactState,
-  ): void {
-    this.db
-      .prepare(
-        `UPDATE campaign_contacts SET state = ?
-          WHERE campaign_id = ? AND contact_id = ?`,
-      )
-      .run(state, campaignId, contactId);
-  }
+  /* ---- outbox --------------------------------------------------------- */
 
   /**
    * Did outreach ever touch this contact? The opt-out sweep suppresses on the
    * strength of one inbound message, so it must only reach people this product
-   * mailed or was about to mail — a campaign_contacts row or an outbox row.
-   * Someone who writes "stop" into an unrelated thread is not suppressed.
+   * mailed or was about to mail — an outbox row. Someone who writes "stop"
+   * into an unrelated thread is not suppressed.
    */
   hasOutreachHistory(contactId: string): boolean {
     const row = this.db
-      .prepare(
-        `SELECT 1 AS hit WHERE EXISTS (
-             SELECT 1 FROM campaign_contacts WHERE contact_id = ?
-           ) OR EXISTS (
-             SELECT 1 FROM outbox WHERE contact_id = ?
-           )`,
-      )
-      .get(contactId, contactId) as { hit: number } | undefined;
+      .prepare(`SELECT 1 AS hit FROM outbox WHERE contact_id = ?`)
+      .get(contactId) as { hit: number } | undefined;
     return row !== undefined;
   }
-
-  /**
-   * End every live campaign membership for a contact who asked to stop.
-   * Rows already 'opted_out' or 'suppressed' are left alone; 'active',
-   * 'replied' and 'done' all move, because the request outranks whatever the
-   * sequence thought its state was.
-   */
-  optOutContact(contactId: string): number {
-    return this.db
-      .prepare(
-        `UPDATE campaign_contacts SET state = 'opted_out'
-          WHERE contact_id = ? AND state NOT IN ('opted_out', 'suppressed')`,
-      )
-      .run(contactId).changes;
-  }
-
-  /**
-   * A human took this address off the suppression list. Rows that stopped
-   * because of that list or a reply-stop restart at step 0 so the sequence
-   * can queue again (still pending approval). replied/done stay put: those
-   * are sequence outcomes, not the suppression the human just answered.
-   */
-  reopenStoppedCampaigns(contactId: string): number {
-    return this.db
-      .prepare(
-        `UPDATE campaign_contacts
-            SET state = 'active', current_step = -1,
-                last_sent_at = NULL, next_due_at = NULL
-          WHERE contact_id = ? AND state IN ('opted_out', 'suppressed')`,
-      )
-      .run(contactId).changes;
-  }
-
-  advanceContact(
-    campaignId: string,
-    contactId: string,
-    patch: {
-      currentStep: number;
-      lastSentAt: string;
-      nextDueAt: string | null;
-      state: ContactState;
-    },
-  ): void {
-    this.db
-      .prepare(
-        `UPDATE campaign_contacts
-            SET current_step = ?, last_sent_at = ?, next_due_at = ?, state = ?
-          WHERE campaign_id = ? AND contact_id = ?`,
-      )
-      .run(
-        patch.currentStep,
-        patch.lastSentAt,
-        patch.nextDueAt,
-        patch.state,
-        campaignId,
-        contactId,
-      );
-  }
-
-  /* ---- outbox --------------------------------------------------------- */
 
   /**
    * Queue a draft for human review. Status is always 'pending': nothing in
@@ -673,9 +224,7 @@ export class OutreachStore {
     to: string;
     subject: string;
     body: string;
-    campaignId?: string | null;
     contactId?: string | null;
-    stepPosition?: number | null;
     createdAt?: string;
   }): OutboxRow {
     if (!input.to.trim()) throw new Error("to is required");
@@ -688,9 +237,7 @@ export class OutreachStore {
     const row: OutboxRow = {
       id: randomUUID(),
       accountId: input.accountId,
-      campaignId: input.campaignId ?? null,
       contactId: input.contactId ?? null,
-      stepPosition: input.stepPosition ?? null,
       to: input.to.trim(),
       subject: input.subject,
       body: withOptOutFooter(input.body),
@@ -713,16 +260,14 @@ export class OutreachStore {
         this.db
           .prepare(
             `INSERT INTO outbox
-               (id, account_id, campaign_id, contact_id, step_position, to_addr,
+               (id, account_id, contact_id, to_addr,
                 subject_enc, body_enc, status, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             row.id,
             row.accountId,
-            row.campaignId,
             row.contactId,
-            row.stepPosition,
             row.to,
             this.enc(row.subject),
             this.enc(row.body),
@@ -741,11 +286,11 @@ export class OutreachStore {
    * about the same person in the same minute. Returning the existing row makes
    * queueing idempotent for that case.
    *
-   * The match is the WHOLE message — recipient, campaign, step, subject, body.
-   * Deliberately narrow. A looser key (same person, same campaign) would also
-   * swallow a second, genuinely different draft, and a draft that silently
-   * never appears is worse than two similar ones: the reviewer can delete a
-   * duplicate they can see, but cannot recover one they never got.
+   * The match is the WHOLE message — recipient, subject, body. Deliberately
+   * narrow. A looser key (same person) would also swallow a second, genuinely
+   * different draft, and a draft that silently never appears is worse than two
+   * similar ones: the reviewer can delete a duplicate they can see, but cannot
+   * recover one they never got.
    *
    * Subject and body are encrypted, so the comparison happens after decrypting
    * the candidates. Only pending rows to the same address on the same account
@@ -761,8 +306,6 @@ export class OutreachStore {
     for (const candidate of candidates) {
       const existing = this.toOutbox(candidate);
       if (
-        existing.campaignId === row.campaignId &&
-        existing.stepPosition === row.stepPosition &&
         existing.subject === row.subject &&
         existing.body === row.body
       ) {
@@ -776,9 +319,7 @@ export class OutreachStore {
     return {
       id: row.id,
       accountId: row.account_id,
-      campaignId: row.campaign_id,
       contactId: row.contact_id,
-      stepPosition: row.step_position,
       to: row.to_addr,
       subject: this.dec(row.subject_enc),
       body: this.dec(row.body_enc),
@@ -800,7 +341,7 @@ export class OutreachStore {
   listOutbox(opts: { status?: OutboxStatus; limit?: number } = {}): OutboxRow[] {
     const limit = Math.max(1, opts.limit ?? 50);
     // rowid breaks ties: several rows can carry the same created_at (one tick
-    // queues a whole campaign), and the send loop must stay first-in-first-out
+    // queues several drafts), and the send loop must stay first-in-first-out
     // rather than fall back to UUID order.
     const rows = opts.status
       ? (this.db

@@ -5,10 +5,8 @@ import {
   addSuppression,
   decideOutbox,
   removeSuppression,
-  updateCampaignStatus,
 } from "@/lib/api/endpoints";
 import { useApiCtx } from "@/lib/hooks/use-settings";
-import type { CampaignStatus } from "@/lib/types";
 
 /**
  * Every outreach write, in one file, because they all invalidate the same
@@ -30,24 +28,6 @@ export function useDecideOutbox() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["outreach-outbox"] });
       // The rail badge counts pending rows, so a decision moves it.
-      void queryClient.invalidateQueries({ queryKey: ["outreach-badge"] });
-      // Approving kicks the engine, which may advance a campaign contact.
-      void queryClient.invalidateQueries({ queryKey: ["outreach-campaigns"] });
-    },
-  });
-}
-
-export function useUpdateCampaignStatus() {
-  const ctx = useApiCtx();
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: { campaignId: string; status: CampaignStatus }) =>
-      updateCampaignStatus(input.campaignId, input.status, ctx),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["outreach-campaigns"] });
-      /* Activating a campaign makes the engine queue step 0 — as PENDING rows.
-         Both the queue and the badge can change within the second. */
-      void queryClient.invalidateQueries({ queryKey: ["outreach-outbox"] });
       void queryClient.invalidateQueries({ queryKey: ["outreach-badge"] });
     },
   });

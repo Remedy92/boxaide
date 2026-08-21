@@ -725,7 +725,7 @@ export class CrmStore {
 
   /**
    * Contact ids whose mailbox matches `email` after canonicalEmail. Used by
-   * un-suppress so CRM flags and campaign membership move together.
+   * un-suppress so the CRM flags move with the human's decision.
    */
   contactIdsForEmail(email: string): string[] {
     const canonical = canonicalEmail(email);
