@@ -7,10 +7,14 @@ import { presenceDisplayName } from "@/components/agent/agent-presence";
 import {
   getAgentState,
   getLocalBootstrap,
+  listAutomations,
   listMessages,
+  listRecentAutomationRuns,
 } from "@/lib/api/endpoints";
 import { displayName } from "@/lib/format/address";
+import { runStatusLabel } from "@/lib/format/automation";
 import { formatListDate } from "@/lib/format/date";
+import type { AutomationRunStatus } from "@/lib/types";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
 import { takeDesktopBootstrapCapability } from "@/lib/desktop-bootstrap";
@@ -30,7 +34,17 @@ import { takeDesktopBootstrapCapability } from "@/lib/desktop-bootstrap";
  */
 
 const REFRESH_AGENT_MS = 8_000;
+const REFRESH_RUNS_MS = 30_000;
 const LIST_LIMIT = 9;
+/** Three rows: a glance, not a history. The view has the rest. */
+const RUNS_LIMIT = 3;
+
+const RUN_DOT: Record<AutomationRunStatus, string> = {
+  running: "bg-accent",
+  ok: "bg-success",
+  error: "bg-danger",
+  killed: "bg-warning",
+};
 
 /**
  * A full document navigation on purpose — not router.push. The desktop shell
@@ -88,6 +102,31 @@ export default function TrayPage() {
     refetchInterval: REFRESH_AGENT_MS,
   });
 
+  /* The last few automation runs, with the automation's name. Two requests,
+     because the run row carries an id and not a name, and the list is the
+     one place the name lives. Same cadence as the rail's badge. */
+  const runs = useQuery({
+    queryKey: ["tray-runs", ctx.baseUrl, ctx.token],
+    enabled: ctx.ready,
+    queryFn: ({ signal }) =>
+      listRecentAutomationRuns({ ...ctx, signal }, RUNS_LIMIT),
+    refetchInterval: REFRESH_RUNS_MS,
+    retry: false,
+  });
+  const automations = useQuery({
+    queryKey: ["tray-automations", ctx.baseUrl, ctx.token],
+    enabled: ctx.ready,
+    queryFn: ({ signal }) => listAutomations({ ...ctx, signal }),
+    refetchInterval: REFRESH_RUNS_MS,
+    retry: false,
+  });
+  const nameOf = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const a of automations.data ?? []) map.set(a.id, a.name);
+    return map;
+  }, [automations.data]);
+  const recentRuns = runs.data ?? [];
+
   const presence = agent.data?.presence;
   const agentName = presence ? presenceDisplayName(presence) : null;
   const messages = mail.data?.messages ?? [];
@@ -115,6 +154,56 @@ export default function TrayPage() {
       </header>
 
       <div className="pane-scroll min-h-0 flex-1 overflow-y-auto">
+        {/* Only when there is something to say: an install with no
+            automations, or none that has run, gets the mail list alone. */}
+        {recentRuns.length > 0 && (
+          <section
+            aria-label="Recent automation runs"
+            className="border-b border-border-subtle"
+          >
+            <h2 className="px-4 pt-2.5 pb-1 text-[11px] leading-4 font-medium tracking-[0.02em] text-fg-tertiary uppercase">
+              Automations
+            </h2>
+            <ul>
+              {recentRuns.map((run) => (
+                <li key={run.id}>
+                  <button
+                    type="button"
+                    onClick={openInbox}
+                    className={cn(
+                      "flex w-full items-baseline gap-2 px-4 py-1.5 text-left",
+                      "transition-colors duration-[var(--dur-fast)] hover:bg-surface-hover",
+                    )}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "relative top-[-1px] inline-block size-1.5 shrink-0 rounded-full",
+                        RUN_DOT[run.status] ?? "bg-fg-tertiary",
+                      )}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-[12px] leading-4 text-fg-secondary">
+                      {nameOf.get(run.automationId) ?? "Automation"}
+                    </span>
+                    <span
+                      className={cn(
+                        "shrink-0 text-[11px] leading-4",
+                        run.status === "error" || run.status === "killed"
+                          ? "text-danger"
+                          : "text-fg-tertiary",
+                      )}
+                    >
+                      {runStatusLabel(run.status)}
+                    </span>
+                    <span className="shrink-0 text-[11px] tabular-nums text-fg-tertiary">
+                      {formatListDate(run.finishedAt ?? run.startedAt)}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
         {!ctx.ready || mail.isPending ? (
           <TrayHint text="Loading your mail…" />
         ) : mail.isError ? (

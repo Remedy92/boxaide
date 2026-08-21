@@ -640,6 +640,14 @@ rises above the last seen value: show a system Notification ("N drafts await
 your approval") and set the dock/taskbar badge to the count. Clear the badge
 when it returns 0.
 
+Poll `/api/automations/badge` on the same tick. The menu bar item shows the
+`unseen` count as its title and swaps to `trayAlert.png` (the mark with a red
+dot) while `failed > 0`; both clear once the Automations view has been opened.
+When `failed` rises above the last seen value: a Notification ("An automation
+run failed. Open Automations to see its log."). The tray popover lists the
+last three runs with name, outcome and time above the mail list, only when
+there is at least one run.
+
 ## Verification gates (every implementation task runs these before claiming done)
 
 ```

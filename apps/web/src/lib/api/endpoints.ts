@@ -1068,6 +1068,18 @@ export function markAutomationRunsSeen(ctx: Ctx): Promise<AutomationBadge> {
   });
 }
 
+/** GET /api/automations/runs — the newest runs across every automation. */
+export async function listRecentAutomationRuns(
+  ctx: Ctx,
+  limit?: number,
+): Promise<AutomationRun[]> {
+  const data = await request<{ runs: AutomationRun[] }>(
+    `/api/automations/runs${query({ limit })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+  return data.runs;
+}
+
 export async function listAutomationRuns(
   automationId: string,
   ctx: Ctx,
