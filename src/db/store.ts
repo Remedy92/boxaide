@@ -1104,6 +1104,12 @@ export class Store {
    *
    * Stale messages are retired first, in the same transaction, so a claim can
    * never hand over one this store would refuse to keep queued.
+   *
+   * A message in an archived chat is not handed over either. Archiving keeps
+   * the turns, so an unanswered question sits there undelivered, and an agent
+   * started later would otherwise work a conversation the rail does not show.
+   * It is still queued: opening the chat unarchives it, and the claim after
+   * that picks the message up.
    */
   claimNextUserTurn(activeChatId?: string | null): StoredTurn | null {
     const claim = this.db.transaction((): StoredTurn | null => {
@@ -1114,6 +1120,9 @@ export class Store {
                   reply_to as replyTo, COALESCE(delivery_count, 0) as deliveryCount
            FROM agent_turns
            WHERE role = 'user' AND delivered = 0
+             AND chat_id NOT IN (
+               SELECT id FROM agent_chats WHERE archived_at IS NOT NULL
+             )
            ORDER BY (chat_id IS NOT NULL AND chat_id = ?) DESC, seq ASC
            LIMIT 1`,
         )

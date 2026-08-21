@@ -428,11 +428,14 @@ export class AgentChannel {
   /**
    * Posts a model's answer to the question it answers, or drops it.
    *
-   * False means dropped, and the only way that happens is the user emptying or
-   * deleting the chat while the model was still working on it. `post` alone
-   * would land that answer wherever the user is now, under no question at all:
-   * a reply to a message nobody can see, in a conversation it was never asked
-   * in. The user removed the question; the answer goes with it.
+   * False means dropped, and the only way that happens is the user emptying,
+   * deleting or archiving the chat while the model was still working on it.
+   * `post` alone would land that answer wherever the user is now, under no
+   * question at all: a reply to a message nobody can see, in a conversation it
+   * was never asked in. The user removed the question; the answer goes with
+   * it. Archiving keeps the question but not the work: the chat is not
+   * writable while it is put away, and `archiveChat` has already released the
+   * lease, so a reply landing there would be one nothing shows.
    */
   answer(input: {
     seq: number;
@@ -440,7 +443,10 @@ export class AgentChannel {
     text: string;
     agent?: string | null;
   }): boolean {
-    if (!this.store.answerable(input.seq, input.chatId)) {
+    if (
+      !this.store.answerable(input.seq, input.chatId) ||
+      !this.writable(input.chatId)
+    ) {
       // Nothing is being worked on any more either way.
       if (this.work?.seq === input.seq) this.work = null;
       this.emitPresence();

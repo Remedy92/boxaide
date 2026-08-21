@@ -350,6 +350,36 @@ describe("archiving", () => {
     expect(channel.history(undefined, chat.id)).toHaveLength(1);
   });
 
+  it("drops an answer to a question in a chat archived while it was being worked", () => {
+    const { channel } = make();
+    const asked = channel.post({ role: "user", text: "what did the supplier say?" });
+    channel.createChat();
+    expect(channel.archiveChat(asked.chatId)).toBe(true);
+
+    // The chat keeps its question, but it is put away: nothing shows a reply
+    // that lands there, and the chat is not writable until it is opened.
+    expect(
+      channel.answer({ seq: asked.seq, chatId: asked.chatId, text: "they said no" }),
+    ).toBe(false);
+    expect(channel.history(undefined, asked.chatId)).toHaveLength(1);
+  });
+
+  it("does not hand an agent a message from an archived chat", () => {
+    const { store, channel } = make();
+    const asked = channel.post({ role: "user", text: "chase the invoice" });
+    channel.createChat();
+    const active = channel.activeChat().id;
+    expect(channel.archiveChat(asked.chatId)).toBe(true);
+
+    // Still queued, but not for now: an agent started after the archive must
+    // not go busy on a conversation the rail does not show.
+    expect(store.claimNextUserTurn(active)).toBeNull();
+
+    // Opening the chat brings it back, and the message with it.
+    expect(channel.selectChat(asked.chatId)).toBe(true);
+    expect(store.claimNextUserTurn(asked.chatId)?.seq).toBe(asked.seq);
+  });
+
   it("says no to archiving twice and to unarchiving what is not archived", () => {
     const { channel } = make();
     channel.post({ role: "user", text: "first" });
