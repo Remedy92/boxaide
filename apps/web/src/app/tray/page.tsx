@@ -40,7 +40,11 @@ const LIST_LIMIT = 9;
  * never fires that. Absolute URL, so no relative-destination lint concern.
  */
 function openInbox() {
-  window.location.assign(new URL("/", window.location.origin).toString());
+  // `#/` rather than a bare `/`: the desktop shell forwards only a hash that
+  // names a page, and the empty one names none, so a window already open on a
+  // message stayed on it. The root hash is a page, the one with nothing open
+  // on it, and it closes a message or Settings the way the app itself does.
+  window.location.assign(new URL("/#/", window.location.origin).toString());
 }
 
 /**

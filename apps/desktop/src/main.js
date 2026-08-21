@@ -29,6 +29,7 @@ import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { appHashOf } from "./app-hash.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -957,22 +958,6 @@ function openExternal(target) {
   const protocol = protocolOf(target);
   if (protocol !== "http:" && protocol !== "https:") return;
   void shell.openExternal(target);
-}
-
-/**
- * The hash a tray navigation asked for, empty unless it names a page inside
- * the app. Every route the app has starts `#/`, so the test also keeps a
- * fragment that is anything else out of the main window.
- * @param {string} value
- * @returns {string}
- */
-function appHashOf(value) {
-  try {
-    const { hash } = new URL(value);
-    return hash.startsWith("#/") ? hash : "";
-  } catch {
-    return "";
-  }
 }
 
 /** @param {string} value */

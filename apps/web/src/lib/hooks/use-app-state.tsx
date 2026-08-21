@@ -629,6 +629,29 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         : view;
   }, [settingsSection, selected, view]);
 
+  /* A message opened from outside the mail pane commits the mail view. The
+     shown view is derived below, which is what paints the Reader on the first
+     frame, but on its own that left the raw state where it was: after a deep
+     link from the menu-bar popover, `view` still read "agent", the Inbox row
+     and `g i` early-returned against a pane already on screen, and closing the
+     message dropped the user back into the agent conversation. Writing the
+     state makes the link behave like a click on the row: what is underneath
+     the message is the list it came from.
+
+     Only when a selection ARRIVES, not whenever one is set: at phone width
+     clearSelection is a history.back() that lands a frame later, so a render
+     where the Agent row has moved `view` while the old hash is still up would
+     otherwise be pulled straight back to mail. Set during render, the
+     documented way to adjust state to a value from outside: React re-renders
+     at once, before any child commits on the stale view. */
+  const [seenSelection, setSeenSelection] = React.useState<Selection | null>(
+    null,
+  );
+  if (selected !== seenSelection) {
+    setSeenSelection(selected);
+    if (selected && !seenSelection && view !== "mail") setViewState("mail");
+  }
+
   const setView = React.useCallback((next: View) => {
     // Settings is a route, not a view state — see openSettings.
     if (next === "settings") {
@@ -929,7 +952,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
          An open message wins for the same reason and in the same way: the
          menu-bar popover raises the window on the row that was clicked, and
          the app starts on the agent conversation, which has no reading pane
-         to show it in. Closing the message returns to the view underneath. */
+         to show it in. The effect above then commits the mail view, so
+         closing the message lands on the list. */
       view: settingsSection ? "settings" : selected ? "mail" : view,
       setView,
       /* Gated on mount for the same reason the wizard is: the hydration render
