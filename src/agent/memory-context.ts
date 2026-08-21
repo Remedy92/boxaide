@@ -27,8 +27,8 @@
  */
 import {
   hasMemoryIndex,
+  MEMORY_INDEX,
   readMemoryFileSync,
-  readMemoryIndexSync,
 } from "../memory/store.js";
 
 /** Characters of MEMORY.md carried into a prompt before the tail is cut. */
@@ -92,13 +92,11 @@ function cap(text: string, maxChars: number): string {
 /**
  * The usable index, or null: absent, unreadable and empty all count as no
  * notes worth speaking of, which is the state the ask-first block describes.
- * Read through readMemoryIndexSync — the general sync read's name rule is the
- * REST one, and the uppercase index sits outside it by design.
  */
 function readIndex(dataDir: string): string | null {
   if (!hasMemoryIndex(dataDir)) return null;
   try {
-    return readMemoryIndexSync(dataDir);
+    return readMemoryFileSync(dataDir, MEMORY_INDEX);
   } catch {
     return null;
   }

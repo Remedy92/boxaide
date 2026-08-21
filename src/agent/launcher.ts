@@ -480,9 +480,9 @@ function claudeDrive(
   return new ClaudeDriver({
     channel: ctx.channel,
     agent: "claude-code",
-    // The workspace-memory block for this install, computed now: the reads
-    // are sync and the notes described are the ones that existed at launch.
-    memorySystem: chatMemoryBlock(ctx.dataDir),
+    // Read per turn, not once here: the agent writes its notes during a
+    // session, and a block frozen at launch would keep saying there are none.
+    memorySystem: () => chatMemoryBlock(ctx.dataDir),
     // The launch's command, not the bare binary: Claude Code has no long-lived
     // child, so these per-turn spawns are the whole agent. Spawning `opts.bin`
     // here would leave every turn outside the sandbox the launch asked for.
@@ -1228,8 +1228,8 @@ function opencodeDrive(
   return new OpenCodeDriver({
     channel: ctx.channel,
     agent: "opencode",
-    // Same block the Claude driver gets: computed once, at launch.
-    memorySystem: chatMemoryBlock(ctx.dataDir),
+    // Same block the Claude driver gets, read the same way: per prompt.
+    memorySystem: () => chatMemoryBlock(ctx.dataDir),
     baseUrl: serveBaseUrl(opts.child),
     directory: opts.workDir,
     password: opts.childEnv.OPENCODE_SERVER_PASSWORD ?? null,

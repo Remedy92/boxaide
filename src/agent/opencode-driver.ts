@@ -78,11 +78,12 @@ export type OpenCodeDriverOptions = {
   model?: string | null;
   /**
    * The workspace-memory block for this install, appended to DRIVEN_SYSTEM on
-   * every prompt. Computed once per launch by the launcher and handed in
-   * whole, so this driver touches no filesystem. Absent means none, which is
+   * every prompt. A function for the reason the Claude driver's is: notes
+   * written mid-session must reach the next prompt, or the agent keeps
+   * offering to build the ones it already has. Absent means none, which is
    * what tests construct.
    */
-  memorySystem?: string;
+  memorySystem?: () => string;
   /** Overridable for tests. */
   fetchImpl?: typeof fetch;
   waitMs?: number;
@@ -293,7 +294,7 @@ export class OpenCodeDriver implements AgentDriver {
         `/session/${session}/message`,
         {
           parts: [{ type: "text", text }],
-          system: drivenSystemWithMemory(this.opts.memorySystem),
+          system: drivenSystemWithMemory(this.opts.memorySystem?.()),
           tools: Object.fromEntries(DISABLED_TOOLS.map((name) => [name, false])),
           ...(this.opts.model ? { model: splitModel(this.opts.model) } : {}),
         },

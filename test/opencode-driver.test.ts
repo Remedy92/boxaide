@@ -204,7 +204,7 @@ describe("OpenCodeDriver", () => {
       baseUrl: fake.url,
       directory: "/tmp/boxaide-agent",
       waitMs: 1_000,
-      memorySystem: "MEMORY BLOCK",
+      memorySystem: () => "MEMORY BLOCK",
     }).start();
     cleanup.push(() => driver.stop());
 

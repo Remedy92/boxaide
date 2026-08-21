@@ -117,11 +117,36 @@ describe("memory routes", () => {
     expect(existsSync(join(memoryDir(dataDir), "big.md"))).toBe(false);
   });
 
+  /**
+   * The first request the panel makes on any install that has notes: the
+   * listing pins the index first and the editor opens whatever leads it. A
+   * name rule that refused the index made that opening request a 400.
+   */
+  it("serves and edits the index the listing puts first", async () => {
+    const dataDir = tempDataDir();
+    mkdirSync(memoryDir(dataDir), { recursive: true });
+    writeFileSync(join(memoryDir(dataDir), MEMORY_INDEX), "# Memory\n");
+
+    const app = appWith(dataDir);
+    const listed = (await (await app.request("/api/memory")).json()) as {
+      files: Array<{ name: string }>;
+    };
+    const first = listed.files[0]!.name;
+    expect(first).toBe(MEMORY_INDEX);
+
+    const read = await app.request(`/api/memory/${first}`);
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual({ name: first, content: "# Memory\n" });
+
+    const edited = await put(app, first, { content: "# Memory\n- voice.md\n" });
+    expect(edited.status).toBe(200);
+    await expect(readMemoryFile(dataDir, MEMORY_INDEX)).resolves.toBe(
+      "# Memory\n- voice.md\n",
+    );
+  });
+
   it("edits a file the agent wrote itself", async () => {
     const dataDir = tempDataDir();
-    // The index is uppercase and so outside the REST name rule — the agent
-    // owns it, writing it with its native tools. A topic file beside it is
-    // what a human would edit here.
     mkdirSync(memoryDir(dataDir), { recursive: true });
     writeFileSync(join(memoryDir(dataDir), MEMORY_INDEX), "# Memory\n");
     writeFileSync(join(memoryDir(dataDir), "people.md"), "Bob\n");

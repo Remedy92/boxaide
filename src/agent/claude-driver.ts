@@ -125,12 +125,14 @@ export type ClaudeDriverOptions = {
   healAuth?: () => boolean;
   /**
    * The workspace-memory block for this install, appended to DRIVEN_SYSTEM on
-   * every turn. Computed once per launch by the launcher — the reads are sync
-   * and the notes described are the ones that existed when the agent started
-   * — and handed in whole, so this driver touches no filesystem. Absent means
-   * none, which is what tests construct.
+   * every turn. A function, not a string: a session outlives the notes it
+   * started with, and an agent that has just written its first ones must not
+   * spend the rest of the session being told it has none and offering again.
+   * The launcher supplies the read (sync, one small file), so this driver
+   * still touches no filesystem itself. Absent means none, which is what
+   * tests construct.
    */
-  memorySystem?: string;
+  memorySystem?: () => string;
   /**
    * The loop's end: null when it was stopped, a message when it gave up. The
    * launcher has no child exit to watch for a driven agent, so this is the only
@@ -350,7 +352,7 @@ export class ClaudeDriver implements AgentDriver {
     );
     const outcome = await this.runTurn({
       prompt: text,
-      system: drivenSystemWithMemory(this.opts.memorySystem),
+      system: drivenSystemWithMemory(this.opts.memorySystem?.()),
       sessionId: resuming,
     });
     // The id is taken from a failed turn too: a fresh session that failed

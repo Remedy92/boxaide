@@ -42,8 +42,20 @@ export function memoryDir(dataDir: string): string {
   return join(agentWorkDir(dataDir), "memory");
 }
 
+/**
+ * True when a name is one the REST routes may serve. The index is the single
+ * name outside NAME_PATTERN — uppercase by convention, and the file a person
+ * most wants to correct — so it is admitted by exact match rather than by
+ * loosening a rule whose whole job is refusing traversal. Listing and
+ * reading/writing ask this same question, because a listing offering a name
+ * the reader then rejects is a panel whose first row is an error.
+ */
+function servable(name: string): boolean {
+  return name === MEMORY_INDEX || NAME_PATTERN.test(name);
+}
+
 function assertName(name: string): void {
-  if (!NAME_PATTERN.test(name)) {
+  if (!servable(name)) {
     throw new Error(`invalid memory file name: ${JSON.stringify(name)}`);
   }
 }
@@ -89,25 +101,6 @@ export function readMemoryFileSync(dataDir: string, name: string): string | null
 }
 
 /**
- * The index's text, or null when the agent has not written it yet.
- *
- * Not readMemoryFileSync on purpose: that validates its name because a route
- * hands it one, and the uppercase index is deliberately outside that rule —
- * the agent owns this one file and writes it with its native tools. Here the
- * name is MEMORY_INDEX itself, so the rule has nothing to protect, and
- * applying it anyway would make the index unreadable to the launch prompt
- * building this sync path exists for.
- */
-export function readMemoryIndexSync(dataDir: string): string | null {
-  try {
-    return readFileSync(join(memoryDir(dataDir), MEMORY_INDEX), "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
-}
-
-/**
  * Write one memory file on a human's behalf. Creates the directory when the
  * agent has not yet — mode 0o700, matching the subtree's owner-only posture —
  * and the file itself at 0o600. Refuses names that fail validation and
@@ -140,8 +133,9 @@ export type MemoryFileEntry = {
 /**
  * Every markdown file in the memory directory, sorted by name with the index
  * pinned first — it is the table of contents, and every listing starts with
- * it. Any *.md file the agent wrote is listed whatever its case or shape; only
- * directories are excluded.
+ * it. Only names the routes can serve are listed: a note the agent named
+ * outside the rule (`Notes.md`, `my_notes.md`) would 400 the moment a person
+ * clicked it, so it is left out rather than offered.
  */
 export async function listMemoryFiles(
   dataDir: string,
@@ -156,7 +150,7 @@ export async function listMemoryFiles(
   }
   const files: MemoryFileEntry[] = [];
   for (const entry of entries) {
-    if (!entry.endsWith(".md")) continue;
+    if (!servable(entry)) continue;
     const path = join(dir, entry);
     let stats: Stats;
     try {

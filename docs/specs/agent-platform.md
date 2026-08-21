@@ -586,8 +586,11 @@ the index plus the topic files it names. Agents read and write them with their
 native file tools; the REST routes under `/api/memory` exist for a human
 editing the same files.
 
-Every launch is told what exists there, computed at launch time
-(`src/agent/memory-context.ts`):
+Every launch is told what exists there (`src/agent/memory-context.ts`). Driven
+turns and automation runs read it fresh each time: a session outlives the notes
+it opened with, and an agent handed a block frozen at launch keeps offering to
+build notes it has already written. A KICKOFF launch is sent one prompt by
+nature, so its block is the one true at launch.
 
 - **Chat and driven sessions, no `MEMORY.md` yet** — one ask-first block: the
   agent may offer, once, to skim mailbox, CRM and calendar (~15 tool calls)
@@ -604,6 +607,11 @@ Every launch is told what exists there, computed at launch time
 
 A read that fails degrades to the no-notes or empty case; a launch never
 fails over its notes.
+
+Names are narrow — `[a-z0-9][a-z0-9-]*.md`, because the name in a route path is
+joined onto a filesystem path — plus `MEMORY.md` itself, which the listing puts
+first and a person opens first. Listing and reading answer that same question,
+so no row is offered that the reader would refuse.
 
 ## REST surface (all inside `createApi` after auth)
 

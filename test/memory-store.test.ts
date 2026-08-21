@@ -23,7 +23,6 @@ import {
   memoryDir,
   readMemoryFile,
   readMemoryFileSync,
-  readMemoryIndexSync,
   writeMemoryFile,
 } from "../src/memory/store.js";
 
@@ -154,18 +153,38 @@ describe("the memory size ceiling", () => {
   });
 });
 
-describe("readMemoryIndexSync", () => {
-  it("reads the uppercase index the REST name rule refuses", async () => {
+describe("the index as a servable name", () => {
+  it("reads the uppercase index like any other note", async () => {
     const dataDir = tempDataDir();
-    // The index is the agent's own file, written with its native tools and
-    // deliberately outside NAME_PATTERN — see hasMemoryIndex above.
     mkdirSync(memoryDir(dataDir), { recursive: true });
     writeFileSync(join(memoryDir(dataDir), MEMORY_INDEX), "# Memory\n");
-    expect(readMemoryIndexSync(dataDir)).toBe("# Memory\n");
+    expect(readMemoryFileSync(dataDir, MEMORY_INDEX)).toBe("# Memory\n");
+    expect(await readMemoryFile(dataDir, MEMORY_INDEX)).toBe("# Memory\n");
   });
 
-  it("answers null before the agent has written any notes", () => {
-    expect(readMemoryIndexSync(tempDataDir())).toBeNull();
+  it("answers null before the agent has written any notes", async () => {
+    const dataDir = tempDataDir();
+    expect(readMemoryFileSync(dataDir, MEMORY_INDEX)).toBeNull();
+    expect(await readMemoryFile(dataDir, MEMORY_INDEX)).toBeNull();
+  });
+
+  /* The one file a person most wants to correct: the panel opens on it. */
+  it("takes a human correction through writeMemoryFile", async () => {
+    const dataDir = tempDataDir();
+    await writeMemoryFile(dataDir, MEMORY_INDEX, "# Memory\n- company.md\n");
+    expect(await readMemoryFile(dataDir, MEMORY_INDEX)).toBe(
+      "# Memory\n- company.md\n",
+    );
+  });
+
+  it("still refuses every other shape outside the rule", async () => {
+    const dataDir = tempDataDir();
+    await expect(writeMemoryFile(dataDir, "MEMORY.MD", "x")).rejects.toThrow(
+      /invalid memory file name/,
+    );
+    await expect(
+      writeMemoryFile(dataDir, "../MEMORY.md", "x"),
+    ).rejects.toThrow(/invalid memory file name/);
   });
 });
 
@@ -173,8 +192,6 @@ describe("hasMemoryIndex", () => {
   it("is false until the agent has written its index", async () => {
     const dataDir = tempDataDir();
     expect(hasMemoryIndex(dataDir)).toBe(false);
-    // The index is the agent's own file, written with its native tools —
-    // never through this store, whose name rule refuses the uppercase form.
     mkdirSync(memoryDir(dataDir), { recursive: true });
     writeFileSync(join(memoryDir(dataDir), MEMORY_INDEX), "# Memory\n");
     expect(hasMemoryIndex(dataDir)).toBe(true);
@@ -203,6 +220,19 @@ describe("listMemoryFiles", () => {
     const company = files.find((file) => file.name === "company.md")!;
     expect(company.bytes).toBe(Buffer.byteLength("Acme\n"));
     expect(Number.isNaN(Date.parse(company.updatedAt))).toBe(false);
+  });
+
+  it("omits markdown the routes could not serve", async () => {
+    const dataDir = tempDataDir();
+    await writeMemoryFile(dataDir, "keep.md", "yes\n");
+    mkdirSync(memoryDir(dataDir), { recursive: true });
+    // Agent-chosen names outside the rule: listing one would offer a row that
+    // 400s the moment somebody clicked it.
+    writeFileSync(join(memoryDir(dataDir), "Notes.md"), "no\n");
+    writeFileSync(join(memoryDir(dataDir), "my_notes.md"), "no\n");
+
+    const files = await listMemoryFiles(dataDir);
+    expect(files.map((file) => file.name)).toEqual(["keep.md"]);
   });
 
   it("ignores non-markdown files and directories", async () => {

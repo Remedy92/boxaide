@@ -219,7 +219,7 @@ function drive(
     stopGraceMs: number;
     healAuth: () => boolean;
     onStop: (error: string | null, cause: { authRequired: boolean }) => void;
-    memorySystem: string;
+    memorySystem: () => string;
   }> = {},
 ): ClaudeDriver {
   const driver = new ClaudeDriver({
@@ -298,7 +298,7 @@ describe("ClaudeDriver", () => {
   it("appends the workspace-memory block to the framing of every turn", async () => {
     const fake = fakeCli([{ answer: "noted" }]);
     const { channel } = make();
-    const driver = drive(channel, fake, { memorySystem: "MEMORY BLOCK" });
+    const driver = drive(channel, fake, { memorySystem: () => "MEMORY BLOCK" });
 
     channel.post({ role: "user", text: "what came in today?" });
     await until(() => channel.history().some((t) => t.role === "agent"));
@@ -309,6 +309,42 @@ describe("ClaudeDriver", () => {
     expect(opened[opened.indexOf("--append-system-prompt") + 1]).toBe(
       `${DRIVEN_SYSTEM}\n\nMEMORY BLOCK`,
     );
+
+    driver.stop();
+    await driver.done;
+  });
+
+  /**
+   * The agent writes its notes mid-session, so the block a launch read first
+   * is stale by the second turn: it still says there are none and asks to
+   * build them again. The driver must read per turn, not once.
+   */
+  it("re-reads the memory block on each turn", async () => {
+    const fake = fakeCli([
+      { session: "ses-a", answer: "one" },
+      { session: "ses-a", answer: "two" },
+    ]);
+    const { channel } = make();
+    const blocks = ["NO NOTES YET", "MEMORY.md: company.md"];
+    let reads = 0;
+    const driver = drive(channel, fake, {
+      memorySystem: () => blocks[Math.min(reads++, blocks.length - 1)]!,
+    });
+
+    channel.post({ role: "user", text: "first" });
+    await until(
+      () => channel.history().filter((t) => t.role === "agent").length === 1,
+    );
+    channel.post({ role: "user", text: "second" });
+    await until(
+      () => channel.history().filter((t) => t.role === "agent").length === 2,
+    );
+
+    const framings = userCalls(fake).map(
+      (call) => call[call.indexOf("--append-system-prompt") + 1],
+    );
+    expect(framings[0]).toBe(`${DRIVEN_SYSTEM}\n\nNO NOTES YET`);
+    expect(framings[1]).toBe(`${DRIVEN_SYSTEM}\n\nMEMORY.md: company.md`);
 
     driver.stop();
     await driver.done;
