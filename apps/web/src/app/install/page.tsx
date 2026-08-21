@@ -162,7 +162,7 @@ const FEATURES = [
   {
     Icon: Send,
     title: "Outreach that waits",
-    body: "Your agent writes the campaign and queues every message. None of it moves until you say so.",
+    body: "Your agent writes the message and queues it. None of it moves until you say so.",
   },
 ] as const;
 

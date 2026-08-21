@@ -101,7 +101,7 @@ export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
  * `automations`, which is one column of schedules and their run history.
  *
  * `outreach` is two-pane again: the middle column is the approval queue (or the
- * campaigns and suppression lists), and the pane is the full text of the queued
+ * suppression list), and the pane is the full text of the queued
  * email a person is about to approve.
  *
  * `calendar` is one column for the same reason `automations` is: an agenda is a
@@ -134,11 +134,11 @@ export function isCrmView(view: View): boolean {
 }
 
 /**
- * Which list the Outreach middle column is showing. All three are the same
+ * Which list the Outreach middle column is showing. Both are the same
  * view — they share a pane and a keyboard map — so this is a filter, not a
  * route.
  */
-export type OutreachTab = "queue" | "campaigns" | "suppression";
+export type OutreachTab = "queue" | "suppression";
 
 export type Selection = { accountId: string; messageId: string };
 
@@ -486,7 +486,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   );
 
   /* The pane belongs to the queue. Leaving a row open while the column shows
-     campaigns would put an approve button beside a list it is not about. */
+     suppression would put an approve button beside a list it is not about. */
   const setOutreachTab = React.useCallback((value: OutreachTab) => {
     setOutreachTabState(value);
     if (value !== "queue") setSelectedOutbox(null);

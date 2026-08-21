@@ -363,37 +363,10 @@ Scheduler (`AutomationScheduler`):
 ### OutreachStore
 
 ```sql
-CREATE TABLE IF NOT EXISTS campaigns (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE,
-  account_id TEXT NOT NULL,       -- sending account
-  status TEXT NOT NULL DEFAULT 'draft',  -- 'draft' | 'active' | 'paused' | 'done'
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sequence_steps (
-  id TEXT PRIMARY KEY,
-  campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-  position INTEGER NOT NULL,      -- 0 = initial email
-  wait_days INTEGER NOT NULL DEFAULT 0,  -- days after previous step, 0 for step 0
-  subject_enc TEXT NOT NULL,      -- template; {{name}}, {{email}}, {{org}} substituted
-  body_enc TEXT NOT NULL,
-  UNIQUE (campaign_id, position)
-);
-CREATE TABLE IF NOT EXISTS campaign_contacts (
-  campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-  contact_id TEXT NOT NULL,
-  state TEXT NOT NULL DEFAULT 'active', -- 'active'|'replied'|'opted_out'|'done'|'suppressed'
-  current_step INTEGER NOT NULL DEFAULT -1, -- last QUEUED step position
-  last_sent_at TEXT,
-  next_due_at TEXT,
-  PRIMARY KEY (campaign_id, contact_id)
-);
 CREATE TABLE IF NOT EXISTS outbox (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL,
-  campaign_id TEXT,               -- null for one-off agent-queued mail
   contact_id TEXT,
-  step_position INTEGER,
   to_addr TEXT NOT NULL,
   subject_enc TEXT NOT NULL,
   body_enc TEXT NOT NULL,
@@ -410,60 +383,41 @@ CREATE TABLE IF NOT EXISTS suppression (
 );
 ```
 
+Campaigns (timed sequences of template steps) shipped and were removed; their
+tables (`campaigns`, `sequence_steps`, `campaign_contacts`) are dropped at
+migration. The approval queue, the suppression list and the opt-out detection
+stand on their own.
+
 Engine (`OutreachEngine`):
-- Hourly tick plus on-demand. For each `active` campaign, for each `active`
-  campaign contact where `next_due_at <= now` (or `current_step = -1`):
-  - Reply check first: any inbound interaction from that contact after
-    `last_sent_at` → state 'replied', stop. Requires CrmStore read access
-    (constructor dep).
-  - Opt-out check: `src/outreach/opt-out.ts` owns the keyword, the footer
-    built from it, the detector (`optOutIntent`) and the canonical address
-    form (`canonicalEmail`). No other module defines its own copy.
-    - CRM sync runs `optOutIntent` over the full inbound body and records the
-      verdict on the interaction row (`interactions.opt_out`). That flag is
-      the authority; the engine reads it. A fetch that fails or yields no
-      text falls back to the snippet and leaves `opt_out_full = 0`, so the
-      next walk retries the body. A stored 0 with `opt_out_full = 1` is a
-      finished judgement (full body, or a human who un-suppressed) and is
-      not fetched again.
-    - The engine's own check runs ONLY when the column itself is absent
-      (a process reading a pre-migration database). A stored 0 is a
-      judgement — by the sync or by a human who un-suppressed — and is
-      never second-guessed from the snippet. It runs per field — subject
-      with the subject rule, snippet with the body rule — never over a
-      joined string, which would fabricate a phrase across the seam.
-    - The rules differ by field. Explicit phrases (unsubscribe, opt out,
-      stop emailing/mailing/contacting) count in the sender's own words:
-      for a body, the reply portion above quoted thread and the signature
-      delimiter — a quoted newsletter's "unsubscribe" footer is not this
-      sender opting out. The bare keyword counts at the start of a body,
-      and only as the whole subject after reply prefixes are stripped:
-      "Re: stop" opts out, "Stop by our booth at SaaStr" does not, and
-      "stop" mid-prose ("we should stop by") stays a normal reply.
-    - A match → suppress (reason 'reply-stop') + state 'opted_out'.
-  - Suppressed email → state 'suppressed', no queue.
-  - Otherwise queue the next step into `outbox` (substitute {{name}} — first
-    word of contact name or the email local part — {{email}}, {{org}}) with
-    status 'pending', advance `current_step`, set
-    `next_due_at = now + next step's wait_days`.
-  - Every queued step appends the opt-out footer to the body (plain text):
-    "\n\n--\nIf you'd rather not hear from me, just reply with \"stop\"."
-    Step 0 included. No tracking links, ever.
+- Hourly tick plus on-demand: send every `approved` `outbox` row, oldest
+  first, under the per-account daily cap and the minimum send gap.
+- Opt-out handling: `src/outreach/opt-out.ts` owns the keyword, the footer
+  built from it, the detector (`optOutIntent`) and the canonical address
+  form (`canonicalEmail`). No other module defines its own copy.
+  - CRM sync runs `optOutIntent` over the full inbound body and records the
+    verdict on the interaction row (`interactions.opt_out`). That flag is
+    the authority. A fetch that fails or yields no text falls back to the
+    snippet and leaves `opt_out_full = 0`, so the next sync retries the
+    body. A stored 0 with `opt_out_full = 1` is a finished judgement (full
+    body, or a human who un-suppressed) and is not fetched again.
+  - The rules differ by field. Explicit phrases (unsubscribe, opt out,
+    stop emailing/mailing/contacting) count in the sender's own words:
+    for a body, the reply portion above quoted thread and the signature
+    delimiter — a quoted newsletter's "unsubscribe" footer is not this
+    sender opting out. The bare keyword counts at the start of a body,
+    and only as the whole subject after reply prefixes are stripped:
+    "Re: stop" opts out, "Stop by our booth at SaaStr" does not, and
+    "stop" mid-prose ("we should stop by") stays a normal reply.
+  - A match → suppress (reason 'reply-stop').
 - Suppression is written at flag time, not by a sweep. The CRM sync fires a
   platform-installed sink (`CrmService.setOptOutSink`, wired in
   `src/platform.ts`) once per freshly flagged inbound message, with the
-  address in hand; the sink suppresses ('reply-stop') and moves every
-  `campaign_contacts` row for that contact to 'opted_out' (rows already
-  'opted_out' or 'suppressed' stay). Scope: only contacts outreach touched —
-  a `campaign_contacts` row or an `outbox` row exists. Fresh rows only, so a
-  message suppresses exactly once: removing a suppression through
+  address in hand; the sink suppresses ('reply-stop'). Scope: only contacts
+  outreach touched — an `outbox` row exists for that contact. Fresh rows
+  only, so a message suppresses exactly once: removing a suppression through
   `DELETE /api/outreach/suppression/:email` also withdraws the stored flags
-  (`CrmStore.clearOptOutFlags`), restarts every `opted_out`/`suppressed`
-  `campaign_contacts` row for that person at step 0, and nothing re-reads
-  old flags — a human removal stands until the contact says stop again.
-  `campaign_add_contacts` uses the same restart for an `opted_out` or
-  `suppressed` row already in the campaign (`INSERT ... ON CONFLICT DO
-  UPDATE`), so re-adding is not a silent no-op. This design (no sweep)
+  (`CrmStore.clearOptOutFlags`), and nothing re-reads old flags — a human
+  removal stands until the contact says stop again. This design (no sweep)
   exists because a sweep over stored flags resurrects removed suppressions,
   and a contact deleted between flag and sweep takes the address with it
   while an approved outbox row lives on.
@@ -529,12 +483,7 @@ Automations (`src/automation/tools.ts`):
   tail (last 4 KiB) per run.
 
 Outreach (`src/outreach/tools.ts`):
-- `campaign_create` { name, account, steps: [{subject, body, waitDays}] }
-- `campaign_update` { campaignId, name?, status?, steps? } — replacing steps
-  only while status 'draft'.
-- `campaigns_list` {} — with per-state contact counts.
-- `campaign_add_contacts` { campaignId, contactIds } — refuses suppressed.
-- `outbox_queue_draft` { account, to, subject, body, contactId?, campaignId? }
+- `outbox_queue_draft` { account, to, subject, body, contactId? }
   — description: "the ONLY way an automation or agent gets outreach toward
   delivery; a human reviews it in the Boxaide Outreach view before anything
   is sent."
@@ -640,8 +589,7 @@ Automations: GET/POST `/api/automations`, PATCH/DELETE `/api/automations/:id`,
 POST `/api/automations/:id/run`, GET `/api/automations/:id/runs`,
 GET `/api/automations/runs` (recent across all).
 
-Outreach: GET/POST `/api/outreach/campaigns`, PATCH `/api/outreach/campaigns/:id`,
-POST `/api/outreach/campaigns/:id/contacts`, GET `/api/outreach/outbox`
+Outreach: GET `/api/outreach/outbox`
 (`?status=`), POST `/api/outreach/outbox/:id/approve`,
 POST `/api/outreach/outbox/:id/reject`, GET/POST `/api/outreach/suppression`,
 DELETE `/api/outreach/suppression/:email`,
@@ -669,7 +617,7 @@ patterns exactly: client components, hooks in `lib/hooks` calling
   run history with log viewer. Creation happens by talking to the agent —
   the empty state says exactly that and offers to open the Agent view; no
   create form.
-- **Outreach** — campaigns list with per-state counts; the **approval queue**:
+- **Outreach** — the **approval queue**:
   pending outbox rows with full preview, Approve / Edit / Reject; suppression
   list management. The rail shows a badge with the pending count
   (poll `/api/outreach/badge` every 30s).

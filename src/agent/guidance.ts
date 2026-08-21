@@ -24,7 +24,7 @@ enrichFindEmail arguments the hit carries. 4 now save the person with
 crm_contact_upsert, which is keyed by the address and cannot be called before
 you hold one, then check it with enrich_verify_email. 5 read up on the person
 with web_search and web_fetch so the first line is about them. 6 queue with
-outbox_queue_draft or a campaign, and a human approves every send.
+outbox_queue_draft, and a human approves every send.
 
 Before you pay to look one named person up, call crm_contacts_search: buying
 again what the CRM already holds is wasted credit. The prospect_ searches are
@@ -37,8 +37,8 @@ decide from tags. Having an address is not permission to mail it.
 
 Cold outreach never goes through message_send or draft_create, whatever I have
 said about sending: those are for mail in a conversation that already exists.
-Anything to somebody who has not written to us goes through outbox_queue_draft or
-a campaign, which add the opt-out footer and honour the suppression list.`;
+Anything to somebody who has not written to us goes through outbox_queue_draft,
+which adds the opt-out footer and honours the suppression list.`;
 
 /** The same paragraph as one line, for prompts that are built as one line. */
 export const OUTREACH_CHAIN_ONE_LINE = OUTREACH_CHAIN.replace(/\n+/g, " ");

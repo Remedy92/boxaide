@@ -65,7 +65,7 @@ export const ENRICHMENT_TOOLS: ToolDef[] = [
   {
     name: "crm_contacts_import",
     description:
-      `Import contacts into the CRM from CSV text. The first line is a header; 'email' is required and 'name', 'title', 'org', 'orgDomain' and 'tags' are optional. Quoted fields and commas inside quotes are handled. Addresses that are not addresses are skipped, repeats of an earlier line are skipped, and every skip comes back with its line number and reason. At most ${MAX_IMPORT_ROWS} rows per call: a longer file is refused outright, so split it rather than expecting a partial import. Nothing here contacts anyone or enrols anyone in a campaign.`,
+      `Import contacts into the CRM from CSV text. The first line is a header; 'email' is required and 'name', 'title', 'org', 'orgDomain' and 'tags' are optional. Quoted fields and commas inside quotes are handled. Addresses that are not addresses are skipped, repeats of an earlier line are skipped, and every skip comes back with its line number and reason. At most ${MAX_IMPORT_ROWS} rows per call: a longer file is refused outright, so split it rather than expecting a partial import. Nothing here contacts anyone.`,
     inputSchema: {
       type: "object" as const,
       properties: {
