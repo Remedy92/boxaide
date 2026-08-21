@@ -46,6 +46,24 @@ command -v node >/dev/null || die "node is not on PATH"
 command -v npm >/dev/null || die "npm is not on PATH"
 command -v xcrun >/dev/null || die "xcrun is not on PATH"
 
+# Which repository every gh call below means, named rather than guessed.
+#
+# A clone with a second remote — a contributor's fork added to fetch a branch —
+# leaves `gh` with no way to choose. Its read commands pick one anyway, so the
+# green-CI gate and the "already shipped" check can silently answer about the
+# fork, and `gh release create` refuses outright with "no default remote
+# repository has been set". That refusal arrived on 0.2.27 after the commit and
+# the tag were already pushed: master said 0.2.27, the download stayed 0.2.26,
+# and the twenty minutes of signing and notarising had to be thrown away.
+#
+# So: derive it from origin, which is the remote every other line here pushes
+# to, and pass it to gh explicitly. `gh repo set-default` then matters to
+# nobody, and a clone with ten remotes ships the same as a clone with one.
+REPO="$(git remote get-url origin 2>/dev/null |
+  sed -e 's#^git@github\.com:#https://github.com/#' \
+      -e 's#^https://github\.com/##' -e 's#\.git$##')"
+[ -n "$REPO" ] || die "no origin remote — gh cannot tell which repo to publish to"
+
 # A signed but un-notarised dmg installs nowhere. macOS says "Apple could not
 # verify Boxaide is free of malware" and offers no Open button. Refuse to
 # publish one. Mint the profile once with (profile name is historical):
@@ -97,13 +115,13 @@ ORIGIN="$(git rev-parse origin/master)"
 # master commit, which is why the gate checks what did run rather than a list
 # of names it expects.
 SHORT="$(git rev-parse --short HEAD)"
-COUNT="$(gh run list --branch master --limit 50 --commit "$HEAD" \
+COUNT="$(gh run list -R "$REPO" --branch master --limit 50 --commit "$HEAD" \
   --json databaseId --jq 'length')" \
   || die "could not read workflow runs for $SHORT"
 if [ "$COUNT" -eq 0 ]; then
   die "no workflow run for $SHORT yet; wait for CI to start and finish"
 fi
-BAD="$(gh run list --branch master --limit 50 --commit "$HEAD" \
+BAD="$(gh run list -R "$REPO" --branch master --limit 50 --commit "$HEAD" \
   --json workflowName,status,conclusion \
   --jq '.[]
     | select(.status != "completed"
@@ -118,7 +136,7 @@ nothing was built or uploaded; fix it and push before shipping"
 fi
 printf 'ci   %s green (%s runs)\n' "$SHORT" "$COUNT"
 
-TAG="$(gh release view --json tagName --jq .tagName 2>/dev/null || true)"
+TAG="$(gh release view -R "$REPO" --json tagName --jq .tagName 2>/dev/null || true)"
 [ -n "$TAG" ] || die "no GitHub release yet — create the first one by hand"
 if ! git rev-parse -q --verify "${TAG}^{commit}" >/dev/null; then
   die "release tag $TAG is not in this clone — fetch tags or pull origin"
@@ -237,21 +255,34 @@ trap - EXIT INT TERM
 git push origin master
 git push origin "v$VER"
 
-BODY="$(printf '%s\n\n%s\n' "## What is new" "$NOTES")"
+BODY_FILE="$(mktemp -t boxaide-notes)"
+printf '%s\n\n%s\n' "## What is new" "$NOTES" >"$BODY_FILE"
+
 BLOCKMAP="${ZIP}.blockmap"
 if [ -f "$BLOCKMAP" ]; then
-  gh release create "v$VER" \
-    --title "Boxaide $VER" \
-    --notes "$BODY" \
-    --latest \
-    "$DMG" "$ZIP" "$FEED" "$BLOCKMAP"
+  set -- "$DMG" "$ZIP" "$FEED" "$BLOCKMAP"
 else
-  gh release create "v$VER" \
-    --title "Boxaide $VER" \
-    --notes "$BODY" \
-    --latest \
-    "$DMG" "$ZIP" "$FEED"
+  set -- "$DMG" "$ZIP" "$FEED"
 fi
+
+# The last step, and the only one that cannot be undone by restoring a file.
+# The commit and the tag are already public by the time it runs, so a failure
+# here is the one state this script can leave behind: master naming a version
+# nobody can download. Say what it costs and how to finish, because the
+# obvious move — run ship.sh again — cuts a further version instead, and
+# throws away a dmg that is signed, notarised and correct.
+if ! gh release create "v$VER" -R "$REPO" \
+  --title "Boxaide $VER" \
+  --notes-file "$BODY_FILE" \
+  --latest \
+  "$@"; then
+  die "master and v$VER are pushed, the release is not up.
+Do not re-run this script: HEAD is the Cut commit already, and it would cut the
+next version over a build that is fine. Retry the upload alone:
+  gh release create v$VER -R $REPO --title 'Boxaide $VER' --latest \\
+    --notes-file $BODY_FILE $*"
+fi
+rm -f "$BODY_FILE"
 
 printf 'shipped https://github.com/Remedy92/boxaide/releases/latest/download/boxaide-mac.dmg\n'
 printf 'commit  %s\n' "$(git rev-parse --short HEAD)"
