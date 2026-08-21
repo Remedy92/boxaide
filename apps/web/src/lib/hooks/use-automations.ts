@@ -1,9 +1,12 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import * as React from "react";
 import {
+  getAutomationBadge,
   listAutomationRuns,
   listAutomations,
+  markAutomationRunsSeen,
   runAutomationNow,
   updateAutomation,
 } from "@/lib/api/endpoints";
@@ -51,6 +54,57 @@ export function useAutomationRuns(automationId: string | null, open: boolean) {
         ? 5_000
         : false,
   });
+}
+
+/**
+ * The rail's count: runs that finished since the Automations view was last
+ * open, and whether any of them failed. Same cadence and the same rules as
+ * the Outreach badge: a server that is down stops the number, it never paints
+ * an error.
+ */
+export function useAutomationBadge(enabled = true) {
+  const ctx = useApiCtx();
+  return useQuery({
+    queryKey: ["automation-badge", ctx.baseUrl, ctx.token],
+    enabled: enabled && ctx.baseUrl.length > 0 && ctx.token.length > 0,
+    queryFn: ({ signal }) => getAutomationBadge({ ...ctx, signal }),
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+    retry: false,
+  });
+}
+
+/**
+ * Mounted by the Automations view. Marks every finished run as seen when the
+ * view opens, and again whenever the badge rises while it is open — a run
+ * that finishes under the user's eyes is not news. The badge query is then
+ * overwritten with the server's answer rather than waiting for the next poll.
+ */
+export function useMarkAutomationRunsSeen(enabled: boolean) {
+  const ctx = useApiCtx();
+  const queryClient = useQueryClient();
+  const badge = useAutomationBadge(enabled);
+  const unseen = badge.data?.unseen ?? 0;
+  const ready = enabled && ctx.baseUrl.length > 0 && ctx.token.length > 0;
+  React.useEffect(() => {
+    if (!ready) return;
+    if (badge.data !== undefined && unseen === 0) return;
+    const controller = new AbortController();
+    markAutomationRunsSeen({ ...ctx, signal: controller.signal })
+      .then((next) => {
+        queryClient.setQueryData(
+          ["automation-badge", ctx.baseUrl, ctx.token],
+          next,
+        );
+      })
+      .catch(() => {
+        // Nothing to show: the count simply stays until the next visit.
+      });
+    return () => controller.abort();
+    // `badge.data` is not a dependency: the effect should fire on a rise in
+    // `unseen`, and on first mount before the badge has answered.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, unseen, ctx.baseUrl, ctx.token, queryClient]);
 }
 
 export function useToggleAutomation() {

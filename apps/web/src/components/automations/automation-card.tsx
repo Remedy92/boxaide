@@ -3,19 +3,27 @@
 import * as React from "react";
 import { ChevronDown, ChevronRight, Play } from "lucide-react";
 import { toast } from "sonner";
-import { Spinner } from "@/components/atoms";
+import { Spinner, StatusDot } from "@/components/atoms";
 import { AutomationAgentSelect } from "@/components/automations/automation-agent-select";
 import { RunHistory } from "@/components/automations/run-history";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { friendlyError } from "@/lib/api/errors";
-import { describeCron } from "@/lib/format/automation";
+import { describeCron, runStatusLabel } from "@/lib/format/automation";
 import { formatReaderDate, isoAttr, isoTitle } from "@/lib/format/date";
 import {
   useRunAutomationNow,
   useToggleAutomation,
 } from "@/lib/hooks/use-automations";
-import type { Automation } from "@/lib/types";
+import type { Automation, AutomationRunStatus } from "@/lib/types";
+
+/** Same tones as the run history, so the card and the list agree. */
+const STATUS_TONE: Record<AutomationRunStatus, "accent" | "success" | "danger" | "warning"> = {
+  running: "accent",
+  ok: "success",
+  error: "danger",
+  killed: "warning",
+};
 
 /**
  * One automation.
@@ -121,7 +129,7 @@ export function AutomationCard({ automation }: { automation: Automation }) {
         </div>
         <div className="flex gap-1.5">
           <dt className="text-fg-tertiary">Last</dt>
-          <dd className="text-fg-secondary">
+          <dd className="flex items-center gap-1.5 text-fg-secondary">
             {automation.lastRunAt ? (
               <time
                 dateTime={isoAttr(automation.lastRunAt)}
@@ -131,6 +139,14 @@ export function AutomationCard({ automation }: { automation: Automation }) {
               </time>
             ) : (
               "Never"
+            )}
+            {/* How it went, beside when. The dot is never alone: the word
+                follows it, and the Runs list below says the same in full. */}
+            {automation.lastRunStatus && (
+              <span className="flex items-center gap-1">
+                <StatusDot tone={STATUS_TONE[automation.lastRunStatus]} />
+                {runStatusLabel(automation.lastRunStatus)}
+              </span>
             )}
           </dd>
         </div>

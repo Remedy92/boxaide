@@ -11,7 +11,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { friendlyError } from "@/lib/api/errors";
 import { useApp } from "@/lib/hooks/use-app-state";
-import { useAutomations } from "@/lib/hooks/use-automations";
+import {
+  useAutomations,
+  useMarkAutomationRunsSeen,
+} from "@/lib/hooks/use-automations";
 import { useConnection, useMeta } from "@/lib/hooks/use-connection";
 import { useSettings } from "@/lib/hooks/use-settings";
 
@@ -39,6 +42,8 @@ export function AutomationsView({
   const meta = useMeta();
   const settings = useSettings();
   const automations = useAutomations();
+  // Being here is looking: the rail's count clears while this view is open.
+  useMarkAutomationRunsSeen(connection.kind === "ok");
 
   const rows = automations.data ?? [];
 

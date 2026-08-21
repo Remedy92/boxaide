@@ -102,6 +102,18 @@ export function registerAutomationRoutes(app: Hono, platform: Platform): void {
     return c.json({ queued: true }, 202);
   });
 
+  // Polled by the web rail (30s) and the desktop main process (60s), so it
+  // stays two COUNTs and nothing else. Registered before the parameterised
+  // siblings below so "badge" is never read as an automation id.
+  app.get("/api/automations/badge", (c) => c.json(store.badge()));
+
+  // The Automations view calls this when it opens and while it is open: runs
+  // that finish under the user's eyes are not news either.
+  app.post("/api/automations/runs/seen", (c) => {
+    store.markRunsSeen();
+    return c.json(store.badge());
+  });
+
   // Registered before the parameterised sibling below so "runs" is never
   // read as an automation id.
   app.get("/api/automations/runs", (c) => {

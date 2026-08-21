@@ -284,6 +284,56 @@ describe("AutomationStore", () => {
     expect(store.listRuns({ automationId: b.id })).toEqual([]);
   });
 
+  it("carries the newest run's status on every automation", () => {
+    const store = newStore();
+    const a = store.create({ name: "n", cron: "0 8 * * *", prompt: "p" });
+    expect(store.get(a.id)!.lastRunStatus).toBeNull();
+    const first = store.startRun(a.id, new Date("2026-08-13T09:00:00Z"));
+    expect(store.list()[0].lastRunStatus).toBe("running");
+    store.finishRun(first.id, { status: "ok", exitCode: 0 });
+    expect(store.get(a.id)!.lastRunStatus).toBe("ok");
+    const second = store.startRun(a.id, new Date("2026-08-13T10:00:00Z"));
+    store.finishRun(second.id, { status: "error", exitCode: 1 });
+    expect(store.get(a.id)!.lastRunStatus).toBe("error");
+    // A save must not lose it: update() returns what it wrote.
+    expect(store.update(a.id, { enabled: false })!.lastRunStatus).toBe("error");
+  });
+
+  it("counts finished runs since the view was last seen, and the failed ones", () => {
+    const store = newStore();
+    const a = store.create({ name: "n", cron: "0 8 * * *", prompt: "p" });
+    expect(store.badge()).toEqual({ unseen: 0, failed: 0 });
+
+    // A running row is not news yet.
+    const live = store.startRun(a.id, new Date("2026-08-13T09:00:00Z"));
+    expect(store.badge()).toEqual({ unseen: 0, failed: 0 });
+    store.finishRun(live.id, { status: "ok", exitCode: 0, at: new Date("2026-08-13T09:01:00Z") });
+    expect(store.badge()).toEqual({ unseen: 1, failed: 0 });
+
+    store.finishRun(store.startRun(a.id).id, {
+      status: "error",
+      exitCode: 1,
+      at: new Date("2026-08-13T09:02:00Z"),
+    });
+    store.finishRun(store.startRun(a.id).id, {
+      status: "killed",
+      exitCode: null,
+      at: new Date("2026-08-13T09:03:00Z"),
+    });
+    expect(store.badge()).toEqual({ unseen: 3, failed: 2 });
+
+    // Looking clears it; only what finishes afterwards counts again.
+    store.markRunsSeen(new Date("2026-08-13T09:03:00Z"));
+    expect(store.badge()).toEqual({ unseen: 0, failed: 0 });
+    store.finishRun(store.startRun(a.id).id, {
+      status: "ok",
+      exitCode: 0,
+      at: new Date("2026-08-13T09:04:00Z"),
+    });
+    expect(store.badge()).toEqual({ unseen: 1, failed: 0 });
+    expect(store.runsSeenAt()).toBe("2026-08-13T09:03:00.000Z");
+  });
+
   it("stamps last_run_at and the recomputed next_run_at", () => {
     const store = newStore();
     const a = store.create({ name: "n", cron: "0 * * * *", prompt: "p" });
@@ -1149,6 +1199,28 @@ describe("automation routes", () => {
 
     const overLimit = await app.request(`/api/automations/${a.id}/runs?limit=9999`);
     expect(overLimit.status).toBe(400);
+  });
+
+  it("serves the unseen-run badge and lets the view mark runs seen", async () => {
+    const { app, store } = await api();
+    const a = store.create({ name: "a", cron: "0 9 * * 1", prompt: "p" });
+    store.finishRun(store.startRun(a.id).id, { status: "error", exitCode: 1 });
+
+    // "badge" must not be read as an automation id.
+    const badge = await app.request("/api/automations/badge");
+    expect(badge.status).toBe(200);
+    expect(await badge.json()).toEqual({ unseen: 1, failed: 1 });
+
+    const listed = await app.request("/api/automations");
+    expect((await listed.json()).automations[0].lastRunStatus).toBe("error");
+
+    const seen = await app.request("/api/automations/runs/seen", { method: "POST" });
+    expect(seen.status).toBe(200);
+    expect(await seen.json()).toEqual({ unseen: 0, failed: 0 });
+    expect(await (await app.request("/api/automations/badge")).json()).toEqual({
+      unseen: 0,
+      failed: 0,
+    });
   });
 });
 

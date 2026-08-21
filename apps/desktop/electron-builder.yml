@@ -42,6 +42,10 @@ extraResources:
     to: trayTemplate.png
   - from: build/trayTemplate@2x.png
     to: trayTemplate@2x.png
+  - from: build/trayAlert.png
+    to: trayAlert.png
+  - from: build/trayAlert@2x.png
+    to: trayAlert@2x.png
 
 asar: true
 # A .node binary cannot be read from inside an asar. Unpack only those files;
@@ -96,6 +100,10 @@ mac:
       to: trayTemplate.png
     - from: build/trayTemplate@2x.png
       to: trayTemplate@2x.png
+    - from: build/trayAlert.png
+      to: trayAlert.png
+    - from: build/trayAlert@2x.png
+      to: trayAlert@2x.png
     - from: build/boxaide-calendar
       to: boxaide-calendar
   # EventKit refuses without this string, and TCC charges the prompt to the

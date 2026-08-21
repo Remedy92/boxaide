@@ -15,6 +15,8 @@
  *   icon.svg             the vector the web surfaces derive from
  *   trayTemplate.png     menu bar, 16pt, black plus alpha
  *   trayTemplate@2x.png  menu bar, retina
+ *   trayAlert.png        menu bar while an automation run has failed: the same
+ *   trayAlert@2x.png     mark in grey, with a red dot. Not a template.
  *
  * And one file outside build/: apps/web/public/favicon.svg, written here so the
  * browser mark cannot drift from the app icon.
@@ -83,6 +85,66 @@ function renderTray(size) {
       if (hits === 0) continue;
       const i = (py * size + px) * 4;
       buf[i + 3] = Math.round((hits / total) * 255);
+    }
+  }
+  return buf;
+}
+
+/* ---------------------------------------------------------------------------
+   Menu bar, alert state.
+
+   A template image is recoloured whole, so a red dot cannot ride on one. The
+   alert icon is therefore a plain colour image: the same silhouette in a grey
+   that reads on both a light and a dark menu bar, and a red dot in the top
+   right corner with a one-pixel gap cut around it so it reads as "on top of"
+   rather than "part of" the mark. Shown only while an unseen automation run
+   has failed; the template icon comes back the moment that clears.
+   --------------------------------------------------------------------------- */
+const ALERT_GREY = [0x8e, 0x8e, 0x93];
+const ALERT_RED = [0xff, 0x3b, 0x30];
+
+function renderTrayAlert(size) {
+  const buf = renderTray(size);
+  const r = size * 0.14;
+  const cx = size - r;
+  const cy = r;
+  const gap = size / 16;
+  const ss = 4;
+  const step = 1 / ss;
+  const off = step / 2;
+  const total = ss * ss;
+
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      const i = (py * size + px) * 4;
+      let inDot = 0;
+      let inHalo = 0;
+      for (let sy = 0; sy < ss; sy++) {
+        for (let sx = 0; sx < ss; sx++) {
+          const dx = px + sx * step + off - cx;
+          const dy = py + sy * step + off - cy;
+          const d = Math.hypot(dx, dy);
+          if (d <= r) inDot++;
+          if (d <= r + gap) inHalo++;
+        }
+      }
+      // The mark, in grey, minus the halo around the dot.
+      const mark = buf[i + 3] * (1 - inHalo / total);
+      const dot = (inDot / total) * 255;
+      if (mark === 0 && dot === 0) {
+        buf[i + 3] = 0;
+        continue;
+      }
+      // Dot over mark, straight alpha.
+      const a = dot / 255 + (mark / 255) * (1 - dot / 255);
+      for (let c = 0; c < 3; c++) {
+        buf[i + c] = Math.round(
+          ((ALERT_RED[c] * (dot / 255) +
+            ALERT_GREY[c] * (mark / 255) * (1 - dot / 255)) /
+            a),
+        );
+      }
+      buf[i + 3] = Math.round(a * 255);
     }
   }
   return buf;
@@ -202,6 +264,8 @@ writeFileSync(
 
 writeFileSync(join(buildDir, "trayTemplate.png"), toPng(renderTray(16), 16, 16));
 writeFileSync(join(buildDir, "trayTemplate@2x.png"), toPng(renderTray(32), 32, 32));
+writeFileSync(join(buildDir, "trayAlert.png"), toPng(renderTrayAlert(16), 16, 16));
+writeFileSync(join(buildDir, "trayAlert@2x.png"), toPng(renderTrayAlert(32), 32, 32));
 
 const svg = toSvg();
 writeFileSync(join(buildDir, "icon.svg"), svg);
@@ -228,6 +292,7 @@ console.log(
   [
     "icon.icns", "icon.ico", "icon.png", "icon-dock.png", "icon.svg",
     "trayTemplate.png", "trayTemplate@2x.png",
+    "trayAlert.png", "trayAlert@2x.png",
   ]
     .map((p) => `${p.padEnd(20)} ${bytes(p)} bytes`)
     .concat(`${"web favicon.svg".padEnd(20)} ${readFileSync(faviconPath).length} bytes`)

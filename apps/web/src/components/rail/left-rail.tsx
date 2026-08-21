@@ -35,6 +35,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useAgent } from "@/lib/hooks/use-agent";
+import { useAutomationBadge } from "@/lib/hooks/use-automations";
 import { useApp } from "@/lib/hooks/use-app-state";
 import { useConnection } from "@/lib/hooks/use-connection";
 import { useHealth } from "@/lib/hooks/use-health";
@@ -64,6 +65,9 @@ export function LeftRail({
      Outreach row to put the number on, so the poll stops rather than running
      every 30s for a view that does not exist. */
   const badge = useOutreachBadge(app.crm);
+  /* Runs that finished since the Automations view was last open. Polled like
+     the Outreach badge; cleared by opening the view, not by time. */
+  const runs = useAutomationBadge();
   const messages = useMessages({
     account: app.account,
     folder: app.folder,
@@ -129,6 +133,27 @@ export function LeftRail({
 
   const inMail = app.view === "mail";
   const pending = badge.data?.pending ?? 0;
+  const unseenRuns = runs.data?.unseen ?? 0;
+  const failedRuns = runs.data?.failed ?? 0;
+  const runsLabel =
+    unseenRuns === 0
+      ? undefined
+      : failedRuns > 0
+        ? `${unseenRuns} new ${unseenRuns === 1 ? "run" : "runs"}, ${failedRuns} failed`
+        : `${unseenRuns} new ${unseenRuns === 1 ? "run" : "runs"}`;
+  /* The count of runs nobody has looked at. Neutral while every one of them
+     went fine; red the moment one did not — the colour says "come look", the
+     number says how much is waiting. It is a number the server returns, not
+     one counted from a page. */
+  const runsBadge =
+    unseenRuns > 0 ? (
+      <Badge
+        variant={failedRuns > 0 ? "danger" : "neutral"}
+        className="tnum px-1.5"
+      >
+        {unseenRuns}
+      </Badge>
+    ) : undefined;
   const sections = useRailSections();
   const chatCount = agent.storage.chats + agent.storage.archived;
 
@@ -228,6 +253,12 @@ export function LeftRail({
         label="Mail"
         open={isOpen("mail")}
         onToggle={() => toggle("mail")}
+        /* Folded, the run count stays visible. Same rule as the CRM section. */
+        summary={
+          runsBadge ? (
+            <span className="mr-1 flex items-center">{runsBadge}</span>
+          ) : undefined
+        }
       >
         <NavItem
           icon={Inbox}
@@ -277,6 +308,8 @@ export function LeftRail({
           label="Automations"
           active={app.view === "automations"}
           onClick={go(() => app.setView("automations"))}
+          ariaLabel={runsLabel ? `Automations, ${runsLabel}` : undefined}
+          trailing={runsBadge}
         />
 
         {/* Mail and Drafts only. Folders scope the MESSAGE list; in a
@@ -395,11 +428,13 @@ export function LeftRail({
                     type="button"
                     variant="ghost"
                     size="icon"
-                    aria-label={
-                      pending > 0
-                        ? `Views and folders, ${pending} waiting for approval`
-                        : "Views and folders"
-                    }
+                    aria-label={[
+                      "Views and folders",
+                      pending > 0 ? `${pending} waiting for approval` : null,
+                      runsLabel,
+                    ]
+                      .filter(Boolean)
+                      .join(", ")}
                     className="relative w-full"
                   >
                     <Inbox className="size-4" strokeWidth={1.5} />
@@ -407,9 +442,9 @@ export function LeftRail({
                         the count it carries becomes a dot on the control that
                         opens it. The number itself is one click away, and the
                         accessible name above already says it. */}
-                    {pending > 0 && (
+                    {(pending > 0 || unseenRuns > 0) && (
                       <StatusDot
-                        tone="accent"
+                        tone={failedRuns > 0 ? "danger" : "accent"}
                         className="absolute top-1.5 right-1.5"
                       />
                     )}

@@ -394,9 +394,17 @@ export type Automation = {
   lastRunAt: string | null;
   /** Null while disabled or unschedulable — never a claim that a run is due. */
   nextRunAt: string | null;
+  /** The newest run's status; null before the first run. */
+  lastRunStatus: AutomationRunStatus | null;
 };
 
 export type AutomationRunStatus = "running" | "ok" | "error" | "killed";
+
+/**
+ * GET /api/automations/badge — runs that finished since the Automations view
+ * was last open, and how many of those failed. Two COUNTs and nothing else.
+ */
+export type AutomationBadge = { unseen: number; failed: number };
 
 export type AutomationRun = {
   id: string;
