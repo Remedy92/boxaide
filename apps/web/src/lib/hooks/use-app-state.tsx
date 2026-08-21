@@ -115,7 +115,7 @@ export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
  * `automations`, which is one column of schedules and their run history.
  *
  * `outreach` is two-pane again: the middle column is the approval queue (or the
- * campaigns and suppression lists), and the pane is the full text of the queued
+ * suppression list), and the pane is the full text of the queued
  * email a person is about to approve.
  *
  * `calendar` is one column for the same reason `automations` is: an agenda is a
@@ -148,11 +148,11 @@ export function isCrmView(view: View): boolean {
 }
 
 /**
- * Which list the Outreach middle column is showing. All three are the same
+ * Which list the Outreach middle column is showing. Both are the same
  * view — they share a pane and a keyboard map — so this is a filter, not a
  * route.
  */
-export type OutreachTab = "queue" | "campaigns" | "suppression";
+export type OutreachTab = "queue" | "suppression";
 
 export type Selection = { accountId: string; messageId: string };
 
@@ -507,7 +507,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   );
 
   /* The pane belongs to the queue. Leaving a row open while the column shows
-     campaigns would put an approve button beside a list it is not about. */
+     suppression would put an approve button beside a list it is not about. */
   const setOutreachTab = React.useCallback((value: OutreachTab) => {
     setOutreachTabState(value);
     if (value !== "queue") setSelectedOutbox(null);
@@ -620,13 +620,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     clearSelectionRefForView.current = clearSelection;
   }, [clearSelection]);
 
-  const viewRef = React.useRef(view);
-  React.useEffect(() => {
-    viewRef.current = view;
-  }, [view]);
-
-  /* Read through a ref for the same reason viewRef exists: setView must stay
-     stable, and it is the one caller. */
+  /* Read through a ref for the same reason shownViewRef below does: setView
+     must stay stable, and it is the one caller. */
   const crmRef = React.useRef(settings.crm);
   React.useEffect(() => {
     crmRef.current = settings.crm;
@@ -637,13 +632,46 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     () => {},
   );
 
-  /* Settings owns the hash while it is open, so leaving it is a hash change
-     even when the view underneath never moved. Read through a ref for the
-     same reason viewRef exists: setView must stay stable. */
-  const settingsRef = React.useRef(settingsSection);
+  /* The pane the shell is actually rendering, which is not always `view`: a
+     settings route and an open message each outrank it, and both can be set
+     while `view` still holds whatever the user was on before. setView compares
+     against this rather than the raw state, because the row a person presses
+     is a navigation away from what they can SEE. Comparing against `view`
+     swallowed two of those: leaving Settings for the view behind it, and
+     leaving a message the menu-bar popover opened in a window that never left
+     the agent conversation. A ref rather than a dependency, so setView stays
+     stable for the many components that hold it. */
+  const shownViewRef = React.useRef(view);
   React.useEffect(() => {
-    settingsRef.current = settingsSection;
-  }, [settingsSection]);
+    shownViewRef.current = settingsSection
+      ? "settings"
+      : selected
+        ? "mail"
+        : view;
+  }, [settingsSection, selected, view]);
+
+  /* A message opened from outside the mail pane commits the mail view. The
+     shown view is derived below, which is what paints the Reader on the first
+     frame, but on its own that left the raw state where it was: after a deep
+     link from the menu-bar popover, `view` still read "agent", the Inbox row
+     and `g i` early-returned against a pane already on screen, and closing the
+     message dropped the user back into the agent conversation. Writing the
+     state makes the link behave like a click on the row: what is underneath
+     the message is the list it came from.
+
+     Only when a selection ARRIVES, not whenever one is set: at phone width
+     clearSelection is a history.back() that lands a frame later, so a render
+     where the Agent row has moved `view` while the old hash is still up would
+     otherwise be pulled straight back to mail. Set during render, the
+     documented way to adjust state to a value from outside: React re-renders
+     at once, before any child commits on the stale view. */
+  const [seenSelection, setSeenSelection] = React.useState<Selection | null>(
+    null,
+  );
+  if (selected !== seenSelection) {
+    setSeenSelection(selected);
+    if (selected && !seenSelection && view !== "mail") setViewState("mail");
+  }
 
   const setView = React.useCallback((next: View) => {
     // Settings is a route, not a view state — see openSettings.
@@ -656,11 +684,11 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     // held keybinding, another tab's palette — and the answer is to do nothing
     // rather than to show a view the rail cannot get back to.
     if (!crmRef.current && isCrmView(next)) return;
-    // Standing in Settings, the row the user pressed may be the view behind
-    // it. That is a navigation — the early return below would swallow it and
-    // leave Settings on screen.
-    if (viewRef.current === next && settingsRef.current === null) return;
-    viewRef.current = next;
+    // Nothing to do only when the pane on screen is already the one asked for.
+    if (shownViewRef.current === next) return;
+    /* Ahead of the effect on purpose: a second call in the same tick, which a
+       held key produces, has to see the move that is already committed. */
+    shownViewRef.current = next;
     clearSelectionRefForView.current();
     // The contact pane is the People view's right column and nothing else's.
     // Leaving it set would restore a stale contact on the way back in.
@@ -954,8 +982,13 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       query,
       searching: query.trim().length > 0,
       /* The settings route wins while it is set. The view underneath is kept,
-         not cleared, so leaving Settings returns to the pane the user left. */
-      view: settingsSection ? "settings" : view,
+         not cleared, so leaving Settings returns to the pane the user left.
+         An open message wins for the same reason and in the same way: the
+         menu-bar popover raises the window on the row that was clicked, and
+         the app starts on the agent conversation, which has no reading pane
+         to show it in. The effect above then commits the mail view, so
+         closing the message lands on the list. */
+      view: settingsSection ? "settings" : selected ? "mail" : view,
       setView,
       /* Gated on mount for the same reason the wizard is: the hydration render
          reads DEFAULT_SETTINGS, where `crm` is true, so passing settings.crm

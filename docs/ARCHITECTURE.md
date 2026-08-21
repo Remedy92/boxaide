@@ -199,7 +199,7 @@ Boxaide grows from an agentic inbox into a local agent work platform. Three modu
 |---|---|---|
 | CRM | `src/crm/` | contacts, orgs, tags, notes, interactions, pipeline stages, deals |
 | Automations | `src/automation/` | cron'd prompts, concurrent runs, run logs |
-| Outreach | `src/outreach/` | campaigns, sequence steps, outbox, suppression |
+| Outreach | `src/outreach/` | outbox approval queue, suppression |
 
 Each module is a store, a service or engine, a `<MODULE>_TOOLS` + dispatcher pair, and a `register*Routes`. Nothing else in the tree changes shape.
 
@@ -211,7 +211,7 @@ Each module is a store, a service or engine, a `<MODULE>_TOOLS` + dispatcher pai
 | **No MCP tool approves, rejects or sends an outbox row** | A tool that exists is a tool that can be called. Absence is the enforcement; a permission flag is not. `outbox_queue_draft` is the only route toward delivery, and its description says so to the agent. |
 | **Suppression enforced in `MailService.sendMessage`, not in the outreach engine** | The engine is one caller of three. Putting the guard at the send seam covers manual compose and `message_send` as well, so there is no path that forgets. |
 | **`overrideSuppression` is REST-only** | Overriding a "stop" is a human decision with a human's accountability. The MCP tool schema does not carry the flag, so an agent cannot pass it. |
-| **Mail-derived text encrypted at rest, contact identity in plaintext** | Subjects, snippets, note text, campaign bodies, outbox bodies and run logs are mail content and get `_enc` columns via `encryptSecret`/`decryptSecret`. Emails, names, org names and domains stay plaintext because UNIQUE constraints and search need them, and because they are CRM data the user typed or the user's mail header carried in the clear anyway. |
+| **Mail-derived text encrypted at rest, contact identity in plaintext** | Subjects, snippets, note text, outbox bodies and run logs are mail content and get `_enc` columns via `encryptSecret`/`decryptSecret`. Emails, names, org names and domains stay plaintext because UNIQUE constraints and search need them, and because they are CRM data the user typed or the user's mail header carried in the clear anyway. |
 | **CRM is derived from mail, not entered** | A CRM you have to fill in is a CRM that goes stale. `CrmService.syncFromMail` reads INBOX and Sent, so the contact list is a fact about your mail rather than a claim about it. Manual and agent-authored records are still allowed and are marked with `source`. |
 | **Free email providers never create an organisation** | A gmail.com "organisation" with 400 unrelated contacts is worse than no organisation. The list is explicit, in the spec. |
 | **One automation run at a time, in an in-process FIFO** | Runs are full agents with tool access to one SQLite file and one set of mailboxes. Concurrency here buys throughput nobody asked for and costs interleaved writes and duplicate outreach. |

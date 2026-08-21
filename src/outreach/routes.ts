@@ -7,13 +7,7 @@
 import type { Context, Hono } from "hono";
 import type { Platform } from "../platform.js";
 import { MAX_LIST_LIMIT as MAX_LIMIT, parseListLimit } from "../input-limits.js";
-import { readContacts } from "./crm-read.js";
-import {
-  MAX_CAMPAIGN_CONTACTS_PER_REQUEST,
-  type CampaignStatus,
-  type OutboxStatus,
-  type StepInput,
-} from "./store.js";
+import type { OutboxStatus } from "./store.js";
 
 const OUTBOX_STATUSES: ReadonlySet<string> = new Set([
   "pending",
@@ -31,109 +25,18 @@ function parseLimit(raw: string | undefined): number | null {
   return parseListLimit(raw, 50);
 }
 
-function stepsOf(raw: unknown): StepInput[] {
-  if (!Array.isArray(raw)) throw new Error("steps must be an array");
-  return raw.map((entry) => {
-    const step = (entry ?? {}) as Record<string, unknown>;
-    return {
-      subject: String(step.subject ?? ""),
-      body: String(step.body ?? ""),
-      waitDays: Number(step.waitDays ?? 0),
-    };
-  });
-}
-
 export function registerOutreachRoutes(app: Hono, platform: Platform): void {
   const store = platform.outreachStore;
 
   /**
    * The spec'd "on-demand" engine tick: the hourly timer alone would leave an
-   * approved row unsent (and a newly added contact unqueued) for up to an
-   * hour. Fire-and-forget so the HTTP response is not held behind the 60s
-   * send gap; the engine coalesces overlapping ticks.
+   * approved row unsent for up to an hour. Fire-and-forget so the HTTP
+   * response is not held behind the 60s send gap; the engine coalesces
+   * overlapping ticks.
    */
   const kickEngine = () => {
     void platform.engine.tick().catch(() => {});
   };
-
-  app.get("/api/outreach/campaigns", (c) =>
-    c.json({ campaigns: store.listCampaigns() }),
-  );
-
-  app.post("/api/outreach/campaigns", async (c) => {
-    const body = await c.req.json<{
-      name?: string;
-      account?: string;
-      steps?: unknown;
-    }>();
-    try {
-      const campaign = store.createCampaign({
-        name: String(body.name ?? ""),
-        accountId: String(body.account ?? ""),
-        steps: stepsOf(body.steps),
-      });
-      return c.json({ campaign, steps: store.listSteps(campaign.id) }, 201);
-    } catch (err) {
-      return c.json({ error: errMessage(err) }, 400);
-    }
-  });
-
-  app.patch("/api/outreach/campaigns/:id", async (c) => {
-    const id = c.req.param("id");
-    const body = await c.req.json<{
-      name?: string;
-      status?: string;
-      steps?: unknown;
-    }>();
-    if (!store.getCampaign(id)) return c.json({ error: "not found" }, 404);
-    try {
-      const campaign = store.updateCampaign(id, {
-        name: body.name,
-        status: body.status as CampaignStatus | undefined,
-        steps: body.steps === undefined ? undefined : stepsOf(body.steps),
-      });
-      // Activation is the human saying "go": queue step 0 now, not in an hour.
-      if (campaign?.status === "active") kickEngine();
-      return c.json({ campaign, steps: store.listSteps(id) });
-    } catch (err) {
-      return c.json({ error: errMessage(err) }, 400);
-    }
-  });
-
-  app.post("/api/outreach/campaigns/:id/contacts", async (c) => {
-    const id = c.req.param("id");
-    if (!store.getCampaign(id)) return c.json({ error: "not found" }, 404);
-    const body = await c.req.json<{ contactIds?: unknown }>();
-    if (!Array.isArray(body.contactIds)) {
-      return c.json({ error: "contactIds must be an array" }, 400);
-    }
-    if (body.contactIds.length > MAX_CAMPAIGN_CONTACTS_PER_REQUEST) {
-      return c.json(
-        {
-          error: `contactIds must contain at most ${MAX_CAMPAIGN_CONTACTS_PER_REQUEST} entries`,
-        },
-        400,
-      );
-    }
-    const ids = body.contactIds.map((v) => String(v));
-    const contacts = readContacts(platform.crmStore.db, ids);
-    const known = new Set(contacts.map((k) => k.id));
-    const refused = contacts
-      .filter((k) => store.isSuppressed(k.email))
-      .map((k) => ({ contactId: k.id, email: k.email, reason: "suppressed" }));
-    const refusedIds = new Set(refused.map((r) => r.contactId));
-    const added = store.addCampaignContacts(
-      id,
-      ids.filter((v) => known.has(v) && !refusedIds.has(v)),
-    );
-    // A contact added to an active campaign is due immediately (step 0).
-    if (added > 0) kickEngine();
-    return c.json({
-      added,
-      refused,
-      unknown: ids.filter((v) => !known.has(v)),
-    });
-  });
 
   app.get("/api/outreach/outbox", (c) => {
     const limit = parseLimit(c.req.query("limit"));
@@ -199,12 +102,9 @@ export function registerOutreachRoutes(app: Hono, platform: Platform): void {
     const removed = store.removeSuppression(email);
     if (!removed) return c.json({ error: "not found" }, 404);
     // The human has answered the stored "stop": withdraw the interaction
-    // flags too, or the windowed reply check re-suppresses from the same old
-    // rows on the next pass. A new "stop" flags anew and suppresses again.
+    // flags too, or a later reply check re-suppresses from the same old
+    // rows. A new "stop" flags anew and suppresses again.
     platform.crmStore.clearOptOutFlags(email);
-    for (const id of platform.crmStore.contactIdsForEmail(email)) {
-      store.reopenStoppedCampaigns(id);
-    }
     kickEngine();
     return c.json({ deleted: true });
   });

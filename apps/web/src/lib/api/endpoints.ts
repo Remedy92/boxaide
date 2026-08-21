@@ -57,8 +57,6 @@ import type {
   OutboxRow,
   OutboxStatus,
   OutreachBadge,
-  OutreachCampaign,
-  CampaignStatus,
   ReusableMailbox,
   RsvpRefreshResult,
   SendResult,
@@ -1086,38 +1084,6 @@ export async function listAutomationRuns(
 /* -------------------------------------------------------------------------- */
 /* outreach — /api/outreach/*                                                 */
 /* -------------------------------------------------------------------------- */
-
-export async function listCampaigns(ctx: Ctx): Promise<OutreachCampaign[]> {
-  const data = await request<{ campaigns: OutreachCampaign[] }>(
-    "/api/outreach/campaigns",
-    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
-  );
-  return data.campaigns;
-}
-
-/**
- * Status only, from this app: steps may be replaced while a campaign is a
- * draft, but they are the agent's to author and no GET returns them, so the UI
- * has nothing to send back. Activating a campaign kicks the engine server-side,
- * which queues step 0 — as pending outbox rows, never as sent mail.
- */
-export async function updateCampaignStatus(
-  campaignId: string,
-  status: CampaignStatus,
-  ctx: Ctx,
-): Promise<OutreachCampaign> {
-  const data = await request<{ campaign: OutreachCampaign }>(
-    `/api/outreach/campaigns/${encodeURIComponent(campaignId)}`,
-    {
-      method: "PATCH",
-      body: { status },
-      baseUrl: ctx.baseUrl,
-      token: ctx.token,
-      signal: ctx.signal,
-    },
-  );
-  return data.campaign;
-}
 
 export async function listOutbox(
   o: { status?: OutboxStatus; limit?: number },

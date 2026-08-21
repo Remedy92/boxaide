@@ -93,7 +93,7 @@ function Shell() {
   });
   /* Same arrangement for the approval queue: the list column issues this query
      and React Query dedupes it, so j / k walk exactly the rows on screen. Only
-     while the Queue tab is up — campaigns and suppression are not a selection. */
+     while the Queue tab is up — suppression is not a selection. */
   const outboxQueue = useOutbox(
     "pending",
     outreaching && app.outreachTab === "queue",
