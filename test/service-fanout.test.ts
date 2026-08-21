@@ -118,6 +118,10 @@ class FlakyProvider implements MailProvider {
     throw new Error("not used");
   }
 
+  async trashMessage(): Promise<MoveResult> {
+    throw new Error("not used");
+  }
+
   async listFolders(): Promise<MailFolder[]> {
     return [];
   }

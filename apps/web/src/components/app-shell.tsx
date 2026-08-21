@@ -28,7 +28,7 @@ import { Reader } from "@/components/reader/reader";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { AgentProvider } from "@/lib/hooks/use-agent";
 import { AppStateProvider, useApp } from "@/lib/hooks/use-app-state";
-import { useArchive } from "@/lib/hooks/use-archive";
+import { useArchive, useTrash } from "@/lib/hooks/use-move";
 import { useCrmContacts } from "@/lib/hooks/use-crm-contacts";
 import { useDrafts } from "@/lib/hooks/use-drafts";
 import { useKeyboard } from "@/lib/hooks/use-keyboard";
@@ -67,6 +67,7 @@ function Shell() {
   const nav = useMessageNavigation();
   const markRead = useMarkRead();
   const archive = useArchive();
+  const trash = useTrash();
   const inMail = app.view === "mail";
   const drafting = app.view === "drafts";
   const peopling = app.view === "people";
@@ -296,6 +297,17 @@ function Shell() {
         const current = nav.current ?? app.selected;
         if (!current) return;
         archive.mutate({
+          accountId: current.accountId,
+          messageId: "id" in current ? current.id : current.messageId,
+        });
+      },
+      trash: () => {
+        if (!inMail) return;
+        // The selection, not nav.current, for the same reason `e` uses it: the
+        // open message can have dropped out of the visible list.
+        const current = nav.current ?? app.selected;
+        if (!current) return;
+        trash.mutate({
           accountId: current.accountId,
           messageId: "id" in current ? current.id : current.messageId,
         });
