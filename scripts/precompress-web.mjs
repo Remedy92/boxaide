@@ -9,7 +9,7 @@
  * Idempotent: a sibling newer than its source is left alone, so a rerun after
  * an unchanged build is free.
  */
-import { readdirSync, statSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliCompressSync, gzipSync, constants } from "node:zlib";
@@ -29,12 +29,28 @@ function* walk(dir) {
   }
 }
 
-function fresh(source, sibling) {
-  if (!existsSync(sibling)) return false;
-  return statSync(sibling).mtimeMs >= statSync(source).mtimeMs;
+/**
+ * `mtimeMs`, or null when the path is not there.
+ *
+ * A try/catch rather than an `existsSync` guard: between the check and the use
+ * the file can be gone, and a build step racing a rebuild is exactly where that
+ * happens.
+ */
+function mtimeOf(path) {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
-if (!existsSync(root)) {
+/** True when `sibling` is present and no older than `sourceMtime`. */
+function fresh(sourceMtime, sibling) {
+  const at = mtimeOf(sibling);
+  return at !== null && at >= sourceMtime;
+}
+
+if (mtimeOf(root) === null) {
   console.log("precompress: web-next/ not built yet, nothing to do");
   process.exit(0);
 }
@@ -46,29 +62,44 @@ let gz = 0;
 for (const path of walk(root)) {
   if (/\.(br|gz)$/i.test(path)) continue;
   if (!COMPRESSIBLE.test(path)) continue;
-  const size = statSync(path).size;
-  if (size < MIN_BYTES) continue;
+  // Read first and measure the bytes in hand. Sizing with a separate stat and
+  // then reading leaves a window where the two disagree, and the numbers below
+  // would be reporting a file that is no longer the one that was compressed.
+  let body;
+  let sourceMtime;
+  try {
+    body = readFileSync(path);
+    sourceMtime = statSync(path).mtimeMs;
+  } catch {
+    // Vanished mid-walk. Nothing to compress, and nothing worth failing over.
+    continue;
+  }
+  if (body.length < MIN_BYTES) continue;
   files += 1;
-  raw += size;
-  const body = readFileSync(path);
+  raw += body.length;
+
   const brPath = `${path}.br`;
-  if (!fresh(path, brPath)) {
-    writeFileSync(
-      brPath,
-      brotliCompressSync(body, {
-        params: {
-          [constants.BROTLI_PARAM_QUALITY]: 11,
-          [constants.BROTLI_PARAM_SIZE_HINT]: size,
-        },
-      }),
-    );
+  if (fresh(sourceMtime, brPath)) {
+    br += readFileSync(brPath).length;
+  } else {
+    const compressed = brotliCompressSync(body, {
+      params: {
+        [constants.BROTLI_PARAM_QUALITY]: 11,
+        [constants.BROTLI_PARAM_SIZE_HINT]: body.length,
+      },
+    });
+    writeFileSync(brPath, compressed);
+    br += compressed.length;
   }
-  br += statSync(brPath).size;
+
   const gzPath = `${path}.gz`;
-  if (!fresh(path, gzPath)) {
-    writeFileSync(gzPath, gzipSync(body, { level: 9 }));
+  if (fresh(sourceMtime, gzPath)) {
+    gz += readFileSync(gzPath).length;
+  } else {
+    const compressed = gzipSync(body, { level: 9 });
+    writeFileSync(gzPath, compressed);
+    gz += compressed.length;
   }
-  gz += statSync(gzPath).size;
 }
 
 const mb = (n) => `${(n / 1024 / 1024).toFixed(2)} MB`;
