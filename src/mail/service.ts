@@ -1,4 +1,8 @@
 import { randomBytes } from "node:crypto";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join, relative, resolve, sep } from "node:path";
+import { envNamed } from "../config.js";
 import addressparser from "nodemailer/lib/addressparser/index.js";
 import type { Store } from "../db/store.js";
 import { canonicalEmail } from "../outreach/opt-out.js";
@@ -9,6 +13,7 @@ import type {
   DraftRef,
   ListDraftsOpts,
   ListMessagesOpts,
+  MailAttachment,
   MailDraft,
   MailFolder,
   MailFolderWithUnread,
@@ -320,8 +325,12 @@ export class MailService {
         .filter((v) => v.includes("@"));
       this.sendGuard(recipients, opts.overrideSuppression === true);
     }
+    const attachments = validateAttachments(input.attachments);
     const account = this.resolve(accountRef);
-    const result = await this.provider.sendMessage(account, input);
+    const result = await this.provider.sendMessage(account, {
+      ...input,
+      attachments,
+    });
     if (result.copied) this.index.upsertSummary(result.copied);
     else if (result.sentFolder) {
       this.index.markDirty(account.id, result.sentFolder);
@@ -515,7 +524,11 @@ export class MailService {
     accountRef: string,
     input: DraftInput,
   ): Promise<DraftRef> {
-    return this.provider.createDraft(this.resolve(accountRef), input);
+    const attachments = validateAttachments(input.attachments);
+    return this.provider.createDraft(this.resolve(accountRef), {
+      ...input,
+      attachments,
+    });
   }
 
   /** Returns a NEW draft id; the one passed in is dead afterwards. */
@@ -524,7 +537,11 @@ export class MailService {
     draftId: string,
     input: DraftInput,
   ): Promise<DraftRef> {
-    return this.provider.updateDraft(this.resolve(accountRef), draftId, input);
+    const attachments = validateAttachments(input.attachments);
+    return this.provider.updateDraft(this.resolve(accountRef), draftId, {
+      ...input,
+      attachments,
+    });
   }
 
   async listDrafts(
@@ -655,4 +672,143 @@ export class MailService {
     this.inflight.set(key, run);
     return run;
   }
+}
+
+/** Ceilings on what one message may carry out of this machine. */
+const MAX_ATTACHMENTS = 20;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Directories a `path` attachment may be read from. BOXAIDE_ATTACHMENT_DIRS
+ * (comma-separated, `~/` expanded) when set, else the user's home directory.
+ */
+function attachmentRoots(): string[] {
+  const raw = envNamed("ATTACHMENT_DIRS");
+  const entries = raw
+    ? raw
+        .split(",")
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0)
+    : [homedir()];
+  return entries.map((entry) => {
+    const root = resolve(
+      entry.startsWith("~/") ? join(homedir(), entry.slice(2)) : entry,
+    );
+    // Through the symlink, so a root given as /tmp still matches a file whose
+    // own realpath is /private/tmp/... A root that does not exist stays as
+    // written and simply matches nothing.
+    return existsSync(root) ? realpathSync(root) : root;
+  });
+}
+
+/**
+ * The path must sit under an allowed root, and no segment below that root may
+ * be hidden. Mail is an exfiltration channel: without this, one injected tool
+ * call turns ~/.ssh/id_rsa into an attachment, and the draft path is not even
+ * approval-gated.
+ */
+function checkAttachmentRoot(resolved: string, original: string): void {
+  const roots = attachmentRoots();
+  const root = roots.find(
+    (r) => resolved === r || resolved.startsWith(r.endsWith(sep) ? r : r + sep),
+  );
+  if (!root) {
+    throw new Error(
+      `attachment path is outside the allowed directories: ${original}`,
+    );
+  }
+  const hidden = relative(root, resolved)
+    .split(sep)
+    .some((segment) => segment.startsWith("."));
+  if (hidden) {
+    throw new Error(`attachment path is a hidden file or directory: ${original}`);
+  }
+}
+
+/** Decoded byte size of inline content, so the cap counts what is sent. */
+function inlineBytes(content: string, encoding: string | undefined): number {
+  if (encoding === "base64") return Math.floor((content.length * 3) / 4);
+  return Buffer.byteLength(content, "utf8");
+}
+
+/**
+ * Validates and normalizes outgoing attachments. Verifies local file existence
+ * and resolves absolute paths so downstream nodemailer can stream them.
+ */
+function validateAttachments(
+  attachments: MailAttachment[] | undefined,
+): MailAttachment[] | undefined {
+  if (attachments === undefined || attachments === null) return undefined;
+  if (!Array.isArray(attachments)) {
+    throw new Error("attachments must be an array");
+  }
+  if (attachments.length === 0) return undefined;
+  if (attachments.length > MAX_ATTACHMENTS) {
+    throw new Error(`too many attachments: at most ${MAX_ATTACHMENTS}`);
+  }
+  const validated: MailAttachment[] = [];
+  let bytes = 0;
+  for (const att of attachments) {
+    if (!att || typeof att !== "object") {
+      throw new Error("invalid attachment: each attachment must be an object");
+    }
+    if (att.path) {
+      if (typeof att.path !== "string" || !att.path.trim()) {
+        throw new Error("invalid attachment path");
+      }
+      const resolved = resolve(att.path.trim());
+      if (!existsSync(resolved)) {
+        throw new Error(`attachment file not found: ${att.path}`);
+      }
+      // Through the symlink first: a link inside an allowed directory that
+      // points at ~/.ssh would otherwise pass the check below.
+      const real = realpathSync(resolved);
+      const stat = statSync(real);
+      if (stat.isDirectory()) {
+        throw new Error(
+          `attachment path is a directory, not a file: ${att.path}`,
+        );
+      }
+      checkAttachmentRoot(real, att.path);
+      bytes += stat.size;
+      validated.push({
+        ...att,
+        path: real,
+        filename: att.filename?.trim() || basename(real),
+      });
+    } else if (att.content !== undefined) {
+      const encoding = att.encoding?.trim().toLowerCase();
+      const contentType = att.contentType?.trim().toLowerCase() ?? "";
+      const textual =
+        !contentType ||
+        contentType.startsWith("text/") ||
+        contentType === "application/json";
+      // Nodemailer reads a string as utf-8 unless told otherwise, so base64
+      // bytes sent without an encoding arrive as the literal base64 text.
+      if (!encoding && !textual) {
+        throw new Error(
+          `attachment ${att.filename ?? contentType} needs an encoding: set encoding to "base64" for binary content`,
+        );
+      }
+      const content = typeof att.content === "string" ? att.content : "";
+      bytes +=
+        typeof att.content === "string"
+          ? inlineBytes(content, encoding)
+          : att.content.length;
+      validated.push({
+        ...att,
+        filename: att.filename?.trim() || "attachment",
+      });
+    } else {
+      throw new Error(
+        "invalid attachment: must provide either 'path' or 'content'",
+      );
+    }
+  }
+  if (bytes > MAX_ATTACHMENT_BYTES) {
+    throw new Error(
+      `attachments are too large: ${Math.round(bytes / 1024 / 1024)} MB exceeds the ${Math.round(MAX_ATTACHMENT_BYTES / 1024 / 1024)} MB limit`,
+    );
+  }
+  return validated;
 }

@@ -1,10 +1,14 @@
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { simpleParser } from "mailparser";
 import {
   MAX_BODY_HTML_CHARS,
   MAX_RFC822_SOURCE_BYTES,
   parseRfc822,
 } from "../src/provider/mime.js";
-import { messageFromImapSource } from "../src/provider/imap-smtp.js";
+import { composeMime, messageFromImapSource } from "../src/provider/imap-smtp.js";
 
 /** RFC822 samples — same shapes Gmail/IMAP commonly return. */
 const SAMPLES = {
@@ -345,5 +349,42 @@ describe("messageFromImapSource (ImapSmtpProvider getMessage body path)", () => 
       SAMPLES.sevenBit,
     );
     expect(msg.bodyText).toContain("Hello from seven-bit body.");
+  });
+
+  it("composes MIME multipart/mixed message with file and inline attachments", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "boxaide-mime-att-"));
+    const filePath = join(dir, "attachment.txt");
+    writeFileSync(filePath, "File attachment content from disk");
+
+    try {
+      const composed = await composeMime({
+        from: "sender@example.com",
+        to: "recipient@example.com",
+        subject: "Message with attachments",
+        text: "Here are the files.",
+        attachments: [
+          { path: filePath, filename: "disk_file.txt" },
+          { filename: "inline.json", content: '{"key": "value"}' },
+        ],
+      });
+
+      expect(composed.raw).toBeInstanceOf(Buffer);
+      const parsed = await simpleParser(composed.raw);
+
+      expect(parsed.subject).toBe("Message with attachments");
+      expect(parsed.text).toContain("Here are the files.");
+      expect(parsed.attachments).toHaveLength(2);
+
+      const [first, second] = parsed.attachments;
+      expect(first.filename).toBe("disk_file.txt");
+      expect(first.content.toString("utf8")).toBe(
+        "File attachment content from disk",
+      );
+
+      expect(second.filename).toBe("inline.json");
+      expect(second.content.toString("utf8")).toBe('{"key": "value"}');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
