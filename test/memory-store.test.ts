@@ -15,7 +15,7 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   MAX_MEMORY_FILE_BYTES,
@@ -40,7 +40,7 @@ afterEach(() => {
 function tempDataDir(): string {
   const parent = mkdtempSync(join(tmpdir(), "boxaide-memory-"));
   const dataDir = join(parent, "data");
-  mkdirSync(dataDir, { recursive: true });
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   cleanups.push(() => rmSync(parent, { recursive: true, force: true }));
   return dataDir;
 }
@@ -52,10 +52,15 @@ describe("memory store paths", () => {
     );
   });
 
-  it("mirrors the launcher's :memory: fallback to the shared scratch root", () => {
-    expect(memoryDir(":memory:")).toBe(
-      join(tmpdir(), "boxaide-agent", "workdir", "memory"),
-    );
+  // Unguessable and owner-only, not a fixed name in a world-writable
+  // directory: on a shared machine that name is whoever creates it first, and
+  // what goes inside is an agent's config homes and the user's workspace notes.
+  it("gives a :memory: install a private scratch root, stable per process", () => {
+    const first = memoryDir(":memory:");
+    expect(first.startsWith(join(tmpdir(), "boxaide-agent-"))).toBe(true);
+    expect(first.endsWith(join("workdir", "memory"))).toBe(true);
+    expect(memoryDir(":memory:")).toBe(first);
+    expect(statSync(dirname(dirname(first))).mode & 0o777).toBe(0o700);
   });
 });
 
@@ -158,8 +163,10 @@ describe("the memory size ceiling", () => {
 describe("the index as a servable name", () => {
   it("reads the uppercase index like any other note", async () => {
     const dataDir = tempDataDir();
-    mkdirSync(memoryDir(dataDir), { recursive: true });
-    writeFileSync(join(memoryDir(dataDir), MEMORY_INDEX), "# Memory\n");
+    mkdirSync(memoryDir(dataDir), { recursive: true, mode: 0o700 });
+    writeFileSync(join(memoryDir(dataDir), MEMORY_INDEX), "# Memory\n", {
+    mode: 0o600,
+  });
     expect(readMemoryFileSync(dataDir, MEMORY_INDEX)).toBe("# Memory\n");
     expect(await readMemoryFile(dataDir, MEMORY_INDEX)).toBe("# Memory\n");
   });
@@ -194,8 +201,10 @@ describe("hasMemoryIndex", () => {
   it("is false until the agent has written its index", async () => {
     const dataDir = tempDataDir();
     expect(hasMemoryIndex(dataDir)).toBe(false);
-    mkdirSync(memoryDir(dataDir), { recursive: true });
-    writeFileSync(join(memoryDir(dataDir), MEMORY_INDEX), "# Memory\n");
+    mkdirSync(memoryDir(dataDir), { recursive: true, mode: 0o700 });
+    writeFileSync(join(memoryDir(dataDir), MEMORY_INDEX), "# Memory\n", {
+    mode: 0o600,
+  });
     expect(hasMemoryIndex(dataDir)).toBe(true);
   });
 });
@@ -210,8 +219,10 @@ describe("listMemoryFiles", () => {
     const dataDir = tempDataDir();
     await writeMemoryFile(dataDir, "voice.md", "warm, plain\n");
     await writeMemoryFile(dataDir, "company.md", "Acme\n");
-    mkdirSync(memoryDir(dataDir), { recursive: true });
-    writeFileSync(join(memoryDir(dataDir), MEMORY_INDEX), "# Memory\n");
+    mkdirSync(memoryDir(dataDir), { recursive: true, mode: 0o700 });
+    writeFileSync(join(memoryDir(dataDir), MEMORY_INDEX), "# Memory\n", {
+    mode: 0o600,
+  });
 
     const files = await listMemoryFiles(dataDir);
     expect(files.map((file) => file.name)).toEqual([
@@ -227,11 +238,15 @@ describe("listMemoryFiles", () => {
   it("omits markdown the routes could not serve", async () => {
     const dataDir = tempDataDir();
     await writeMemoryFile(dataDir, "keep.md", "yes\n");
-    mkdirSync(memoryDir(dataDir), { recursive: true });
+    mkdirSync(memoryDir(dataDir), { recursive: true, mode: 0o700 });
     // Agent-chosen names outside the rule: listing one would offer a row that
     // 400s the moment somebody clicked it.
-    writeFileSync(join(memoryDir(dataDir), "Notes.md"), "no\n");
-    writeFileSync(join(memoryDir(dataDir), "my_notes.md"), "no\n");
+    writeFileSync(join(memoryDir(dataDir), "Notes.md"), "no\n", {
+    mode: 0o600,
+  });
+    writeFileSync(join(memoryDir(dataDir), "my_notes.md"), "no\n", {
+    mode: 0o600,
+  });
 
     const files = await listMemoryFiles(dataDir);
     expect(files.map((file) => file.name)).toEqual(["keep.md"]);
@@ -240,9 +255,14 @@ describe("listMemoryFiles", () => {
   it("ignores non-markdown files and directories", async () => {
     const dataDir = tempDataDir();
     await writeMemoryFile(dataDir, "keep.md", "yes\n");
-    mkdirSync(memoryDir(dataDir), { recursive: true });
-    writeFileSync(join(memoryDir(dataDir), "scratch.txt"), "no\n");
-    mkdirSync(join(memoryDir(dataDir), "folder.md"), { recursive: true });
+    mkdirSync(memoryDir(dataDir), { recursive: true, mode: 0o700 });
+    writeFileSync(join(memoryDir(dataDir), "scratch.txt"), "no\n", {
+    mode: 0o600,
+  });
+    mkdirSync(join(memoryDir(dataDir), "folder.md"), {
+      recursive: true,
+      mode: 0o700,
+    });
 
     const files = await listMemoryFiles(dataDir);
     expect(files.map((file) => file.name)).toEqual(["keep.md"]);
@@ -262,14 +282,14 @@ describe("a note that is really a symlink", () => {
   /** A secret outside the agent subtree, as bearer.token is. */
   function plantSecret(dataDir: string): string {
     const path = join(dataDir, "bearer.token");
-    writeFileSync(path, "SUPER-SECRET-TOKEN\n");
+    writeFileSync(path, "SUPER-SECRET-TOKEN\n", { mode: 0o600 });
     return path;
   }
 
   it("refuses to read one, rather than dereferencing it", async () => {
     const dataDir = tempDataDir();
     const secret = plantSecret(dataDir);
-    mkdirSync(memoryDir(dataDir), { recursive: true });
+    mkdirSync(memoryDir(dataDir), { recursive: true, mode: 0o700 });
     symlinkSync(secret, join(memoryDir(dataDir), "company.md"));
 
     expect(() => readMemoryFileSync(dataDir, "company.md")).toThrow(/symlink/);
@@ -281,7 +301,7 @@ describe("a note that is really a symlink", () => {
   it("refuses the index too, and does not count it as having notes", () => {
     const dataDir = tempDataDir();
     const secret = plantSecret(dataDir);
-    mkdirSync(memoryDir(dataDir), { recursive: true });
+    mkdirSync(memoryDir(dataDir), { recursive: true, mode: 0o700 });
     symlinkSync(secret, join(memoryDir(dataDir), MEMORY_INDEX));
 
     expect(hasMemoryIndex(dataDir)).toBe(false);
@@ -302,7 +322,7 @@ describe("a note that is really a symlink", () => {
   it("refuses to write through one", async () => {
     const dataDir = tempDataDir();
     const secret = plantSecret(dataDir);
-    mkdirSync(memoryDir(dataDir), { recursive: true });
+    mkdirSync(memoryDir(dataDir), { recursive: true, mode: 0o700 });
     symlinkSync(secret, join(memoryDir(dataDir), "voice.md"));
 
     await expect(
@@ -314,7 +334,10 @@ describe("a note that is really a symlink", () => {
   it("refuses a memory directory that is itself a symlink", async () => {
     const dataDir = tempDataDir();
     plantSecret(dataDir);
-    mkdirSync(join(dataDir + "-agents", "workdir"), { recursive: true });
+    mkdirSync(join(dataDir + "-agents", "workdir"), {
+      recursive: true,
+      mode: 0o700,
+    });
     // The same trick one level up: point the whole directory at the secrets.
     symlinkSync(dataDir, memoryDir(dataDir));
 
@@ -328,7 +351,10 @@ describe("a note that is really a symlink", () => {
 
   it("refuses a note that is a directory", async () => {
     const dataDir = tempDataDir();
-    mkdirSync(join(memoryDir(dataDir), "company.md"), { recursive: true });
+    mkdirSync(join(memoryDir(dataDir), "company.md"), {
+      recursive: true,
+      mode: 0o700,
+    });
     expect(() => readMemoryFileSync(dataDir, "company.md")).toThrow(
       /not a regular file|EISDIR/,
     );

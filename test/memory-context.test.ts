@@ -31,7 +31,7 @@ afterEach(() => {
 function tempDataDir(): string {
   const parent = mkdtempSync(join(tmpdir(), "boxaide-memory-ctx-"));
   const dataDir = join(parent, "data");
-  mkdirSync(dataDir, { recursive: true });
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   cleanups.push(() => rmSync(parent, { recursive: true, force: true }));
   return dataDir;
 }
@@ -41,8 +41,10 @@ function tempDataDir(): string {
  * with a plain write, not through the store's REST-facing helpers.
  */
 function writeNote(dataDir: string, name: string, content: string): void {
-  mkdirSync(memoryDir(dataDir), { recursive: true });
-  writeFileSync(join(memoryDir(dataDir), name), content);
+  mkdirSync(memoryDir(dataDir), { recursive: true, mode: 0o700 });
+  writeFileSync(join(memoryDir(dataDir), name), content, {
+    mode: 0o600,
+  });
 }
 
 /**
@@ -135,8 +137,8 @@ describe("chatMemoryBlock", () => {
     const dataDir = tempDataDir();
     // A directory sitting where MEMORY.md belongs: hasMemoryIndex answers
     // true, the read throws, and the launch must degrade rather than fail.
-    mkdirSync(memoryDir(dataDir), { recursive: true });
-    mkdirSync(join(memoryDir(dataDir), MEMORY_INDEX));
+    mkdirSync(memoryDir(dataDir), { recursive: true, mode: 0o700 });
+    mkdirSync(join(memoryDir(dataDir), MEMORY_INDEX), { mode: 0o700 });
     expect(chatMemoryBlock(dataDir)).toContain("want me to?");
   });
 });

@@ -22,19 +22,39 @@
  * about the same subtree — src/memory/store.ts puts the agent's workspace
  * notes inside it — and a second copy of the layout would let the two drift.
  */
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+/**
+ * The scratch root a `:memory:` install's agents own, made once per process.
+ *
+ * This used to be a fixed `<tmp>/boxaide-agent`, and a predictable name in a
+ * world-writable directory is somebody else's to claim first. On a shared
+ * machine another user could create that path, or a symlink standing where it
+ * belongs, and own the subtree this process then writes an agent's config
+ * homes and workspace notes into. `mkdtemp` answers exactly that: a name
+ * nobody can guess, created 0700, owned by us.
+ *
+ * Cached, because the launcher and the memory store must agree on where the
+ * subtree is for the life of the process. Not shared BETWEEN processes any
+ * more, which costs nothing: an install with no data directory keeps nothing
+ * across runs by definition.
+ */
+let scratchRoot: string | null = null;
 
 /**
  * The root of the subtree an install's agents own. One per data directory,
  * named by suffix so a data dir and its agent root sit side by side.
  *
  * `:memory:` names no directory at all, so there is no sibling to derive;
- * those installs (tests, embedders) share one scratch root under the system
- * temporary directory instead.
+ * those installs (tests, embedders) get the private scratch root above.
  */
 export function agentRoot(dataDir: string): string {
-  if (dataDir === ":memory:") return join(tmpdir(), "boxaide-agent");
+  if (dataDir === ":memory:") {
+    scratchRoot ??= mkdtempSync(join(tmpdir(), "boxaide-agent-"));
+    return scratchRoot;
+  }
   return `${dataDir.replace(/[/\\]+$/, "")}-agents`;
 }
 
