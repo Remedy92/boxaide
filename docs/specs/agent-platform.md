@@ -294,6 +294,15 @@ Scheduler (`AutomationScheduler`):
   same MCP wiring, but prompt = the automation's prompt plus a fixed preamble
   (below), and no chat loop. `runOnce` takes the run row's id: it keys the live
   run for `killRun(id)` and names the run's own working directory.
+- A saved runner that is no longer usable before spawn does not lose the
+  schedule. `runOnce` chooses an installed fallback, drops the original
+  runner's model id, and writes the reason plus the runner actually used into
+  the run log. Fallback preference starts with Codex because its `CODEX_HOME`
+  and MCP config isolate cleanly. Antigravity is ineligible for unattended
+  runs while `~/.gemini/config/mcp_config.json` names any global MCP server:
+  agy always merges that file and has no strict-config flag, so an unrelated
+  server can fail or hold startup before the Boxaide task begins. Watched chat
+  launches keep those user-configured integrations.
 - `close()` is final. Every spawn path checks it, including after the model
   lookup in `start()` — shutdown clears the chat slot, so the idle check alone
   would let a launch suspended there spawn an agent nobody owns.

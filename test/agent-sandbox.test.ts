@@ -143,6 +143,26 @@ describe("the macOS profile", () => {
     expect(profile).toContain('/tmp/he said \\"no\\"');
   });
 
+  it("lets an allowed path under home be canonicalized without opening home", () => {
+    const target = `${HOME}/.boxaide-agents/workdir/runs/r1/codex-home`;
+    const profile = macosProfile(HOME, {
+      read: [],
+      write: [target],
+      deny: [],
+    });
+    // realpath stats each named parent. These are literals, not subpaths: the
+    // process still cannot list the home or read a sibling such as ~/.ssh.
+    expect(profile).toContain(
+      `(allow file-read-metadata (literal "${HOME}"))`,
+    );
+    expect(profile).toContain(
+      `(allow file-read-metadata (literal "${HOME}/.boxaide-agents/workdir/runs/r1"))`,
+    );
+    expect(profile).not.toContain(
+      `(allow file-read-metadata (subpath "${HOME}"))`,
+    );
+  });
+
   /**
    * A scheduled run's network: nothing leaves this machine except through the
    * loopback proxy. Seatbelt takes only `*` or `localhost` as an address, so
@@ -355,6 +375,22 @@ describe.runIf(sandboxSupported() && !sandboxUnavailable())(
         console.log("wrote:" + fs.readFileSync(process.env.WORK + "/note.txt", "utf8"));
       `);
       expect(out).toContain("wrote:hello");
+    });
+
+    it("can canonicalize an allowed directory nested under home", () => {
+      const nested = mkdtempSync(join(process.env.HOME!, ".boxaide-sb-realpath-"));
+      const owned = join(nested, "workdir", "runs", "r1", "codex-home");
+      mkdirSync(owned, { recursive: true });
+      const out = run(
+        `
+        const fs = require("node:fs");
+        try { console.log("real:" + fs.realpathSync(process.env.OWNED)); }
+        catch (err) { console.log("realpath failed:" + err.message); }
+      `,
+        { write: [owned], env: { OWNED: owned } },
+      );
+      expect(out).toContain(`real:${realpathSync(owned)}`);
+      expect(out).not.toContain("realpath failed");
     });
 
     it("can save its own sign-in, which is what a confined agent could not do", () => {

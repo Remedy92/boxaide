@@ -251,6 +251,8 @@ function resolved(path: string): string {
  * unresolved path matches nothing while looking exactly right.
  */
 export function macosProfile(home: string, confinement: Confinement): string {
+  const read = unique(confinement.read);
+  const write = unique(confinement.write);
   const lines = [
     "(version 1)",
     "(allow default)",
@@ -260,16 +262,48 @@ export function macosProfile(home: string, confinement: Confinement): string {
     // them either.
     `(deny file-read* file-write* ${subpath(home)})`,
   ];
-  for (const path of unique(confinement.read)) {
+  // realpath(3) / canonicalize has to stat every parent on the way to an
+  // allowed path. A subpath allowance for the destination does not grant
+  // that metadata read on its ancestors, so Rust CLIs such as Codex failed
+  // before startup while trying to canonicalize a CODEX_HOME they owned.
+  //
+  // Literal metadata only: do not allow a home subtree here. That is enough
+  // to walk a path whose name Boxaide already supplied, without allowing the
+  // process to list the home or read any file inside it.
+  for (const path of metadataAncestors(home, [...read, ...write])) {
+    lines.push(`(allow file-read-metadata ${literal(path)})`);
+  }
+  for (const path of read) {
     lines.push(`(allow file-read* ${subpath(path)})`);
   }
-  for (const path of unique(confinement.write)) {
+  for (const path of write) {
     lines.push(`(allow file-read* file-write* ${subpath(path)})`);
   }
   for (const path of unique(confinement.deny)) {
     lines.push(`(deny file-read* file-write* ${subpath(path)})`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+/** Named parents below home that realpath must stat to reach an allowance. */
+function metadataAncestors(home: string, paths: readonly string[]): string[] {
+  const base = resolved(home);
+  const found = new Set<string>();
+  for (const path of paths) {
+    const target = resolved(path);
+    const rel = relative(base, target);
+    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) continue;
+    found.add(base);
+    const parts = rel.split(sep).filter(Boolean);
+    let parent = base;
+    // The destination has a read/write subpath rule of its own. Only its
+    // parents need this narrower metadata allowance.
+    for (const part of parts.slice(0, -1)) {
+      parent = join(parent, part);
+      found.add(parent);
+    }
+  }
+  return [...found];
 }
 
 /**
@@ -299,6 +333,10 @@ function unique(paths: readonly string[]): string[] {
 
 function subpath(path: string): string {
   return `(subpath ${sbplString(path)})`;
+}
+
+function literal(path: string): string {
+  return `(literal ${sbplString(path)})`;
 }
 
 /**

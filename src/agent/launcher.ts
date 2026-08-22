@@ -418,6 +418,16 @@ export type AgentSpec = {
    */
   preflight?: (ctx: LaunchContext, env: NodeJS.ProcessEnv) => string | null;
   /**
+   * A precondition specific to unattended runs. A watched chat launch may
+   * intentionally load the user's integrations; a scheduled run may not be
+   * able to isolate them safely or start reliably. When this blocks a saved
+   * choice, the launcher uses another installed run-capable agent.
+   */
+  automationPreflight?: (
+    ctx: LaunchContext,
+    env: NodeJS.ProcessEnv,
+  ) => string | null;
+  /**
    * Runs the chat loop in this process, for a CLI whose model must not be asked
    * to run it. Called once, straight after the launch; the launcher stops it
    * when the child exits or is stopped. Null means the driver declined (no
@@ -1215,22 +1225,50 @@ function antigravityPreflight(
   ctx: LaunchContext,
   env: NodeJS.ProcessEnv,
 ): string | null {
-  const path = join(env.HOME || homedir(), ".gemini", "config", "mcp_config.json");
-  let declared: unknown;
-  try {
-    declared = JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    // No file, or one this cannot read as JSON. Nothing shadows Boxaide's own
-    // entry, which is the only thing being checked here.
-    return null;
-  }
-  const servers = (declared as { mcpServers?: Record<string, unknown> })?.mcpServers;
-  if (!servers || typeof servers !== "object") return null;
+  const { path, servers } = antigravityUserMcpServers(env);
+  if (!servers) return null;
   const found = Object.entries(servers).find(([name, entry]) =>
     reachesBoxaide(name, entry, ctx.mcpUrl),
   );
   if (!found) return null;
   return `Antigravity is configured with its own Boxaide server in ${path}, under the name "${found[0]}" — the agent would reach Boxaide through that entry, on the credential written there, instead of the limited one Boxaide issues for a launch. Remove the "${found[0]}" entry from that file and start again; Boxaide wires the connection itself now, so nothing else is needed.`;
+}
+
+function antigravityUserMcpServers(env: NodeJS.ProcessEnv): {
+  path: string;
+  servers: Record<string, unknown> | null;
+} {
+  const path = join(env.HOME || homedir(), ".gemini", "config", "mcp_config.json");
+  let declared: unknown;
+  try {
+    declared = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return { path, servers: null };
+  }
+  const servers = (declared as { mcpServers?: Record<string, unknown> })?.mcpServers;
+  return {
+    path,
+    servers: servers && typeof servers === "object" ? servers : null,
+  };
+}
+
+/**
+ * agy always merges the user's global MCP servers into a run and offers no
+ * strict-config flag. Those servers start before the task: a Supabase entry,
+ * for example, downloads Playwright browsers and can hold a Boxaide schedule
+ * at its five-minute startup timeout. A watched chat may want those servers;
+ * an unattended run is carried by an isolated fallback instead.
+ */
+function antigravityAutomationPreflight(
+  _ctx: LaunchContext,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const { path, servers } = antigravityUserMcpServers(env);
+  const names = Object.keys(servers ?? {});
+  if (names.length === 0) return null;
+  const shown = names.slice(0, 3).join(", ");
+  const extra = names.length > 3 ? ` and ${names.length - 3} more` : "";
+  return `Antigravity loads the global MCP server${names.length === 1 ? "" : "s"} ${shown}${extra} from ${path} into every session, and cannot isolate them from a scheduled run`;
 }
 
 /** `agy models` prints "id<TAB>Label" for everything the account can reach. */
@@ -1625,6 +1663,7 @@ export const KNOWN_AGENTS: AgentSpec[] = [
     prepare: antigravityPrepare,
     sandbox: antigravitySandbox,
     preflight: antigravityPreflight,
+    automationPreflight: antigravityAutomationPreflight,
   },
   {
     id: "opencode",
@@ -1676,6 +1715,15 @@ export type ListedAgent = {
   /** Models the user may pick from. Empty means no picker. */
   models: ModelOption[];
 };
+
+/** Preferred unattended fallbacks: isolated config first, then the rest. */
+const RUN_FALLBACK_PREFERENCE = [
+  "codex",
+  "claude-code",
+  "grok",
+  "opencode",
+  "antigravity",
+] as const;
 
 export type RunningAgent = {
   id: string;
@@ -2056,7 +2104,10 @@ export class AgentLauncher {
           label: spec.label,
           available: bin !== null,
           supported: launchable(spec),
-          runsAutomations: spec.runArgs !== undefined,
+          runsAutomations:
+            spec.runArgs !== undefined &&
+            !spec.preflight?.(this.ctx, this.env) &&
+            !spec.automationPreflight?.(this.ctx, this.env),
           models: cached ?? (await this.firstModels(spec, bin)),
         };
       }),
@@ -2494,8 +2545,13 @@ export class AgentLauncher {
     let egress: EgressProxy | null = null;
     /** What that way out allows, kept for the note the run log opens with. */
     let egressAllow: string[] = [];
+    let fallbackNote: string | null = null;
     try {
-      const spec = this.resolveRunSpec(opts.agentId);
+      const resolved = this.resolveRunSpec(opts.agentId);
+      const spec = resolved.spec;
+      if (resolved.fallbackFrom) {
+        fallbackNote = `[boxaide] fallback: ${resolved.fallbackFrom.label} could not run this schedule because ${resolved.fallbackFrom.reason}. ${spec.label} ran it instead.`;
+      }
       const bin = this.resolveBin(spec.bin);
       if (!bin) {
         throw new LaunchError(
@@ -2503,9 +2559,13 @@ export class AgentLauncher {
           `${spec.label} is not installed (no ${spec.bin} on PATH)`,
         );
       }
-      const blocked = spec.preflight?.(this.ctx, this.env);
+      const blocked =
+        spec.preflight?.(this.ctx, this.env) ??
+        spec.automationPreflight?.(this.ctx, this.env);
       if (blocked) throw new LaunchError(400, blocked);
-      const model = opts.model ?? undefined;
+      // A model id belongs to the selected CLI. Passing Antigravity's Gemini
+      // id to a Codex fallback would turn recovery into another startup error.
+      const model = resolved.fallbackFrom ? undefined : opts.model ?? undefined;
       if (model !== undefined) {
         // The model id becomes an argv element, so it must be one the CLI
         // itself named — the same rule `start` applies to a chat launch.
@@ -2581,6 +2641,7 @@ export class AgentLauncher {
     // The boundary says so before the CLI speaks, so a run broken by it is
     // one line from its reason even when the CLI never reached the proxy.
     if (egress) note(egressActiveNote(egressAllow));
+    if (fallbackNote) note(fallbackNote);
 
     // Which status a kill produces. A deadline or a manual kill is 'killed';
     // the watchdog is 'error', because a run that never spoke did not start.
@@ -2929,28 +2990,71 @@ export class AgentLauncher {
    * resolved in registry order against what is actually installed — an
    * automation saved on a machine that later loses that CLI still runs.
    */
-  private resolveRunSpec(agentId?: string | null): AgentSpec {
+  private resolveRunSpec(agentId?: string | null): {
+    spec: AgentSpec;
+    fallbackFrom?: { label: string; reason: string };
+  } {
     if (agentId) {
       const spec = this.registry.find((s) => s.id === agentId);
       if (!spec) throw new LaunchError(404, `unknown agent: ${agentId}`);
       if (!spec.runArgs) {
         throw new LaunchError(400, `${spec.label} cannot run automations yet`);
       }
-      return spec;
+      const reason = this.runBlockedReason(spec);
+      if (!reason) return { spec };
+      const fallback = this.fallbackRunSpec(new Set([spec.id]));
+      if (fallback) {
+        return {
+          spec: fallback,
+          fallbackFrom: { label: spec.label, reason },
+        };
+      }
+      throw new LaunchError(400, reason);
     }
     const found = this.registry.find(
-      (s) =>
-        s.runArgs !== undefined &&
-        this.resolveBin(s.bin) !== null &&
-        // "First available" must mean first that can actually run: an agent
-        // its preflight would refuse is not a candidate, or every scheduled
-        // run on that machine would fail on the same message.
-        !s.preflight?.(this.ctx, this.env),
+      (s) => s.runArgs !== undefined && !this.runBlockedReason(s),
     );
     if (!found) {
       throw new LaunchError(400, "no agent CLI is installed to run automations");
     }
-    return found;
+    return { spec: found };
+  }
+
+  /** Why this CLI cannot safely start a run right now, or null when it can. */
+  private runBlockedReason(spec: AgentSpec): string | null {
+    if (!spec.runArgs) return `${spec.label} cannot run automations yet`;
+    if (!this.resolveBin(spec.bin)) {
+      return `${spec.label} is not installed (no ${spec.bin} on PATH)`;
+    }
+    return (
+      spec.preflight?.(this.ctx, this.env) ??
+      spec.automationPreflight?.(this.ctx, this.env) ??
+      null
+    );
+  }
+
+  /**
+   * Another installed runner for a saved choice that became unusable.
+   * Production agents have a reliability order; injected/custom registries
+   * retain their own order after those known ids.
+   */
+  private fallbackRunSpec(exclude: ReadonlySet<string>): AgentSpec | null {
+    const rank = (id: string) => {
+      const index = RUN_FALLBACK_PREFERENCE.indexOf(
+        id as (typeof RUN_FALLBACK_PREFERENCE)[number],
+      );
+      return index === -1 ? RUN_FALLBACK_PREFERENCE.length : index;
+    };
+    return (
+      this.registry
+        .map((spec, order) => ({ spec, order }))
+        .filter(
+          ({ spec }) => !exclude.has(spec.id) && !this.runBlockedReason(spec),
+        )
+        .sort(
+          (a, b) => rank(a.spec.id) - rank(b.spec.id) || a.order - b.order,
+        )[0]?.spec ?? null
+    );
   }
 
   /**

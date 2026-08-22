@@ -926,6 +926,51 @@ exec /bin/sleep 60
     launcher.close();
   });
 
+  it("falls back before spawn when a saved runner cannot run unattended", async () => {
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\necho fallback-ran\nexit 0\n");
+    let primarySpawned = false;
+    const launcher = new AgentLauncher(
+      CTX,
+      [
+        {
+          id: "primary",
+          label: "Primary",
+          bin: "fake-agent",
+          runArgs: () => {
+            primarySpawned = true;
+            return [];
+          },
+          automationPreflight: () => "its global MCP server cannot be isolated",
+        },
+        {
+          id: "codex",
+          label: "Codex",
+          bin: "fake-agent",
+          runArgs: () => [],
+        },
+      ],
+      { PATH: "" },
+      [bin],
+    );
+
+    const listed = await launcher.list();
+    expect(listed.find((a) => a.id === "primary")?.runsAutomations).toBe(false);
+    expect(listed.find((a) => a.id === "codex")?.runsAutomations).toBe(true);
+
+    const result = await launcher.runOnce({
+      runId: "fallback-run",
+      agentId: "primary",
+      model: "primary-only-model",
+      prompt: "x",
+    });
+    expectStatus(result, "ok");
+    expect(primarySpawned).toBe(false);
+    expect(result.log).toContain("[boxaide] fallback: Primary");
+    expect(result.log).toContain("Codex ran it instead");
+    expect(result.log).toContain("fallback-ran");
+    launcher.close();
+  });
+
   it("blocks Antigravity when the user's own agy config declares a boxaide server", () => {
     // That entry wins over the one a launch writes, and it carries whatever
     // credential the user pasted into it — so the scope Boxaide minted would
@@ -938,6 +983,7 @@ exec /bin/sleep 60
 
     writeFileSync(path, JSON.stringify({ mcpServers: { supabase: {} } }));
     expect(spec.preflight!(CTX, { HOME: home })).toBeNull();
+    expect(spec.automationPreflight!(CTX, { HOME: home })).toContain("supabase");
 
     writeFileSync(
       path,
@@ -967,6 +1013,7 @@ exec /bin/sleep 60
     // No file at all is the normal case and must not block a launch.
     rmSync(path);
     expect(spec.preflight!(CTX, { HOME: home })).toBeNull();
+    expect(spec.automationPreflight!(CTX, { HOME: home })).toBeNull();
   });
 
   it("launches every registered CLI, including the ones with no allowlist flag", () => {
