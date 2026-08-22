@@ -453,6 +453,7 @@ Each `BOXAIDE_*` name is preferred. Then `SLEY_*`, then `MAILMUX_*`.
 | `BOXAIDE_FIXTURE` | off | Demo provider |
 | `BOXAIDE_AGENT_ACCESS` | `workspace` | `full` runs launched agents unconfined — they can read every file you can. Only set this if the sandbox is in your way. |
 | `BOXAIDE_ALLOWED_ORIGINS` | empty | Extra browser origins allowed to call the API — see below |
+| `BOXAIDE_ATTACHMENT_DIRS` | home directory | Comma-separated directories an attachment may be read from. Hidden files and directories are refused inside them either way |
 | `BOXAIDE_SEND_DAILY_CAP` | `50` | Approved outreach sends per account per UTC day |
 | `BOXAIDE_GOOGLE_CLIENT_ID` | empty | OAuth client for Google Calendar — see below |
 | `BOXAIDE_GOOGLE_CLIENT_SECRET` | empty | Secret for that client |

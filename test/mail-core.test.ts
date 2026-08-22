@@ -6,7 +6,14 @@ import { MailService } from "../src/mail/service.js";
 import { encryptSecret, decryptSecret } from "../src/crypto/secrets.js";
 import { handleMcpJsonRpc } from "../src/mcp/server.js";
 import { createRuntime } from "../src/app.js";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -208,6 +215,72 @@ describe("MailService connect/list/read/send (shipped path)", () => {
     expect(result.accepted).toContain("client@acme.test");
     expect(provider.getSent()).toHaveLength(1);
     expect(provider.getSent()[0].subject).toBe("Hello");
+  });
+
+  it("sends mail with file attachments and validates missing files", async () => {
+    await mail.connectAccount({
+      alias: "work",
+      email: "you@work.test",
+      creds: { ...baseCreds, auth: { kind: "password", user: "you@work.test", pass: "ok" } },
+    });
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "boxaide-mailcore-att-")));
+    const filePath = join(dir, "doc.pdf");
+    writeFileSync(filePath, "%PDF document content");
+    process.env.BOXAIDE_ATTACHMENT_DIRS = dir;
+    const symlinkRoot = join(tmpdir(), `boxaide-att-link-${process.pid}`);
+    rmSync(symlinkRoot, { force: true });
+    symlinkSync(dir, symlinkRoot);
+
+    try {
+      const result = await mail.sendMessage("work", {
+        to: "founder@startup.test",
+        subject: "Contract",
+        text: "Attached contract",
+        attachments: [{ path: filePath, filename: "contract.pdf" }],
+      });
+      expect(result.messageId).toBeTruthy();
+      expect(provider.getSent()[0].attachments).toHaveLength(1);
+      expect(provider.getSent()[0].attachments![0].filename).toBe("contract.pdf");
+      expect(provider.getSent()[0].attachments![0].path).toBe(filePath);
+
+      // Missing file rejects
+      await expect(
+        mail.sendMessage("work", {
+          to: "founder@startup.test",
+          subject: "Contract",
+          text: "Missing file",
+          attachments: [{ path: join(dir, "nonexistent.pdf") }],
+        }),
+      ).rejects.toThrow(/attachment file not found/);
+
+      // A root named through a symlink still matches: on macOS the tmp dir
+      // is reached as /tmp but lives at /private/tmp.
+      process.env.BOXAIDE_ATTACHMENT_DIRS = symlinkRoot;
+      const viaLink = await mail.sendMessage("work", {
+        to: "founder@startup.test",
+        subject: "Contract",
+        text: "Attached through a symlinked root",
+        attachments: [{ path: filePath }],
+      });
+      expect(viaLink.messageId).toBeTruthy();
+      process.env.BOXAIDE_ATTACHMENT_DIRS = dir;
+
+      // A hidden file inside an allowed directory is still refused.
+      const hidden = join(dir, ".env");
+      writeFileSync(hidden, "SECRET=1");
+      await expect(
+        mail.sendMessage("work", {
+          to: "founder@startup.test",
+          subject: "Contract",
+          text: "Hidden file",
+          attachments: [{ path: hidden }],
+        }),
+      ).rejects.toThrow(/hidden file or directory/);
+    } finally {
+      delete process.env.BOXAIDE_ATTACHMENT_DIRS;
+      rmSync(symlinkRoot, { force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("rejects bad credentials on connect", async () => {

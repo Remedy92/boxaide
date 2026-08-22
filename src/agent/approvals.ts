@@ -25,6 +25,8 @@
 import { randomUUID } from "node:crypto";
 import type { Store, StoredApproval } from "../db/store.js";
 import type { MailService } from "../mail/service.js";
+import { parseAttachments } from "../provider/types.js";
+import { basename } from "node:path";
 import type { Platform } from "../platform.js";
 import type { AgentChannel } from "./channel.js";
 import { dispatchCalendarTool, CALENDAR_SEND_TOOL_NAMES } from "../calendar/tools.js";
@@ -116,6 +118,9 @@ export class ApprovalQueue {
         `${input.tool} was not queued: ${MAX_PENDING} actions are already waiting for the user to approve them. Stop asking and tell the user what is waiting.`,
       );
     }
+    // Parse now, so an unusable attachment is refused at the tool call rather
+    // than at the moment the user clicks approve.
+    if (input.tool === "message_send") parseAttachments(input.args.attachments);
     const row = this.store.addApproval({
       id: randomUUID(),
       tool: input.tool,
@@ -217,6 +222,7 @@ export class ApprovalQueue {
         bcc: args.bcc ? String(args.bcc) : undefined,
         inReplyTo: args.inReplyTo ? String(args.inReplyTo) : undefined,
         references: args.references ? String(args.references) : undefined,
+        attachments: parseAttachments(args.attachments),
       });
       return;
     }
@@ -333,6 +339,26 @@ export class ApprovalError extends Error {
  * replayed on approval, and the whole point of the card is that the user is
  * looking at what will happen.
  */
+/**
+ * What each attachment will actually be, for the card. Never throws: a stored
+ * row the user still has to decide on must render even if its arguments are
+ * malformed, and the send itself re-validates them.
+ */
+function attachmentLabels(raw: unknown): string[] {
+  let attachments;
+  try {
+    attachments = parseAttachments(raw);
+  } catch {
+    return ["(unreadable attachment)"];
+  }
+  if (!attachments) return [];
+  return attachments.map((a) => {
+    if (!a.path) return a.filename || "inline attachment";
+    const named = a.filename && a.filename !== basename(a.path);
+    return named ? `${a.path} (sent as ${a.filename})` : a.path;
+  });
+}
+
 export function describe(row: StoredApproval): ApprovalView {
   const args = row.args;
   const text = (key: string): string | null => {
@@ -354,6 +380,12 @@ export function describe(row: StoredApproval): ApprovalView {
     push(fields, "Cc", text("cc"));
     push(fields, "Bcc", text("bcc"));
     push(fields, "Subject", subject);
+    // The path, not the caller's filename: a card that reads "invoice.pdf"
+    // for /Users/me/.ssh/id_rsa is an approval given for something else.
+    const attachments = attachmentLabels(args.attachments);
+    if (attachments.length > 0) {
+      push(fields, "Attachments", attachments.join(", "));
+    }
     body = text("text") ?? text("html");
   } else if (row.tool === "meeting_create") {
     const attendees = list(args.attendees);

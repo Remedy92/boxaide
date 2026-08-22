@@ -25,7 +25,7 @@ import { registerUpdateRoutes } from "../update/routes.js";
 import type { UpdateService } from "../update/service.js";
 import { appVersion } from "../version.js";
 import type { AccountCredentials, DraftInput } from "../provider/types.js";
-import { passwordCredentials } from "../provider/types.js";
+import { parseAttachments, passwordCredentials } from "../provider/types.js";
 import { MAX_LIST_LIMIT, parseListLimit } from "../input-limits.js";
 
 /** Highest `limit` any list endpoint will accept. */
@@ -127,6 +127,7 @@ function draftFieldsOf(body: DraftBody): DraftInput {
     bcc: body.bcc,
     inReplyTo: body.inReplyTo,
     references: body.references,
+    attachments: parseAttachments(body.attachments),
   };
 }
 
@@ -719,6 +720,7 @@ export function createApi(
       bcc?: string;
       inReplyTo?: string;
       references?: string;
+      attachments?: unknown;
       overrideSuppression?: unknown;
     }>();
     // The suppression override is a human decision, so only this REST route
@@ -737,6 +739,7 @@ export function createApi(
           bcc: body.bcc,
           inReplyTo: body.inReplyTo,
           references: body.references,
+          attachments: parseAttachments(body.attachments),
         },
         { overrideSuppression },
       );
