@@ -3,6 +3,7 @@
 import * as React from "react";
 import {
   Archive,
+  ChevronRight,
   FilePen,
   Folder,
   Send,
@@ -16,11 +17,12 @@ import {
   folderLabel,
   type FolderNode,
 } from "@/components/rail/folder-tree";
-import { SectionLabel } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useFolders, useFolderGroups } from "@/lib/hooks/use-folders";
 import { useMoveTo } from "@/lib/hooks/use-move";
+import { useRailSections } from "@/lib/hooks/use-rail-sections";
+import { cn } from "@/lib/utils";
 import {
   MESSAGE_DRAG_MIME,
   canDropOn,
@@ -54,6 +56,22 @@ function iconFor(folder: MailFolder): LucideIcon {
   return (key && SPECIAL_ICON[key]) || Folder;
 }
 
+/**
+ * The last segment of a path, for the label the folded row carries.
+ *
+ * Split on both separators, like use-move's leafOf and unlike buildFolderTree:
+ * with the section folded there is no folder list loaded to read the account's
+ * real delimiter from, and the worst this can do is print a slightly short
+ * label on a mailbox whose name contains a dot. It draws no tree edge.
+ */
+function leafOf(path: string): string {
+  const parts = path.split(/[/.]/).filter((part) => part.length > 0);
+  return parts[parts.length - 1] ?? path;
+}
+
+/** Its own id in the rail's saved open map, alongside "mail" and "crm". */
+const FOLDERS_SECTION = "mail-folders";
+
 /** Unique per row: two mailboxes both have an INBOX. */
 function rowKey(accountId: string, path: string): string {
   return `${accountId} ${path}`;
@@ -80,8 +98,16 @@ export function FolderList({
   disabled?: boolean;
 }) {
   const all = accountRef === "all";
-  const single = useFolders(accountRef);
-  const grouped = useFolderGroups(all);
+  const sections = useRailSections();
+  /* Folded by default. Folders are the deepest thing in the rail and the least
+     often reached for: most sessions never leave the inbox, and an unfolded
+     tree of forty mailboxes pushes everything under Mail off the bottom. */
+  const open = sections.isOpen(FOLDERS_SECTION, false);
+  /* Gated on `open`, so a folded section is not relisting every mailbox over
+     IMAP. Both queries are shared caches, so anything else that needs a folder
+     list, the palette or the reader's move menu, still fills them. */
+  const single = useFolders(open ? accountRef : "");
+  const grouped = useFolderGroups(all && open);
   const accounts = useAccounts();
   const moveTo = useMoveTo();
   const drag = useMessageDrag();
@@ -250,69 +276,116 @@ export function FolderList({
     );
   }
 
+  const region = `rail-section-${FOLDERS_SECTION}`;
+
   return (
     <div className="space-y-0.5">
-      <SectionLabel>Folders</SectionLabel>
+      {/* Not a SectionLabel: this is a row inside Mail, not a peer of it, so it
+          takes the same 28px shape as Inbox and Drafts and folds from the
+          chevron on its right rather than announcing itself in 11px caps. */}
+      <button
+        type="button"
+        onClick={() => sections.toggle(FOLDERS_SECTION, false)}
+        aria-expanded={open}
+        aria-controls={region}
+        className={cn(
+          "flex h-7 w-full items-center gap-2 rounded-[var(--radius-md)] px-2 text-left",
+          "text-fg-secondary transition-colors duration-[var(--dur-fast)] hover:duration-0",
+          "hover:bg-surface-hover hover:text-fg",
+        )}
+      >
+        <Folder
+          aria-hidden="true"
+          strokeWidth={1.5}
+          className="size-4 shrink-0 text-fg-tertiary"
+        />
+        <span className="min-w-0 flex-1 truncate text-[13px] leading-[18px]">
+          Folders
+        </span>
+        {/* Folded, the open folder is still named. Otherwise the list would be
+            filtered to a mailbox with nothing on screen saying which. */}
+        {!open && !disabled && activeFolder ? (
+          <span className="min-w-0 max-w-[96px] truncate text-[11px] leading-4 text-fg-tertiary">
+            {leafOf(activeFolder)}
+          </span>
+        ) : null}
+        <ChevronRight
+          aria-hidden="true"
+          strokeWidth={1.5}
+          className={cn(
+            "size-3 shrink-0 text-fg-tertiary transition-transform duration-[var(--dur-fast)] motion-reduce:transition-none",
+            open && "rotate-90",
+          )}
+        />
+      </button>
 
-      {live.isPending ? (
-        <p className="px-2 py-1 text-[12px] leading-4 text-fg-tertiary">
-          Loading folders…
-        </p>
-      ) : live.isError ? (
-        <div role="status" className="px-2 py-1">
-          <p className="text-[12px] leading-4 text-danger">
-            Could not list folders.
-          </p>
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            className="h-6 px-0"
-            onClick={() => void live.refetch()}
-          >
-            Retry
-          </Button>
-        </div>
-      ) : (
-        <>
-          {/* One mailbox that did not answer never takes the rail with it: it
-              says so on its own line and every other mailbox still draws. */}
-          {errors.map((error) => (
-            <p
-              key={error.account}
-              className="px-2 py-1 text-[12px] leading-4 text-danger"
-            >
-              Could not list folders for {error.account}.
+      {/* Unmounted, not hidden: a folded section must not keep rendering rows
+          that fetch, poll or measure. */}
+      {open ? (
+        <div id={region}>
+          {live.isPending ? (
+            <p className="px-2 py-1 text-[12px] leading-4 text-fg-tertiary">
+              Loading folders…
             </p>
-          ))}
-
-          {groups.map((group) => (
-            <div key={group.accountId || group.alias}>
-              {all && (
-                <div
-                  id={`folders-${group.accountId}`}
-                  title={group.email}
-                  className="truncate px-2 pt-1 pb-0.5 text-[11px] leading-4 font-medium text-fg-tertiary"
-                >
-                  {group.alias}
-                </div>
-              )}
-              {/* Nested lists, not role="tree": a tree role promises full
-                  arrow-key traversal that nothing here implements. Ancestry is
-                  in each row's accessible name, which carries the full path. */}
-              <ul
-                className="list-none"
-                aria-labelledby={all ? `folders-${group.accountId}` : undefined}
-                aria-label={all ? undefined : "Folders"}
+          ) : live.isError ? (
+            <div role="status" className="px-2 py-1">
+              <p className="text-[12px] leading-4 text-danger">
+                Could not list folders.
+              </p>
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                className="h-6 px-0"
+                onClick={() => void live.refetch()}
               >
-                {buildFolderTree(group.folders).map((node) =>
-                  renderNode(group, node),
-                )}
-              </ul>
+                Retry
+              </Button>
             </div>
-          ))}
-        </>
-      )}
+          ) : (
+            <>
+              {/* One mailbox that did not answer never takes the rail with it: it
+                says so on its own line and every other mailbox still draws. */}
+              {errors.map((error) => (
+                <p
+                  key={error.account}
+                  className="px-2 py-1 text-[12px] leading-4 text-danger"
+                >
+                  Could not list folders for {error.account}.
+                </p>
+              ))}
+
+              {groups.map((group) => (
+                <div key={group.accountId || group.alias}>
+                  {all && (
+                    <div
+                      id={`folders-${group.accountId}`}
+                      title={group.email}
+                      className="truncate px-2 pt-1 pb-0.5 text-[11px] leading-4 font-medium text-fg-tertiary"
+                    >
+                      {group.alias}
+                    </div>
+                  )}
+                  {/* Nested lists, not role="tree": a tree role promises full
+                    arrow-key traversal that nothing here implements. Ancestry is
+                    in each row's accessible name, which carries the full path. */}
+                  <ul
+                    className="list-none"
+                    aria-labelledby={
+                      all ? `folders-${group.accountId}` : undefined
+                    }
+                    aria-label={all ? undefined : "Folders"}
+                  >
+                    {buildFolderTree(group.folders).map((node) =>
+                      renderNode(group, node),
+                    )}
+                  </ul>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }
