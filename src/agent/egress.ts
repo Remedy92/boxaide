@@ -69,7 +69,14 @@ const ALLOW_BY_AGENT: Record<string, readonly string[]> = {
   codex: [".openai.com", ".chatgpt.com"],
   opencode: [".opencode.ai", ".anthropic.com", ".openai.com", ".x.ai"],
   grok: [".x.ai", ".grok.com"],
-  antigravity: [".googleapis.com", ".google.com", ".gstatic.com"],
+  antigravity: [
+    ".googleapis.com",
+    ".google.com",
+    ".gstatic.com",
+    ".googleusercontent.com",
+    ".goog",
+    ".gvt1.com",
+  ],
 };
 
 /** Every CLI reaches its own provider; nothing reaches a host nobody named. */
