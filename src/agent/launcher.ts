@@ -50,8 +50,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
+import { agentRoot, agentWorkDir } from "./paths.js";
 import {
   lineSplitter,
   readGrokEvent,
@@ -66,6 +67,14 @@ import {
   OUTREACH_CHAIN,
   OUTREACH_CHAIN_ONE_LINE,
 } from "./guidance.js";
+import {
+  allowedHostsFor,
+  egressDisabled,
+  EgressProxy,
+  egressEnv,
+} from "./egress.js";
+import { chatMemoryBlock, runMemoryBlock } from "./memory-context.js";
+import { memoryDir } from "../memory/store.js";
 import { OpenCodeDriver, serveBaseUrl } from "./opencode-driver.js";
 import {
   fetchModels,
@@ -78,6 +87,7 @@ import {
 import { scopeToolNames, type ScopeProfile } from "../mcp/scope.js";
 import {
   confineCommand,
+  type NetworkAccess,
   plainCommand,
   resolveAccess,
   type AgentAccess,
@@ -140,6 +150,20 @@ ${OUTREACH_CHAIN}`;
 export const AUTOMATION_RUN_PREAMBLE =
   "You are a scheduled Boxaide automation. Do the task below using the Boxaide MCP tools, then exit. You cannot talk to the user: do not call chat tools; write nothing to the user. Never send email; the chain below says where outreach goes. " +
   OUTREACH_CHAIN_ONE_LINE;
+
+/**
+ * KICKOFF plus whatever this install's workspace memory adds to it.
+ *
+ * Every chat launch — Grok, Antigravity, Codex — gets the same prompt, so the
+ * block is appended here once rather than at each spec's args builder.
+ * Appended rather than folded into the const: KICKOFF is exported and mirrored
+ * in the connect dialog, and neither copy should change shape because one
+ * install has notes and another does not.
+ */
+function kickoffPrompt(ctx: LaunchContext): string {
+  const memory = chatMemoryBlock(ctx.dataDir);
+  return memory ? `${KICKOFF}\n\n${memory}` : KICKOFF;
+}
 
 /**
  * The allowlists a CLI is given on its command line.
@@ -425,7 +449,7 @@ export function claudeTurnArgs(
       drivenPreapprovedToolNames().map((name) => `mcp__boxaide__${name}`),
       // The chat agent owns the shared workdir: it is the only launch that
       // uses it, and its session outlives any single turn.
-      agentWorkDir(ctx),
+      agentWorkDir(ctx.dataDir),
       { nativeWebTools: nativeWebAllowed(ctx), model },
     ),
     // What is left of KICKOFF once Boxaide runs the loop: the reply text is the
@@ -464,6 +488,9 @@ function claudeDrive(
   return new ClaudeDriver({
     channel: ctx.channel,
     agent: "claude-code",
+    // Read per turn, not once here: the agent writes its notes during a
+    // session, and a block frozen at launch would keep saying there are none.
+    memorySystem: () => chatMemoryBlock(ctx.dataDir),
     // The launch's command, not the bare binary: Claude Code has no long-lived
     // child, so these per-turn spawns are the whole agent. Spawning `opts.bin`
     // here would leave every turn outside the sandbox the launch asked for.
@@ -564,7 +591,7 @@ function claudeFlagsFor(
  * renamed (writeSecret / copySecret).
  */
 function claudeConfigHomeFor(ctx: LaunchContext): string {
-  return join(agentRoot(ctx), "agent-homes", "claude");
+  return join(agentRoot(ctx.dataDir), "agent-homes", "claude");
 }
 
 function claudeChildEnv(
@@ -780,7 +807,7 @@ function grokHomeFor(workDir: string): string {
 
 function grokArgs(ctx: LaunchContext, model?: string): string[] {
   return [
-    ...grokArgsFor(KICKOFF, chatPreapprovedToolNames(), {
+    ...grokArgsFor(kickoffPrompt(ctx), chatPreapprovedToolNames(), {
       // Boxaide's own web_search is what the chat agent should reach for, so
       // the CLI's index stays off while a search connector exists. With none
       // configured there is nothing to prefer, and Grok keeps its own.
@@ -1008,13 +1035,13 @@ function tempPathFor(path: string): string {
 function antigravityArgs(ctx: LaunchContext, model?: string): string[] {
   return [
     "-p",
-    KICKOFF,
+    kickoffPrompt(ctx),
     // Without this agy does not read the .agents/ directory it is standing in,
     // and Boxaide's server is simply absent from the session — verified
     // against agy: the same launch lists the server only when the directory is
     // named here.
     "--add-dir",
-    agentWorkDir(ctx),
+    agentWorkDir(ctx.dataDir),
     "--dangerously-skip-permissions",
     // The user's own slash commands and skills are not part of a session
     // Boxaide is responsible for.
@@ -1163,7 +1190,7 @@ const ANTIGRAVITY_LISTER: ModelLister = {
  * servers. Auth stays in the default data dir so the process still has keys.
  */
 function opencodeHomeFor(ctx: LaunchContext): string {
-  return join(agentRoot(ctx), "agent-homes", "opencode");
+  return join(agentRoot(ctx.dataDir), "agent-homes", "opencode");
 }
 
 /**
@@ -1209,6 +1236,8 @@ function opencodeDrive(
   return new OpenCodeDriver({
     channel: ctx.channel,
     agent: "opencode",
+    // Same block the Claude driver gets, read the same way: per prompt.
+    memorySystem: () => chatMemoryBlock(ctx.dataDir),
     baseUrl: serveBaseUrl(opts.child),
     directory: opts.workDir,
     password: opts.childEnv.OPENCODE_SERVER_PASSWORD ?? null,
@@ -1330,8 +1359,8 @@ function codexHomeFor(workDir: string): string {
   return join(workDir, "codex-home");
 }
 
-function codexArgs(_ctx: LaunchContext, model?: string): string[] {
-  return codexArgsFor(KICKOFF, model);
+function codexArgs(ctx: LaunchContext, model?: string): string[] {
+  return codexArgsFor(kickoffPrompt(ctx), model);
 }
 
 function codexRunArgs(
@@ -1475,36 +1504,14 @@ const CLAUDE_MODELS: ModelOption[] = [
 ];
 
 /**
- * Everything an agent is pointed at lives under here, and it is deliberately
- * NOT inside the data directory.
- *
- * The data directory holds `bearer.token` and `master.key`. An agent used to
- * stand in `<dataDir>/agent-workdir`, so `cat ../bearer.token` handed it the
- * master credential the scope exists to keep away from it, and
- * `cat ../master.key` decrypted the mail store. Three of the CLIs launched
- * here run shell commands with approval turned off, and a prompt-injected
- * email is enough to ask for that read.
- *
- * A sibling directory, so nothing the agent is handed — its cwd, its config
- * home, the env vars naming them — walks up into the secrets. On its own that
- * only removes the escalation that needs no guessing; an absolute path still
- * reaches the data directory. `src/agent/sandbox.ts` is what closes that, and
- * this layout is what makes its rule expressible: one subtree the agent owns,
- * one it must never see, and no overlap between them.
+ * The agent-owned subtree — `agentRoot`/`agentWorkDir`, and why it sits
+ * outside the data directory — is defined in ./paths.ts and shared with the
+ * modules that reason about the same layout.
  */
-function agentRoot(ctx: LaunchContext): string {
-  if (ctx.dataDir === ":memory:") return join(tmpdir(), "boxaide-agent");
-  return `${ctx.dataDir.replace(/[/\\]+$/, "")}-agents`;
-}
-
-/** The chat agent's working directory. One per install; it owns it alone. */
-function agentWorkDir(ctx: LaunchContext): string {
-  return join(agentRoot(ctx), "workdir");
-}
 
 /** Where every automation run's own directory is created. */
 function runWorkDirRoot(ctx: LaunchContext): string {
-  return join(agentWorkDir(ctx), "runs");
+  return join(agentWorkDir(ctx.dataDir), "runs");
 }
 
 /**
@@ -1820,6 +1827,37 @@ function windowDuration(ms: number): string {
 
 export const ONESHOT_KILLED_NOTE =
   "[boxaide] killed: the run was stopped before it finished.";
+
+/**
+ * What a confined run's refused connections read as in its log.
+ *
+ * Two audiences, one line. For a person whose automation broke, it names the
+ * host their CLI wanted so BOXAIDE_RUN_NETWORK_ALLOW can answer it. For a
+ * person reading a run that worked, it is the record that something in there
+ * tried to reach an address nobody listed.
+ */
+export function egressRefusedNote(
+  hosts: readonly string[],
+  total = hosts.length,
+): string {
+  const extra = total > hosts.length ? ` (and ${total - hosts.length} more)` : "";
+  return `[boxaide] network: refused ${hosts.join(", ")}${extra} — a scheduled run reaches its model provider and Boxaide, nothing else. Add a host with BOXAIDE_RUN_NETWORK_ALLOW if the CLI needs it.`;
+}
+
+/**
+ * Written into a confined run's log before the CLI says anything.
+ *
+ * Refusals are only recorded for connections that came through the proxy. A
+ * CLI that ignores the proxy variables goes straight at the network, is
+ * refused by the sandbox instead, and reports whatever a connection error
+ * looks like to it — with nothing of ours in the log to explain it. So the
+ * boundary announces itself at the top of every run it applies to: the person
+ * reading a broken automation is then one line away from the reason, whether
+ * or not this proxy ever saw the attempt.
+ */
+export function egressActiveNote(hosts: readonly string[]): string {
+  return `[boxaide] network: this run reaches ${hosts.length > 0 ? hosts.join(", ") : "no external host"} and Boxaide, nothing else. A connection error naming another host is this boundary. BOXAIDE_RUN_NETWORK_ALLOW adds one; BOXAIDE_RUN_NETWORK=open turns it off.`;
+}
 
 /**
  * The tail is what gets kept, not the head: a run that failed says why in its
@@ -2393,6 +2431,10 @@ export class AgentLauncher {
     let child: ChildProcess;
     let render: RenderRunLine | undefined;
     let workDir: string;
+    /** This run's way out, when it is confined. Closed by finish(). */
+    let egress: EgressProxy | null = null;
+    /** What that way out allows, kept for the note the run log opens with. */
+    let egressAllow: string[] = [];
     try {
       const spec = this.resolveRunSpec(opts.agentId);
       const bin = this.resolveBin(spec.bin);
@@ -2419,26 +2461,53 @@ export class AgentLauncher {
       this.assertClosed();
       render = spec.renderRunLine;
       workDir = this.prepareWorkDir(spec, ctx, runWorkDir(ctx, opts.runId));
-      const prompt = `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
+      // Workspace memory rides between the preamble and the task: the
+      // preamble states the boundaries, the notes give the background, and
+      // the task stays last. A run gets neither the ask-first offer (nobody
+      // is here to consent to a skim) nor the update duty (its directory is
+      // not the workdir the notes live in), so an install without notes adds
+      // nothing at all.
+      const memory = runMemoryBlock(ctx.dataDir);
+      const prompt = memory
+        ? `${AUTOMATION_RUN_PREAMBLE}\n\n${memory}\n\n${opts.prompt}`
+        : `${AUTOMATION_RUN_PREAMBLE}\n\n${opts.prompt}`;
 
       // A scheduled run is the case this matters most for: nobody is watching
-      // it, and the mail it reads was written by strangers.
+      // it, and the mail it reads was written by strangers. So it is the one
+      // launch that also loses the network: everything but loopback is denied
+      // and its way out is the allowlisting proxy below (src/agent/egress.ts).
+      // An unconfined install keeps what it had — with no sandbox there is
+      // nothing holding the run to the proxy, and a boundary that can be
+      // stepped around should not be claimed.
+      const access = resolveAccess(this.ctx.access ?? "workspace").access;
+      const confined = access !== "full" && !egressDisabled(this.env);
+      if (confined) {
+        egressAllow = allowedHostsFor(spec.id, this.env);
+        egress = new EgressProxy(egressAllow);
+        await egress.start();
+      }
       const command = this.confine(
         spec,
         bin,
         workDir,
-        resolveAccess(this.ctx.access ?? "workspace").access,
+        access,
+        confined ? "loopback" : "open",
+        "run",
       );
       child = spawn(command.bin, [...command.prefix, ...spec.runArgs!(ctx, prompt, workDir, model)], {
         cwd: workDir,
-        env: this.childEnvFor(spec, workDir, ctx),
+        env: {
+          ...this.childEnvFor(spec, workDir, ctx),
+          ...(egress ? egressEnv(egress.url()) : {}),
+        },
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (err) {
       // No child, so nothing else will ever release this reservation — or the
-      // credential it was about to use.
+      // credential it was about to use, or the door the proxy is holding open.
       this.starting.delete(opts.runId);
       grant?.revoke();
+      egress?.stop();
       throw err;
     }
 
@@ -2450,6 +2519,10 @@ export class AgentLauncher {
     const note = (line: string) => {
       capture(`${log && !log.endsWith("\n") ? "\n" : ""}${line}\n`);
     };
+    // The boundary says so before the CLI speaks, so a run broken by it is
+    // one line from its reason even when the CLI never reached the proxy.
+    if (egress) note(egressActiveNote(egressAllow));
+
     // Which status a kill produces. A deadline or a manual kill is 'killed';
     // the watchdog is 'error', because a run that never spoke did not start.
     let forced: "killed" | "error" | null = null;
@@ -2533,8 +2606,15 @@ export class AgentLauncher {
         // best evidence of what the run was doing when it died.
         split?.flush();
         // Before anything that can throw: this run's credential must not
-        // outlive it, and a SIGKILLed child may still be draining pipes.
+        // outlive it, and a SIGKILLed child may still be draining pipes. The
+        // proxy goes with it, and what it turned away goes in the log — a run
+        // that failed because its CLI needed a host nobody listed must say so,
+        // or the boundary is indistinguishable from a broken install.
         grant?.revoke();
+        const refused = egress?.refusals() ?? [];
+        const refusedTotal = egress?.refusedTotal() ?? 0;
+        egress?.stop();
+        if (refused.length > 0) note(egressRefusedNote(refused, refusedTotal));
         // The slot is freed before the directory is removed: a failure to clean
         // up disk must not cost this launcher a run slot for the rest of the
         // process's life.
@@ -2656,7 +2736,7 @@ export class AgentLauncher {
     ctx: LaunchContext,
     dir?: string,
   ): string {
-    const workDir = dir ?? agentWorkDir(ctx);
+    const workDir = dir ?? agentWorkDir(ctx.dataDir);
     mkdirSync(workDir, { recursive: true });
     // `ctx`, not `this.ctx`: prepare writes the credential into the CLI's
     // config file, and the credential is this launch's scoped token.
@@ -2677,7 +2757,7 @@ export class AgentLauncher {
    * credential is per-launch it is not.
    */
   private listWorkDir(spec: AgentSpec): string {
-    const dir = join(agentRoot(this.ctx), "model-list", spec.id);
+    const dir = join(agentRoot(this.ctx.dataDir), "model-list", spec.id);
     try {
       return this.prepareWorkDir(spec, this.listCtx(), dir);
     } catch {
@@ -2722,25 +2802,47 @@ export class AgentLauncher {
    * `DriveOptions.command`) every turn a driver starts. That is the same shape
    * as the tool scope: one place decides, and a spec cannot opt out of it.
    *
-   * Writable: the launch's own directory and the agent root, which holds the
-   * CLI config homes that are shared across launches. Denied last: the data
-   * directory, whatever else named it.
+   * Writable: the launch's own directory, plus the shared CLI config homes.
+   * Denied last: the data directory, whatever else named it.
+   *
+   * A chat launch additionally owns the whole agent root, because the notes in
+   * `workdir/memory/` are its to write and a person is reading what it says
+   * about them. A scheduled run is the opposite case on both counts, so it
+   * gets `kind: "run"`: the allow-back narrows to `agent-homes`, and the
+   * memory directory is named in the deny list outright.
+   *
+   * That deny is the difference between a claim and a boundary. The review
+   * gate (src/memory/reviews.ts) filters what `runMemoryBlock` puts in the
+   * PROMPT; it says nothing about a CLI that runs shell commands and can walk
+   * `../../memory/` from its own run directory. Without this, an unreviewed
+   * note was one `cat` away from the run it was written to be kept from, and
+   * a run could plant one for the next chat session to read.
    */
   private confine(
     spec: AgentSpec,
     bin: string,
     workDir: string,
     access: AgentAccess,
+    network: NetworkAccess = "open",
+    kind: "chat" | "run" = "chat",
   ): LaunchCommand {
     if (access === "full") return plainCommand(bin);
     const extra = spec.sandbox?.(this.ctx, workDir, this.env) ?? {};
+    const root = agentRoot(this.ctx.dataDir);
+    const shared = kind === "run" ? join(root, "agent-homes") : root;
     return confineCommand({
       bin,
       access,
-      write: [workDir, agentRoot(this.ctx), ...(extra.write ?? [])],
+      network,
+      write: [workDir, shared, ...(extra.write ?? [])],
       // The credential and the mail store. `:memory:` names no directory, so
-      // there is nothing on disk to keep the agent out of.
-      deny: this.ctx.dataDir === ":memory:" ? [] : [this.ctx.dataDir],
+      // there is nothing on disk to keep the agent out of. A run adds the
+      // notes: an agent-root deny would take its own config homes with it, so
+      // the one directory is named instead.
+      deny: [
+        ...(this.ctx.dataDir === ":memory:" ? [] : [this.ctx.dataDir]),
+        ...(kind === "run" ? [memoryDir(this.ctx.dataDir)] : []),
+      ],
       home: this.env.HOME || undefined,
     });
   }

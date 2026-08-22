@@ -125,7 +125,7 @@ BOXAIDE_ALLOWED_ORIGINS=https://boxaide.tech boxaide serve
 
 See the rules and the cost of doing this under [Browser origins](#browser-origins-boxaide_allowed_origins) below.
 
-**3. Copy the token.** `boxaide serve` prints it on first run; it is also in `bearer.token` inside your data directory (`~/.boxaide` by default, else `~/.sley`, else `~/.mailmux`, if one of those folders already exists).
+**3. Copy the token.** `boxaide serve` prints it on first run; it is also in `bearer.token` inside your data directory, `~/.boxaide`. An install made under the retired names is moved onto that one automatically the first time this version starts: `~/.sley` becomes `~/.boxaide`, `~/.sley-agents` becomes `~/.boxaide-agents`, and `sley.db` becomes `boxaide.db`. Nothing is overwritten — if `~/.boxaide` already exists, the older folder is left exactly where it is.
 
 **4. Point the page at your server.** Open the deployed page at **`/app`**, click **Set up Boxaide**, and enter the Server URL and the token. Both are stored in your browser's localStorage (`boxaide.*`) and are sent only to the server URL you entered. A first run still reads leftover `sley.*`, `mailmux.*` and `mailmux_token` keys once.
 
@@ -445,7 +445,7 @@ Each `BOXAIDE_*` name is preferred. Then `SLEY_*`, then `MAILMUX_*`.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `BOXAIDE_DATA_DIR` | `~/.boxaide` | SQLite + keys. Else the first existing of `~/.sley`, `~/.mailmux`. |
+| `BOXAIDE_DATA_DIR` | `~/.boxaide` | SQLite + keys. A legacy `~/.sley` or `~/.mailmux` install is renamed onto this name on first start. Setting this variable points at a directory as-is and migrates nothing. |
 | `BOXAIDE_HOST` | `127.0.0.1` | Bind address — see below |
 | `BOXAIDE_PORT` | `8787` | Port |
 | `BOXAIDE_TOKEN` | auto file | API/MCP bearer |

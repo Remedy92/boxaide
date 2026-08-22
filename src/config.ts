@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentAccess } from "./agent/sandbox.js";
+import { migrateLegacyDataDir } from "./legacy-names.js";
 
 /**
  * First non-empty environment value, in the order given.
@@ -210,19 +211,20 @@ function loadOrCreateToken(dataDir: string): string {
 }
 
 /**
- * BOXAIDE_DATA_DIR, else SLEY_DATA_DIR, else MAILMUX_DATA_DIR, else the first
- * existing of ~/.boxaide, ~/.sley, ~/.mailmux, else ~/.boxaide.
+ * BOXAIDE_DATA_DIR, else SLEY_DATA_DIR, else MAILMUX_DATA_DIR, else ~/.boxaide.
+ *
+ * Not a pure read: with no variable set, an install still sitting under a
+ * retired name is moved onto the current one first (src/legacy-names.ts), and
+ * the path answered here is the one it now has. The chain that used to answer
+ * `~/.sley` for ever is gone with it — a name is migrated once, not tolerated
+ * by every module that derives a path from this one. A move that cannot be
+ * made safely leaves the legacy directory where it is and returns it, so the
+ * install starts exactly as it did before.
  */
 export function resolveDefaultDataDir(): string {
   const fromEnv = envNamed("DATA_DIR");
   if (fromEnv) return expandHome(fromEnv);
-  const boxaide = join(homedir(), ".boxaide");
-  const sley = join(homedir(), ".sley");
-  const mailmux = join(homedir(), ".mailmux");
-  if (existsSync(boxaide)) return boxaide;
-  if (existsSync(sley)) return sley;
-  if (existsSync(mailmux)) return mailmux;
-  return boxaide;
+  return migrateLegacyDataDir(homedir());
 }
 
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {

@@ -156,6 +156,9 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
     launcher,
     store,
     calendarHelperPath: config.calendarHelperPath,
+    // The workspace-memory routes reach the agent-owned subtree beside the
+    // data directory, and need to know where that is.
+    dataDir: config.dataDir,
   });
   platformRef = platform;
 

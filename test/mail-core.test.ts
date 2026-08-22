@@ -788,7 +788,10 @@ describe("Store.open database name", () => {
     expect(existsSync(join(dir, "mailmux.db"))).toBe(false);
   });
 
-  it("keeps using sley.db when boxaide.db is absent", () => {
+  // The rows have to come across, not just the file: a migration that renamed
+  // an empty database onto the current name would read as a working install
+  // with an empty mailbox, which is the failure nobody notices in time.
+  it("renames sley.db onto boxaide.db and keeps its rows", () => {
     const dir = mkdtempSync(join(tmpdir(), "boxaide-db-"));
     const key = randomBytes(32);
     writeFileSync(join(dir, "sley.db"), "");
@@ -803,10 +806,11 @@ describe("Store.open database name", () => {
     const store = Store.open(dir, key);
     expect(store.listTurns().map((t) => t.text)).toEqual(["sley"]);
     store.close();
-    expect(existsSync(join(dir, "boxaide.db"))).toBe(false);
+    expect(existsSync(join(dir, "boxaide.db"))).toBe(true);
+    expect(existsSync(join(dir, "sley.db"))).toBe(false);
   });
 
-  it("keeps using mailmux.db when boxaide.db is absent", () => {
+  it("renames mailmux.db onto boxaide.db and keeps its rows", () => {
     const dir = mkdtempSync(join(tmpdir(), "boxaide-db-"));
     const key = randomBytes(32);
     writeFileSync(join(dir, "mailmux.db"), "");
@@ -821,7 +825,8 @@ describe("Store.open database name", () => {
     const store = Store.open(dir, key);
     expect(store.listTurns().map((t) => t.text)).toEqual(["legacy"]);
     store.close();
-    expect(existsSync(join(dir, "boxaide.db"))).toBe(false);
+    expect(existsSync(join(dir, "boxaide.db"))).toBe(true);
+    expect(existsSync(join(dir, "mailmux.db"))).toBe(false);
   });
 });
 

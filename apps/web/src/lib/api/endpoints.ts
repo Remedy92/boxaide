@@ -52,6 +52,9 @@ import type {
   MailAccountMeta,
   MeetingResult,
   MeetingsResponse,
+  MemoryFile,
+  MemoryFileDetail,
+  MemoryListResponse,
   MessageListResponse,
   MetaResponse,
   MoveResult,
@@ -1283,6 +1286,85 @@ export async function setConnectorKey(
     },
   );
   return data.connector;
+}
+
+/* -------------------------------------------------------------------------- */
+/* workspace memory — /api/memory                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The markdown notes the launched agent keeps in its own workspace
+ * (`<workDir>/memory/`). The agent owns the file set — it starts and retires
+ * topics as it learns — so this surface is read-and-correct only: no create,
+ * no rename, no delete. A server built before workspace memory answers 404,
+ * which the panel reads as "nothing here".
+ */
+export async function listMemoryFiles(ctx: Ctx): Promise<MemoryFile[]> {
+  const data = await request<MemoryListResponse>("/api/memory", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+  return data.files;
+}
+
+/**
+ * One file's text. A 404 means it was retired after the list was drawn; the
+ * list only ever hands out valid names, so a 400 here would mean a caller
+ * that did not come from it.
+ */
+export function getMemoryFile(
+  name: string,
+  ctx: Ctx,
+): Promise<MemoryFileDetail> {
+  return request<MemoryFileDetail>(
+    `/api/memory/${encodeURIComponent(name)}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+/**
+ * Replaces one file's whole text. There is no patch and no create: the name
+ * must already exist in the workspace. A valid save answers {ok:true}; an
+ * invalid name or content over MAX_MEMORY_FILE_BYTES is a 400 that names what
+ * it refused.
+ */
+export function saveMemoryFile(
+  name: string,
+  content: string,
+  ctx: Ctx,
+): Promise<{ ok: true; reviewed: true }> {
+  return request<{ ok: true; reviewed: true }>(
+    `/api/memory/${encodeURIComponent(name)}`,
+    {
+      method: "PUT",
+      body: { content },
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
+/**
+ * "This note reads right." The text is left exactly as the agent wrote it and
+ * becomes available to scheduled automations, which otherwise skip anything
+ * nobody has read. Recorded against the bytes on disk at this moment: if the
+ * agent rewrites the note later, it goes back to unreviewed on its own.
+ */
+export function reviewMemoryFile(
+  name: string,
+  ctx: Ctx,
+): Promise<{ ok: true; reviewed: true }> {
+  return request<{ ok: true; reviewed: true }>(
+    `/api/memory/${encodeURIComponent(name)}/review`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
 }
 
 /* -------------------------------------------------------------------------- */

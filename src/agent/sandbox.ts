@@ -29,9 +29,16 @@
  * The honest limits, because a sandbox believed in is worse than none:
  *  - macOS only today. Elsewhere a launch runs unconfined and is reported that
  *    way, so nothing ever claims a confinement it does not have.
- *  - The network is open at both levels. An agent still talks to its model
- *    provider and to Boxaide. Confining reads is what keeps the master
- *    credential out of its hands; it is not an exfiltration boundary.
+ *  - The network is open at both levels for a launch a person is watching. An
+ *    agent still talks to its model provider and to Boxaide. Confining reads
+ *    is what keeps the master credential out of its hands; for those launches
+ *    it is not an exfiltration boundary.
+ *  - A scheduled run asks for `network: "loopback"`, which denies every
+ *    outbound connection except to this machine. Seatbelt takes only `*` or
+ *    `localhost` as an address, so "the model provider and nothing else"
+ *    cannot be said here at all: the run reaches its provider through the
+ *    allowlisting proxy in `src/agent/egress.ts`, which is the only thing
+ *    listening on the loopback it is left.
  *  - The login keychain is reachable. See `keychainDir`: without it no CLI
  *    that signs in through the keychain can authenticate at all, and macOS
  *    gates the items inside on the asking program, not on this profile.
@@ -66,6 +73,13 @@ export function plainCommand(bin: string): LaunchCommand {
 }
 
 /** Where a confined launch may still reach. */
+/**
+ * How much network a launch keeps. "open" is what a watched launch gets, and
+ * what every launch got before scheduled runs were confined; "loopback" is
+ * this machine only, which is the shape the egress proxy needs.
+ */
+export type NetworkAccess = "open" | "loopback";
+
 export type Confinement = {
   /** Read and write. The agent's own directories. */
   write: string[];
@@ -76,6 +90,8 @@ export type Confinement = {
    * directory: `bearer.token`, `master.key`, and the mail database.
    */
   deny: string[];
+  /** Absent means open, so an existing caller keeps what it had. */
+  network?: NetworkAccess;
 };
 
 /** macOS ships `sandbox-exec`; nothing else here has a verified equivalent. */
@@ -238,6 +254,7 @@ export function macosProfile(home: string, confinement: Confinement): string {
   const lines = [
     "(version 1)",
     "(allow default)",
+    ...networkLines(confinement.network),
     // The home, minus what is allowed back below. Writes as well as reads: an
     // agent that cannot read the user's files should not be able to replace
     // them either.
@@ -253,6 +270,29 @@ export function macosProfile(home: string, confinement: Confinement): string {
     lines.push(`(deny file-read* file-write* ${subpath(path)})`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Outbound network, denied except to this machine.
+ *
+ * Unix sockets stay allowed: the system's own name resolution and a CLI's
+ * talking to a helper it spawned both use them, and neither leaves the
+ * machine.
+ *
+ * Listening is NOT allowed back, and the omission is deliberate rather than
+ * forgotten. `(allow network-bind (local ip "localhost:*"))` was written here
+ * first and does not work — under `(deny network*)` a loopback `listen` still
+ * fails with EPERM, so the line said something the profile did not do. No run
+ * spec binds today. If one ever needs to, this is where it has to be solved
+ * for real, and the fix is not that line.
+ */
+function networkLines(network: NetworkAccess | undefined): string[] {
+  if (network !== "loopback") return [];
+  return [
+    "(deny network*)",
+    "(allow network-outbound (remote unix-socket))",
+    '(allow network-outbound (remote ip "localhost:*"))',
+  ];
 }
 
 function unique(paths: readonly string[]): string[] {
@@ -285,6 +325,13 @@ export type ConfineOptions = {
   write: string[];
   /** The data directory. Denied last, whatever else allows it. */
   deny: string[];
+  /**
+   * Outbound network. A scheduled run passes "loopback": nobody is watching
+   * it, so its only way off this machine is the allowlisting proxy in
+   * src/agent/egress.ts. Absent means open, which is what a watched launch
+   * gets.
+   */
+  network?: NetworkAccess;
   home?: string;
   platform?: string;
   /** The runtime that will execute the CLI, when the CLI is a script. */
@@ -314,7 +361,12 @@ export function confineCommand(opts: ConfineOptions): LaunchCommand {
     ...readRootsForBinary(opts.execPath ?? process.execPath, home),
   ];
   const write = [...opts.write, tmpdir(), keychainDir(home)];
-  const profile = macosProfile(home, { read, write, deny: opts.deny });
+  const profile = macosProfile(home, {
+    read,
+    write,
+    deny: opts.deny,
+    network: opts.network,
+  });
   // `-p` rather than a profile file: a file would be one more thing to write
   // before a launch, clean up after it, and keep in step with the directory it
   // describes. The profile names paths, never secrets.
