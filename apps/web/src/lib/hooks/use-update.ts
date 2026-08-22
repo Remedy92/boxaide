@@ -96,9 +96,15 @@ export function useUpdate(): UpdateHandle {
     // progress bar dead the moment the user switches app — and leaves it
     // frozen at whatever percentage it had reached when they come back. The
     // request is loopback and a few hundred bytes; keep it running.
-    // ...but only while there is a progress bar to keep moving. Otherwise a
-    // hidden window polls forever for an answer nobody is looking at.
-    refetchIntervalInBackground: false,
+    //
+    // This stays `true`. It is a boolean, not a callback, so "background only
+    // while downloading" cannot be expressed here — setting it false to save
+    // idle polls silently reintroduced the frozen progress bar, because
+    // queryObserver only fires the interval when this flag is set OR the window
+    // is focused. The idle waste it was meant to fix is handled by
+    // QUIET_POLL_MS above instead, which is the right lever: a hidden idle
+    // window now polls every ten minutes rather than not at all.
+    refetchIntervalInBackground: true,
     // The answer is worth refreshing when somebody comes back to the window;
     // it is the moment they are most likely to act on it.
     refetchOnWindowFocus: true,

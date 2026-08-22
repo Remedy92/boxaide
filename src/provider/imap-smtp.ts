@@ -572,10 +572,11 @@ async function attachSnippets(
     if (uids) uids.push(head.uid);
     else groups.set(key, [head.uid]);
   }
-  // Concurrent, not sequential: imapflow pipelines commands over the one
-  // session, so a mixed inbox's 3-6 distinct part keys cost one batch of round
-  // trips instead of one after another. Each group still fails alone.
-  await Promise.all([...groups].map(async ([key, uids]) => {
+  // Sequential on purpose. This was briefly a Promise.all, on the belief that
+  // imapflow pipelines commands over one session. It does not: trySend keeps
+  // exactly one command in flight and the next waits for the tagged OK, so the
+  // round trips stayed sequential and only the concurrency was real.
+  for (const [key, uids] of groups) {
     try {
       for await (const msg of client.fetch(
         uids,
@@ -598,7 +599,7 @@ async function attachSnippets(
         `snippet fetch failed for part ${key} (${uids.length} messages): ${imapErrorText(err)}`,
       );
     }
-  }));
+  }
   return snippets;
 }
 
@@ -809,9 +810,10 @@ const mailboxPathCache = new Map<string, CachedMailboxPaths>();
  * after the first costs MOVE alone instead of paying a full folder LIST every
  * time.
  *
- * A missing Archive or Trash mailbox is deliberately not remembered: the fix
- * the error tells the user to make, create one, must be picked up on the very
- * next archive or delete, not when a TTL runs out. Exported for tests, which is
+ * A missing Archive, Trash, Drafts or Sent mailbox is deliberately not
+ * remembered: the fix the error tells the user to make, create one, must be
+ * picked up on the very next archive, delete, draft save or send, not when a
+ * TTL runs out. Exported for tests, which is
  * also why `now` is injectable.
  */
 export async function accountMailboxPaths(
@@ -821,6 +823,8 @@ export async function accountMailboxPaths(
     force?: boolean;
     needArchive?: boolean;
     needTrash?: boolean;
+    needDrafts?: boolean;
+    needSent?: boolean;
     now?: number;
   } = {},
 ): Promise<CachedMailboxPaths> {
@@ -831,7 +835,9 @@ export async function accountMailboxPaths(
     hit &&
     now - hit.at <= MAILBOX_PATH_TTL_MS &&
     !(opts.needArchive === true && hit.archive == null) &&
-    !(opts.needTrash === true && hit.trash == null)
+    !(opts.needTrash === true && hit.trash == null) &&
+    !(opts.needDrafts === true && hit.drafts == null) &&
+    !(opts.needSent === true && hit.sent == null)
   ) {
     return hit;
   }
@@ -1489,7 +1495,8 @@ export class ImapSmtpProvider implements MailProvider {
     raw: Buffer,
   ): Promise<{ folder: string; summary: MailMessageSummary | null }> {
     return withImap(account.id, account.creds, async (client) => {
-      const path = (await accountMailboxPaths(client, account.id)).sent;
+      const path = (await accountMailboxPaths(client, account.id, { needSent: true }))
+        .sent;
       if (!path) throw new Error("no Sent mailbox found");
       const appended = await client.append(path, raw, ["\\Seen"], new Date());
       if (!appended || appended.uid == null) {
@@ -1686,7 +1693,9 @@ export class ImapSmtpProvider implements MailProvider {
   ): Promise<MailDraft[]> {
     const limit = opts.limit ?? DRAFT_LIST_LIMIT;
     return withImap(account.id, account.creds, async (client) => {
-      const path = (await accountMailboxPaths(client, account.id)).drafts;
+      const path = (
+        await accountMailboxPaths(client, account.id, { needDrafts: true })
+      ).drafts;
       if (!path) return [];
       const lock = await client.getMailboxLock(path, { readOnly: true });
       try {
@@ -1755,7 +1764,9 @@ export class ImapSmtpProvider implements MailProvider {
     messageId: string,
   ): Promise<DraftRef> {
     return withImap(account.id, account.creds, async (client) => {
-      const path = (await accountMailboxPaths(client, account.id)).drafts;
+      const path = (
+        await accountMailboxPaths(client, account.id, { needDrafts: true })
+      ).drafts;
       if (!path) throw new Error("no Drafts mailbox found");
       // \Seen alongside \Draft: your own unfinished mail is not unread mail.
       const res = await client.append(
@@ -1788,7 +1799,9 @@ export class ImapSmtpProvider implements MailProvider {
       // parseId resolves a bare uid to INBOX, so without this a malformed
       // draft id would delete delivered mail — which is exactly what the
       // draft tools promise never to touch.
-      const path = (await accountMailboxPaths(client, account.id)).drafts;
+      const path = (
+        await accountMailboxPaths(client, account.id, { needDrafts: true })
+      ).drafts;
       if (!path) throw new Error("no Drafts mailbox found");
       if (target.folder !== path) {
         throw new Error(

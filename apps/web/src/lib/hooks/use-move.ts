@@ -229,17 +229,12 @@ function useFiling<I extends MoveTarget>(copy: {
     },
 
     onSuccess: (result, input) => {
-      // Marked stale, not refetched. onMutate already took the row out of every
-      // cached list, so a refetch here paints nothing new — it just costs a
-      // full 50-message list read per filed message, and holding `e` through
-      // ten of them raced ten refetches against the next optimistic patch.
-      // The lists refresh on their next natural trigger. The 404 branch in
-      // onError still refetches immediately, because there the client genuinely
-      // does not know where the message went.
-      void queryClient.invalidateQueries({
-        queryKey: ["messages"],
-        refetchType: "none",
-      });
+      // A real refetch, not just a staleness mark. The list is a capped window:
+      // onMutate can only remove the filed row, never pull row 51 up into the
+      // fifty now showing 49. Marking it stale and waiting for a natural
+      // trigger left a list that quietly shrank with every archive — worst in
+      // unread-only, where the next unread below the fold is the whole point.
+      void queryClient.invalidateQueries({ queryKey: ["messages"] });
       toast.success(copy.done(result), {
         action: result.id
           ? {
