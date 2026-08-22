@@ -273,18 +273,14 @@ export function macosProfile(home: string, confinement: Confinement): string {
 }
 
 /**
- * Outbound network, denied except to this machine.
+ * Outbound and local network, denied except to this machine.
  *
  * Unix sockets stay allowed: the system's own name resolution and a CLI's
  * talking to a helper it spawned both use them, and neither leaves the
  * machine.
  *
- * Listening is NOT allowed back, and the omission is deliberate rather than
- * forgotten. `(allow network-bind (local ip "localhost:*"))` was written here
- * first and does not work — under `(deny network*)` a loopback `listen` still
- * fails with EPERM, so the line said something the profile did not do. No run
- * spec binds today. If one ever needs to, this is where it has to be solved
- * for real, and the fix is not that line.
+ * Local loopback listening and binding are allowed so CLIs that use internal
+ * loopback IPC (such as Antigravity / `agy` binding on 127.0.0.1:0) can start.
  */
 function networkLines(network: NetworkAccess | undefined): string[] {
   if (network !== "loopback") return [];
@@ -292,6 +288,8 @@ function networkLines(network: NetworkAccess | undefined): string[] {
     "(deny network*)",
     "(allow network-outbound (remote unix-socket))",
     '(allow network-outbound (remote ip "localhost:*"))',
+    '(allow network-inbound (local ip "localhost:*"))',
+    '(allow network-bind (local ip "localhost:*"))',
   ];
 }
 
