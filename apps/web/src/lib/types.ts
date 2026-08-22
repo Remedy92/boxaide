@@ -64,10 +64,10 @@ export type MailFolder = {
   /**
    * ABSENT MEANS NOT KNOWN, never zero: the local index has never synced this
    * folder, so there is no honest count for it and the row carries no badge.
-   * A present `{ count: 0 }` is a real zero and also carries no badge, but its
-   * accessible name says "no unread" where the absent case says "not known
-   * yet". Absence rather than -1 or 0, because a sentinel is a number until
-   * someone forgets to check it.
+   * A present `{ count: 0, exact: true }` is a real zero and also carries no
+   * badge, but its accessible name says "no unread" where the absent case (and
+   * an inexact zero) says "not known yet". Absence rather than -1 or 0,
+   * because a sentinel is a number until someone forgets to check it.
    */
   unread?: FolderUnread;
 };
