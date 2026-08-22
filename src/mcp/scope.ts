@@ -25,6 +25,7 @@
  * No profile sends mail or books a meeting. Every profile may ASK to, and a
  * person answers — see src/agent/approvals.ts for why that replaced taking the
  * tools away.
+
  *
  * A caller with no profile — the master bearer, or the stdio server a user
  * wired into their own desktop client — is unrestricted, exactly as before.
@@ -144,7 +145,14 @@ export function scopeToolNames(profile: ScopeProfile): string[] {
   for (const name of CALENDAR_READ_TOOL_NAMES) names.add(name);
   for (const name of CALENDAR_SEND_TOOL_NAMES) names.add(name);
   // Reading the public web is a read in every profile, including a scheduled
-  // run: a run that cannot look anything up has to guess instead.
+  // run: a run that cannot look anything up has to guess instead, and looking
+  // somebody up is most of what a run is for. web_fetch was taken off `run`
+  // for a while and put back: the tool is fetched by THIS process, so a run
+  // can name any address and reach it whatever the sandbox says, and that is
+  // a real channel — but an outreach agent that can only read search snippets
+  // is not the product, and the exfiltration it prevents is a targeted attack
+  // on a self-hosted single-user install. The bounded version of the idea is
+  // in docs/specs/agent-platform.md; until it exists, a run researches.
   for (const name of RESEARCH_TOOL_NAMES) names.add(name);
   // Paid lookups reach a vendor and bill the operator. Every profile gets
   // them, a run included, because the cap that matters is the vendor's own

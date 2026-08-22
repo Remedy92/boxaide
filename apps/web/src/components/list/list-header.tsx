@@ -56,7 +56,7 @@ export function ListHeader({
   const folderReason = searching
     ? "Search always runs against Inbox."
     : app.account === ALL
-      ? "Pick one mailbox first — folders are per mailbox."
+      ? "Pick one mailbox first, this picker filters one mailbox at a time."
       : null;
 
   return (

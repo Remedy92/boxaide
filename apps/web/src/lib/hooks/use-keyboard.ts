@@ -42,6 +42,8 @@ export type KeyboardHandlers = {
   goDrafts: () => void;
   goAccount: (index: number) => void;
   goFolder: () => void;
+  /** `m`, the keyboard equivalent of dragging a row onto a folder. */
+  moveToFolder: () => void;
   toggleRail: () => void;
   scrollReader: (direction: 1 | -1) => void;
 };
@@ -189,6 +191,10 @@ export function useKeyboard(
         case "c":
           event.preventDefault();
           h.compose();
+          return;
+        case "m":
+          event.preventDefault();
+          h.moveToFolder();
           return;
         case "/":
           event.preventDefault();

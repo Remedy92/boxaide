@@ -44,7 +44,7 @@ import {
   type ClaudeTurnOutcome,
 } from "./agent-stream.js";
 import {
-  DRIVEN_SYSTEM,
+  drivenSystemWithMemory,
   runDrivenLoop,
   STOPPED_BY_USER,
   TITLE_PROMPT,
@@ -123,6 +123,16 @@ export type ClaudeDriverOptions = {
    * which is the launcher saying a retry would fail identically.
    */
   healAuth?: () => boolean;
+  /**
+   * The workspace-memory block for this install, appended to DRIVEN_SYSTEM on
+   * every turn. A function, not a string: a session outlives the notes it
+   * started with, and an agent that has just written its first ones must not
+   * spend the rest of the session being told it has none and offering again.
+   * The launcher supplies the read (sync, one small file), so this driver
+   * still touches no filesystem itself. Absent means none, which is what
+   * tests construct.
+   */
+  memorySystem?: () => string;
   /**
    * The loop's end: null when it was stopped, a message when it gave up. The
    * launcher has no child exit to watch for a driven agent, so this is the only
@@ -342,7 +352,7 @@ export class ClaudeDriver implements AgentDriver {
     );
     const outcome = await this.runTurn({
       prompt: text,
-      system: DRIVEN_SYSTEM,
+      system: drivenSystemWithMemory(this.opts.memorySystem?.()),
       sessionId: resuming,
     });
     // The id is taken from a failed turn too: a fresh session that failed

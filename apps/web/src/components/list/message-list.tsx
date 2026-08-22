@@ -22,6 +22,12 @@ import { usePrefetchMessage } from "@/lib/hooks/use-message";
 import { useMessages } from "@/lib/hooks/use-messages";
 import { useArchive, useTrash } from "@/lib/hooks/use-move";
 import { useSettings } from "@/lib/hooks/use-settings";
+import {
+  MESSAGE_DRAG_MIME,
+  beginMessageDrag,
+  endMessageDrag,
+  type MessageDrag,
+} from "@/lib/dnd/message-drag";
 import { DEFAULT_LIMIT } from "@/lib/constants";
 import { hostLabel } from "@/lib/settings";
 import type { MailMessageSummary } from "@/lib/types";
@@ -144,6 +150,32 @@ export function MessageList({
     [trashMutate],
   );
 
+  /* Dragging a row onto a folder in the rail files it there. The payload's
+     folder is `message.folder`, never `app.folder`: app.folder is undefined in
+     the Inbox and means nothing at all in the unified view, and the rail has to
+     know which mailbox and which folder the message is leaving. */
+  const onDragStart = React.useCallback(
+    (message: MailMessageSummary, event: React.DragEvent<HTMLLIElement>) => {
+      select({ accountId: message.accountId, messageId: message.id });
+      const payload: MessageDrag = {
+        v: 1,
+        accountId: message.accountId,
+        messageId: message.id,
+        folder: message.folder,
+        subject: message.subject,
+      };
+      beginMessageDrag(payload);
+      event.dataTransfer.setData(MESSAGE_DRAG_MIME, JSON.stringify(payload));
+      // The fallback anything else can read, and what a drop into a text field
+      // outside this app would paste.
+      event.dataTransfer.setData("text/plain", payload.subject);
+      event.dataTransfer.effectAllowed = "move";
+    },
+    [select],
+  );
+  // Also on a drag the user cancelled, or the rail keeps dimming rows forever.
+  const onDragEnd = React.useCallback(() => endMessageDrag(), []);
+
   /* "Start conversation about this email" opens a new chat and prefills the
      composer with something the agent can act on: the id its message_get tool
      takes, and the subject and sender so the user can see which mail they are
@@ -255,6 +287,8 @@ export function MessageList({
             onArchive={onArchive}
             onTrash={onTrash}
             onAskAgent={onAskAgent}
+            onDragStart={onDragStart}
+            onDragEnd={onDragEnd}
           />
         ))}
       </ul>

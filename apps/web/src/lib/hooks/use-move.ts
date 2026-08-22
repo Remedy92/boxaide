@@ -1,7 +1,11 @@
 "use client";
 
 import * as React from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   archiveMessage,
@@ -9,6 +13,7 @@ import {
   trashMessage,
 } from "@/lib/api/endpoints";
 import { ApiError, friendlyError } from "@/lib/api/errors";
+import { canMoveOutOf, isMoveDestination } from "@/lib/dnd/message-drag";
 import { useApp } from "@/lib/hooks/use-app-state";
 import { useMessageNavigation } from "@/lib/hooks/use-selection";
 import { useApiCtx } from "@/lib/hooks/use-settings";
@@ -73,20 +78,35 @@ const inflight = new Set<string>();
 /**
  * The folders a message may be moved to, out of everything the mailbox lists.
  *
- * Two are left out because the server refuses the move: the folder the message
- * is already in, and Drafts, which `moveMessage` declines by name so that a
- * message filed there does not become a draft nobody wrote. Offering either
- * would paint the row gone and then bring it back with an error the picker
- * could have predicted.
+ * Three rules, all of them the server's. The folder the message is already in
+ * is refused, Drafts is refused by name so that filed mail does not become a
+ * draft nobody wrote, and a message that is itself in Drafts cannot be moved
+ * anywhere at all: `moveMessage` guards that mailbox in both directions.
+ * Offering any of them would paint the row gone and then bring it back with an
+ * error the picker could have predicted.
+ *
+ * The rules live in the dnd module so this picker and the rail's drop targets
+ * cannot drift apart. They did once: the drag path refused to lift a draft
+ * while this list still offered it every folder on the mailbox, which made the
+ * keyboard route strictly worse than the mouse route it stands in for.
  */
 export function moveDestinations(
   folders: MailFolder[] | undefined,
   currentFolder: string | undefined,
 ): MailFolder[] {
-  return (folders ?? []).filter(
-    (folder) =>
-      folder.path !== currentFolder && folder.specialUse !== "\\Drafts",
-  );
+  const listed = folders ?? [];
+  if (!canMoveOutOf(currentFolder, listed)) return [];
+  return listed.filter((folder) => isMoveDestination(folder, currentFolder));
+}
+
+/**
+ * A move changes two folders' unread totals, and the rail reads those from a
+ * query held for five minutes. Without this its counts lag the list beside them
+ * by up to that long.
+ */
+function invalidateFolders(queryClient: QueryClient): void {
+  void queryClient.invalidateQueries({ queryKey: ["folders"] });
+  void queryClient.invalidateQueries({ queryKey: ["folder-groups"] });
 }
 
 /** Every one of these actions names one message in one mailbox. */
@@ -145,6 +165,7 @@ function useFiling<I extends MoveTarget>(copy: {
       moveMessage(input.accountId, input.messageId, input.folder, ctx),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["messages"] });
+      invalidateFolders(queryClient);
     },
     onError: (error) => {
       toast.error("Could not move that message back", {
@@ -204,6 +225,7 @@ function useFiling<I extends MoveTarget>(copy: {
       // removal stands and the list is refetched to find out where it went.
       if (error instanceof ApiError && error.status === 404) {
         void queryClient.invalidateQueries({ queryKey: ["messages"] });
+        invalidateFolders(queryClient);
         toast(copy.gone);
         return;
       }
@@ -235,6 +257,7 @@ function useFiling<I extends MoveTarget>(copy: {
       // trigger left a list that quietly shrank with every archive — worst in
       // unread-only, where the next unread below the fold is the whole point.
       void queryClient.invalidateQueries({ queryKey: ["messages"] });
+      invalidateFolders(queryClient);
       toast.success(copy.done(result), {
         action: result.id
           ? {

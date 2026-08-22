@@ -793,7 +793,13 @@ type CachedMailboxPaths = {
   drafts: string | null;
   sent: string | null;
   /** The raw LIST, so /api/folders reads this cache instead of its own LIST. */
-  boxes: Array<{ name: string; path: string; specialUse?: string }>;
+  boxes: Array<{
+    name: string;
+    path: string;
+    specialUse?: string;
+    /** Per-server path separator. The rail splits the folder tree on it. */
+    delimiter?: string;
+  }>;
   at: number;
 };
 
@@ -851,6 +857,7 @@ export async function accountMailboxPaths(
       name: b.name,
       path: b.path,
       specialUse: b.specialUse,
+      delimiter: b.delimiter,
     })),
     at: now,
   };
@@ -1646,10 +1653,16 @@ export class ImapSmtpProvider implements MailProvider {
       // Reads the same cached LIST that archive/trash/drafts resolution uses.
       // A Gmail LIST enumerates every label, and the rail asks for folders on
       // every mailbox switch.
+      //
+      // The separator is per server, "/" on some and "." on others. The rail
+      // splits paths into a tree with it, so pass it through rather than let
+      // the reader guess which character is the separator and which is part of
+      // a mailbox name. It is carried on the cached entry for that reason.
       return (await accountMailboxPaths(client, account.id)).boxes.map((b) => ({
         name: b.name,
         path: b.path,
         specialUse: b.specialUse,
+        delimiter: b.delimiter,
       }));
     });
   }

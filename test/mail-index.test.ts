@@ -4,7 +4,10 @@ import { Store } from "../src/db/store.js";
 import { FixtureProvider } from "../src/provider/fixture.js";
 import { MailService } from "../src/mail/service.js";
 import { MailIndexStore } from "../src/mail/index-store.js";
-import type { AccountCredentials } from "../src/provider/types.js";
+import type {
+  AccountCredentials,
+  MailMessageSummary,
+} from "../src/provider/types.js";
 
 const baseCreds: AccountCredentials = {
   imapHost: "fixture",
@@ -593,5 +596,101 @@ describe("mail index upgrade", () => {
     });
     expect(listed.map((m) => m.subject)).toEqual(["Survived the upgrade"]);
     expect(index.needsSinceFill(null, new Date().toISOString())).toBe(true);
+  });
+});
+
+describe("unread per folder from the index", () => {
+  let store: Store;
+  let index: MailIndexStore;
+
+  function summary(
+    folder: string,
+    uid: number,
+    seen: boolean,
+  ): MailMessageSummary {
+    return {
+      id: `acct:${folder}:${uid}`,
+      accountId: "acct",
+      uid,
+      folder,
+      from: "a@b.c",
+      to: "you@personal.test",
+      subject: `Message ${uid}`,
+      date: new Date().toISOString(),
+      internalDate: new Date().toISOString(),
+      snippet: "body",
+      seen,
+      hasAttachments: false,
+    };
+  }
+
+  /** One sync pass: writes the mailbox_state row that marks a folder synced. */
+  function sync(
+    folder: string,
+    messages: MailMessageSummary[],
+    exists = messages.length,
+  ): void {
+    index.applySync("acct", folder, {
+      replaced: true,
+      messages,
+      vanishedUids: [],
+      flagUpdates: [],
+      cursor: {
+        uidvalidity: 1,
+        highestModseq: "1",
+        uidnext: messages.length + 1,
+        exists,
+      },
+    });
+  }
+
+  beforeEach(() => {
+    store = new Store(randomBytes(32), ":memory:");
+    index = new MailIndexStore(store.db, store.masterKey);
+  });
+
+  it("counts unseen rows for a synced folder", () => {
+    sync("INBOX", [
+      summary("INBOX", 1, false),
+      summary("INBOX", 2, true),
+      summary("INBOX", 3, false),
+    ]);
+    expect(index.unreadByFolder("acct").get("INBOX")).toEqual({
+      count: 2,
+      exact: true,
+    });
+  });
+
+  it("leaves a never-synced folder OUT of the map rather than reporting zero", () => {
+    sync("INBOX", [summary("INBOX", 1, false)]);
+    const map = index.unreadByFolder("acct");
+    // Absence, not zero: a confident 0 over a folder nobody has looked at is
+    // exactly the lie the badge must never tell.
+    expect(map.has("Never/Synced")).toBe(false);
+    expect(map.get("Never/Synced")).toBeUndefined();
+  });
+
+  it("reports a real zero as present with count 0", () => {
+    sync("Archive", [
+      summary("Archive", 1, true),
+      summary("Archive", 2, true),
+    ]);
+    const map = index.unreadByFolder("acct");
+    expect(map.has("Archive")).toBe(true);
+    expect(map.get("Archive")).toEqual({ count: 0, exact: true });
+  });
+
+  it("marks the count inexact when the index holds only a window", () => {
+    // Two rows indexed, the server says the folder holds 500.
+    sync("Big", [summary("Big", 1, false), summary("Big", 2, false)], 500);
+    expect(index.unreadByFolder("acct").get("Big")).toEqual({
+      count: 2,
+      exact: false,
+    });
+  });
+
+  it("keeps one account's folders out of another's map", () => {
+    sync("INBOX", [summary("INBOX", 1, false)]);
+    expect(index.unreadByFolder("other").size).toBe(0);
   });
 });

@@ -363,6 +363,31 @@ Scheduler (`AutomationScheduler`):
   is watching a scheduled run and the mail it reads was written by strangers,
   so there is no per-run opt-out; `BOXAIDE_AGENT_ACCESS=full` turns it off for
   the install, and a machine with no sandbox runs unconfined and reports it.
+- Network access: a confined run reaches this machine and nothing else
+  (`network: "loopback"` in `src/agent/sandbox.ts`). Its way out of the sandbox
+  is the proxy in `src/agent/egress.ts`, which reads the host off the CONNECT
+  line and allows only that CLI's own provider — no TLS is terminated and no
+  body is read. The sandbox alone would not do it, because the launched CLIs
+  run shell commands and `curl` is not ours to withhold; Seatbelt accepts only
+  `*` or `localhost` as a network address, which is why the host decision lives
+  in a proxy rather than in the profile.
+- Known gap, accepted deliberately: an MCP tool runs in the SERVER process,
+  which is not sandboxed, so `web_fetch` reaches whatever address its argument
+  names whatever the profile above denies. A run keeps it anyway — an outreach
+  agent that can only read search snippets is not the product, and what it
+  costs is a targeted attack on a self-hosted single-user install. The bounded
+  version, if this is ever worth closing: let a run fetch only a URL returned
+  verbatim by one of its own `web_search` calls, so the agent chooses among
+  links rather than composing an address it could hide data in.
+- What is claimed and what is not: refusals seen by the proxy are written into
+  the run's log with the host wanted, capped so a loop cannot evict the log. A
+  CLI that ignores the proxy variables is refused by the sandbox instead, and
+  that arrives as its own connection error — so every confined run opens its
+  log with a line naming the boundary. `BOXAIDE_RUN_NETWORK_ALLOW` adds hosts a
+  CLI turns out to need; `BOXAIDE_RUN_NETWORK=open` turns the boundary off. An
+  unconfined install (`full`, or no sandbox) keeps an open network and claims
+  nothing. The per-CLI host lists are written from what each CLI is believed to
+  need; the mechanism is tested, the completeness of those lists is not.
 
 ### OutreachStore
 
@@ -580,6 +605,79 @@ engine verifies each approved recipient immediately before the send. A verdict
 of `invalid` fails the row with the address in the error and it leaves the
 queue; `risky`, `unknown` and a verifier that is down do not block anything.
 The day-long cache means a row held back by the daily cap is not billed twice.
+
+## Workspace memory
+
+The agent keeps its own notes as plaintext markdown in
+`<dataDir>-agents/workdir/memory/` (`src/memory/store.ts`; the layout rule that
+keeps them out of the data directory is `src/agent/paths.ts`) — `MEMORY.md` as
+the index plus the topic files it names. Agents read and write them with their
+native file tools; the REST routes under `/api/memory` exist for a human
+editing the same files.
+
+Every launch is told what exists there (`src/agent/memory-context.ts`). Driven
+turns and automation runs read it fresh each time: a session outlives the notes
+it opened with, and an agent handed a block frozen at launch keeps offering to
+build notes it has already written. A KICKOFF launch is sent one prompt by
+nature, so its block is the one true at launch.
+
+- **Chat and driven sessions, no `MEMORY.md` yet** — one ask-first block: the
+  agent may offer, once, to skim mailbox, CRM and calendar (~15 tool calls)
+  and only after the user agrees write the index plus `company.md`,
+  `voice.md`, `people.md`. Every fact names its source; no passwords or keys.
+- **Chat and driven sessions, notes exist** — the index, capped at ~2000
+  characters with the tail marked, plus the duty to keep the files current
+  itself.
+- **Automation runs** — never the ask (nobody is there to consent) and never
+  the update duty (a run's directory is not the workdir): the capped index
+  with `company.md` and `voice.md` inlined, each capped at ~1500 characters,
+  inserted between the run preamble and the task. No notes stored, nothing
+  injected.
+
+A read that fails degrades to the no-notes or empty case; a launch never
+fails over its notes.
+
+A note reaches an automation run only after a human has read it, and that
+holds on disk as well as in the prompt: a run's sandbox profile denies the
+memory directory and narrows its writable share of the agent root to the CLI
+config homes (`confine` in `src/agent/launcher.ts`), so a CLI running shell
+commands can neither read a note the gate withheld nor plant one for the next
+chat session. The prompt filter alone would have been a claim, not a boundary. Review is
+recorded as a hash of the reviewed bytes in `<dataDir>/memory-reviews.json`
+(`src/memory/reviews.ts`), deliberately outside the subtree the agent can
+write: a note the agent rewrites after it passed goes back to unreviewed on its
+own. `runMemoryBlock` injects reviewed notes only, and an unreviewed index
+takes the whole block with it. Chat and driven launches are not gated, because
+the person is in the conversation. Saving an edit in Settings reviews it; so
+does `POST /api/memory/:name/review`, which leaves the agent's own words alone.
+This is the layer that does not depend on the model obeying anything: text a
+stranger got written into a note at three in the morning waits for a human
+before it can reach an unattended run.
+
+Notes are quoted, never obeyed. Their material comes from read mail, so a
+sender who lands a line in a topic file has written into every later prompt.
+Injected content is wrapped in `--- BEGIN/END WORKSPACE NOTES ---` markers,
+preceded by the rule that quoted text describes and never directs; a line
+inside imitating a marker is defanged on the way in, so the quote cannot be
+closed from within; and the write side is told notes hold facts in the agent's
+own words, never instructions and never text pasted out of received mail. What
+survives that is bounded by the launch's scope: sending stays a human decision
+(`src/agent/approvals.ts`).
+
+Names are narrow — `[a-z0-9][a-z0-9-]*.md`, because the name in a route path is
+joined onto a filesystem path — plus `MEMORY.md` itself, which the listing puts
+first and a person opens first. Listing and reading answer that same question,
+so no row is offered that the reader would refuse.
+
+Names answer nothing about what a name POINTS at, and the agent writes these
+files while this server reads them, unsandboxed, with rights the agent does not
+have — a `company.md` symlinked at `bearer.token` would otherwise be read by us
+and pasted into the next prompt, and a save through one would truncate whatever
+it named. So every open is `O_NOFOLLOW` with a regular-file check on the handle
+itself, symlinks are skipped by the listing rather than described by their
+target, and the memory directory is proven to be a real directory still inside
+the agent root before any of it (`src/memory/store.ts`). This is the one place
+the sandbox cannot help: the read is ours, made on the agent's behalf.
 
 ## REST surface (all inside `createApi` after auth)
 

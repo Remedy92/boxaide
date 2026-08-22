@@ -71,6 +71,13 @@ export type Platform = {
   /** Which provider keys this server has, and where each one came from. */
   connectorsService: ConnectorsService;
   /**
+   * This install's data directory, when the runtime has one. Needed only by
+   * the routes that touch the agent-owned filesystem subtree next to it (the
+   * workspace memory); absent on the stdio and test graphs that build a
+   * platform from a bare database and have no install to point at.
+   */
+  dataDir?: string;
+  /**
    * True when a search back end has a key today. Read live, so the launcher
    * can ask per launch: with no connector the CLI keeps its own web tools.
    */
@@ -93,6 +100,12 @@ export function createPlatform(opts: {
   store?: Store;
   /** Path to the macOS calendar helper, when the shell knows one. */
   calendarHelperPath?: string;
+  /**
+   * This install's data directory, for the routes that reach the agent-owned
+   * subtree beside it. Optional for the same reason `store` is: the graphs
+   * built from a bare database have no install to point at.
+   */
+  dataDir?: string;
 }): Platform {
   const archiveLog = opts.store ? new ArchiveLog(opts.store, opts.mail) : null;
   const crmStore = new CrmStore(opts.db, opts.masterKey);
@@ -203,6 +216,7 @@ export function createPlatform(opts: {
     prospectingService,
     connectorStore,
     connectorsService,
+    dataDir: opts.dataDir,
     hasSearchConnector: () => connectorsService.hasSearchConnector(),
     start: () => {
       crmService.start();

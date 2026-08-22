@@ -46,12 +46,51 @@ export type MailMessage = MailMessageSummary & {
   references?: string; // space-separated Message-ID chain
 };
 
-/** GET /api/folders?account=<id> → { folders: MailFolder[] }. 400s on account=all. */
+/**
+ * GET /api/folders?account=<id|alias> → { folders: MailFolder[] }
+ * GET /api/folders?account=all        → { groups: FolderGroup[], errors: AccountError[] }
+ * An empty `account` still 400s.
+ */
 export type MailFolder = {
   name: string;
   path: string; // the value to pass as ?folder=
   specialUse?: string; // e.g. "\\Sent". Absent on servers without SPECIAL-USE.
-}; // NO message count. NO unread count.
+  /**
+   * The server's hierarchy separator, "/" or "." depending on the server.
+   * Absent when the provider does not report one, and buildFolderTree then
+   * infers it from the paths.
+   */
+  delimiter?: string;
+  /**
+   * ABSENT MEANS NOT KNOWN, never zero: the local index has never synced this
+   * folder, so there is no honest count for it and the row carries no badge.
+   * A present `{ count: 0, exact: true }` is a real zero and also carries no
+   * badge, but its accessible name says "no unread" where the absent case (and
+   * an inexact zero) says "not known yet". Absence rather than -1 or 0,
+   * because a sentinel is a number until someone forgets to check it.
+   */
+  unread?: FolderUnread;
+};
+
+export type FolderUnread = {
+  count: number;
+  /** False when the index holds only a window of the folder: `count` is then a floor. */
+  exact: boolean;
+};
+
+/** One mailbox's folders, in the account=all response. */
+export type FolderGroup = {
+  accountId: string;
+  alias: string;
+  email: string;
+  folders: MailFolder[];
+};
+
+export type FolderListResponse = { folders: MailFolder[] };
+export type FolderGroupsResponse = {
+  groups: FolderGroup[];
+  errors: AccountError[];
+};
 
 /** Present on EVERY list/search 200 response, `[]` when nothing failed. */
 export type AccountError = { account: string; error: string }; // `account` is the ALIAS
@@ -505,6 +544,37 @@ export type ConnectorCheck = {
 export type ConnectorsSnapshot = {
   connectors: Connector[];
   checks: Record<string, ConnectorCheck>;
+};
+
+/* -------------------------------------------------------------------------- */
+/* workspace memory — /api/memory                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One markdown file in the agent's own workspace, as GET /api/memory lists it.
+ * The agent owns the set — names match [a-z0-9][a-z0-9-]*\.md, MEMORY.md is
+ * the index — so this UI can read and correct the rows but never create,
+ * rename or delete them.
+ */
+export type MemoryFile = {
+  name: string;
+  bytes: number;
+  updatedAt: string;
+  /**
+   * Whether a person has seen the bytes this file holds NOW. Scheduled
+   * automations read only reviewed notes, so an unreviewed one is something
+   * the agent learned that no unattended run may act on yet. The agent
+   * rewriting a note takes its review with it.
+   */
+  reviewed: boolean;
+};
+
+export type MemoryListResponse = { files: MemoryFile[] };
+
+/** GET /api/memory/:name — the whole body, not wrapped in a key. */
+export type MemoryFileDetail = {
+  name: string;
+  content: string;
 };
 
 /**

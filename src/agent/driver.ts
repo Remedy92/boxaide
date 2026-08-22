@@ -153,6 +153,16 @@ Draft rather than send unless I ask you to send.
 ${OUTREACH_CHAIN}`;
 
 /**
+ * DRIVEN_SYSTEM plus the workspace-memory block, when the launcher computed
+ * one for this install. The join lives beside the const so neither driver can
+ * grow its own separator and drift apart; no block is the plain const, which
+ * is what the tests assert against.
+ */
+export function drivenSystemWithMemory(memory?: string): string {
+  return memory ? `${DRIVEN_SYSTEM}\n\n${memory}` : DRIVEN_SYSTEM;
+}
+
+/**
  * The one question asked purely to name a chat.
  *
  * Written for a model that has just answered a person and is inclined to keep
