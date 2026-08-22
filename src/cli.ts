@@ -182,7 +182,8 @@ Usage:
   boxaide help
 
 Env:
-  BOXAIDE_DATA_DIR     default ~/.boxaide (then ~/.sley, then ~/.mailmux)
+  BOXAIDE_DATA_DIR     default ~/.boxaide (a ~/.sley or ~/.mailmux install
+                    is renamed onto that name once, on first start)
   BOXAIDE_HOST         default 127.0.0.1
   BOXAIDE_PORT         default 8787
   BOXAIDE_TOKEN        API/MCP bearer token

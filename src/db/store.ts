@@ -1,6 +1,5 @@
 import Database from "better-sqlite3";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { migrateLegacyDatabase } from "../legacy-names.js";
 import { encryptSecret, decryptSecret } from "../crypto/secrets.js";
 import type { AccountCredentials, MailAuth } from "../provider/types.js";
 
@@ -260,18 +259,16 @@ export class Store {
     this.migrate();
   }
 
+  /**
+   * The install's database, opened at `boxaide.db`.
+   *
+   * A database still named `sley.db` or `mailmux.db` is renamed onto the
+   * current name first, WAL sidecars and all (src/legacy-names.ts), rather
+   * than opened where it lies for ever. A rename that cannot be made safely
+   * answers the legacy path, so the install opens the same file it always did.
+   */
   static open(dataDir: string, masterKey: Buffer): Store {
-    const boxaide = join(dataDir, "boxaide.db");
-    const sley = join(dataDir, "sley.db");
-    const mailmux = join(dataDir, "mailmux.db");
-    const dbPath = existsSync(boxaide)
-      ? boxaide
-      : existsSync(sley)
-        ? sley
-        : existsSync(mailmux)
-          ? mailmux
-          : boxaide;
-    return new Store(masterKey, dbPath);
+    return new Store(masterKey, migrateLegacyDatabase(dataDir));
   }
 
   private migrate(): void {

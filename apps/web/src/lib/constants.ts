@@ -11,6 +11,9 @@ export const DEFAULT_API_BASE =
 /** Mirrors MAX_LIMIT in src/api/routes.ts. The server 400s above this. */
 export const MAX_LIMIT = 200;
 
+/** Mirrors MAX_MEMORY_FILE_BYTES in src/memory/store.ts. The server 400s above this. */
+export const MAX_MEMORY_FILE_BYTES = 64 * 1024;
+
 /** The server's own default when `limit` is omitted. */
 export const DEFAULT_LIMIT = 50;
 

@@ -546,6 +546,37 @@ export type ConnectorsSnapshot = {
   checks: Record<string, ConnectorCheck>;
 };
 
+/* -------------------------------------------------------------------------- */
+/* workspace memory — /api/memory                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One markdown file in the agent's own workspace, as GET /api/memory lists it.
+ * The agent owns the set — names match [a-z0-9][a-z0-9-]*\.md, MEMORY.md is
+ * the index — so this UI can read and correct the rows but never create,
+ * rename or delete them.
+ */
+export type MemoryFile = {
+  name: string;
+  bytes: number;
+  updatedAt: string;
+  /**
+   * Whether a person has seen the bytes this file holds NOW. Scheduled
+   * automations read only reviewed notes, so an unreviewed one is something
+   * the agent learned that no unattended run may act on yet. The agent
+   * rewriting a note takes its review with it.
+   */
+  reviewed: boolean;
+};
+
+export type MemoryListResponse = { files: MemoryFile[] };
+
+/** GET /api/memory/:name — the whole body, not wrapped in a key. */
+export type MemoryFileDetail = {
+  name: string;
+  content: string;
+};
+
 /**
  * GET /api/update — the whole updater state, in one object.
  *
