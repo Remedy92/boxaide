@@ -51,6 +51,28 @@ describe("crypto secrets", () => {
     expect(enc).not.toContain("app-password-secret");
     expect(decryptSecret(key, enc)).toBe("app-password-secret");
   });
+
+  it("round-trips the empty string", () => {
+    const key = randomBytes(32);
+    const enc = encryptSecret(key, "");
+    // GCM emits no ciphertext for "", so the payload is nonce + tag only.
+    expect(Buffer.from(enc, "base64")).toHaveLength(12 + 16);
+    expect(decryptSecret(key, enc)).toBe("");
+  });
+
+  it("rejects a payload too short to hold a nonce and tag", () => {
+    const key = randomBytes(32);
+    const short = randomBytes(12 + 15).toString("base64");
+    expect(() => decryptSecret(key, short)).toThrow("invalid secret payload");
+  });
+
+  it("still rejects a full-length payload that fails authentication", () => {
+    const key = randomBytes(32);
+    const forged = randomBytes(12 + 16).toString("base64");
+    // Long enough to pass the length guard, so GCM has to be what stops it.
+    expect(() => decryptSecret(key, forged)).toThrow();
+    expect(() => decryptSecret(key, forged)).not.toThrow("invalid secret payload");
+  });
 });
 
 describe("Store xoauth2 credential round-trip", () => {
