@@ -315,20 +315,9 @@ export default function InstallPage() {
             <AppMark size={92} />
           </span>
 
-          <span
-            data-reveal="1"
-            className="mt-8 inline-flex items-center gap-2 rounded-[var(--radius-full)] border border-border-subtle bg-surface-2/60 px-3 py-1 text-[12px] leading-[18px] text-fg-secondary backdrop-blur-[2px]"
-          >
-            <span
-              aria-hidden="true"
-              className="size-[5px] rounded-full bg-accent"
-            />
-            Works with Claude, Cursor and any MCP agent
-          </span>
-
           <h1
-            data-reveal="2"
-            className="mailmux-display mt-5 text-[clamp(32px,6.2vw,58px)] font-semibold leading-[1.04] tracking-[-0.032em] text-fg"
+            data-reveal="1"
+            className="mailmux-display mt-8 text-[clamp(32px,6.2vw,58px)] font-semibold leading-[1.04] tracking-[-0.032em] text-fg"
           >
             Every mailbox.
             <br />
@@ -336,7 +325,7 @@ export default function InstallPage() {
           </h1>
 
           <p
-            data-reveal="3"
+            data-reveal="2"
             className="mt-5 max-w-[46ch] text-[15px] leading-[24px] text-fg-secondary"
           >
             Connect as many mailboxes as you want, then point every agent on
@@ -346,7 +335,7 @@ export default function InstallPage() {
           <a
             href={primaryHref}
             onClick={() => setStarted(true)}
-            data-reveal="4"
+            data-reveal="3"
             className={cn(
               "mailmux-cta mt-9 inline-flex h-11 items-center gap-2",
               "rounded-[var(--radius-lg)] bg-accent-fill px-7",
@@ -362,7 +351,7 @@ export default function InstallPage() {
               it just gave you. A fixed height so the swap moves nothing. */}
           <div
             aria-live="polite"
-            data-reveal="5"
+            data-reveal="4"
             className="mt-4 flex min-h-11 items-center justify-center"
           >
             <p className="max-w-[46ch] text-[12px] leading-[16px] text-fg-tertiary">
@@ -378,7 +367,7 @@ export default function InstallPage() {
 
           {/* Everyone else: the other two platforms, and the terminal. */}
           <p
-            data-reveal="6"
+            data-reveal="5"
             className="mt-2 flex flex-wrap items-center justify-center gap-x-2.5 gap-y-1 text-[12px] text-fg-tertiary"
           >
             {others.map((id) => (
