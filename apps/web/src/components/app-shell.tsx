@@ -342,6 +342,20 @@ function Shell() {
         if (app.account === "all" || !inMail) return;
         app.openPalette("folders");
       },
+      /* Straight to the move page, on the selected row. It works under "all"
+         where `g f` cannot, because the page asks the selected message's own
+         mailbox for its folders rather than the account filter.
+
+         With nothing selected there is no message to move, and the move page
+         would open on an empty list under a heading promising folders. It opens
+         the root instead, where "Move to folder" sits disabled with the reason,
+         "Select a message first". `e` and `#` can afford to swallow the key in
+         that state because a toolbar button says the same thing; `m` is the
+         only route to a move that the keyboard has. */
+      moveToFolder: () => {
+        if (!inMail) return;
+        app.openPalette(nav.current ? "move" : "root");
+      },
       toggleRail: app.toggleRail,
       scrollReader: (direction) => {
         const pane = document.getElementById("mailmux-reader");

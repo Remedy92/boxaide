@@ -162,8 +162,12 @@ export type DraftSelection = { accountId: string; draftId: string };
 
 export type ReplyRequest = { mode: Exclude<ComposeMode, "new">; nonce: number };
 
-/** Which page the command palette opens on. `g f` asks for "folders". */
-export type PalettePage = "root" | "folders";
+/**
+ * Which page the command palette opens on. `g f` asks for "folders", and `m`
+ * asks for "move", which is the keyboard equivalent of dragging a row onto a
+ * folder in the rail.
+ */
+export type PalettePage = "root" | "folders" | "move";
 
 type AppStateValue = {
   /* filters */

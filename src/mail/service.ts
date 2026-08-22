@@ -11,6 +11,7 @@ import type {
   ListMessagesOpts,
   MailDraft,
   MailFolder,
+  MailFolderWithUnread,
   MailMessage,
   MailMessageSummary,
   MailProvider,
@@ -36,6 +37,24 @@ export type ConnectAccountInput = {
  */
 export type MessageListResult = {
   messages: MailMessageSummary[];
+  errors: Array<{ account: string; error: string }>;
+};
+
+/** One mailbox's folders, for a rail that draws every account at once. */
+export type FolderGroup = {
+  accountId: string;
+  alias: string;
+  email: string;
+  folders: MailFolderWithUnread[];
+};
+
+/**
+ * Result of listFolderTree. `errors` is keyed by alias, exactly as the message
+ * fan-out is, and is always present so the caller can surface a mailbox that
+ * did not answer without the rest of the rail failing with it.
+ */
+export type FolderListResult = {
+  groups: FolderGroup[];
   errors: Array<{ account: string; error: string }>;
 };
 
@@ -420,8 +439,69 @@ export class MailService {
     };
   }
 
+  /**
+   * Stays a bare MailFolder[] on purpose. The CRM walk (src/crm/service.ts) and
+   * the MCP folders_list tool (src/mcp/server.ts) both read this, and neither
+   * wants the index's unread number or the per-account grouping: they want the
+   * names the server reported. listFolderTree below is the additive path for
+   * callers that do.
+   */
   async listFolders(accountRef: string): Promise<MailFolder[]> {
     return this.provider.listFolders(this.resolve(accountRef));
+  }
+
+  /**
+   * Folders grouped by account, each folder carrying what the local index knows
+   * about its unread mail.
+   *
+   * Additive rather than in place: listFolders above keeps its shape and its
+   * callers. With accountRef "all" this NEVER throws, an unreachable mailbox
+   * lands in `errors` keyed by alias exactly as listMessages does, and the rest
+   * of the rail still draws. With a single named mailbox the failure is
+   * rethrown, so the route still answers 400 for one bad account.
+   *
+   * The unread number is a SQLite read over the local index, so this adds no
+   * IMAP round trip beyond the one LIST per account listFolders already issues.
+   * The index read runs after the provider call so a provider failure
+   * short-circuits before touching SQLite.
+   */
+  async listFolderTree(accountRef: string | "all"): Promise<FolderListResult> {
+    const rows =
+      accountRef === "all"
+        ? this.store.listAccounts()
+        : [this.store.getAccount(accountRef)].filter(
+            (a): a is NonNullable<typeof a> => a != null,
+          );
+    if (accountRef !== "all" && rows.length === 0) {
+      throw new Error(`account not found: ${accountRef}`);
+    }
+
+    const settled = await Promise.allSettled(
+      rows.map(async (row) => {
+        const account = this.resolve(row.id);
+        const folders = await this.provider.listFolders(account);
+        const unread = this.index.unreadByFolder(row.id);
+        return {
+          accountId: row.id,
+          alias: row.alias,
+          email: row.email,
+          folders: folders.map((f) => ({ ...f, unread: unread.get(f.path) })),
+        } satisfies FolderGroup;
+      }),
+    );
+
+    const groups: FolderGroup[] = [];
+    const errors: Array<{ account: string; error: string }> = [];
+    for (const [i, res] of settled.entries()) {
+      if (res.status === "fulfilled") {
+        groups.push(res.value);
+      } else if (accountRef === "all") {
+        errors.push({ account: rows[i].alias, error: errText(res.reason) });
+      } else {
+        throw res.reason;
+      }
+    }
+    return { groups, errors };
   }
 
   /**

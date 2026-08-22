@@ -499,11 +499,18 @@ export function createApi(
 
   app.get("/api/folders", async (c) => {
     const account = c.req.query("account") ?? "";
-    if (!account || account === "all") {
+    // Empty still 400s, "all" no longer does: the rail draws every mailbox at
+    // once and needs to know which folder belongs to which account.
+    if (!account) {
       return c.json({ error: "account is required" }, 400);
     }
     try {
-      return c.json({ folders: await mail.listFolders(account) });
+      const result = await mail.listFolderTree(account);
+      if (account === "all") return c.json(result);
+      // One named mailbox keeps answering with the flat { folders } array. The
+      // command palette, the reader's move menu and use-move all read that
+      // shape, and only "all" needs the grouping.
+      return c.json({ folders: result.groups[0]?.folders ?? [] });
     } catch (err) {
       return c.json(
         { error: err instanceof Error ? err.message : String(err) },

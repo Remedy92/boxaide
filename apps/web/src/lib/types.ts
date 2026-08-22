@@ -46,12 +46,51 @@ export type MailMessage = MailMessageSummary & {
   references?: string; // space-separated Message-ID chain
 };
 
-/** GET /api/folders?account=<id> → { folders: MailFolder[] }. 400s on account=all. */
+/**
+ * GET /api/folders?account=<id|alias> → { folders: MailFolder[] }
+ * GET /api/folders?account=all        → { groups: FolderGroup[], errors: AccountError[] }
+ * An empty `account` still 400s.
+ */
 export type MailFolder = {
   name: string;
   path: string; // the value to pass as ?folder=
   specialUse?: string; // e.g. "\\Sent". Absent on servers without SPECIAL-USE.
-}; // NO message count. NO unread count.
+  /**
+   * The server's hierarchy separator, "/" or "." depending on the server.
+   * Absent when the provider does not report one, and buildFolderTree then
+   * infers it from the paths.
+   */
+  delimiter?: string;
+  /**
+   * ABSENT MEANS NOT KNOWN, never zero: the local index has never synced this
+   * folder, so there is no honest count for it and the row carries no badge.
+   * A present `{ count: 0, exact: true }` is a real zero and also carries no
+   * badge, but its accessible name says "no unread" where the absent case (and
+   * an inexact zero) says "not known yet". Absence rather than -1 or 0,
+   * because a sentinel is a number until someone forgets to check it.
+   */
+  unread?: FolderUnread;
+};
+
+export type FolderUnread = {
+  count: number;
+  /** False when the index holds only a window of the folder: `count` is then a floor. */
+  exact: boolean;
+};
+
+/** One mailbox's folders, in the account=all response. */
+export type FolderGroup = {
+  accountId: string;
+  alias: string;
+  email: string;
+  folders: MailFolder[];
+};
+
+export type FolderListResponse = { folders: MailFolder[] };
+export type FolderGroupsResponse = {
+  groups: FolderGroup[];
+  errors: AccountError[];
+};
 
 /** Present on EVERY list/search 200 response, `[]` when nothing failed. */
 export type AccountError = { account: string; error: string }; // `account` is the ALIAS

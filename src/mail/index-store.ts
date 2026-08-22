@@ -4,7 +4,7 @@
  */
 import type Database from "better-sqlite3";
 import { decryptSecret, encryptSecret } from "../crypto/secrets.js";
-import type { MailMessageSummary } from "../provider/types.js";
+import type { FolderUnread, MailMessageSummary } from "../provider/types.js";
 import type { MailboxCursor, MailboxSyncResult } from "../provider/types.js";
 
 /** Paint from SQLite; IMAP only if older than this or marked dirty. */
@@ -185,6 +185,56 @@ export class MailIndexStore {
       )
       .get(accountId, folder) as { n: number };
     return row.n;
+  }
+
+  /**
+   * Unread per folder for one account, for the rail's badges.
+   *
+   * Driven off mailbox_state, NOT off a GROUP BY over message_summaries. A
+   * GROUP BY returns no row for a synced folder that happens to hold nothing
+   * unread, which is indistinguishable from a folder the index has never
+   * synced at all, and confusing those two is the one thing the badge must
+   * never do: a confident "0" over a folder holding 400 unread destroys trust
+   * in every other count on screen. A mailbox_state row exists only once
+   * applySync has written one, so its presence is exactly "has been synced",
+   * and the returned Map holds a key ONLY for folders that qualify. A folder
+   * absent from the Map is unknown, not empty.
+   *
+   * `exact: false` means the index holds only a window of the folder, fewer
+   * rows than the server's EXISTS. `count` is then a floor, at least this many
+   * and possibly more, and the caller has to render it as "at least" rather
+   * than as the total.
+   *
+   * No schema change and no new index: message_summaries_account_folder_date
+   * already gives each subquery a prefix scan over (account_id, folder).
+   */
+  unreadByFolder(accountId: string): Map<string, FolderUnread> {
+    const rows = this.db
+      .prepare(
+        `SELECT s.folder AS folder,
+                s.exists_count AS existsCount,
+                (SELECT COUNT(*) FROM message_summaries m
+                  WHERE m.account_id = s.account_id AND m.folder = s.folder) AS indexed,
+                (SELECT COUNT(*) FROM message_summaries m
+                  WHERE m.account_id = s.account_id AND m.folder = s.folder
+                    AND m.seen = 0) AS unread
+           FROM mailbox_state s
+          WHERE s.account_id = ?`,
+      )
+      .all(accountId) as Array<{
+      folder: string;
+      existsCount: number;
+      indexed: number;
+      unread: number;
+    }>;
+    const out = new Map<string, FolderUnread>();
+    for (const row of rows) {
+      out.set(row.folder, {
+        count: row.unread,
+        exact: row.indexed >= row.existsCount,
+      });
+    }
+    return out;
   }
 
   isStale(state: MailboxState | null, now = Date.now()): boolean {

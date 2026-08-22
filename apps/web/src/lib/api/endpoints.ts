@@ -44,6 +44,8 @@ import type {
   CrmSyncResult,
   DraftInput,
   DraftRef,
+  FolderGroupsResponse,
+  FolderListResponse,
   FreeSlotsResponse,
   HealthResponse,
   MailDraft,
@@ -515,16 +517,32 @@ export async function deleteDraft(
 /* folders                                                                    */
 /* -------------------------------------------------------------------------- */
 
-/** 400s on "all" or an empty value — folders are per mailbox. */
+/**
+ * One mailbox's folders, flat. 400s on an empty value, and on "all" you want
+ * listFolderGroups instead: this shape cannot say which account a folder is on.
+ */
 export async function listFolders(
   accountRef: string,
   ctx: Ctx,
 ): Promise<MailFolder[]> {
-  const data = await request<{ folders: MailFolder[] }>(
+  const data = await request<FolderListResponse>(
     `/api/folders${query({ account: accountRef })}`,
     { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
   );
   return data.folders;
+}
+
+/**
+ * Every mailbox's folders, grouped, for the rail under "All mailboxes". Kept
+ * separate from listFolders because the two answer different shapes and share
+ * no cache: a mailbox that did not answer lands in `errors` keyed by alias
+ * rather than failing the whole call.
+ */
+export function listFolderGroups(ctx: Ctx): Promise<FolderGroupsResponse> {
+  return request<FolderGroupsResponse>(
+    `/api/folders${query({ account: "all" })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
 }
 
 /* -------------------------------------------------------------------------- */

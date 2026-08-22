@@ -47,6 +47,7 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { DialogBody } from "@/components/ui/dialog";
+import { canMoveOutOf } from "@/lib/dnd/message-drag";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useApp } from "@/lib/hooks/use-app-state";
 import {
@@ -79,8 +80,8 @@ export function CommandPalette({
   onOpenChange,
 }: {
   open: boolean;
-  /** `g f` opens straight on the folder page rather than the root list. */
-  initialPage?: "root" | "folders";
+  /** `g f` opens on the folder page and `m` on the move page, not the root list. */
+  initialPage?: "root" | "folders" | "move";
   onOpenChange: (open: boolean) => void;
 }) {
   // cmdk's CommandDialog renders its sr-only title and description outside the
@@ -94,7 +95,7 @@ function Palette({
   initialPage,
   onOpenChange,
 }: {
-  initialPage: "root" | "folders";
+  initialPage: "root" | "folders" | "move";
   onOpenChange: (open: boolean) => void;
 }) {
   const app = useApp();
@@ -133,13 +134,21 @@ function Palette({
   const selected = nav.current ?? null;
 
   /* The move page lists the SELECTED MESSAGE's own mailbox, not `app.account`:
-     that reads "all" in the unified inbox and /api/folders 400s on it, so a
-     picker keyed to it would be empty exactly where mail from several mailboxes
-     is on screen. Asked for only once the page is open. */
+     that reads "all" in the unified inbox, where one flat folder list cannot
+     say which mailbox a path belongs to, so a picker keyed to it would be empty
+     exactly where mail from several mailboxes is on screen. Asked for only once
+     the page is open. */
   const moveFolders = useFolders(
     page === "move" && selected ? selected.accountId : "",
   );
   const destinations = moveDestinations(moveFolders.data, selected?.folder);
+  /* A draft is the one message with no destinations at all, and the picker has
+     to say so: "No other folder on this mailbox" would be a lie told over a
+     mailbox full of them. */
+  const stuckInDrafts =
+    selected !== null &&
+    moveFolders.data !== undefined &&
+    !canMoveOutOf(selected.folder, moveFolders.data);
 
   /** Closing always resets the page and the query — no effect needed. */
   const close = (next: boolean) => {
@@ -600,7 +609,7 @@ function Palette({
                         label="Go to folder"
                         trailing={<ChevronRight className="size-3.5" />}
                         disabled={app.account === "all"}
-                        reason="Pick one mailbox first — folders are per mailbox."
+                        reason="Pick one mailbox first, this picker lists one mailbox at a time."
                         onSelect={() => goToPage("folders")}
                       />
                     )}
@@ -619,9 +628,10 @@ function Palette({
                         <Row
                           icon={<Folder />}
                           label="Move to folder"
+                          hint="m"
                           trailing={<ChevronRight className="size-3.5" />}
                           disabled={!selected}
-                          reason="Open a message first"
+                          reason="Select a message first"
                           onSelect={() => goToPage("move")}
                         />
                         <Row
@@ -666,7 +676,11 @@ function Palette({
               ) : destinations.length === 0 ? (
                 <Row
                   icon={<Folder />}
-                  label="No other folder on this mailbox"
+                  label={
+                    stuckInDrafts
+                      ? "A draft cannot be moved out of Drafts"
+                      : "No other folder on this mailbox"
+                  }
                   disabled
                 />
               ) : (
