@@ -7,6 +7,9 @@ import { ApiError } from "@/lib/api/errors";
 import { useApiCtx } from "@/lib/hooks/use-settings";
 import type { MailMessage } from "@/lib/types";
 
+/** How long a fetched body is kept after nothing is rendering it. */
+const BODY_GC_MS = 30 * 60_000;
+
 export function messageKey(
   baseUrl: string,
   token: string,
@@ -16,7 +19,12 @@ export function messageKey(
   return ["message", baseUrl, token, accountId, messageId] as const;
 }
 
-/** Bodies are immutable, so a fetched message never goes stale. */
+/**
+ * Bodies are immutable, so a fetched message never goes stale — and `gcTime`
+ * has to say so too. With only `staleTime: Infinity` the QueryClient's
+ * five-minute default still evicted every unmounted body, so re-opening a
+ * message read six minutes ago refetched it in full.
+ */
 export function useMessage(accountId: string | null, messageId: string | null) {
   const ctx = useApiCtx();
   return useQuery<MailMessage>({
@@ -29,6 +37,7 @@ export function useMessage(accountId: string | null, messageId: string | null) {
     queryFn: ({ signal }) =>
       getMessage(accountId as string, messageId as string, { ...ctx, signal }),
     staleTime: Infinity,
+    gcTime: BODY_GC_MS,
     retry: (count, error) =>
       !(error instanceof ApiError && (error.status === 404 || error.status === 401)) &&
       count < 1,
@@ -68,6 +77,7 @@ export function usePrefetchMessage() {
           queryFn: () =>
             getMessage(accountId, messageId, { ...ctx, signal: controller.signal }),
           staleTime: Infinity,
+          gcTime: BODY_GC_MS,
         })
         .finally(() => {
           inFlight.current.delete(cacheKey);

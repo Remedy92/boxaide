@@ -175,6 +175,82 @@ describe("local mail index", () => {
     );
   });
 
+  it("orders and pages a three-account unified list by date", async () => {
+    // The unified list is built from one indexed branch per account, unioned.
+    // Ordering, LIMIT, OFFSET and unreadOnly all have to survive that, and each
+    // branch has to be asked for limit+offset rows or a later page loses
+    // messages from whichever account happened to sort late.
+    const ids = [accountId];
+    for (const alias of ["work", "side"]) {
+      const acct = await mail.connectAccount({
+        alias,
+        email: `you@${alias}.test`,
+        creds: {
+          ...baseCreds,
+          auth: { kind: "password", user: `you@${alias}.test`, pass: "ok" },
+        },
+      });
+      ids.push(acct.id);
+    }
+    // A folder of its own, so the seeded INBOX mail does not interleave.
+    const folder = "Archive";
+    const base = Date.parse("2026-03-01T00:00:00.000Z");
+    // Interleaved on purpose: newest to oldest the accounts alternate, so a
+    // per-account LIMIT that ignored the others would hand back the wrong page.
+    ids.forEach((id, accountIndex) => {
+      for (let n = 0; n < 9; n += 1) {
+        const rank = n * ids.length + accountIndex;
+        mail.index.upsertSummary({
+          id: `${id}:${folder}:${n + 1}`,
+          accountId: id,
+          uid: n + 1,
+          messageId: `<${id}-${n}@t>`,
+          folder,
+          from: "s@example.com",
+          to: "you@example.com",
+          subject: `rank-${String(rank).padStart(2, "0")}`,
+          date: new Date(base - rank * 60_000).toISOString(),
+          internalDate: new Date(base - rank * 60_000).toISOString(),
+          snippet: "a line of preview text",
+          seen: rank % 2 === 0,
+          hasAttachments: false,
+        });
+      }
+    });
+    const rank = (i: number) => `rank-${String(i).padStart(2, "0")}`;
+
+    expect(
+      mail.index
+        .listMessages({ accountIds: ids, folder, limit: 27 })
+        .map((m) => m.subject),
+    ).toEqual(Array.from({ length: 27 }, (_, i) => rank(i)));
+
+    expect(
+      mail.index
+        .listMessages({ accountIds: ids, folder, limit: 5 })
+        .map((m) => m.subject),
+    ).toEqual([rank(0), rank(1), rank(2), rank(3), rank(4)]);
+
+    expect(
+      mail.index
+        .listMessages({ accountIds: ids, folder, limit: 5, offset: 5 })
+        .map((m) => m.subject),
+    ).toEqual([rank(5), rank(6), rank(7), rank(8), rank(9)]);
+
+    expect(
+      mail.index
+        .listMessages({ accountIds: ids, folder, limit: 4, unreadOnly: true })
+        .map((m) => m.subject),
+    ).toEqual([rank(1), rank(3), rank(5), rank(7)]);
+
+    // One account still takes the single-branch plan.
+    expect(
+      mail.index
+        .listMessages({ accountIds: [ids[0]], folder, limit: 3 })
+        .map((m) => m.subject),
+    ).toEqual([rank(0), rank(3), rank(6)]);
+  });
+
   it("grows the indexed window after a tray-sized first fill", async () => {
     provider.seedAccount(accountId, "you@personal.test", [
       ...Array.from({ length: 15 }, (_, i) => ({

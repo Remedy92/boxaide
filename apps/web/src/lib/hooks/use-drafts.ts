@@ -1,7 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQueries,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   createDraft,
   deleteDraft,
@@ -22,6 +27,9 @@ import type { DraftInput, MailAccountMeta, MailDraft } from "@/lib/types";
  * `errors[]` contract the message list already has, so a mailbox that is down
  * costs you that mailbox's drafts and nothing else.
  */
+
+/** Drafts only change through this app, which invalidates on every mutation. */
+const DRAFTS_STALE_MS = 5 * 60_000;
 
 export type DraftListResult = {
   drafts: MailDraft[];
@@ -64,7 +72,13 @@ export function useDrafts(accountRef: string, enabled = true): DraftListResult {
       enabled: ctx.baseUrl.length > 0 && ctx.token.length > 0,
       queryFn: ({ signal }: { signal: AbortSignal }) =>
         listDrafts(account.id, { ...ctx, signal }),
-      staleTime: 30_000,
+      // Drafts change only through this app's own mutations, and every one of
+      // them invalidates below. Thirty seconds meant leaving Drafts and coming
+      // back re-ran the whole per-account fan-out, each leg an IMAP round trip.
+      staleTime: DRAFTS_STALE_MS,
+      // Same reason the message list keeps its previous page: switching mailbox
+      // while in Drafts blanked the list to a skeleton.
+      placeholderData: keepPreviousData,
     })),
   });
 

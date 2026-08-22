@@ -251,6 +251,11 @@ function useFiling<I extends MoveTarget>(copy: {
     },
 
     onSuccess: (result, input) => {
+      // A real refetch, not just a staleness mark. The list is a capped window:
+      // onMutate can only remove the filed row, never pull row 51 up into the
+      // fifty now showing 49. Marking it stale and waiting for a natural
+      // trigger left a list that quietly shrank with every archive — worst in
+      // unread-only, where the next unread below the fold is the whole point.
       void queryClient.invalidateQueries({ queryKey: ["messages"] });
       invalidateFolders(queryClient);
       toast.success(copy.done(result), {

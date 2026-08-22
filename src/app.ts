@@ -422,21 +422,47 @@ export function createRuntime(overrides: RuntimeOverrides = {}): Runtime {
 
   // Static web UI
   const webRoot = resolveWebRoot(config.webRoot);
+  // Read once, not per navigation. The desktop shell reloads the renderer on
+  // every launch, so a 30 KB existsSync + readFileSync + utf8 decode sat on the
+  // request path of every app open.
+  const indexPath = join(webRoot, "index.html");
+  const indexHtml = existsSync(indexPath)
+    ? readFileSync(indexPath, "utf8")
+    : null;
   app.get("/", async (c) => {
-    const index = join(webRoot, "index.html");
-    if (!existsSync(index)) {
+    if (indexHtml === null) {
       return c.text(
         "Boxaide UI missing. Build it with: npm run build",
         500,
       );
     }
-    return c.html(readFileSync(index, "utf8"));
+    // The entry document names hashed assets, so it must be revalidated even
+    // though everything it points at is immutable.
+    c.header("Cache-Control", "no-cache");
+    return c.html(indexHtml);
+  });
+
+  // Next writes content-hashed filenames under _next/static, so those bytes can
+  // never change under a given URL and the browser never needs to ask again.
+  // Everything else is revalidated.
+  //
+  // Set here rather than through serveStatic's `onFound`: that hook runs after
+  // the middleware has already built its Response, so a header written inside
+  // it is dropped on the floor.
+  app.use("/_next/static/*", async (c, next) => {
+    await next();
+    if (c.res.ok) {
+      c.res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
+    }
   });
 
   app.use(
     "/*",
     serveStatic({
       root: webRoot,
+      // Serves the .br/.gz sibling written by scripts/precompress-web.mjs when
+      // the client accepts it. Nothing is compressed at request time.
+      precompressed: true,
     }),
   );
 

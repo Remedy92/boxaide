@@ -21,6 +21,8 @@ import { useApiCtx, useSettings } from "@/lib/hooks/use-settings";
  * catches an agent that exited on its own.
  */
 const POLL_MS = 5_000;
+/** Nothing is running, so nothing can change without this app doing it. */
+const IDLE_POLL_MS = 30_000;
 
 export function useLocalAgents() {
   const ctx = useApiCtx();
@@ -28,7 +30,11 @@ export function useLocalAgents() {
     queryKey: ["local-agents", ctx.baseUrl, ctx.token],
     enabled: ctx.baseUrl.length > 0 && ctx.token.length > 0,
     queryFn: ({ signal }) => listLocalAgents({ ...ctx, signal }),
-    refetchInterval: POLL_MS,
+    // AgentsSection renders in every view, so a flat 5s meant 720 requests an
+    // hour whether or not an agent was running. Fast only while one is.
+    refetchInterval: (query) =>
+      query.state.data?.running ? POLL_MS : IDLE_POLL_MS,
+    staleTime: POLL_MS,
   });
 }
 

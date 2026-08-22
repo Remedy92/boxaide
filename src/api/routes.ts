@@ -206,7 +206,13 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
 // keys with PUT /api/connectors/:id.
 const CORS_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 const CORS_HEADERS = "authorization, content-type";
-const CORS_MAX_AGE = "600";
+// A day, not ten minutes. The web app defaults to a different origin than the
+// API (apps/web/src/lib/constants.ts) and every request carries an
+// Authorization header, so each distinct URL is preflighted — at ten minutes
+// the whole cold-open round-trip count was paid twice, again every ten minutes.
+// The allowlist is enforced per request, so a long-lived preflight cache never
+// widens what an origin may reach.
+const CORS_MAX_AGE = "86400";
 
 /**
  * Origin gate for the *authenticated* API. Loopback always passes, so the

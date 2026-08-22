@@ -25,7 +25,7 @@
     "ship:status": "./scripts/ship_status.sh",
     "ship:hooks": "./scripts/install-hooks.sh",
     "web:build": "npm --prefix apps/web ci && npm --prefix apps/web run build",
-    "web:sync": "node scripts/web-sync.mjs",
+    "web:sync": "node scripts/web-sync.mjs && node scripts/precompress-web.mjs",
     "prepack": "npm run build"
   },
   "files": [
