@@ -82,6 +82,11 @@ describe("allowlists", () => {
   it("gives each CLI its own provider and nobody else's", () => {
     expect(allowedHostsFor("codex", {})).toContain(".openai.com");
     expect(allowedHostsFor("codex", {})).not.toContain(".x.ai");
+    const antigravityAllow = allowedHostsFor("antigravity", {});
+    expect(antigravityAllow).toContain(".googleusercontent.com");
+    expect(antigravityAllow).toContain(".goog");
+    expect(hostAllowed("lh3.googleusercontent.com", antigravityAllow)).toBe(true);
+    expect(hostAllowed("antigravity-unleash.goog", antigravityAllow)).toBe(true);
   });
 
   it("takes extra hosts from the operator, for the CLI nobody guessed right", () => {
