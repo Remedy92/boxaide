@@ -277,7 +277,7 @@ export class FixtureProvider implements MailProvider {
       date: nowIso(),
       snippet: input.text.slice(0, 120),
       seen: true,
-      hasAttachments: false,
+      hasAttachments: Boolean(input.attachments && input.attachments.length > 0),
       bodyText: input.text,
       bodyHtml: input.html,
       accountEmail: account.email,
@@ -421,7 +421,7 @@ export class FixtureProvider implements MailProvider {
       // Your own unfinished mail is not unread mail — same call as the IMAP
       // provider, which appends \Draft together with \Seen.
       seen: true,
-      hasAttachments: false,
+      hasAttachments: Boolean(input.attachments && input.attachments.length > 0),
       bodyText: text,
       bodyHtml: input.html,
       inReplyTo: input.inReplyTo,

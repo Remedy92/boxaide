@@ -3,7 +3,9 @@ import { randomBytes } from "node:crypto";
 import { Store } from "../src/db/store.js";
 import { FixtureProvider } from "../src/provider/fixture.js";
 import { MailService } from "../src/mail/service.js";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { CHAT_TOOLS, handleMcpJsonRpc, PLATFORM_TOOLS, TOOLS } from "../src/mcp/server.js";
 import { createPlatform } from "../src/platform.js";
 import type { AgentLauncher } from "../src/agent/launcher.js";
@@ -182,6 +184,79 @@ describe("MCP tool surface", () => {
     const sent = provider.getSent();
     expect(sent[0].inReplyTo).toBeUndefined();
     expect(sent[0].references).toBeUndefined();
+  });
+
+  it("forwards local file and inline attachments on message_send", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "boxaide-att-"));
+    const filePath = join(dir, "report.pdf");
+    writeFileSync(filePath, "%PDF-1.4 test pdf content");
+
+    try {
+      const res = await call(mail, "message_send", {
+        account: "personal",
+        to: "cofounder@test.com",
+        subject: "Q3 Report",
+        text: "Here is the report.",
+        attachments: [
+          { path: filePath, filename: "Q3_Report.pdf" },
+          { filename: "notes.txt", content: "Some inline notes" },
+        ],
+      });
+      expect(payloadOf(res).result.messageId).toBeTruthy();
+
+      const sent = provider.getSent();
+      expect(sent).toHaveLength(1);
+      expect(sent[0].attachments).toHaveLength(2);
+      expect(sent[0].attachments![0].filename).toBe("Q3_Report.pdf");
+      expect(sent[0].attachments![0].path).toBe(filePath);
+      expect(sent[0].attachments![1].filename).toBe("notes.txt");
+      expect(sent[0].attachments![1].content).toBe("Some inline notes");
+
+      // Listed messages in Sent folder should have hasAttachments: true
+      const listed = await mail.listMessages("personal", {
+        folder: "Sent",
+        limit: 10,
+      });
+      expect(listed.messages[0].hasAttachments).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("supports string paths in attachments on message_send", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "boxaide-att-"));
+    const filePath = join(dir, "data.csv");
+    writeFileSync(filePath, "a,b,c\n1,2,3");
+
+    try {
+      const res = await call(mail, "message_send", {
+        account: "personal",
+        to: "cofounder@test.com",
+        subject: "Data",
+        text: "See attached data.",
+        attachments: [filePath],
+      });
+      expect(payloadOf(res).result.messageId).toBeTruthy();
+
+      const sent = provider.getSent();
+      expect(sent[0].attachments).toHaveLength(1);
+      expect(sent[0].attachments![0].filename).toBe("data.csv");
+      expect(sent[0].attachments![0].path).toBe(filePath);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails message_send when attachment file path does not exist", async () => {
+    const res = (await call(mail, "message_send", {
+      account: "personal",
+      to: "cofounder@test.com",
+      subject: "Missing",
+      text: "Missing file",
+      attachments: [{ path: "/nonexistent/path/missing.pdf" }],
+    })) as ToolResult & { result: { isError?: boolean } };
+    expect(res.result.isError).toBe(true);
+    expect(payloadOf(res).error).toMatch(/attachment file not found/i);
   });
 
   it("returns a JSON-RPC error for an unknown tool", async () => {
@@ -409,6 +484,36 @@ describe("MCP tool surface", () => {
     expect(listed.drafts).toHaveLength(1);
     expect(listed.drafts[0].subject).toBe("v2");
     expect(listed.drafts[0].bodyText).toBe("two");
+  });
+
+  it("handles attachments in draft_create and draft_update", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "boxaide-draft-att-"));
+    const filePath = join(dir, "plan.md");
+    writeFileSync(filePath, "# Project Plan");
+
+    try {
+      const created = payloadOf(await call(mail, "draft_create", {
+        account: "personal",
+        to: "team@test.com",
+        subject: "Draft Plan",
+        text: "Please see attached plan.",
+        attachments: [{ path: filePath, filename: "plan.md" }],
+      })).draft;
+      expect(created.id).toBeTruthy();
+
+      // Update draft with new attachment
+      const updated = payloadOf(await call(mail, "draft_update", {
+        account: "personal",
+        draftId: created.id,
+        to: "team@test.com",
+        subject: "Draft Plan v2",
+        text: "Updated draft plan.",
+        attachments: [{ filename: "inline.txt", content: "Inline content" }],
+      })).draft;
+      expect(updated.id).not.toBe(created.id);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("discards a draft through draft_delete, and reports the second try", async () => {

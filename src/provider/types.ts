@@ -109,6 +109,53 @@ export type SearchMessagesOpts = SinceOpt & {
   limit?: number;
 };
 
+export type MailAttachment = {
+  filename?: string;
+  path?: string;
+  content?: string | Buffer;
+  contentType?: string;
+  encoding?: string;
+  cid?: string;
+};
+
+/**
+ * Normalizes an array of attachment arguments (accepting strings or objects)
+ * into a typed MailAttachment array.
+ */
+export function parseAttachments(
+  raw: unknown,
+): MailAttachment[] | undefined {
+  if (!raw || !Array.isArray(raw)) return undefined;
+  const list: MailAttachment[] = [];
+  for (const item of raw) {
+    if (typeof item === "string" && item.trim()) {
+      list.push({ path: item.trim() });
+    } else if (typeof item === "object" && item !== null) {
+      const obj = item as Record<string, unknown>;
+      const att: MailAttachment = {};
+      if (typeof obj.path === "string" && obj.path.trim()) {
+        att.path = obj.path.trim();
+      }
+      if (typeof obj.filename === "string" && obj.filename.trim()) {
+        att.filename = obj.filename.trim();
+      }
+      if (typeof obj.content === "string") {
+        att.content = obj.content;
+      }
+      if (typeof obj.contentType === "string" && obj.contentType.trim()) {
+        att.contentType = obj.contentType.trim();
+      }
+      if (typeof obj.encoding === "string" && obj.encoding.trim()) {
+        att.encoding = obj.encoding.trim();
+      }
+      if (att.path || att.content !== undefined) {
+        list.push(att);
+      }
+    }
+  }
+  return list.length > 0 ? list : undefined;
+}
+
 export type SendMessageInput = {
   to: string;
   subject: string;
@@ -118,6 +165,7 @@ export type SendMessageInput = {
   bcc?: string;
   inReplyTo?: string;
   references?: string;
+  attachments?: MailAttachment[];
   /**
    * iMIP calendar part (RFC 6047). Nodemailer emits it as text/calendar with
    * the method parameter, which is what makes Gmail/Outlook render the
@@ -177,6 +225,7 @@ export type DraftInput = {
   bcc?: string;
   inReplyTo?: string;
   references?: string;
+  attachments?: MailAttachment[];
 };
 
 /** Where a draft landed. `id` is the same accountId:folder:uid shape as mail. */

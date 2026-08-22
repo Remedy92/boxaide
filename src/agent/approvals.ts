@@ -25,6 +25,7 @@
 import { randomUUID } from "node:crypto";
 import type { Store, StoredApproval } from "../db/store.js";
 import type { MailService } from "../mail/service.js";
+import { parseAttachments } from "../provider/types.js";
 import type { Platform } from "../platform.js";
 import type { AgentChannel } from "./channel.js";
 import { dispatchCalendarTool, CALENDAR_SEND_TOOL_NAMES } from "../calendar/tools.js";
@@ -217,6 +218,7 @@ export class ApprovalQueue {
         bcc: args.bcc ? String(args.bcc) : undefined,
         inReplyTo: args.inReplyTo ? String(args.inReplyTo) : undefined,
         references: args.references ? String(args.references) : undefined,
+        attachments: parseAttachments(args.attachments),
       });
       return;
     }
@@ -354,6 +356,13 @@ export function describe(row: StoredApproval): ApprovalView {
     push(fields, "Cc", text("cc"));
     push(fields, "Bcc", text("bcc"));
     push(fields, "Subject", subject);
+    const attachments = parseAttachments(args.attachments);
+    if (attachments && attachments.length > 0) {
+      const labels = attachments.map(
+        (a) => a.filename || a.path || "attachment",
+      );
+      push(fields, "Attachments", labels.join(", "));
+    }
     body = text("text") ?? text("html");
   } else if (row.tool === "meeting_create") {
     const attendees = list(args.attendees);

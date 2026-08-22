@@ -41,7 +41,7 @@ import {
   PROSPECTING_TOOL_NAMES,
   dispatchProspectingTool,
 } from "../prospecting/tools.js";
-import type { DraftInput } from "../provider/types.js";
+import { parseAttachments, type DraftInput } from "../provider/types.js";
 import { MAX_LIST_LIMIT, requireListLimit } from "../input-limits.js";
 import {
   isScopeProfile,
@@ -187,6 +187,39 @@ export const TOOLS = [
           description:
             "Space-separated Message-ID chain of the thread, oldest first.",
         },
+        attachments: {
+          type: "array",
+          description:
+            "Optional list of files to attach. Each entry can be an object with { path, filename, contentType } or inline { filename, content, contentType, encoding }.",
+          items: {
+            type: "object",
+            properties: {
+              path: {
+                type: "string",
+                description: "Local file path to attach.",
+              },
+              filename: {
+                type: "string",
+                description:
+                  "Name for the attached file (defaults to filename of path).",
+              },
+              content: {
+                type: "string",
+                description: "Inline attachment content (text or base64).",
+              },
+              contentType: {
+                type: "string",
+                description:
+                  "MIME type (e.g. application/pdf, text/plain). Inferred if omitted.",
+              },
+              encoding: {
+                type: "string",
+                description: "Encoding of content, e.g. 'base64' or 'utf-8'.",
+              },
+            },
+            additionalProperties: false,
+          },
+        },
       },
       required: ["account", "to", "subject", "text"],
       additionalProperties: false,
@@ -266,6 +299,39 @@ export const TOOLS = [
           description:
             "Space-separated Message-ID chain of the thread, oldest first.",
         },
+        attachments: {
+          type: "array",
+          description:
+            "Optional list of files to attach. Each entry can be an object with { path, filename, contentType } or inline { filename, content, contentType, encoding }.",
+          items: {
+            type: "object",
+            properties: {
+              path: {
+                type: "string",
+                description: "Local file path to attach.",
+              },
+              filename: {
+                type: "string",
+                description:
+                  "Name for the attached file (defaults to filename of path).",
+              },
+              content: {
+                type: "string",
+                description: "Inline attachment content (text or base64).",
+              },
+              contentType: {
+                type: "string",
+                description:
+                  "MIME type (e.g. application/pdf, text/plain). Inferred if omitted.",
+              },
+              encoding: {
+                type: "string",
+                description: "Encoding of content, e.g. 'base64' or 'utf-8'.",
+              },
+            },
+            additionalProperties: false,
+          },
+        },
       },
       required: ["account"],
       additionalProperties: false,
@@ -287,6 +353,39 @@ export const TOOLS = [
         bcc: { type: "string" },
         inReplyTo: { type: "string" },
         references: { type: "string" },
+        attachments: {
+          type: "array",
+          description:
+            "Optional list of files to attach. Each entry can be an object with { path, filename, contentType } or inline { filename, content, contentType, encoding }.",
+          items: {
+            type: "object",
+            properties: {
+              path: {
+                type: "string",
+                description: "Local file path to attach.",
+              },
+              filename: {
+                type: "string",
+                description:
+                  "Name for the attached file (defaults to filename of path).",
+              },
+              content: {
+                type: "string",
+                description: "Inline attachment content (text or base64).",
+              },
+              contentType: {
+                type: "string",
+                description:
+                  "MIME type (e.g. application/pdf, text/plain). Inferred if omitted.",
+              },
+              encoding: {
+                type: "string",
+                description: "Encoding of content, e.g. 'base64' or 'utf-8'.",
+              },
+            },
+            additionalProperties: false,
+          },
+        },
       },
       required: ["account", "draftId"],
       additionalProperties: false,
@@ -520,6 +619,7 @@ function draftFields(args: Record<string, unknown>): DraftInput {
     bcc: str(args.bcc),
     inReplyTo: str(args.inReplyTo),
     references: str(args.references),
+    attachments: parseAttachments(args.attachments),
   };
 }
 
@@ -647,6 +747,7 @@ async function dispatch(
           bcc: args.bcc ? String(args.bcc) : undefined,
           inReplyTo: args.inReplyTo ? String(args.inReplyTo) : undefined,
           references: args.references ? String(args.references) : undefined,
+          attachments: parseAttachments(args.attachments),
         }),
       };
     case "message_mark_read":

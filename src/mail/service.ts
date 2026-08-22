@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
+import { basename, resolve } from "node:path";
 import addressparser from "nodemailer/lib/addressparser/index.js";
 import type { Store } from "../db/store.js";
 import { canonicalEmail } from "../outreach/opt-out.js";
@@ -9,6 +11,7 @@ import type {
   DraftRef,
   ListDraftsOpts,
   ListMessagesOpts,
+  MailAttachment,
   MailDraft,
   MailFolder,
   MailMessage,
@@ -299,8 +302,12 @@ export class MailService {
         .filter((v) => v.includes("@"));
       this.sendGuard(recipients, opts.overrideSuppression === true);
     }
+    const attachments = validateAttachments(input.attachments);
     const account = this.resolve(accountRef);
-    const result = await this.provider.sendMessage(account, input);
+    const result = await this.provider.sendMessage(account, {
+      ...input,
+      attachments,
+    });
     if (result.copied) this.index.upsertSummary(result.copied);
     else if (result.sentFolder) {
       this.index.markDirty(account.id, result.sentFolder);
@@ -433,7 +440,11 @@ export class MailService {
     accountRef: string,
     input: DraftInput,
   ): Promise<DraftRef> {
-    return this.provider.createDraft(this.resolve(accountRef), input);
+    const attachments = validateAttachments(input.attachments);
+    return this.provider.createDraft(this.resolve(accountRef), {
+      ...input,
+      attachments,
+    });
   }
 
   /** Returns a NEW draft id; the one passed in is dead afterwards. */
@@ -442,7 +453,11 @@ export class MailService {
     draftId: string,
     input: DraftInput,
   ): Promise<DraftRef> {
-    return this.provider.updateDraft(this.resolve(accountRef), draftId, input);
+    const attachments = validateAttachments(input.attachments);
+    return this.provider.updateDraft(this.resolve(accountRef), draftId, {
+      ...input,
+      attachments,
+    });
   }
 
   async listDrafts(
@@ -556,3 +571,53 @@ export class MailService {
     return run;
   }
 }
+
+/**
+ * Validates and normalizes outgoing attachments. Verifies local file existence
+ * and resolves absolute paths so downstream nodemailer can stream them.
+ */
+function validateAttachments(
+  attachments: MailAttachment[] | undefined,
+): MailAttachment[] | undefined {
+  if (!attachments || attachments.length === 0) return undefined;
+  if (!Array.isArray(attachments)) {
+    throw new Error("attachments must be an array");
+  }
+  const validated: MailAttachment[] = [];
+  for (const att of attachments) {
+    if (!att || typeof att !== "object") {
+      throw new Error("invalid attachment: each attachment must be an object");
+    }
+    if (att.path) {
+      if (typeof att.path !== "string" || !att.path.trim()) {
+        throw new Error("invalid attachment path");
+      }
+      const resolved = resolve(att.path.trim());
+      if (!existsSync(resolved)) {
+        throw new Error(`attachment file not found: ${att.path}`);
+      }
+      const stat = statSync(resolved);
+      if (stat.isDirectory()) {
+        throw new Error(
+          `attachment path is a directory, not a file: ${att.path}`,
+        );
+      }
+      validated.push({
+        ...att,
+        path: resolved,
+        filename: att.filename?.trim() || basename(resolved),
+      });
+    } else if (att.content !== undefined) {
+      validated.push({
+        ...att,
+        filename: att.filename?.trim() || "attachment",
+      });
+    } else {
+      throw new Error(
+        "invalid attachment: must provide either 'path' or 'content'",
+      );
+    }
+  }
+  return validated;
+}
+

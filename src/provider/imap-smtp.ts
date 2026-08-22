@@ -845,7 +845,7 @@ export async function accountMailboxPaths(
  * go through it: sendMessage APPENDs to Sent the exact bytes it handed to
  * SMTP, and the draft path APPENDs bytes that are never delivered at all.
  */
-async function composeMime(mail: SendMailOptions) {
+export async function composeMime(mail: SendMailOptions) {
   const composed = await nodemailer
     .createTransport({ streamTransport: true, buffer: true, newline: "\r\n" })
     .sendMail(mail);
@@ -871,6 +871,7 @@ function draftMailOptions(
     html: input.html,
     inReplyTo: input.inReplyTo,
     references: input.references,
+    attachments: input.attachments,
   };
 }
 
@@ -1425,6 +1426,7 @@ export class ImapSmtpProvider implements MailProvider {
       html: input.html,
       inReplyTo: input.inReplyTo,
       references: input.references,
+      attachments: input.attachments,
       icalEvent: input.icalEvent,
     };
 

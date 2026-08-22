@@ -8,6 +8,9 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Store } from "../src/db/store.js";
 import { FixtureProvider } from "../src/provider/fixture.js";
 import { MailService } from "../src/mail/service.js";
@@ -46,6 +49,7 @@ function everyToolName(): string[] {
 
 describe("agent scopes", () => {
   let store: Store;
+  let provider: FixtureProvider;
   let mail: MailService;
   let platform: Platform;
   let channel: AgentChannel;
@@ -53,7 +57,8 @@ describe("agent scopes", () => {
 
   beforeEach(async () => {
     store = new Store(randomBytes(32), ":memory:");
-    mail = new MailService(store, new FixtureProvider());
+    provider = new FixtureProvider();
+    mail = new MailService(store, provider);
     channel = new AgentChannel(store);
     platform = createPlatform({
       db: store.db,
@@ -252,6 +257,44 @@ describe("agent scopes", () => {
     const sent = (await mail.listMessages("personal", { folder: "Sent" })).messages;
     expect(sent).toHaveLength(1);
     expect(sent[0].subject).toBe("approved");
+  });
+
+  it("shows attachments on approval card and passes them on approval", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "boxaide-scope-att-"));
+    const filePath = join(dir, "pitch.pdf");
+    writeFileSync(filePath, "PDF pitch deck");
+
+    try {
+      await call("message_send", "chat", {
+        account: "personal",
+        to: "investor@test.com",
+        subject: "Pitch Deck",
+        text: "Please find attached pitch deck.",
+        attachments: [
+          { path: filePath, filename: "Pitch_Deck.pdf" },
+          { filename: "metrics.csv", content: "mrr,arr\n10k,120k" },
+        ],
+      });
+      const pending = approvals.pending();
+      expect(pending).toHaveLength(1);
+      const card = pending[0];
+      expect(card.title).toBe("Send “Pitch Deck” to investor@test.com");
+      const attField = card.fields.find((f) => f.label === "Attachments");
+      expect(attField).toBeDefined();
+      expect(attField?.value).toBe("Pitch_Deck.pdf, metrics.csv");
+
+      // Approve it
+      const outcome = await approvals.decide(card.id, "approve");
+      expect(outcome.state).toBe("approved");
+
+      const sent = provider.getSent();
+      expect(sent).toHaveLength(1);
+      expect(sent[0].attachments).toHaveLength(2);
+      expect(sent[0].attachments![0].filename).toBe("Pitch_Deck.pdf");
+      expect(sent[0].attachments![1].filename).toBe("metrics.csv");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("answers a request once, however many windows are looking at it", async () => {
