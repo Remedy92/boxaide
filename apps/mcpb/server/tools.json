@@ -128,6 +128,36 @@
         "references": {
           "type": "string",
           "description": "Space-separated Message-ID chain of the thread, oldest first."
+        },
+        "attachments": {
+          "type": "array",
+          "description": "Optional list of files to attach. Each entry can be an object with { path, filename, contentType } or inline { filename, content, contentType, encoding }.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Local file path to attach."
+              },
+              "filename": {
+                "type": "string",
+                "description": "Name for the attached file (defaults to filename of path)."
+              },
+              "content": {
+                "type": "string",
+                "description": "Inline attachment content. Base64 content MUST set encoding to 'base64'; without it the bytes are sent as utf-8 text."
+              },
+              "contentType": {
+                "type": "string",
+                "description": "MIME type (e.g. application/pdf, text/plain). Inferred if omitted."
+              },
+              "encoding": {
+                "type": "string",
+                "description": "Encoding of content: 'base64' for binary files, 'utf-8' for text. Required when contentType is not text."
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "required": [
@@ -250,6 +280,36 @@
         "references": {
           "type": "string",
           "description": "Space-separated Message-ID chain of the thread, oldest first."
+        },
+        "attachments": {
+          "type": "array",
+          "description": "Optional list of files to attach. Each entry can be an object with { path, filename, contentType } or inline { filename, content, contentType, encoding }.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Local file path to attach."
+              },
+              "filename": {
+                "type": "string",
+                "description": "Name for the attached file (defaults to filename of path)."
+              },
+              "content": {
+                "type": "string",
+                "description": "Inline attachment content. Base64 content MUST set encoding to 'base64'; without it the bytes are sent as utf-8 text."
+              },
+              "contentType": {
+                "type": "string",
+                "description": "MIME type (e.g. application/pdf, text/plain). Inferred if omitted."
+              },
+              "encoding": {
+                "type": "string",
+                "description": "Encoding of content: 'base64' for binary files, 'utf-8' for text. Required when contentType is not text."
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "required": [
@@ -295,6 +355,36 @@
         },
         "references": {
           "type": "string"
+        },
+        "attachments": {
+          "type": "array",
+          "description": "Optional list of files to attach. Each entry can be an object with { path, filename, contentType } or inline { filename, content, contentType, encoding }.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Local file path to attach."
+              },
+              "filename": {
+                "type": "string",
+                "description": "Name for the attached file (defaults to filename of path)."
+              },
+              "content": {
+                "type": "string",
+                "description": "Inline attachment content. Base64 content MUST set encoding to 'base64'; without it the bytes are sent as utf-8 text."
+              },
+              "contentType": {
+                "type": "string",
+                "description": "MIME type (e.g. application/pdf, text/plain). Inferred if omitted."
+              },
+              "encoding": {
+                "type": "string",
+                "description": "Encoding of content: 'base64' for binary files, 'utf-8' for text. Required when contentType is not text."
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "required": [
