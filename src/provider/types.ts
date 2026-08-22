@@ -314,6 +314,46 @@ export type MailFolder = {
   name: string;
   path: string;
   specialUse?: string;
+  /**
+   * The server's own hierarchy separator, straight from the IMAP LIST reply.
+   * Both "/" and "." are in the wild: Dovecot and Courier spell the same
+   * mailbox INBOX/Archive and INBOX.Archive. Absent when the provider has no
+   * hierarchy to report, and the reader then infers one from the paths it was
+   * handed rather than splitting on both characters and inventing a parent for
+   * a mailbox literally named foo.bar.
+   */
+  delimiter?: string;
+};
+
+/** What the local index knows about one folder's unread mail. */
+export type FolderUnread = {
+  /** Unread messages the index holds for this folder. */
+  count: number;
+  /**
+   * True when the index holds every message the server says the folder has, so
+   * `count` is the folder's whole unread total. False when the index holds
+   * only a sync window: `count` is then a floor, at least this many and
+   * possibly more, and the reader must say so instead of printing a number
+   * that is quietly too small.
+   */
+  exact: boolean;
+};
+
+/**
+ * A listed folder plus the index's view of it. Only MailService can build one:
+ * `unread` is a SQLite read, no provider can fill it, and putting it on
+ * MailFolder above would advertise a field every implementer has to leave
+ * empty.
+ */
+export type MailFolderWithUnread = MailFolder & {
+  /**
+   * ABSENT MEANS NOT KNOWN. The index has never synced this folder, so there
+   * is no honest number for it. Absence, not a sentinel: -1 or 0 forces every
+   * reader to remember which value means "no idea", and the first reader that
+   * forgets renders a confident 0 over a folder holding 400 unread. An absent
+   * field cannot be mistaken for a count.
+   */
+  unread?: FolderUnread;
 };
 
 /** Provider contract — IMAP and fixture both implement this. */

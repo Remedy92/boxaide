@@ -389,10 +389,13 @@ export class FixtureProvider implements MailProvider {
     const box = this.ensureBox(account.id, account.email);
     const names = new Set<string>(["INBOX"]);
     for (const m of box) names.add(m.folder);
+    // "/" so a seeded folder named "INBOX/Archive/2024" nests exactly the way
+    // a real "/" server would, without the reader having to infer a separator.
     return [...names].map((name) => ({
       name,
       path: name,
       specialUse: specialUseOf(name),
+      delimiter: "/",
     }));
   }
 

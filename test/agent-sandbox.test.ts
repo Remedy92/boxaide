@@ -142,6 +142,39 @@ describe("the macOS profile", () => {
     const profile = macosProfile('/tmp/he said "no"', { read: [], write: [], deny: [] });
     expect(profile).toContain('/tmp/he said \\"no\\"');
   });
+
+  /**
+   * A scheduled run's network: nothing leaves this machine except through the
+   * loopback proxy. Seatbelt takes only `*` or `localhost` as an address, so
+   * "the model provider only" cannot be written here — that is why there is a
+   * proxy at all (src/agent/egress.ts).
+   */
+  it("denies every outbound connection but loopback when asked", () => {
+    const profile = macosProfile(HOME, {
+      read: [],
+      write: [],
+      deny: [],
+      network: "loopback",
+    });
+    expect(profile).toContain("(deny network*)");
+    expect(profile).toContain('(allow network-outbound (remote ip "localhost:*"))');
+    // Deliberately NOT a bind allowance: one was tried and does not work —
+    // a loopback listen still fails under (deny network*). No run spec binds,
+    // and a line that claims otherwise is worse than its absence.
+    expect(profile).not.toContain("network-bind");
+    // Name resolution and helper processes go over unix sockets and never
+    // leave the machine, so denying them would break the run for nothing.
+    expect(profile).toContain("(allow network-outbound (remote unix-socket))");
+    // The deny lands before the allows: later rules win in a profile.
+    expect(profile.indexOf("(deny network*)")).toBeLessThan(
+      profile.indexOf('(remote ip "localhost:*")'),
+    );
+  });
+
+  it("says nothing about the network for a watched launch", () => {
+    const profile = macosProfile(HOME, { read: [], write: [], deny: [] });
+    expect(profile).not.toContain("network");
+  });
 });
 
 describe("building the command", () => {

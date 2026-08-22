@@ -398,10 +398,47 @@ describe("accountMailboxPaths (the per-account LIST cache)", () => {
       archive: "Archive",
       trash: "Trash",
       drafts: "Drafts",
+      // No \\Sent mailbox in this fixture, and none named like one.
+      sent: null,
+      // The raw LIST is cached alongside the resolved paths so /api/folders,
+      // listDrafts and appendToSent all read it instead of LISTing again.
+      boxes: withArchive.map((b) => ({
+        name: b.name,
+        path: b.path,
+        specialUse: b.specialUse,
+      })),
       at: 1_000,
     });
     expect(b).toBe(a);
     expect(count()).toBe(1);
+  });
+
+  it("does not remember a missing Drafts or Sent mailbox", async () => {
+    // Same rule Archive and Trash already follow: the fix the error tells the
+    // user to make — create the folder — has to be picked up on their very next
+    // draft save or send, not when a five-minute TTL runs out. Routing the
+    // drafts/sent call sites through this cache without that bypass made a
+    // folder created a minute ago invisible.
+    const { client, count } = lister([{ name: "INBOX", path: "INBOX" }]);
+    const first = await accountMailboxPaths(client, "cache-drafts-missing", { now: 1_000 });
+    expect(first.drafts).toBeNull();
+    expect(first.sent).toBeNull();
+    expect(count()).toBe(1);
+
+    await accountMailboxPaths(client, "cache-drafts-missing", { now: 2_000, needDrafts: true });
+    expect(count()).toBe(2);
+    await accountMailboxPaths(client, "cache-drafts-missing", { now: 3_000, needSent: true });
+    expect(count()).toBe(3);
+
+    // A cached hit that HAS the mailbox is still served without a LIST.
+    const { client: found, count: foundCount } = lister(withArchive);
+    await accountMailboxPaths(found, "cache-drafts-hit", { now: 1_000 });
+    const hit = await accountMailboxPaths(found, "cache-drafts-hit", {
+      now: 2_000,
+      needDrafts: true,
+    });
+    expect(hit.drafts).toBe("Drafts");
+    expect(foundCount()).toBe(1);
   });
 
   it("re-LISTs after the TTL and on force", async () => {
@@ -420,15 +457,15 @@ describe("accountMailboxPaths (the per-account LIST cache)", () => {
     // The error tells the user to create the folder; the very next archive
     // must see it, not wait out a TTL.
     const { client, count } = lister([{ name: "INBOX", path: "INBOX" }]);
-    const first = await accountMailboxPaths(client, "cache-3", {
+    const first = await accountMailboxPaths(client, "cache-drafts-missing", {
       now: 0,
       needArchive: true,
     });
     expect(first.archive).toBeNull();
-    await accountMailboxPaths(client, "cache-3", { now: 1, needArchive: true });
+    await accountMailboxPaths(client, "cache-drafts-missing", { now: 1, needArchive: true });
     expect(count()).toBe(2);
     // A caller that does not need Archive keeps reading the cached entry.
-    await accountMailboxPaths(client, "cache-3", { now: 2 });
+    await accountMailboxPaths(client, "cache-drafts-missing", { now: 2 });
     expect(count()).toBe(2);
   });
 

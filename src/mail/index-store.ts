@@ -4,7 +4,7 @@
  */
 import type Database from "better-sqlite3";
 import { decryptSecret, encryptSecret } from "../crypto/secrets.js";
-import type { MailMessageSummary } from "../provider/types.js";
+import type { FolderUnread, MailMessageSummary } from "../provider/types.js";
 import type { MailboxCursor, MailboxSyncResult } from "../provider/types.js";
 
 /** Paint from SQLite; IMAP only if older than this or marked dirty. */
@@ -177,14 +177,82 @@ export class MailIndexStore {
     return covered > asked;
   }
 
-  count(accountId: string, folder: string): number {
+  /**
+   * How many rows this folder holds, counted no further than `cap`.
+   *
+   * The only caller asks whether the index already reaches a requested window,
+   * so an exact count of a 20k-message Archive is 20k rows walked to answer a
+   * question that `cap` rows settle. Omit `cap` for the true count.
+   */
+  count(accountId: string, folder: string, cap?: number): number {
+    if (cap === undefined) {
+      const row = this.db
+        .prepare(
+          `SELECT COUNT(*) as n FROM message_summaries
+           WHERE account_id = ? AND folder = ?`,
+        )
+        .get(accountId, folder) as { n: number };
+      return row.n;
+    }
     const row = this.db
       .prepare(
-        `SELECT COUNT(*) as n FROM message_summaries
-         WHERE account_id = ? AND folder = ?`,
+        `SELECT COUNT(*) as n FROM (
+           SELECT 1 FROM message_summaries
+           WHERE account_id = ? AND folder = ? LIMIT ?
+         )`,
       )
-      .get(accountId, folder) as { n: number };
+      .get(accountId, folder, cap) as { n: number };
     return row.n;
+  }
+
+  /**
+   * Unread per folder for one account, for the rail's badges.
+   *
+   * Driven off mailbox_state, NOT off a GROUP BY over message_summaries. A
+   * GROUP BY returns no row for a synced folder that happens to hold nothing
+   * unread, which is indistinguishable from a folder the index has never
+   * synced at all, and confusing those two is the one thing the badge must
+   * never do: a confident "0" over a folder holding 400 unread destroys trust
+   * in every other count on screen. A mailbox_state row exists only once
+   * applySync has written one, so its presence is exactly "has been synced",
+   * and the returned Map holds a key ONLY for folders that qualify. A folder
+   * absent from the Map is unknown, not empty.
+   *
+   * `exact: false` means the index holds only a window of the folder, fewer
+   * rows than the server's EXISTS. `count` is then a floor, at least this many
+   * and possibly more, and the caller has to render it as "at least" rather
+   * than as the total.
+   *
+   * No schema change and no new index: message_summaries_account_folder_date
+   * already gives each subquery a prefix scan over (account_id, folder).
+   */
+  unreadByFolder(accountId: string): Map<string, FolderUnread> {
+    const rows = this.db
+      .prepare(
+        `SELECT s.folder AS folder,
+                s.exists_count AS existsCount,
+                (SELECT COUNT(*) FROM message_summaries m
+                  WHERE m.account_id = s.account_id AND m.folder = s.folder) AS indexed,
+                (SELECT COUNT(*) FROM message_summaries m
+                  WHERE m.account_id = s.account_id AND m.folder = s.folder
+                    AND m.seen = 0) AS unread
+           FROM mailbox_state s
+          WHERE s.account_id = ?`,
+      )
+      .all(accountId) as Array<{
+      folder: string;
+      existsCount: number;
+      indexed: number;
+      unread: number;
+    }>;
+    const out = new Map<string, FolderUnread>();
+    for (const row of rows) {
+      out.set(row.folder, {
+        count: row.unread,
+        exact: row.indexed >= row.existsCount,
+      });
+    }
+    return out;
   }
 
   isStale(state: MailboxState | null, now = Date.now()): boolean {
@@ -217,7 +285,6 @@ export class MailIndexStore {
     since?: string;
   }): MailMessageSummary[] {
     if (opts.accountIds.length === 0) return [];
-    const placeholders = opts.accountIds.map(() => "?").join(", ");
     const unread = opts.unreadOnly ? "AND seen = 0" : "";
     // Receive time first, for the same reason the provider prefers it: a
     // sender's wrong clock must not hide mail that did arrive in the window.
@@ -225,24 +292,38 @@ export class MailIndexStore {
       ? "AND COALESCE(internal_date, date) >= ?"
       : "";
     const bounds = opts.since ? [opts.since] : [];
-    const rows = this.db
-      .prepare(
-        `SELECT account_id as accountId, folder, uid, id, message_id_enc as messageIdEnc,
+    const offset = opts.offset ?? 0;
+    // One indexed branch per account, unioned, rather than
+    // `account_id IN (...) ORDER BY date DESC`. The index is
+    // (account_id, folder, date DESC): with two or more accounts bound, SQLite
+    // cannot walk it in date order and falls back to sorting every indexed row
+    // of the folder before applying LIMIT. Since "all mailboxes" is the default
+    // inbox, that made the default paint the slowest one. Each branch here is
+    // its own indexed range scan of at most limit+offset rows, and only the
+    // union of those is sorted.
+    const columns = `account_id as accountId, folder, uid, id, message_id_enc as messageIdEnc,
                 from_enc as fromEnc, to_enc as toEnc, subject_enc as subjectEnc,
                 snippet_enc as snippetEnc, date, internal_date as internalDate,
-                seen, has_attachments as hasAttachments
-         FROM message_summaries
-         WHERE account_id IN (${placeholders}) AND folder = ? ${unread} ${window}
-         ORDER BY date DESC
-         LIMIT ? OFFSET ?`,
-      )
-      .all(
-        ...opts.accountIds,
-        opts.folder,
-        ...bounds,
-        opts.limit,
-        opts.offset ?? 0,
-      ) as SummaryRow[];
+                seen, has_attachments as hasAttachments`;
+    const branch = `SELECT * FROM (
+           SELECT ${columns}
+           FROM message_summaries
+           WHERE account_id = ? AND folder = ? ${unread} ${window}
+           ORDER BY date DESC
+           LIMIT ?
+         )`;
+    const params: unknown[] = [];
+    for (const accountId of opts.accountIds) {
+      params.push(accountId, opts.folder, ...bounds, opts.limit + offset);
+    }
+    const sql =
+      opts.accountIds.length === 1
+        ? `${branch} ORDER BY date DESC LIMIT ? OFFSET ?`
+        : `${opts.accountIds.map(() => branch).join(" UNION ALL ")}
+           ORDER BY date DESC LIMIT ? OFFSET ?`;
+    const rows = this.db
+      .prepare(sql)
+      .all(...params, opts.limit, offset) as SummaryRow[];
     const summaries: MailMessageSummary[] = [];
     for (const row of rows) {
       const summary = this.toSummary(row);
@@ -273,13 +354,18 @@ export class MailIndexStore {
     return row ? this.toSummary(row) : null;
   }
 
+  /**
+   * The uids this folder holds, newest first. `.pluck()` so a 50k-message
+   * folder does not allocate 50k wrapper objects on every background sync.
+   */
   listUids(accountId: string, folder: string): number[] {
-    const rows = this.db
+    return this.db
       .prepare(
-        `SELECT uid FROM message_summaries WHERE account_id = ? AND folder = ?`,
+        `SELECT uid FROM message_summaries
+         WHERE account_id = ? AND folder = ? ORDER BY uid DESC`,
       )
-      .all(accountId, folder) as Array<{ uid: number }>;
-    return rows.map((row) => row.uid);
+      .pluck()
+      .all(accountId, folder) as number[];
   }
 
   applySync(

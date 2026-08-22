@@ -21,8 +21,14 @@ import type { UpdateState } from "@/lib/types";
  * exactly how a badge ends up outliving the update it announced.
  */
 
-/** Loopback and a few hundred bytes. Fast enough that a background download shows up. */
+/** An update is waiting to be downloaded or installed: keep the card honest. */
 const IDLE_POLL_MS = 10_000;
+/**
+ * Nothing to watch. UpdateCard is mounted in every view and calls this before
+ * its own "draw nothing" early return, so a flat 10s polled 8,640 times a day
+ * to render nothing at all.
+ */
+const QUIET_POLL_MS = 10 * 60_000;
 /** A live progress bar. The request is loopback and the body is small. */
 const ACTIVE_POLL_MS = 1_000;
 /** Between "check" and its answer, which is one network round trip away. */
@@ -82,12 +88,22 @@ export function useUpdate(): UpdateHandle {
       const status = q.state.data?.status;
       if (status === "downloading") return ACTIVE_POLL_MS;
       if (status === "checking") return CHECKING_POLL_MS;
-      return IDLE_POLL_MS;
+      return status === "available" || status === "ready"
+        ? IDLE_POLL_MS
+        : QUIET_POLL_MS;
     },
     // Polling pauses on a hidden tab by default, which stops a download's
     // progress bar dead the moment the user switches app — and leaves it
     // frozen at whatever percentage it had reached when they come back. The
     // request is loopback and a few hundred bytes; keep it running.
+    //
+    // This stays `true`. It is a boolean, not a callback, so "background only
+    // while downloading" cannot be expressed here — setting it false to save
+    // idle polls silently reintroduced the frozen progress bar, because
+    // queryObserver only fires the interval when this flag is set OR the window
+    // is focused. The idle waste it was meant to fix is handled by
+    // QUIET_POLL_MS above instead, which is the right lever: a hidden idle
+    // window now polls every ten minutes rather than not at all.
     refetchIntervalInBackground: true,
     // The answer is worth refreshing when somebody comes back to the window;
     // it is the moment they are most likely to act on it.

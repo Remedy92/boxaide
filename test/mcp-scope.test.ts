@@ -378,6 +378,8 @@ describe("agent scopes", () => {
   it("gives every profile the web and the lookups, and the CSV import to none but a person's session", async () => {
     for (const profile of SCOPE_PROFILES) {
       expect(scopeAllows(profile, "web_search")).toBe(true);
+      // A run included: reading up on somebody is most of what a run does,
+      // and snippets are not enough to write a first line from.
       expect(scopeAllows(profile, "web_fetch")).toBe(true);
       expect(scopeAllows(profile, "enrich_find_email")).toBe(true);
       expect(scopeAllows(profile, "enrich_verify_email")).toBe(true);

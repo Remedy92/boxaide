@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
   AgentLauncher,
+  AUTOMATION_RUN_PREAMBLE,
   KNOWN_AGENTS,
   LaunchError,
   claudeCopyCredentials,
@@ -37,6 +38,7 @@ import { renderClaudeRunLine } from "../src/agent/agent-stream.js";
 import { DRIVEN_SYSTEM, type DriverChannel } from "../src/agent/driver.js";
 import { parseTabbedModels } from "../src/agent/model-list.js";
 import { claudeLoginScript, watchForClaudeSignIn } from "../src/api/routes.js";
+import { markReviewed } from "../src/memory/reviews.js";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -1096,6 +1098,177 @@ exec /bin/sleep 60
     expect(grokArgs).toContain("MCPTool(boxaide__automation_create)");
     expect(grokArgs).toContain("MCPTool(boxaide__crm_contact_upsert)");
   });
+
+  it("appends the workspace-memory block to every chat kickoff", () => {
+    const dataDir = tempDir();
+    const ctx = {
+      mcpUrl: "http://127.0.0.1:8787/mcp",
+      bearerToken: "secret-token-xyz",
+      dataDir,
+    };
+    const prompt = (id: string) =>
+      KNOWN_AGENTS.find((s) => s.id === id)!.args!(ctx).join("\n");
+
+    // No notes yet: the ask-first offer rides every chat launch, because a
+    // person is at the other end to answer it.
+    for (const id of ["grok", "antigravity", "codex"]) {
+      expect(prompt(id)).toContain("want me to?");
+      expect(prompt(id)).toContain("./memory/");
+    }
+
+    // Notes exist: the index travels instead, and the offer is gone — an
+    // agent that already wrote its notes must not be asked to write them
+    // again. The index is the agent's own file, so a plain write.
+    const memory = join(`${dataDir}-agents`, "workdir", "memory");
+    mkdirSync(memory, { recursive: true });
+    writeFileSync(join(memory, "MEMORY.md"), "# Memory\nAcme ships boats.\n");
+    for (const id of ["grok", "antigravity", "codex"]) {
+      expect(prompt(id)).toContain("Acme ships boats.");
+      expect(prompt(id)).not.toContain("want me to?");
+    }
+  });
+
+  it("inlines workspace memory between the run preamble and the task", async () => {
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
+    let seenPrompt = "";
+    const dataDir = tempDir();
+    const launcher = new AgentLauncher(
+      { ...CTX, dataDir },
+      specs({
+        runArgs: (_ctx, prompt) => {
+          seenPrompt = prompt;
+          return [];
+        },
+      }),
+      { PATH: "" },
+      [bin],
+    );
+
+    // No notes: exactly the old shape, preamble then task.
+    await launcher.runOnce({ runId: "r1", prompt: "do the thing", closeGraceMs: 200 });
+    expect(seenPrompt).toBe(`${AUTOMATION_RUN_PREAMBLE}\n\ndo the thing`);
+
+    // Notes the agent wrote but nobody has read: a run is unattended, so it
+    // gets none of them. See src/memory/reviews.ts.
+    const memory = join(`${dataDir}-agents`, "workdir", "memory");
+    mkdirSync(memory, { recursive: true });
+    const index = "- company.md — what Acme does\n";
+    const company = "Acme ships boats.\n";
+    writeFileSync(join(memory, "MEMORY.md"), index);
+    writeFileSync(join(memory, "company.md"), company);
+    await launcher.runOnce({ runId: "r2", prompt: "do the thing", closeGraceMs: 200 });
+    expect(seenPrompt).toBe(`${AUTOMATION_RUN_PREAMBLE}\n\ndo the thing`);
+
+    // Once a person has read them: preamble, then the notes as background, and
+    // the task still last — never the ask-first offer, which a run has nobody
+    // to answer.
+    markReviewed(dataDir, "MEMORY.md", index);
+    markReviewed(dataDir, "company.md", company);
+    await launcher.runOnce({ runId: "r3", prompt: "do the thing", closeGraceMs: 200 });
+    expect(seenPrompt.startsWith(`${AUTOMATION_RUN_PREAMBLE}\n\n`)).toBe(true);
+    expect(seenPrompt).toContain("Acme ships boats.");
+    expect(seenPrompt).not.toContain("want me to?");
+    expect(seenPrompt.endsWith("\n\ndo the thing")).toBe(true);
+    launcher.close();
+  });
+
+  /**
+   * A scheduled run loses the network: everything but loopback is denied by
+   * the sandbox, and its way out is the allowlisting proxy. macOS only, like
+   * every other confinement assertion — off macOS a workspace launch is
+   * refused outright, which test/agent-sandbox.test.ts covers.
+   */
+  it.skipIf(process.platform !== "darwin")(
+    "points a confined run at its own loopback proxy",
+    async () => {
+      // The fake CLI reports the two things this is about: whether it was
+      // handed a proxy, and whether it can still reach Boxaide directly.
+      const bin = fakeBinDir(
+        "fake-agent",
+        '#!/bin/sh\necho "proxy=$HTTPS_PROXY"\necho "direct=$NO_PROXY"\n',
+      );
+      const launcher = new AgentLauncher(
+        { ...CTX, access: "workspace" as const },
+        specs({ runArgs: () => [] }),
+        { PATH: "" },
+        [bin],
+      );
+      const result = await launcher.runOnce({
+        runId: "r-net",
+        prompt: "do the thing",
+        closeGraceMs: 200,
+      });
+      launcher.close();
+      expect(result.log).toMatch(/proxy=http:\/\/127\.0\.0\.1:\d+/);
+      expect(result.log).toContain("direct=127.0.0.1,localhost,::1");
+      // The boundary announces itself, because a CLI that ignores the proxy
+      // variables is refused by the sandbox instead and says nothing useful.
+      expect(result.log).toContain("[boxaide] network:");
+      expect(result.log).toContain("BOXAIDE_RUN_NETWORK_ALLOW");
+    },
+  );
+
+  /**
+   * The review gate filters the PROMPT. It says nothing on its own about a
+   * CLI that runs shell commands from a run directory two levels under the
+   * notes — so the sandbox has to say it instead, or an unreviewed note is
+   * one `cat` away from the run it was written to be kept from.
+   */
+  it.skipIf(process.platform !== "darwin")(
+    "keeps a scheduled run out of the notes on disk",
+    async () => {
+      const memory = join(`${AGENT_DATA_DIR}-agents`, "workdir", "memory");
+      mkdirSync(memory, { recursive: true });
+      writeFileSync(join(memory, "company.md"), "UNREVIEWED-SECRET\n");
+
+      // The run stands in workdir/runs/<id>, so the notes are ../../memory.
+      const bin = fakeBinDir(
+        "fake-agent",
+        // Absolute path: this launcher runs with an empty PATH.
+        '#!/bin/sh\n/bin/cat ../../memory/company.md 2>&1 || true\n',
+      );
+      const launcher = new AgentLauncher(
+        { ...CTX, access: "workspace" as const },
+        specs({ runArgs: () => [] }),
+        { PATH: "" },
+        [bin],
+      );
+      const result = await launcher.runOnce({
+        runId: "r-notes",
+        prompt: "do the thing",
+        closeGraceMs: 200,
+      });
+      launcher.close();
+      // The run must have actually tried: a log with neither the secret nor a
+      // refusal means the probe never ran and this test proves nothing.
+      expect(result.log).toMatch(/not permitted|Operation not permitted|No such file/i);
+      expect(result.log).not.toContain("UNREVIEWED-SECRET");
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "leaves the network alone when the operator turned the boundary off",
+    async () => {
+      const bin = fakeBinDir(
+        "fake-agent",
+        '#!/bin/sh\necho "proxy=$HTTPS_PROXY"\n',
+      );
+      const launcher = new AgentLauncher(
+        { ...CTX, access: "workspace" as const },
+        specs({ runArgs: () => [] }),
+        { PATH: "", BOXAIDE_RUN_NETWORK: "open" },
+        [bin],
+      );
+      const result = await launcher.runOnce({
+        runId: "r-net-open",
+        prompt: "do the thing",
+        closeGraceMs: 200,
+      });
+      launcher.close();
+      expect(result.log).toContain("proxy=\n");
+      expect(result.log).not.toContain("[boxaide] network:");
+    },
+  );
 
   it("asks the chat agent for its event stream, and a run for plain text", () => {
     // The stream is how the Agent pane knows a launched CLI is still working

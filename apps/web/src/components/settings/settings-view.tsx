@@ -6,6 +6,7 @@ import {
   Info,
   KeyRound,
   Menu,
+  NotebookPen,
   Palette,
   Plug,
   Server,
@@ -21,6 +22,7 @@ import {
   GeneralPanel,
 } from "@/components/settings/settings-panels";
 import { ConnectorsPanel } from "@/components/settings/connectors-panel";
+import { MemoryPanel } from "@/components/settings/memory-panel";
 import { UpdatesPanel } from "@/components/settings/updates-panel";
 import { Button } from "@/components/ui/button";
 import {
@@ -51,6 +53,7 @@ const ROWS: Record<SettingsSection, Row> = {
   connection: { id: "connection", label: "Connection", icon: Server },
   agents: { id: "agents", label: "Agents", icon: Plug },
   connectors: { id: "connectors", label: "Connectors", icon: KeyRound },
+  memory: { id: "memory", label: "What I remember", icon: NotebookPen },
   appearance: { id: "appearance", label: "Appearance", icon: Palette },
   updates: { id: "updates", label: "Updates", icon: ArrowUpCircle },
   about: { id: "about", label: "About", icon: Info },
@@ -198,6 +201,8 @@ function Panel({
       return <AgentsPanel />;
     case "connectors":
       return <ConnectorsPanel />;
+    case "memory":
+      return <MemoryPanel />;
     case "appearance":
       return <AppearancePanel />;
     case "updates":

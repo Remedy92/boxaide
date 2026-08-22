@@ -45,9 +45,11 @@ import { useRailSections } from "@/lib/hooks/use-rail-sections";
 import type { MailAccountMeta } from "@/lib/types";
 
 /**
- * The rail carries provenance and configuration. It carries no counts — the
- * backend returns none, and counting the page we happened to fetch is a
- * different number from the one the mailbox holds.
+ * The rail carries provenance, configuration, and the few counts the backend
+ * can actually stand behind: the automation badge, the outreach queue and a
+ * folder's unread total from the local index. It never counts the page we
+ * happened to fetch, which is a different number from the one the mailbox
+ * holds.
  */
 export function LeftRail({
   collapsed = false,
@@ -322,8 +324,12 @@ export function LeftRail({
             accountRef={app.account}
             activeFolder={app.folder}
             disabled={app.view === "drafts"}
-            onSelect={go((path: string | undefined) => {
+            onSelect={go((path: string | undefined, accountAlias?: string) => {
               app.setView("mail");
+              // Under "All mailboxes" the folder names its own mailbox, and
+              // picking it switches to that mailbox: the path means nothing in
+              // any of the others.
+              if (accountAlias) app.setAccount(accountAlias);
               app.setFolder(path);
             })}
           />

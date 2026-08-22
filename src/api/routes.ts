@@ -14,6 +14,7 @@ import type { MailService } from "../mail/service.js";
 import type { Platform } from "../platform.js";
 import { registerCrmRoutes } from "../crm/routes.js";
 import { registerAutomationRoutes } from "../automation/routes.js";
+import { registerMemoryRoutes } from "../memory/routes.js";
 import { registerOutreachRoutes } from "../outreach/routes.js";
 import { registerConnectorRoutes } from "../connectors/routes.js";
 import {
@@ -206,7 +207,13 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
 // keys with PUT /api/connectors/:id.
 const CORS_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 const CORS_HEADERS = "authorization, content-type";
-const CORS_MAX_AGE = "600";
+// A day, not ten minutes. The web app defaults to a different origin than the
+// API (apps/web/src/lib/constants.ts) and every request carries an
+// Authorization header, so each distinct URL is preflighted — at ten minutes
+// the whole cold-open round-trip count was paid twice, again every ten minutes.
+// The allowlist is enforced per request, so a long-lived preflight cache never
+// widens what an origin may reach.
+const CORS_MAX_AGE = "86400";
 
 /**
  * Origin gate for the *authenticated* API. Loopback always passes, so the
@@ -499,11 +506,18 @@ export function createApi(
 
   app.get("/api/folders", async (c) => {
     const account = c.req.query("account") ?? "";
-    if (!account || account === "all") {
+    // Empty still 400s, "all" no longer does: the rail draws every mailbox at
+    // once and needs to know which folder belongs to which account.
+    if (!account) {
       return c.json({ error: "account is required" }, 400);
     }
     try {
-      return c.json({ folders: await mail.listFolders(account) });
+      const result = await mail.listFolderTree(account);
+      if (account === "all") return c.json(result);
+      // One named mailbox keeps answering with the flat { folders } array. The
+      // command palette, the reader's move menu and use-move all read that
+      // shape, and only "all" needs the grouping.
+      return c.json({ folders: result.groups[0]?.folders ?? [] });
     } catch (err) {
       return c.json(
         { error: err instanceof Error ? err.message : String(err) },
@@ -752,6 +766,7 @@ export function createApi(
   if (platform) {
     registerCrmRoutes(app, platform);
     registerAutomationRoutes(app, platform);
+    registerMemoryRoutes(app, platform);
     registerOutreachRoutes(app, platform);
     registerConnectorRoutes(app, platform);
     registerCalendarRoutes(app, platform, address ?? { host: "127.0.0.1", port: 8787 });
