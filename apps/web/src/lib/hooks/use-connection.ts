@@ -20,12 +20,19 @@ export type ConnectionState =
   | { kind: "unauthorized"; host: string; raw: string }
   | { kind: "ok"; host: string; fixture: boolean; version: string | null };
 
-/** `tokenHint` is the first four characters plus an ellipsis — safe to show. */
-export function useMeta() {
+/**
+ * `tokenHint` is the first four characters plus an ellipsis — safe to show.
+ *
+ * `enabled` because the only consumer is the connection-failure block, which
+ * renders only when the connection is not ok. Fetching it unconditionally put a
+ * request — and, cross-origin, a CORS preflight — on the first render of a mail
+ * view that was working fine.
+ */
+export function useMeta(enabled = true) {
   const ctx = useApiCtx();
   return useQuery({
     queryKey: ["meta", ctx.baseUrl, ctx.token],
-    enabled: ctx.baseUrl.length > 0 && ctx.token.length > 0,
+    enabled: enabled && ctx.baseUrl.length > 0 && ctx.token.length > 0,
     queryFn: ({ signal }) => getMeta({ ...ctx, signal }),
     staleTime: 5 * 60_000,
     retry: false,

@@ -4,7 +4,10 @@ import { Store } from "../src/db/store.js";
 import { FixtureProvider } from "../src/provider/fixture.js";
 import { MailService } from "../src/mail/service.js";
 import { MailIndexStore } from "../src/mail/index-store.js";
-import type { AccountCredentials } from "../src/provider/types.js";
+import type {
+  AccountCredentials,
+  MailMessageSummary,
+} from "../src/provider/types.js";
 
 const baseCreds: AccountCredentials = {
   imapHost: "fixture",
@@ -170,6 +173,82 @@ describe("local mail index", () => {
     expect(all.messages.map((m) => m.subject)).toEqual(
       expect.arrayContaining(["Work ping", "Secret subject", "Already read"]),
     );
+  });
+
+  it("orders and pages a three-account unified list by date", async () => {
+    // The unified list is built from one indexed branch per account, unioned.
+    // Ordering, LIMIT, OFFSET and unreadOnly all have to survive that, and each
+    // branch has to be asked for limit+offset rows or a later page loses
+    // messages from whichever account happened to sort late.
+    const ids = [accountId];
+    for (const alias of ["work", "side"]) {
+      const acct = await mail.connectAccount({
+        alias,
+        email: `you@${alias}.test`,
+        creds: {
+          ...baseCreds,
+          auth: { kind: "password", user: `you@${alias}.test`, pass: "ok" },
+        },
+      });
+      ids.push(acct.id);
+    }
+    // A folder of its own, so the seeded INBOX mail does not interleave.
+    const folder = "Archive";
+    const base = Date.parse("2026-03-01T00:00:00.000Z");
+    // Interleaved on purpose: newest to oldest the accounts alternate, so a
+    // per-account LIMIT that ignored the others would hand back the wrong page.
+    ids.forEach((id, accountIndex) => {
+      for (let n = 0; n < 9; n += 1) {
+        const rank = n * ids.length + accountIndex;
+        mail.index.upsertSummary({
+          id: `${id}:${folder}:${n + 1}`,
+          accountId: id,
+          uid: n + 1,
+          messageId: `<${id}-${n}@t>`,
+          folder,
+          from: "s@example.com",
+          to: "you@example.com",
+          subject: `rank-${String(rank).padStart(2, "0")}`,
+          date: new Date(base - rank * 60_000).toISOString(),
+          internalDate: new Date(base - rank * 60_000).toISOString(),
+          snippet: "a line of preview text",
+          seen: rank % 2 === 0,
+          hasAttachments: false,
+        });
+      }
+    });
+    const rank = (i: number) => `rank-${String(i).padStart(2, "0")}`;
+
+    expect(
+      mail.index
+        .listMessages({ accountIds: ids, folder, limit: 27 })
+        .map((m) => m.subject),
+    ).toEqual(Array.from({ length: 27 }, (_, i) => rank(i)));
+
+    expect(
+      mail.index
+        .listMessages({ accountIds: ids, folder, limit: 5 })
+        .map((m) => m.subject),
+    ).toEqual([rank(0), rank(1), rank(2), rank(3), rank(4)]);
+
+    expect(
+      mail.index
+        .listMessages({ accountIds: ids, folder, limit: 5, offset: 5 })
+        .map((m) => m.subject),
+    ).toEqual([rank(5), rank(6), rank(7), rank(8), rank(9)]);
+
+    expect(
+      mail.index
+        .listMessages({ accountIds: ids, folder, limit: 4, unreadOnly: true })
+        .map((m) => m.subject),
+    ).toEqual([rank(1), rank(3), rank(5), rank(7)]);
+
+    // One account still takes the single-branch plan.
+    expect(
+      mail.index
+        .listMessages({ accountIds: [ids[0]], folder, limit: 3 })
+        .map((m) => m.subject),
+    ).toEqual([rank(0), rank(3), rank(6)]);
   });
 
   it("grows the indexed window after a tray-sized first fill", async () => {
@@ -546,5 +625,101 @@ describe("mail index upgrade", () => {
     });
     expect(listed.map((m) => m.subject)).toEqual(["Survived the upgrade"]);
     expect(index.needsSinceFill(null, new Date().toISOString())).toBe(true);
+  });
+});
+
+describe("unread per folder from the index", () => {
+  let store: Store;
+  let index: MailIndexStore;
+
+  function summary(
+    folder: string,
+    uid: number,
+    seen: boolean,
+  ): MailMessageSummary {
+    return {
+      id: `acct:${folder}:${uid}`,
+      accountId: "acct",
+      uid,
+      folder,
+      from: "a@b.c",
+      to: "you@personal.test",
+      subject: `Message ${uid}`,
+      date: new Date().toISOString(),
+      internalDate: new Date().toISOString(),
+      snippet: "body",
+      seen,
+      hasAttachments: false,
+    };
+  }
+
+  /** One sync pass: writes the mailbox_state row that marks a folder synced. */
+  function sync(
+    folder: string,
+    messages: MailMessageSummary[],
+    exists = messages.length,
+  ): void {
+    index.applySync("acct", folder, {
+      replaced: true,
+      messages,
+      vanishedUids: [],
+      flagUpdates: [],
+      cursor: {
+        uidvalidity: 1,
+        highestModseq: "1",
+        uidnext: messages.length + 1,
+        exists,
+      },
+    });
+  }
+
+  beforeEach(() => {
+    store = new Store(randomBytes(32), ":memory:");
+    index = new MailIndexStore(store.db, store.masterKey);
+  });
+
+  it("counts unseen rows for a synced folder", () => {
+    sync("INBOX", [
+      summary("INBOX", 1, false),
+      summary("INBOX", 2, true),
+      summary("INBOX", 3, false),
+    ]);
+    expect(index.unreadByFolder("acct").get("INBOX")).toEqual({
+      count: 2,
+      exact: true,
+    });
+  });
+
+  it("leaves a never-synced folder OUT of the map rather than reporting zero", () => {
+    sync("INBOX", [summary("INBOX", 1, false)]);
+    const map = index.unreadByFolder("acct");
+    // Absence, not zero: a confident 0 over a folder nobody has looked at is
+    // exactly the lie the badge must never tell.
+    expect(map.has("Never/Synced")).toBe(false);
+    expect(map.get("Never/Synced")).toBeUndefined();
+  });
+
+  it("reports a real zero as present with count 0", () => {
+    sync("Archive", [
+      summary("Archive", 1, true),
+      summary("Archive", 2, true),
+    ]);
+    const map = index.unreadByFolder("acct");
+    expect(map.has("Archive")).toBe(true);
+    expect(map.get("Archive")).toEqual({ count: 0, exact: true });
+  });
+
+  it("marks the count inexact when the index holds only a window", () => {
+    // Two rows indexed, the server says the folder holds 500.
+    sync("Big", [summary("Big", 1, false), summary("Big", 2, false)], 500);
+    expect(index.unreadByFolder("acct").get("Big")).toEqual({
+      count: 2,
+      exact: false,
+    });
+  });
+
+  it("keeps one account's folders out of another's map", () => {
+    sync("INBOX", [summary("INBOX", 1, false)]);
+    expect(index.unreadByFolder("other").size).toBe(0);
   });
 });

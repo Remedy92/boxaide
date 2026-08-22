@@ -32,6 +32,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { canMoveOutOf } from "@/lib/dnd/message-drag";
 import { useFolders } from "@/lib/hooks/use-folders";
 import { moveDestinations } from "@/lib/hooks/use-move";
 import { copyToClipboard } from "@/lib/utils";
@@ -83,12 +84,20 @@ export function ReaderActionBar({
   const disabled = !message;
 
   /* Folders are per mailbox, and the mailbox is the open message's own rather
-     than `app.account`, which reads "all" in the unified inbox and is exactly
-     the value /api/folders 400s on. Asked for only while the menu is open, so
-     reading mail costs no folder LIST at all, and the answer is cached for five
-     minutes after that. */
+     than `app.account`, which reads "all" in the unified inbox. /api/folders
+     answers "all" with a grouped shape now, but this menu wants one mailbox's
+     flat list and knows exactly which mailbox that is. Asked for only while the
+     menu is open, so reading mail costs no folder LIST at all, and the answer
+     is cached for five minutes after that. */
   const folders = useFolders(menuOpen && message ? message.accountId : "");
   const destinations = moveDestinations(folders.data, message?.folder);
+  /* A draft has no destinations at all: the server guards Drafts in both
+     directions. Saying "no other folder" over a mailbox full of them would be
+     a lie. */
+  const stuckInDrafts =
+    message !== null &&
+    folders.data !== undefined &&
+    !canMoveOutOf(message.folder, folders.data);
 
   const copy = async (value: string, label: string) => {
     const ok = await copyToClipboard(value);
@@ -208,7 +217,9 @@ export function ReaderActionBar({
                 </DropdownMenuItem>
               ) : destinations.length === 0 ? (
                 <DropdownMenuItem disabled>
-                  No other folder on this mailbox
+                  {stuckInDrafts
+                    ? "A draft cannot be moved out of Drafts"
+                    : "No other folder on this mailbox"}
                 </DropdownMenuItem>
               ) : (
                 destinations.map((folder) => (

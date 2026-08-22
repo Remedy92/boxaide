@@ -810,7 +810,10 @@ describe("Store.open database name", () => {
     expect(existsSync(join(dir, "mailmux.db"))).toBe(false);
   });
 
-  it("keeps using sley.db when boxaide.db is absent", () => {
+  // The rows have to come across, not just the file: a migration that renamed
+  // an empty database onto the current name would read as a working install
+  // with an empty mailbox, which is the failure nobody notices in time.
+  it("renames sley.db onto boxaide.db and keeps its rows", () => {
     const dir = mkdtempSync(join(tmpdir(), "boxaide-db-"));
     const key = randomBytes(32);
     writeFileSync(join(dir, "sley.db"), "");
@@ -825,10 +828,11 @@ describe("Store.open database name", () => {
     const store = Store.open(dir, key);
     expect(store.listTurns().map((t) => t.text)).toEqual(["sley"]);
     store.close();
-    expect(existsSync(join(dir, "boxaide.db"))).toBe(false);
+    expect(existsSync(join(dir, "boxaide.db"))).toBe(true);
+    expect(existsSync(join(dir, "sley.db"))).toBe(false);
   });
 
-  it("keeps using mailmux.db when boxaide.db is absent", () => {
+  it("renames mailmux.db onto boxaide.db and keeps its rows", () => {
     const dir = mkdtempSync(join(tmpdir(), "boxaide-db-"));
     const key = randomBytes(32);
     writeFileSync(join(dir, "mailmux.db"), "");
@@ -843,7 +847,8 @@ describe("Store.open database name", () => {
     const store = Store.open(dir, key);
     expect(store.listTurns().map((t) => t.text)).toEqual(["legacy"]);
     store.close();
-    expect(existsSync(join(dir, "boxaide.db"))).toBe(false);
+    expect(existsSync(join(dir, "boxaide.db"))).toBe(true);
+    expect(existsSync(join(dir, "mailmux.db"))).toBe(false);
   });
 });
 
@@ -897,5 +902,188 @@ describe("MailService send guard recipients", () => {
     ).rejects.toThrow("invalid recipients: to/cc/bcc must be strings");
     expect(provider.getSent()).toHaveLength(0);
     store.close();
+  });
+});
+
+describe("MailService.listFolderTree (additive, index-backed)", () => {
+  let mail: MailService;
+  let provider: FixtureProvider;
+
+  beforeEach(async () => {
+    const s = makeService();
+    mail = s.mail;
+    provider = s.provider;
+    await mail.connectAccount({
+      alias: "work",
+      email: "you@work.test",
+      creds: {
+        ...baseCreds,
+        auth: { kind: "password", user: "you@work.test", pass: "ok" },
+      },
+    });
+  });
+
+  it("groups one mailbox and carries the index's unread number", async () => {
+    const work = mail.listAccounts()[0];
+    provider.seedAccount(work.id, "you@work.test", [
+      { subject: "Unread one", from: "a@b.c", bodyText: "x", seen: false },
+      { subject: "Unread two", from: "a@b.c", bodyText: "y", seen: false },
+      { subject: "Read one", from: "a@b.c", bodyText: "z", seen: true },
+    ]);
+    // The index only knows a folder once a list has filled it.
+    await mail.listMessages("work", { limit: 20 });
+
+    const result = await mail.listFolderTree("work");
+    expect(result.errors).toEqual([]);
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0].alias).toBe("work");
+    expect(result.groups[0].email).toBe("you@work.test");
+
+    const inbox = result.groups[0].folders.find((f) => f.path === "INBOX")!;
+    expect(inbox.unread).toEqual({ count: 2, exact: true });
+    expect(inbox.delimiter).toBe("/");
+
+    // The old method is untouched and still answers a bare array.
+    const flat = await mail.listFolders("work");
+    expect(flat.find((f) => f.path === "INBOX")).toBeTruthy();
+    expect("unread" in flat[0]).toBe(false);
+  });
+
+  it("omits unread entirely for a folder the index never synced", async () => {
+    const work = mail.listAccounts()[0];
+    provider.seedAccount(work.id, "you@work.test", [
+      { subject: "Filed", from: "a@b.c", bodyText: "x", folder: "Receipts" },
+    ]);
+    const result = await mail.listFolderTree("work");
+    const receipts = result.groups[0].folders.find(
+      (f) => f.path === "Receipts",
+    )!;
+    expect(receipts.unread).toBeUndefined();
+  });
+
+  it("returns a group per account and an empty errors array for all", async () => {
+    await mail.connectAccount({
+      alias: "personal",
+      email: "you@personal.test",
+      creds: {
+        ...baseCreds,
+        auth: { kind: "password", user: "you@personal.test", pass: "ok" },
+      },
+    });
+    const result = await mail.listFolderTree("all");
+    expect(result.errors).toEqual([]);
+    expect(result.groups.map((g) => g.alias)).toEqual(["work", "personal"]);
+  });
+
+  it("keeps a single unreachable mailbox out of the way of the rest", async () => {
+    await mail.connectAccount({
+      alias: "broken",
+      email: "you@broken.test",
+      creds: {
+        ...baseCreds,
+        auth: { kind: "password", user: "you@broken.test", pass: "ok" },
+      },
+    });
+    const broken = mail.listAccounts().find((a) => a.alias === "broken")!;
+    const orig = provider.listFolders.bind(provider);
+    provider.listFolders = async (account) => {
+      if (account.id === broken.id) throw new Error("connect ECONNREFUSED");
+      return orig(account);
+    };
+
+    const result = await mail.listFolderTree("all");
+    expect(result.groups.map((g) => g.alias)).toEqual(["work"]);
+    expect(result.errors).toEqual([
+      { account: "broken", error: "connect ECONNREFUSED" },
+    ]);
+  });
+
+  it("throws for one named mailbox that does not exist", async () => {
+    await expect(mail.listFolderTree("nosuch")).rejects.toThrow(
+      /account not found: nosuch/,
+    );
+  });
+});
+
+describe("GET /api/folders over HTTP (shipped routes)", () => {
+  async function runtimeWithAccounts() {
+    const masterKey = randomBytes(32);
+    const store = new Store(masterKey, ":memory:");
+    const provider = new FixtureProvider();
+    const runtime = createRuntime({
+      dataDir: ":memory:",
+      masterKey,
+      bearerToken: "test-token",
+      host: "127.0.0.1",
+      port: 0,
+      fixtureMode: true,
+      store,
+      provider,
+      webRoot: WEB_FIXTURE,
+    });
+    const headers = {
+      Authorization: "Bearer test-token",
+      "Content-Type": "application/json",
+    };
+    for (const alias of ["work", "personal"]) {
+      const res = await runtime.app.request("/api/accounts", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          alias,
+          email: `you@${alias}.test`,
+          username: `you@${alias}.test`,
+          password: "ok",
+          imapHost: "fixture",
+          smtpHost: "fixture",
+        }),
+      });
+      expect(res.status).toBe(201);
+    }
+    return { runtime, headers };
+  }
+
+  it("answers account=all with groups and errors", async () => {
+    const { runtime, headers } = await runtimeWithAccounts();
+    const res = await runtime.app.request("/api/folders?account=all", {
+      headers,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body.groups)).toBe(true);
+    expect(body.groups.map((g: { alias: string }) => g.alias)).toEqual([
+      "work",
+      "personal",
+    ]);
+    expect(body.errors).toEqual([]);
+    expect(body.folders).toBeUndefined();
+  });
+
+  it("still 400s on an empty account", async () => {
+    const { runtime, headers } = await runtimeWithAccounts();
+    const res = await runtime.app.request("/api/folders?account=", { headers });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "account is required" });
+  });
+
+  it("keeps the flat { folders } shape for one named mailbox", async () => {
+    const { runtime, headers } = await runtimeWithAccounts();
+    const res = await runtime.app.request("/api/folders?account=work", {
+      headers,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body.folders)).toBe(true);
+    expect(body.folders.map((f: { path: string }) => f.path)).toContain("INBOX");
+    expect(body.groups).toBeUndefined();
+  });
+
+  it("400s on an account that does not exist", async () => {
+    const { runtime, headers } = await runtimeWithAccounts();
+    const res = await runtime.app.request("/api/folders?account=nosuch", {
+      headers,
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/account not found: nosuch/);
   });
 });
