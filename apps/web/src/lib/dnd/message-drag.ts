@@ -1,6 +1,5 @@
 "use client";
 
-import * as React from "react";
 import type { MailFolder } from "@/lib/types";
 
 /**
@@ -17,8 +16,9 @@ import type { MailFolder } from "@/lib/types";
  * set in use-move.ts, and it is deliberate for the same kind of reason: the
  * drag is one fact about the whole window, not state belonging to any one row.
  *
- * Everything except useMessageDrag is pure, so a root vitest test can exercise
- * the drop rules without a DOM.
+ * Nothing here imports React, so a root vitest test can exercise the drop rules
+ * without a DOM and without apps/web/node_modules. The React binding onto this
+ * singleton lives in use-message-drag.ts for exactly that reason.
  */
 
 export const MESSAGE_DRAG_MIME = "application/x-boxaide-message+json";
@@ -125,18 +125,4 @@ export function subscribeMessageDrag(listener: () => void): () => void {
   return () => {
     watchers.delete(listener);
   };
-}
-
-/* Null on the server, so the prerendered HTML and the first client render
-   agree: nothing is being dragged before the page is interactive. */
-function serverSnapshot(): MessageDrag | null {
-  return null;
-}
-
-export function useMessageDrag(): MessageDrag | null {
-  return React.useSyncExternalStore(
-    subscribeMessageDrag,
-    currentMessageDrag,
-    serverSnapshot,
-  );
 }

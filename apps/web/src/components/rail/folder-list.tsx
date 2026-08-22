@@ -20,9 +20,9 @@ import { useMoveTo } from "@/lib/hooks/use-move";
 import {
   MESSAGE_DRAG_MIME,
   canDropOn,
-  useMessageDrag,
   type MessageDrag,
 } from "@/lib/dnd/message-drag";
+import { useMessageDrag } from "@/lib/dnd/use-message-drag";
 import type { FolderGroup, MailFolder, FolderUnread } from "@/lib/types";
 
 /**
