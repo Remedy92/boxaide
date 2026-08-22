@@ -39,6 +39,8 @@ export const MessageRow = React.memo(function MessageRow({
   onArchive,
   onTrash,
   onAskAgent,
+  onDragStart,
+  onDragEnd,
 }: {
   message: MailMessageSummary;
   selected: boolean;
@@ -61,6 +63,13 @@ export const MessageRow = React.memo(function MessageRow({
   onArchive: (message: MailMessageSummary) => void;
   onTrash: (message: MailMessageSummary) => void;
   onAskAgent: (message: MailMessageSummary) => void;
+  /* Also stable across parent renders, for the same reason as the five above.
+     Dragging a row onto a folder in the rail files it there. */
+  onDragStart: (
+    message: MailMessageSummary,
+    event: React.DragEvent<HTMLLIElement>,
+  ) => void;
+  onDragEnd: () => void;
 }) {
   const { accountId, id } = message;
 
@@ -122,6 +131,17 @@ export const MessageRow = React.memo(function MessageRow({
              Shift+F10 and the Menu key make the browser fire the same
              contextmenu event on the focused row. */
           onContextMenu={select}
+          draggable
+          /* Dragging selects first, the same rule as the right button above and
+             for the same reason: a drop that files one message while the reader
+             shows another is a way to file the wrong mail. It is also what makes
+             the palette's Move page a true equivalent of the drag, because the
+             palette acts on exactly this selection. */
+          onDragStart={(event) => {
+            select();
+            onDragStart(message, event);
+          }}
+          onDragEnd={onDragEnd}
           onKeyDown={(event) => {
             if (event.key !== "Enter" && event.key !== " ") return;
             if (event.metaKey || event.ctrlKey || event.altKey) return;

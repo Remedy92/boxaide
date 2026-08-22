@@ -42,6 +42,7 @@ const GROUPS: Array<[string, Array<[string, string[]]>]> = [
       ["Toggle read / unread", ["u"]],
       ["Archive", ["e"]],
       ["Delete", ["#"]],
+      ["Move to folder", ["m"]],
       ["Reply", ["r"]],
       ["Reply all", ["a"]],
       ["Forward", ["f"]],

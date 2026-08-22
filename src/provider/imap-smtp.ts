@@ -1626,10 +1626,15 @@ export class ImapSmtpProvider implements MailProvider {
   async listFolders(account: ProviderAccount): Promise<MailFolder[]> {
     return withImap(account.id, account.creds, async (client) => {
       const boxes = await client.list();
+      // The separator is per server, "/" on some and "." on others. The rail
+      // splits paths into a tree with it, so pass it through rather than let
+      // the reader guess which character is the separator and which is part of
+      // a mailbox name.
       return boxes.map((b) => ({
         name: b.name,
         path: b.path,
         specialUse: b.specialUse,
+        delimiter: b.delimiter,
       }));
     });
   }
