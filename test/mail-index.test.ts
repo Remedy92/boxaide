@@ -518,4 +518,33 @@ describe("mail index upgrade", () => {
     expect(listed.map((m) => m.subject)).toEqual(["Survived the upgrade"]);
     expect(index.needsSinceFill(null, new Date().toISOString())).toBe(true);
   });
+
+  it("lists a message whose snippet and subject are empty", () => {
+    const empty = new Store(randomBytes(32), ":memory:");
+    const index = new MailIndexStore(empty.db, empty.masterKey);
+    index.upsertSummary({
+      id: "acct:INBOX:1",
+      accountId: "acct",
+      uid: 1,
+      messageId: "<invite@example.com>",
+      folder: "INBOX",
+      // A calendar invite carries no body text and sometimes no subject.
+      from: "organiser@example.com",
+      to: "you@example.com",
+      subject: "",
+      date: new Date().toISOString(),
+      snippet: "",
+      seen: false,
+      hasAttachments: false,
+    });
+    const listed = index.listMessages({
+      accountIds: ["acct"],
+      folder: "INBOX",
+      limit: 10,
+    });
+    expect(listed).toHaveLength(1);
+    expect(listed[0].subject).toBe("");
+    expect(listed[0].snippet).toBe("");
+    expect(listed[0].from).toBe("organiser@example.com");
+  });
 });

@@ -23,7 +23,9 @@ export function decryptSecret(masterKey: Buffer, payload: string): string {
     throw new Error("masterKey must be 32 bytes");
   }
   const buf = Buffer.from(payload, "base64");
-  if (buf.length < 12 + 16 + 1) throw new Error("invalid secret payload");
+  // 12-byte nonce + 16-byte tag is a complete payload: GCM ciphertext for the
+  // empty string is zero bytes, so "" must round-trip rather than be rejected.
+  if (buf.length < 12 + 16) throw new Error("invalid secret payload");
   const nonce = buf.subarray(0, 12);
   const tag = buf.subarray(12, 28);
   const data = buf.subarray(28);
