@@ -34,7 +34,7 @@
  *    docs/specs/agent-platform.md invariant 4.
  */
 import { randomUUID } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import {
   copyFileSync,
   chmodSync,
@@ -633,16 +633,50 @@ function claudeParentHome(parentEnv: NodeJS.ProcessEnv): string {
 }
 
 /**
+ * Reads OAuth credentials stored in macOS Keychain by Claude Code.
+ */
+export function claudeReadKeychainCredentials(): string | null {
+  if (process.platform !== "darwin") return null;
+  try {
+    const raw = execFileSync(
+      "/usr/bin/security",
+      ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+      { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { claudeAiOauth?: { accessToken?: string; expiresAt?: number } };
+    if (parsed?.claudeAiOauth?.accessToken) {
+      return JSON.stringify({ claudeAiOauth: parsed.claudeAiOauth }, null, 2);
+    }
+  } catch {
+    // No keychain item, security tool failed, or malformed JSON
+  }
+  return null;
+}
+
+function claudeCredentialsExpired(path: string): boolean {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+      claudeAiOauth?: { expiresAt?: number };
+    };
+    if (parsed?.claudeAiOauth?.expiresAt && parsed.claudeAiOauth.expiresAt < Date.now()) {
+      return true;
+    }
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Auth is the one thing the isolated home must inherit.
  *
  * Copied per launch rather than symlinked: `claude` rewrites this file when it
  * refreshes a token, and through a symlink that write lands in the user's own
  * ~/.claude/.credentials.json — a process Boxaide is responsible for must not
  * edit the user's terminal auth. prepare runs before every spawn, so the copy
- * is at most one run stale. On macOS the credentials live in the keychain and
- * there is no file at all; then nothing is copied and the CLI finds its own —
- * keyed to the config directory, which is why a login made inside the isolated
- * home (the sign-in route's job) is the only one a launch can actually see.
+ * is at most one run stale. On macOS the credentials live in the keychain;
+ * we read the active token from Keychain and sync it into the isolated home.
  *
  * Never over a login the home owns. Once `claude /login` has run inside the
  * isolated home, that home's credential — keychain entry or file — is the real
@@ -652,15 +686,30 @@ function claudeParentHome(parentEnv: NodeJS.ProcessEnv): string {
  */
 export function claudeCopyCredentials(parentHome: string, home: string): void {
   if (claudeHomeOwnsLogin(home)) return;
-  try {
-    copySecret(
-      join(parentHome, ".credentials.json"),
-      join(home, ".credentials.json"),
-    );
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
-    // Unreadable credentials are not fatal: the CLI reports its own auth error,
-    // and a prepare that throws would fail the launch instead.
+  const parent = join(parentHome, ".credentials.json");
+  const dest = join(home, ".credentials.json");
+  if (existsSync(parent)) {
+    try {
+      copySecret(parent, dest);
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    }
+  }
+  // When running against the default user home on macOS, Claude stores auth in Keychain.
+  // Sync the active Keychain token into the isolated home if missing or expired.
+  if (
+    parentHome === join(homedir(), ".claude") &&
+    (!existsSync(dest) || claudeCredentialsExpired(dest))
+  ) {
+    const keychain = claudeReadKeychainCredentials();
+    if (keychain) {
+      try {
+        writeSecret(dest, keychain);
+      } catch {
+        // Unwritable
+      }
+    }
   }
 }
 
@@ -713,6 +762,16 @@ export function claudeHealCredentials(parentHome: string, home: string): boolean
     } catch {
       // Unreadable or unwritable. The delete above already improved matters,
       // and a failed copy is not worth failing the turn over.
+    }
+  } else if (parentHome === join(homedir(), ".claude")) {
+    const keychain = claudeReadKeychainCredentials();
+    if (keychain) {
+      try {
+        writeSecret(copied, keychain);
+        healed = true;
+      } catch {
+        // Unwritable
+      }
     }
   }
   return healed;
