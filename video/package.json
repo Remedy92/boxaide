@@ -1,0 +1,30 @@
+{
+  "name": "boxaide-launch-video",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "remotion studio",
+    "music": "node scripts/make-music.mjs",
+    "vo": "node scripts/make-voiceover.mjs --voice Adrian",
+    "vo:dry": "node scripts/make-voiceover.mjs --dry",
+    "build": "npm run music && remotion render LaunchX out/boxaide-launch-x.mp4",
+    "build:square": "remotion render LaunchSquare out/boxaide-launch-square.mp4",
+    "build:silent": "remotion render LaunchXSilent out/boxaide-launch-x-silent.mp4",
+    "still": "remotion still Poster out/poster.png"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.515",
+    "@remotion/google-fonts": "^4.0.515",
+    "@remotion/shapes": "^4.0.515",
+    "@remotion/transitions": "^4.0.515",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "remotion": "^4.0.515"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "typescript": "^7.0.2"
+  }
+}
