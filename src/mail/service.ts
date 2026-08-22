@@ -198,12 +198,13 @@ export class MailService {
     }
 
     const errors: Array<{ account: string; error: string }> = [];
-    await Promise.all(
+    // ensureFresh hands back the state it already loaded, so the lastError
+    // sweep below does not re-run the same mailbox_state query per account.
+    const lastErrors = await Promise.all(
       accounts.map(async (row) => {
         try {
-          const account = this.resolve(row.id);
-          await this.ensureFresh(
-            account,
+          return await this.ensureFresh(
+            row.id,
             folder,
             limit,
             opts.refresh === true,
@@ -213,16 +214,17 @@ export class MailService {
           this.index.setLastError(row.id, folder, errText(err));
           if (accountRef !== "all") throw err;
           errors.push({ account: row.alias, error: errText(err) });
+          return null;
         }
       }),
     );
 
-    for (const row of accounts) {
-      const last = this.index.getState(row.id, folder)?.lastError;
+    accounts.forEach((row, i) => {
+      const last = lastErrors[i];
       if (last && !errors.some((e) => e.account === row.alias)) {
         errors.push({ account: row.alias, error: last });
       }
-    }
+    });
 
     return {
       messages: this.index.listMessages({
@@ -477,42 +479,60 @@ export class MailService {
   /**
    * Empty or short window: wait for IMAP. Warm cache: return immediately and
    * refresh in the background when dirty or older than 30s.
+   *
+   * Returns the folder's standing `lastError` so the caller does not re-read
+   * the state row it just loaded here.
+   *
+   * Takes an account id, not a resolved ProviderAccount: resolving costs an
+   * accounts row read and an AES-GCM decrypt of the IMAP password, and the warm
+   * path never opens a connection. The decrypt happens only in the branches
+   * that actually reach IMAP.
    */
   private async ensureFresh(
-    account: ProviderAccount,
+    accountId: string,
     folder: string,
     limit: number,
     force = false,
     since?: string,
-  ): Promise<void> {
-    const state = this.index.getState(account.id, folder);
+  ): Promise<string | null> {
+    const state = this.index.getState(accountId, folder);
     const refreshLater = () => {
       if (!state?.dirty && !this.index.isStale(state)) return;
-      void this.syncFolder(account, folder, limit).catch((err) => {
-        this.index.setLastError(account.id, folder, errText(err));
-      });
+      void this.syncFolder(this.resolve(accountId), folder, limit).catch(
+        (err) => {
+          this.index.setLastError(accountId, folder, errText(err));
+        },
+      );
     };
+    /** The error standing after an awaited sync, which may have cleared it. */
+    const settled = () => this.index.getState(accountId, folder)?.lastError ?? null;
     // A dated ask is not a window ask, so the window rules below do not apply
     // to it: holding the newest `limit` rows says nothing about whether the
     // index reaches back to the instant the caller named. Fill by date once,
     // then answer from SQLite for as long as that coverage stands.
     if (since) {
       if (this.index.needsSinceFill(state, since)) {
-        await this.syncFolder(account, folder, limit, { since });
-        return;
+        await this.syncFolder(this.resolve(accountId), folder, limit, { since });
+        return settled();
       }
       refreshLater();
-      return;
+      return state?.lastError ?? null;
     }
-    const count = this.index.count(account.id, folder);
+    // Bounded: the question is only whether the index already holds `limit`
+    // rows, and an exact count of a 20k-message Archive walks 20k rows to
+    // answer it.
+    const count = this.index.count(accountId, folder, limit);
     const exists = state?.exists ?? 0;
     const needsFill =
       count === 0 || (count < limit && exists > 0 && count < exists);
     if (force || needsFill) {
-      await this.syncFolder(account, folder, limit, { fullWindow: needsFill });
-      return;
+      await this.syncFolder(this.resolve(accountId), folder, limit, {
+        fullWindow: needsFill,
+      });
+      return settled();
     }
     refreshLater();
+    return state?.lastError ?? null;
   }
 
   private async syncFolder(

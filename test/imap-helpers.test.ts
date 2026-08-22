@@ -398,6 +398,15 @@ describe("accountMailboxPaths (the per-account LIST cache)", () => {
       archive: "Archive",
       trash: "Trash",
       drafts: "Drafts",
+      // No \\Sent mailbox in this fixture, and none named like one.
+      sent: null,
+      // The raw LIST is cached alongside the resolved paths so /api/folders,
+      // listDrafts and appendToSent all read it instead of LISTing again.
+      boxes: withArchive.map((b) => ({
+        name: b.name,
+        path: b.path,
+        specialUse: b.specialUse,
+      })),
       at: 1_000,
     });
     expect(b).toBe(a);

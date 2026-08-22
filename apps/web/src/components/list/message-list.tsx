@@ -43,7 +43,8 @@ export function MessageList({
   const settings = useSettings();
   const accounts = useAccounts();
   const connection = useConnection();
-  const meta = useMeta();
+  // Only the connection-failure block reads this; see useMeta.
+  const meta = useMeta(connection.kind !== "ok");
   const queryClient = useQueryClient();
   const prefetch = usePrefetchMessage();
   const agent = useAgent();

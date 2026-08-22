@@ -572,7 +572,10 @@ async function attachSnippets(
     if (uids) uids.push(head.uid);
     else groups.set(key, [head.uid]);
   }
-  for (const [key, uids] of groups) {
+  // Concurrent, not sequential: imapflow pipelines commands over the one
+  // session, so a mixed inbox's 3-6 distinct part keys cost one batch of round
+  // trips instead of one after another. Each group still fails alone.
+  await Promise.all([...groups].map(async ([key, uids]) => {
     try {
       for await (const msg of client.fetch(
         uids,
@@ -595,7 +598,7 @@ async function attachSnippets(
         `snippet fetch failed for part ${key} (${uids.length} messages): ${imapErrorText(err)}`,
       );
     }
-  }
+  }));
   return snippets;
 }
 
@@ -787,6 +790,9 @@ type CachedMailboxPaths = {
   archive: string | null;
   trash: string | null;
   drafts: string | null;
+  sent: string | null;
+  /** The raw LIST, so /api/folders reads this cache instead of its own LIST. */
+  boxes: Array<{ name: string; path: string; specialUse?: string }>;
   at: number;
 };
 
@@ -834,6 +840,12 @@ export async function accountMailboxPaths(
     archive: archiveMailboxPath(boxes),
     trash: trashMailboxPath(boxes),
     drafts: draftsMailboxPath(boxes),
+    sent: sentMailboxPath(boxes),
+    boxes: boxes.map((b) => ({
+      name: b.name,
+      path: b.path,
+      specialUse: b.specialUse,
+    })),
     at: now,
   };
   mailboxPathCache.set(accountId, fresh);
@@ -1477,8 +1489,7 @@ export class ImapSmtpProvider implements MailProvider {
     raw: Buffer,
   ): Promise<{ folder: string; summary: MailMessageSummary | null }> {
     return withImap(account.id, account.creds, async (client) => {
-      const boxes = await client.list();
-      const path = sentMailboxPath(boxes);
+      const path = (await accountMailboxPaths(client, account.id)).sent;
       if (!path) throw new Error("no Sent mailbox found");
       const appended = await client.append(path, raw, ["\\Seen"], new Date());
       if (!appended || appended.uid == null) {
@@ -1625,8 +1636,10 @@ export class ImapSmtpProvider implements MailProvider {
 
   async listFolders(account: ProviderAccount): Promise<MailFolder[]> {
     return withImap(account.id, account.creds, async (client) => {
-      const boxes = await client.list();
-      return boxes.map((b) => ({
+      // Reads the same cached LIST that archive/trash/drafts resolution uses.
+      // A Gmail LIST enumerates every label, and the rail asks for folders on
+      // every mailbox switch.
+      return (await accountMailboxPaths(client, account.id)).boxes.map((b) => ({
         name: b.name,
         path: b.path,
         specialUse: b.specialUse,
@@ -1673,7 +1686,7 @@ export class ImapSmtpProvider implements MailProvider {
   ): Promise<MailDraft[]> {
     const limit = opts.limit ?? DRAFT_LIST_LIMIT;
     return withImap(account.id, account.creds, async (client) => {
-      const path = draftsMailboxPath(await client.list());
+      const path = (await accountMailboxPaths(client, account.id)).drafts;
       if (!path) return [];
       const lock = await client.getMailboxLock(path, { readOnly: true });
       try {
@@ -1689,28 +1702,38 @@ export class ImapSmtpProvider implements MailProvider {
         })) {
           heads.push(msg);
         }
-        const drafts: MailDraft[] = [];
+        // One giant attachment must not make a drafts listing allocate it or
+        // hide every other draft. It remains available in the mail client.
+        const byUid = new Map<number, FetchedHead>();
         for (const head of heads) {
-          // One giant attachment must not make a drafts listing allocate it or
-          // hide every other draft. It remains available in the mail client.
-          if (!isSafeImapSourceSize(head.size)) continue;
-          for await (const msg of client.fetch(
-            String(head.uid),
-            { uid: true, source: true },
-            { uid: true },
-          )) {
-            drafts.push(
-              await draftFromImapSource(
-                account.id,
-                path,
-                msg.uid,
-                msg.source ?? Buffer.from(""),
-                head,
-              ),
-            );
-          }
+          if (isSafeImapSourceSize(head.size)) byUid.set(head.uid, head);
         }
-        return drafts.reverse();
+        if (byUid.size === 0) return [];
+        // One FETCH for the whole uid set, not one per draft. The per-draft
+        // loop this replaces cost up to DRAFT_LIST_LIMIT sequential round
+        // trips — the entire latency of opening the Drafts view.
+        const drafts: MailDraft[] = [];
+        for await (const msg of client.fetch(
+          [...byUid.keys()],
+          { uid: true, source: true },
+          { uid: true },
+        )) {
+          const head = byUid.get(msg.uid);
+          if (!head) continue;
+          drafts.push(
+            await draftFromImapSource(
+              account.id,
+              path,
+              msg.uid,
+              msg.source ?? Buffer.from(""),
+              head,
+            ),
+          );
+        }
+        // The server may answer a uid set in any order; the caller is promised
+        // newest first, which the envelope window already ordered by uid.
+        drafts.sort((a, b) => b.uid - a.uid);
+        return drafts;
       } finally {
         lock.release();
       }
@@ -1732,7 +1755,7 @@ export class ImapSmtpProvider implements MailProvider {
     messageId: string,
   ): Promise<DraftRef> {
     return withImap(account.id, account.creds, async (client) => {
-      const path = draftsMailboxPath(await client.list());
+      const path = (await accountMailboxPaths(client, account.id)).drafts;
       if (!path) throw new Error("no Drafts mailbox found");
       // \Seen alongside \Draft: your own unfinished mail is not unread mail.
       const res = await client.append(
@@ -1765,7 +1788,7 @@ export class ImapSmtpProvider implements MailProvider {
       // parseId resolves a bare uid to INBOX, so without this a malformed
       // draft id would delete delivered mail — which is exactly what the
       // draft tools promise never to touch.
-      const path = draftsMailboxPath(await client.list());
+      const path = (await accountMailboxPaths(client, account.id)).drafts;
       if (!path) throw new Error("no Drafts mailbox found");
       if (target.folder !== path) {
         throw new Error(

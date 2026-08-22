@@ -229,7 +229,17 @@ function useFiling<I extends MoveTarget>(copy: {
     },
 
     onSuccess: (result, input) => {
-      void queryClient.invalidateQueries({ queryKey: ["messages"] });
+      // Marked stale, not refetched. onMutate already took the row out of every
+      // cached list, so a refetch here paints nothing new — it just costs a
+      // full 50-message list read per filed message, and holding `e` through
+      // ten of them raced ten refetches against the next optimistic patch.
+      // The lists refresh on their next natural trigger. The 404 branch in
+      // onError still refetches immediately, because there the client genuinely
+      // does not know where the message went.
+      void queryClient.invalidateQueries({
+        queryKey: ["messages"],
+        refetchType: "none",
+      });
       toast.success(copy.done(result), {
         action: result.id
           ? {
