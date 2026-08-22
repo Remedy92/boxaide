@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { Store } from "../src/db/store.js";
 import { FixtureProvider } from "../src/provider/fixture.js";
 import { MailService } from "../src/mail/service.js";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CHAT_TOOLS, handleMcpJsonRpc, PLATFORM_TOOLS, TOOLS } from "../src/mcp/server.js";
@@ -187,9 +187,10 @@ describe("MCP tool surface", () => {
   });
 
   it("forwards local file and inline attachments on message_send", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "boxaide-att-"));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "boxaide-att-")));
     const filePath = join(dir, "report.pdf");
     writeFileSync(filePath, "%PDF-1.4 test pdf content");
+    process.env.BOXAIDE_ATTACHMENT_DIRS = dir;
 
     try {
       const res = await call(mail, "message_send", {
@@ -219,14 +220,16 @@ describe("MCP tool surface", () => {
       });
       expect(listed.messages[0].hasAttachments).toBe(true);
     } finally {
+      delete process.env.BOXAIDE_ATTACHMENT_DIRS;
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it("supports string paths in attachments on message_send", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "boxaide-att-"));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "boxaide-att-")));
     const filePath = join(dir, "data.csv");
     writeFileSync(filePath, "a,b,c\n1,2,3");
+    process.env.BOXAIDE_ATTACHMENT_DIRS = dir;
 
     try {
       const res = await call(mail, "message_send", {
@@ -243,8 +246,63 @@ describe("MCP tool surface", () => {
       expect(sent[0].attachments![0].filename).toBe("data.csv");
       expect(sent[0].attachments![0].path).toBe(filePath);
     } finally {
+      delete process.env.BOXAIDE_ATTACHMENT_DIRS;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("refuses an attachment outside the allowed directories", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "boxaide-att-")));
+    const allowed = join(dir, "allowed");
+    mkdirSync(allowed);
+    const secret = join(dir, "secret.pem");
+    writeFileSync(secret, "PRIVATE KEY");
+    process.env.BOXAIDE_ATTACHMENT_DIRS = allowed;
+
+    try {
+      const res = (await call(mail, "message_send", {
+        account: "personal",
+        to: "cofounder@test.com",
+        subject: "Leak",
+        text: "Nothing to see.",
+        attachments: [{ path: secret, filename: "invoice.pdf" }],
+      })) as ToolResult & { result: { isError?: boolean } };
+      expect(res.result.isError).toBe(true);
+      expect(payloadOf(res).error).toMatch(/outside the allowed directories/i);
+      expect(provider.getSent()).toHaveLength(0);
+    } finally {
+      delete process.env.BOXAIDE_ATTACHMENT_DIRS;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses malformed attachments instead of sending without them", async () => {
+    const bad = async (attachments: unknown) =>
+      payloadOf(
+        await call(mail, "message_send", {
+          account: "personal",
+          to: "cofounder@test.com",
+          subject: "Bad",
+          text: "Bad attachment",
+          attachments,
+        }),
+      ).error as string;
+
+    expect(await bad({ path: "/tmp/report.pdf" })).toMatch(/must be an array/i);
+    expect(await bad([{ filename: "report.pdf" }])).toMatch(
+      /either 'path' or 'content'/i,
+    );
+    // Base64 bytes with no encoding would arrive as literal base64 text.
+    expect(
+      await bad([
+        {
+          filename: "doc.pdf",
+          contentType: "application/pdf",
+          content: "JVBERi0xLjQK",
+        },
+      ]),
+    ).toMatch(/needs an encoding/i);
+    expect(provider.getSent()).toHaveLength(0);
   });
 
   it("fails message_send when attachment file path does not exist", async () => {
@@ -487,9 +545,10 @@ describe("MCP tool surface", () => {
   });
 
   it("handles attachments in draft_create and draft_update", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "boxaide-draft-att-"));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "boxaide-draft-att-")));
     const filePath = join(dir, "plan.md");
     writeFileSync(filePath, "# Project Plan");
+    process.env.BOXAIDE_ATTACHMENT_DIRS = dir;
 
     try {
       const created = payloadOf(await call(mail, "draft_create", {
@@ -512,6 +571,7 @@ describe("MCP tool surface", () => {
       })).draft;
       expect(updated.id).not.toBe(created.id);
     } finally {
+      delete process.env.BOXAIDE_ATTACHMENT_DIRS;
       rmSync(dir, { recursive: true, force: true });
     }
   });

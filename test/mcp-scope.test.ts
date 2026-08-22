@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/db/store.js";
@@ -260,9 +260,10 @@ describe("agent scopes", () => {
   });
 
   it("shows attachments on approval card and passes them on approval", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "boxaide-scope-att-"));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "boxaide-scope-att-")));
     const filePath = join(dir, "pitch.pdf");
     writeFileSync(filePath, "PDF pitch deck");
+    process.env.BOXAIDE_ATTACHMENT_DIRS = dir;
 
     try {
       await call("message_send", "chat", {
@@ -281,7 +282,10 @@ describe("agent scopes", () => {
       expect(card.title).toBe("Send “Pitch Deck” to investor@test.com");
       const attField = card.fields.find((f) => f.label === "Attachments");
       expect(attField).toBeDefined();
-      expect(attField?.value).toBe("Pitch_Deck.pdf, metrics.csv");
+      // The card names the file on disk, not the caller's label for it.
+      expect(attField?.value).toBe(
+        `${filePath} (sent as Pitch_Deck.pdf), metrics.csv`,
+      );
 
       // Approve it
       const outcome = await approvals.decide(card.id, "approve");
@@ -293,6 +297,7 @@ describe("agent scopes", () => {
       expect(sent[0].attachments![0].filename).toBe("Pitch_Deck.pdf");
       expect(sent[0].attachments![1].filename).toBe("metrics.csv");
     } finally {
+      delete process.env.BOXAIDE_ATTACHMENT_DIRS;
       rmSync(dir, { recursive: true, force: true });
     }
   });

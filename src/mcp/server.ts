@@ -205,7 +205,8 @@ export const TOOLS = [
               },
               content: {
                 type: "string",
-                description: "Inline attachment content (text or base64).",
+                description:
+                  "Inline attachment content. Base64 content MUST set encoding to 'base64'; without it the bytes are sent as utf-8 text.",
               },
               contentType: {
                 type: "string",
@@ -214,7 +215,8 @@ export const TOOLS = [
               },
               encoding: {
                 type: "string",
-                description: "Encoding of content, e.g. 'base64' or 'utf-8'.",
+                description:
+                  "Encoding of content: 'base64' for binary files, 'utf-8' for text. Required when contentType is not text.",
               },
             },
             additionalProperties: false,
@@ -317,7 +319,8 @@ export const TOOLS = [
               },
               content: {
                 type: "string",
-                description: "Inline attachment content (text or base64).",
+                description:
+                  "Inline attachment content. Base64 content MUST set encoding to 'base64'; without it the bytes are sent as utf-8 text.",
               },
               contentType: {
                 type: "string",
@@ -326,7 +329,8 @@ export const TOOLS = [
               },
               encoding: {
                 type: "string",
-                description: "Encoding of content, e.g. 'base64' or 'utf-8'.",
+                description:
+                  "Encoding of content: 'base64' for binary files, 'utf-8' for text. Required when contentType is not text.",
               },
             },
             additionalProperties: false,
@@ -371,7 +375,8 @@ export const TOOLS = [
               },
               content: {
                 type: "string",
-                description: "Inline attachment content (text or base64).",
+                description:
+                  "Inline attachment content. Base64 content MUST set encoding to 'base64'; without it the bytes are sent as utf-8 text.",
               },
               contentType: {
                 type: "string",
@@ -380,7 +385,8 @@ export const TOOLS = [
               },
               encoding: {
                 type: "string",
-                description: "Encoding of content, e.g. 'base64' or 'utf-8'.",
+                description:
+                  "Encoding of content: 'base64' for binary files, 'utf-8' for text. Required when contentType is not text.",
               },
             },
             additionalProperties: false,

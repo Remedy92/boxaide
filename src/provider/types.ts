@@ -119,39 +119,61 @@ export type MailAttachment = {
 };
 
 /**
- * Normalizes an array of attachment arguments (accepting strings or objects)
- * into a typed MailAttachment array.
+ * Normalizes attachment arguments (a file path string, or an object) into a
+ * typed MailAttachment array.
+ *
+ * Throws rather than dropping: a malformed attachment that is silently
+ * discarded turns into a mail that goes out looking sent-with-attachment to
+ * the caller and arrives without one.
  */
-export function parseAttachments(
-  raw: unknown,
-): MailAttachment[] | undefined {
-  if (!raw || !Array.isArray(raw)) return undefined;
+export function parseAttachments(raw: unknown): MailAttachment[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new Error("attachments must be an array");
   const list: MailAttachment[] = [];
   for (const item of raw) {
-    if (typeof item === "string" && item.trim()) {
-      list.push({ path: item.trim() });
-    } else if (typeof item === "object" && item !== null) {
-      const obj = item as Record<string, unknown>;
-      const att: MailAttachment = {};
-      if (typeof obj.path === "string" && obj.path.trim()) {
-        att.path = obj.path.trim();
-      }
-      if (typeof obj.filename === "string" && obj.filename.trim()) {
-        att.filename = obj.filename.trim();
-      }
-      if (typeof obj.content === "string") {
-        att.content = obj.content;
-      }
-      if (typeof obj.contentType === "string" && obj.contentType.trim()) {
-        att.contentType = obj.contentType.trim();
-      }
-      if (typeof obj.encoding === "string" && obj.encoding.trim()) {
-        att.encoding = obj.encoding.trim();
-      }
-      if (att.path || att.content !== undefined) {
-        list.push(att);
-      }
+    if (typeof item === "string") {
+      const path = item.trim();
+      if (!path) throw new Error("invalid attachment: empty file path");
+      list.push({ path });
+      continue;
     }
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      throw new Error(
+        "invalid attachment: each entry must be a file path or an object",
+      );
+    }
+    const obj = item as Record<string, unknown>;
+    const att: MailAttachment = {};
+    const str = (key: "path" | "filename" | "contentType" | "encoding" | "cid") => {
+      const value = obj[key];
+      if (value === undefined || value === null) return;
+      if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`invalid attachment ${key}`);
+      }
+      att[key] = value.trim();
+    };
+    str("path");
+    str("filename");
+    str("contentType");
+    str("encoding");
+    str("cid");
+    if (obj.content !== undefined && obj.content !== null) {
+      if (typeof obj.content !== "string") {
+        throw new Error("attachment content must be a string");
+      }
+      att.content = obj.content;
+    }
+    if (!att.path && att.content === undefined) {
+      throw new Error(
+        "invalid attachment: must provide either 'path' or 'content'",
+      );
+    }
+    if (att.path && att.content !== undefined) {
+      throw new Error(
+        "invalid attachment: provide either 'path' or 'content', not both",
+      );
+    }
+    list.push(att);
   }
   return list.length > 0 ? list : undefined;
 }
