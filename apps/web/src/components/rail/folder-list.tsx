@@ -11,7 +11,11 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { NavItem } from "@/components/rail/nav-item";
-import { buildFolderTree, type FolderNode } from "@/components/rail/folder-tree";
+import {
+  buildFolderTree,
+  folderLabel,
+  type FolderNode,
+} from "@/components/rail/folder-tree";
 import { SectionLabel } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
 import { useAccounts } from "@/lib/hooks/use-accounts";
@@ -23,7 +27,7 @@ import {
   type MessageDrag,
 } from "@/lib/dnd/message-drag";
 import { useMessageDrag } from "@/lib/dnd/use-message-drag";
-import type { FolderGroup, MailFolder, FolderUnread } from "@/lib/types";
+import type { FolderGroup, MailFolder } from "@/lib/types";
 
 /**
  * §6.2 row 5. Rendered from GET /api/folders, one mailbox at a time or grouped
@@ -48,20 +52,6 @@ const SPECIAL_ICON: Record<string, LucideIcon> = {
 function iconFor(folder: MailFolder): LucideIcon {
   const key = folder.specialUse?.toLowerCase();
   return (key && SPECIAL_ICON[key]) || Folder;
-}
-
-/**
- * The row's accessible name, and the one place the three unread states are
- * spelled out. Absent is not zero: it says the count is not known, where a real
- * zero says there is none. "at least n" is what an index holding only a window
- * of the folder can honestly claim.
- */
-function folderLabel(path: string, unread: FolderUnread | undefined): string {
-  if (!unread) return `Folder ${path}, unread count not known yet`;
-  if (unread.count === 0) return `Folder ${path}, no unread`;
-  return unread.exact
-    ? `Folder ${path}, ${unread.count} unread`
-    : `Folder ${path}, at least ${unread.count} unread`;
 }
 
 /** Unique per row: two mailboxes both have an INBOX. */

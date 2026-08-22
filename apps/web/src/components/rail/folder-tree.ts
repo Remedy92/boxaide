@@ -1,4 +1,4 @@
-import type { MailFolder } from "@/lib/types";
+import type { FolderUnread, MailFolder } from "@/lib/types";
 
 /**
  * The rail's folder tree, built from the flat list IMAP hands back.
@@ -110,4 +110,25 @@ export function buildFolderTree(folders: MailFolder[]): FolderNode[] {
   }
 
   return sortLevel([...roots.values()]);
+}
+
+/**
+ * The row's accessible name, and the one place the three unread states are
+ * spelled out. Absent is not zero: it says the count is not known, where a real
+ * zero says there is none. "at least n" is what an index holding only a window
+ * of the folder can honestly claim.
+ */
+export function folderLabel(
+  path: string,
+  unread: FolderUnread | undefined,
+): string {
+  if (!unread) return `Folder ${path}, unread count not known yet`;
+  if (unread.exact) {
+    return unread.count === 0
+      ? `Folder ${path}, no unread`
+      : `Folder ${path}, ${unread.count} unread`;
+  }
+  return unread.count === 0
+    ? `Folder ${path}, unread count not known yet`
+    : `Folder ${path}, at least ${unread.count} unread`;
 }

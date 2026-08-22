@@ -11,8 +11,9 @@ import { describe, expect, it } from "vitest";
 import {
   buildFolderTree,
   delimiterOf,
+  folderLabel,
 } from "../apps/web/src/components/rail/folder-tree.ts";
-import type { MailFolder } from "../apps/web/src/lib/types.ts";
+import type { FolderUnread, MailFolder } from "../apps/web/src/lib/types.ts";
 
 function folder(path: string, over: Partial<MailFolder> = {}): MailFolder {
   return { name: path, path, ...over };
@@ -103,3 +104,38 @@ describe("buildFolderTree", () => {
     expect(tree[0]?.folder?.path).toBe("INBOX.");
   });
 });
+
+describe("folderLabel", () => {
+  it("says unread count not known yet when unread is undefined", () => {
+    expect(folderLabel("INBOX", undefined)).toBe(
+      "Folder INBOX, unread count not known yet",
+    );
+  });
+
+  it("says no unread only when exact is true and count is 0", () => {
+    expect(folderLabel("INBOX", { count: 0, exact: true })).toBe(
+      "Folder INBOX, no unread",
+    );
+  });
+
+  it("says unread count not known yet when count is 0 but exact is false", () => {
+    // Partial sync window with 0 unread messages in the window must not claim
+    // there are no unread messages in the entire folder.
+    expect(folderLabel("INBOX", { count: 0, exact: false })).toBe(
+      "Folder INBOX, unread count not known yet",
+    );
+  });
+
+  it("gives the exact count when exact is true and count > 0", () => {
+    expect(folderLabel("INBOX", { count: 5, exact: true })).toBe(
+      "Folder INBOX, 5 unread",
+    );
+  });
+
+  it("gives at least n when exact is false and count > 0", () => {
+    expect(folderLabel("INBOX", { count: 5, exact: false })).toBe(
+      "Folder INBOX, at least 5 unread",
+    );
+  });
+});
+
