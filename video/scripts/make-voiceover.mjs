@@ -33,13 +33,7 @@
  * Idempotent: a line whose text, provider and voice are unchanged is skipped.
  * `--force` regenerates everything, `--dry` generates nothing.
  */
-import {
-  writeFileSync,
-  readFileSync,
-  mkdirSync,
-  existsSync,
-  statSync,
-} from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -218,10 +212,25 @@ if (DRY) {
 
 mkdirSync(VO_DIR, { recursive: true });
 
-const cache = existsSync(CACHE) ? JSON.parse(readFileSync(CACHE, "utf8")) : {};
-const durations = existsSync(DURATIONS)
-  ? JSON.parse(readFileSync(DURATIONS, "utf8"))
-  : {};
+/**
+ * Read-or-default, without an `existsSync` first.
+ *
+ * Checking for a file and then opening it is two syscalls with a gap between
+ * them, and the answer can change in the gap — CodeQL flags the pattern, and
+ * it is genuinely the wrong shape even for a single-user build script. One
+ * `readFileSync` in a try/catch has no gap to race: either it returns the
+ * bytes or it does not.
+ */
+const readJson = (path) => {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return {};
+  }
+};
+
+const cache = readJson(CACHE);
+const durations = readJson(DURATIONS);
 
 // Lines that were removed from the script must not keep their old durations —
 // the video would place audio for a beat that no longer exists.
@@ -238,8 +247,15 @@ let skipped = 0;
 for (const line of script) {
   const out = join(VO_DIR, `${line.id}.wav`);
   const stamp = `${PROVIDER}::${MODEL}::${VOICE ?? ""}::${INSTRUCTIONS}::${line.text}`;
-  const fresh =
-    !FORCE && cache[line.id] === stamp && existsSync(out) && statSync(out).size > 1024;
+  // Same reason as readJson: one stat in a try/catch rather than exists-then-stat.
+  const onDisk = (() => {
+    try {
+      return statSync(out).size;
+    } catch {
+      return 0;
+    }
+  })();
+  const fresh = !FORCE && cache[line.id] === stamp && onDisk > 1024;
 
   if (fresh) {
     durations[line.id] = wavDuration(out);
