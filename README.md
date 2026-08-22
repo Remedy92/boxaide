@@ -49,6 +49,22 @@ create one named `Archive` in your mail provider and it is picked up on the
 next archive. Archiving is one message per request: there is no bulk archive
 yet.
 
+### Deleting, and moving by hand
+
+Right-click a message in the list for **Archive**, **Delete** and **Start
+conversation about this email**. `#` deletes the selected message, the way `e`
+archives it.
+
+Delete is a move into the account's **Trash** mailbox, never an IMAP expunge:
+the message is where your own mail client expects it, the toast offers the same
+**Undo**, and emptying the trash stays something you do in your mail provider.
+A mailbox whose server has no Trash folder says so instead of guessing, exactly
+as it does for Archive.
+
+To file a message anywhere else, use **Move to folder** in the command palette
+(`⌘K`) or in the reader's **⋯** menu. Both list the folders of the message's own
+mailbox, so they work in the unified inbox too.
+
 ### Production-ish start
 
 ```bash

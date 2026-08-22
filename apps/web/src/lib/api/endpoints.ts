@@ -24,6 +24,7 @@ import type {
   AgentTurn,
   ApiHealthResponse,
   Automation,
+  AutomationBadge,
   AutomationRun,
   CalendarAccount,
   CalendarAccountsResponse,
@@ -347,6 +348,30 @@ export function archiveMessage(
   );
 }
 
+/**
+ * Delete one message: a move into the account's Trash mailbox, never an IMAP
+ * expunge. Like archive, the result names the folder it left, which is what
+ * `moveMessage` below needs to put it back.
+ *
+ * 404 means the message had already left that folder. 400 means this account's
+ * server has no Trash mailbox at all; the message text says so.
+ */
+export function trashMessage(
+  accountId: string,
+  messageId: string,
+  ctx: Ctx,
+): Promise<MoveResult> {
+  return request<MoveResult>(
+    `/api/messages/${encodeURIComponent(accountId)}/${encodeURIComponent(messageId)}/trash`,
+    {
+      method: "POST",
+      baseUrl: ctx.baseUrl,
+      token: ctx.token,
+      signal: ctx.signal,
+    },
+  );
+}
+
 /** Move one message to a named mailbox. The undo of an archive posts here. */
 export function moveMessage(
   accountId: string,
@@ -567,9 +592,24 @@ export function renameAgentChat(
   });
 }
 
+/**
+ * Put a chat away, and take it back out. Neither touches its messages: the
+ * pair is a two-way move between the live list and the archive, and Delete is
+ * the only control that destroys anything.
+ */
 export function archiveAgentChat(id: string, ctx: Ctx): Promise<{ archived: boolean }> {
   return request<{ archived: boolean }>(
     `/api/agent/chats/${encodeURIComponent(id)}/archive`,
+    { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+}
+
+export function unarchiveAgentChat(
+  id: string,
+  ctx: Ctx,
+): Promise<{ archived: boolean }> {
+  return request<{ archived: boolean }>(
+    `/api/agent/chats/${encodeURIComponent(id)}/unarchive`,
     { method: "POST", baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
   );
 }
@@ -1048,6 +1088,40 @@ export function runAutomationNow(
 }
 
 /** `limit` defaults to 20 server-side; each run carries the last 4 KiB of log. */
+/** GET /api/automations/badge — what the rail row shows. */
+export function getAutomationBadge(ctx: Ctx): Promise<AutomationBadge> {
+  return request<AutomationBadge>("/api/automations/badge", {
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/**
+ * POST /api/automations/runs/seen — the Automations view is open, so every run
+ * that has finished by now has been looked at. Answers the reset badge.
+ */
+export function markAutomationRunsSeen(ctx: Ctx): Promise<AutomationBadge> {
+  return request<AutomationBadge>("/api/automations/runs/seen", {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/** GET /api/automations/runs — the newest runs across every automation. */
+export async function listRecentAutomationRuns(
+  ctx: Ctx,
+  limit?: number,
+): Promise<AutomationRun[]> {
+  const data = await request<{ runs: AutomationRun[] }>(
+    `/api/automations/runs${query({ limit })}`,
+    { baseUrl: ctx.baseUrl, token: ctx.token, signal: ctx.signal },
+  );
+  return data.runs;
+}
+
 export async function listAutomationRuns(
   automationId: string,
   ctx: Ctx,

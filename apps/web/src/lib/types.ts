@@ -227,9 +227,11 @@ export type AgentWork = {
 /**
  * One conversation.
  *
- * `archivedAt` is set on a chat whose messages were dropped to keep the store
- * inside its budget. The row survives so the list does not silently lose
- * entries; the messages do not.
+ * `archivedAt` is set while the user has this chat put away: it is out of the
+ * rail and out of the live list, and every message it holds is still there.
+ * Unarchive clears it. `trimmedAt` is set when a limit took the messages, and
+ * it never clears itself. The two are independent, and a chat the user
+ * archived and the budget later emptied carries both.
  */
 export type AgentChat = {
   id: string;
@@ -237,15 +239,20 @@ export type AgentChat = {
   createdAt: string; // ISO 8601
   updatedAt: string; // ISO 8601
   archivedAt: string | null;
-  /** True once this chat has lost old turns to its own limit. */
-  trimmed: boolean;
+  /** When a limit last dropped messages from this chat. ISO 8601, or null. */
+  trimmedAt: string | null;
   /** The chat the composer writes to. Exactly one is active. */
   active: boolean;
   turns: number;
   bytes: number;
 };
 
-/** What the storage line reads from. Bytes of conversation text, not disk. */
+/**
+ * What the storage line reads from. Bytes of conversation text, not disk.
+ *
+ * `chats` counts the conversations in the live list and `archived` the ones
+ * put away, so the two together are every chat there is.
+ */
 export type AgentChatStorage = {
   bytes: number;
   budget: number;
@@ -387,9 +394,17 @@ export type Automation = {
   lastRunAt: string | null;
   /** Null while disabled or unschedulable — never a claim that a run is due. */
   nextRunAt: string | null;
+  /** The newest run's status; null before the first run. */
+  lastRunStatus: AutomationRunStatus | null;
 };
 
 export type AutomationRunStatus = "running" | "ok" | "error" | "killed";
+
+/**
+ * GET /api/automations/badge — runs that finished since the Automations view
+ * was last open, and how many of those failed. Two COUNTs and nothing else.
+ */
+export type AutomationBadge = { unseen: number; failed: number };
 
 export type AutomationRun = {
   id: string;

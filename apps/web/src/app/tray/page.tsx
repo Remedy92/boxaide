@@ -7,13 +7,18 @@ import { presenceDisplayName } from "@/components/agent/agent-presence";
 import {
   getAgentState,
   getLocalBootstrap,
+  listAutomations,
   listMessages,
+  listRecentAutomationRuns,
 } from "@/lib/api/endpoints";
 import { displayName } from "@/lib/format/address";
+import { runStatusLabel } from "@/lib/format/automation";
 import { formatListDate } from "@/lib/format/date";
+import type { AutomationRunStatus } from "@/lib/types";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
 import { takeDesktopBootstrapCapability } from "@/lib/desktop-bootstrap";
+import type { MailMessageSummary } from "@/lib/types";
 
 /**
  * The menu-bar popover. Loaded by the desktop shell's tray window at `/tray/`,
@@ -23,14 +28,25 @@ import { takeDesktopBootstrapCapability } from "@/lib/desktop-bootstrap";
  *
  * It is a glance, not a client: recent mail, whether an agent is listening,
  * one button into the app. Clicking anything that needs more room navigates
- * to `/` — the desktop shell intercepts that and raises the main window.
+ * to the app — the desktop shell intercepts that and raises the main window,
+ * on the address the navigation named.
  *
  * In a plain browser the page still works (it is part of the static export);
- * navigation then simply opens the inbox in the same tab.
+ * navigation then simply opens the same address in the same tab.
  */
 
 const REFRESH_AGENT_MS = 8_000;
+const REFRESH_RUNS_MS = 30_000;
 const LIST_LIMIT = 9;
+/** Three rows: a glance, not a history. The view has the rest. */
+const RUNS_LIMIT = 3;
+
+const RUN_DOT: Record<AutomationRunStatus, string> = {
+  running: "bg-accent",
+  ok: "bg-success",
+  error: "bg-danger",
+  killed: "bg-warning",
+};
 
 /**
  * A full document navigation on purpose — not router.push. The desktop shell
@@ -38,7 +54,28 @@ const LIST_LIMIT = 9;
  * never fires that. Absolute URL, so no relative-destination lint concern.
  */
 function openInbox() {
-  window.location.assign(new URL("/", window.location.origin).toString());
+  // `#/` rather than a bare `/`: the desktop shell forwards only a hash that
+  // names a page, and the empty one names none, so a window already open on a
+  // message stayed on it. The root hash is a page, the one with nothing open
+  // on it, and it closes a message or Settings the way the app itself does.
+  window.location.assign(new URL("/#/", window.location.origin).toString());
+}
+
+/**
+ * The same navigation, carrying the row the user pressed. The app routes a
+ * message on the hash, so the address is the whole of the popover's ability
+ * to open one: the desktop shell forwards the hash into the window it raises,
+ * and a browser tab lands on it unaided.
+ *
+ * The format belongs to `hashFor` in use-app-state.tsx and is written out
+ * again rather than imported, because that module is the app's state provider
+ * and the popover deliberately mounts none of it.
+ */
+function openMessage(message: MailMessageSummary) {
+  const hash = `#/a/${encodeURIComponent(
+    message.accountId,
+  )}/m/${encodeURIComponent(message.id)}`;
+  window.location.assign(new URL(`/${hash}`, window.location.origin).toString());
 }
 
 function useTrayCtx() {
@@ -88,6 +125,31 @@ export default function TrayPage() {
     refetchInterval: REFRESH_AGENT_MS,
   });
 
+  /* The last few automation runs, with the automation's name. Two requests,
+     because the run row carries an id and not a name, and the list is the
+     one place the name lives. Same cadence as the rail's badge. */
+  const runs = useQuery({
+    queryKey: ["tray-runs", ctx.baseUrl, ctx.token],
+    enabled: ctx.ready,
+    queryFn: ({ signal }) =>
+      listRecentAutomationRuns({ ...ctx, signal }, RUNS_LIMIT),
+    refetchInterval: REFRESH_RUNS_MS,
+    retry: false,
+  });
+  const automations = useQuery({
+    queryKey: ["tray-automations", ctx.baseUrl, ctx.token],
+    enabled: ctx.ready,
+    queryFn: ({ signal }) => listAutomations({ ...ctx, signal }),
+    refetchInterval: REFRESH_RUNS_MS,
+    retry: false,
+  });
+  const nameOf = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const a of automations.data ?? []) map.set(a.id, a.name);
+    return map;
+  }, [automations.data]);
+  const recentRuns = runs.data ?? [];
+
   const presence = agent.data?.presence;
   const agentName = presence ? presenceDisplayName(presence) : null;
   const messages = mail.data?.messages ?? [];
@@ -115,6 +177,56 @@ export default function TrayPage() {
       </header>
 
       <div className="pane-scroll min-h-0 flex-1 overflow-y-auto">
+        {/* Only when there is something to say: an install with no
+            automations, or none that has run, gets the mail list alone. */}
+        {recentRuns.length > 0 && (
+          <section
+            aria-label="Recent automation runs"
+            className="border-b border-border-subtle"
+          >
+            <h2 className="px-4 pt-2.5 pb-1 text-[11px] leading-4 font-medium tracking-[0.02em] text-fg-tertiary uppercase">
+              Automations
+            </h2>
+            <ul>
+              {recentRuns.map((run) => (
+                <li key={run.id}>
+                  <button
+                    type="button"
+                    onClick={openInbox}
+                    className={cn(
+                      "flex w-full items-baseline gap-2 px-4 py-1.5 text-left",
+                      "transition-colors duration-[var(--dur-fast)] hover:bg-surface-hover",
+                    )}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "relative top-[-1px] inline-block size-1.5 shrink-0 rounded-full",
+                        RUN_DOT[run.status] ?? "bg-fg-tertiary",
+                      )}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-[12px] leading-4 text-fg-secondary">
+                      {nameOf.get(run.automationId) ?? "Automation"}
+                    </span>
+                    <span
+                      className={cn(
+                        "shrink-0 text-[11px] leading-4",
+                        run.status === "error" || run.status === "killed"
+                          ? "text-danger"
+                          : "text-fg-tertiary",
+                      )}
+                    >
+                      {runStatusLabel(run.status)}
+                    </span>
+                    <span className="shrink-0 text-[11px] tabular-nums text-fg-tertiary">
+                      {formatListDate(run.finishedAt ?? run.startedAt)}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
         {!ctx.ready || mail.isPending ? (
           <TrayHint text="Loading your mail…" />
         ) : mail.isError ? (
@@ -130,7 +242,7 @@ export default function TrayPage() {
                     instead, which client-side routing would never trigger. */}
                 <button
                   type="button"
-                  onClick={openInbox}
+                  onClick={() => openMessage(m)}
                   className={cn(
                     "w-full text-left",
                     "flex flex-col gap-0.5 px-4 py-2",

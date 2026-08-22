@@ -29,6 +29,7 @@ import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { appHashOf } from "./app-hash.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -102,6 +103,13 @@ let badgeTimer = null;
  * @type {number | null}
  */
 let lastPending = null;
+/**
+ * Failed-run count from the previous automations poll, or null before the
+ * first one. Same null-is-not-zero rule as lastPending: failures that were
+ * already there at launch are painted, not announced.
+ * @type {number | null}
+ */
+let lastFailed = null;
 /**
  * Set while `quitAndInstall` is tearing the app down.
  *
@@ -394,8 +402,10 @@ const BADGE_POLL_MS = 60_000;
  */
 function startBadgePoll(url, token) {
   const endpoint = `${url}/api/outreach/badge`;
+  const runsEndpoint = `${url}/api/automations/badge`;
   const poll = () => {
     void pollBadge(endpoint, token);
+    void pollRuns(runsEndpoint, token);
   };
   poll();
   badgeTimer = setInterval(poll, BADGE_POLL_MS);
@@ -454,6 +464,85 @@ function applyBadge(pending) {
   // the window the user would otherwise have to find.
   notification.on("click", () => openMainWindow());
   notification.show();
+}
+
+/**
+ * The automations leg of the same poll: runs that finished since the user
+ * last opened the Automations view, and how many of those failed. Painted on
+ * the menu bar, not the dock — the dock badge is the approval queue and one
+ * number with two meanings is worse than none.
+ * @param {string} endpoint
+ * @param {string} token
+ */
+async function pollRuns(endpoint, token) {
+  let body;
+  try {
+    const response = await fetch(endpoint, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) return;
+    body = await response.json();
+  } catch {
+    // Same transient shutdown/startup races as pollBadge; the next tick wins.
+    return;
+  }
+  const unseen = typeof body?.unseen === "number" ? body.unseen : null;
+  const failed = typeof body?.failed === "number" ? body.failed : null;
+  if (unseen === null || failed === null) return;
+  if (!Number.isFinite(unseen) || !Number.isFinite(failed)) return;
+  if (unseen < 0 || failed < 0) return;
+  applyRuns(unseen, failed);
+}
+
+/**
+ * @param {number} unseen
+ * @param {number} failed
+ */
+function applyRuns(unseen, failed) {
+  const rose = lastFailed !== null && failed > lastFailed;
+  lastFailed = failed;
+  paintTray(unseen, failed);
+  if (!rose || !Notification.isSupported()) return;
+  const notification = new Notification({
+    title: "Boxaide",
+    body:
+      failed === 1
+        ? "An automation run failed. Open Automations to see its log."
+        : `${failed} automation runs failed. Open Automations to see their logs.`,
+  });
+  notification.on("click", () => openMainWindow());
+  notification.show();
+}
+
+/**
+ * The menu bar item says two things: the count of unseen runs beside the
+ * icon, and a red dot on the icon while any of them failed. Both clear when
+ * the user opens the Automations view — the server resets the count there,
+ * and the next poll takes the dot down.
+ * @param {number} unseen
+ * @param {number} failed
+ */
+function paintTray(unseen, failed) {
+  if (!tray) return;
+  const alert = failed > 0;
+  if (alert !== trayShowsAlert) {
+    const image = nativeImage.createFromPath(alert ? trayAlertPng : trayIconPng);
+    if (!image.isEmpty()) {
+      // Only the plain icon is a template; the alert one carries its own red.
+      image.setTemplateImage(!alert);
+      tray.setImage(image);
+      trayShowsAlert = alert;
+    }
+  }
+  // Monospaced digits: "9" and "10" must not shove the icon around.
+  tray.setTitle(unseen > 0 ? String(unseen) : "", { fontType: "monospacedDigit" });
+  tray.setToolTip(
+    unseen === 0
+      ? "Boxaide"
+      : alert
+        ? `Boxaide — ${unseen} new automation ${unseen === 1 ? "run" : "runs"}, ${failed} failed`
+        : `Boxaide — ${unseen} new automation ${unseen === 1 ? "run" : "runs"}`,
+  );
 }
 
 /**
@@ -646,6 +735,12 @@ function createAppMenu() {
 const trayIconPng = app.isPackaged
   ? join(process.resourcesPath, "trayTemplate.png")
   : join(here, "..", "build", "trayTemplate.png");
+/** The same mark with a red dot, shown while an unseen automation run failed. */
+const trayAlertPng = app.isPackaged
+  ? join(process.resourcesPath, "trayAlert.png")
+  : join(here, "..", "build", "trayAlert.png");
+/** Which of the two the tray currently shows, so setImage runs only on a change. */
+let trayShowsAlert = false;
 
 /** @param {string} url */
 function createTray(url) {
@@ -742,14 +837,15 @@ function showPopover(url) {
       popover = null;
     });
 
-    // The page's "Open Boxaide" button and every mail row navigate to the
-    // server's root. That navigation IS the popover's exit: catch it, raise
-    // the real window, keep the popover parked on /tray/ for next time.
+    // The page's "Open Boxaide" button navigates to the server's root and a
+    // mail row to that message's hash. That navigation IS the popover's exit:
+    // catch it, raise the real window on the address it named, keep the
+    // popover parked on /tray/ for next time.
     popover.webContents.on("will-navigate", (event, target) => {
       event.preventDefault();
       if (originOf(target) === origin) {
         popover?.hide();
-        openMainWindow();
+        openMainWindow(appHashOf(target));
         return;
       }
       openExternal(target);

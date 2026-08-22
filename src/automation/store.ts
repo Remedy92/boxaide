@@ -23,7 +23,16 @@ export type Automation = {
   createdAt: string;
   lastRunAt: string | null;
   nextRunAt: string | null;
+  /** Status of the newest run, or null before the first one. */
+  lastRunStatus: RunStatus | null;
 };
+
+/**
+ * What the rail and the tray poll. `unseen` counts runs that finished after the
+ * user last opened the Automations view; `failed` is how many of those ended
+ * in 'error' or 'killed'. Both are counts and nothing else.
+ */
+export type AutomationBadge = { unseen: number; failed: number };
 
 export type AutomationRun = {
   id: string;
@@ -47,6 +56,7 @@ type AutomationRow = {
   created_at: string;
   last_run_at: string | null;
   next_run_at: string | null;
+  last_run_status?: string | null;
 };
 
 type RunRow = {
@@ -190,6 +200,12 @@ export class AutomationStore {
       -- at most, while the table grows without bound.
       CREATE INDEX IF NOT EXISTS automation_runs_live
         ON automation_runs (automation_id) WHERE status = 'running';
+      -- One row: when the user last looked at the Automations view. The badge
+      -- counts runs that finished after it.
+      CREATE TABLE IF NOT EXISTS automation_runs_seen (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        seen_at TEXT NOT NULL
+      );
     `);
 
     // Only reached by databases created before the model column existed. Null
@@ -347,16 +363,52 @@ export class AutomationStore {
 
   get(id: string): Automation | null {
     const row = this.db
-      .prepare(`SELECT * FROM automations WHERE id = ?`)
+      .prepare(`${SELECT_WITH_STATUS} WHERE a.id = ?`)
       .get(id) as AutomationRow | undefined;
     return row ? toAutomation(row) : null;
   }
 
   list(): Automation[] {
     const rows = this.db
-      .prepare(`SELECT * FROM automations ORDER BY name ASC`)
+      .prepare(`${SELECT_WITH_STATUS} ORDER BY a.name ASC`)
       .all() as AutomationRow[];
     return rows.map(toAutomation);
+  }
+
+  /**
+   * Finished runs the user has not looked at, and how many of them failed.
+   * 'running' rows are excluded: a run is news when it ends, not when it
+   * starts, and counting it twice would make the number jump for nothing.
+   */
+  badge(): AutomationBadge {
+    const seen = this.runsSeenAt() ?? "";
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS unseen,
+                COALESCE(SUM(CASE WHEN status IN ('error', 'killed') THEN 1 ELSE 0 END), 0) AS failed
+           FROM automation_runs
+          WHERE finished_at IS NOT NULL AND finished_at > ?`,
+      )
+      .get(seen) as { unseen: number; failed: number };
+    return { unseen: row.unseen, failed: row.failed };
+  }
+
+  /** When the user last opened the Automations view; null if never. */
+  runsSeenAt(): string | null {
+    const row = this.db
+      .prepare(`SELECT seen_at FROM automation_runs_seen WHERE id = 1`)
+      .get() as { seen_at: string } | undefined;
+    return row?.seen_at ?? null;
+  }
+
+  /** The user is looking at the Automations view now: the badge resets. */
+  markRunsSeen(at: Date = new Date()): void {
+    this.db
+      .prepare(
+        `INSERT INTO automation_runs_seen (id, seen_at) VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET seen_at = excluded.seen_at`,
+      )
+      .run(at.toISOString());
   }
 
   /** Enabled automations whose next_run_at has arrived. */
@@ -543,6 +595,17 @@ export class AutomationStore {
   }
 }
 
+/**
+ * The newest run's status rides along with every automation, so a list can say
+ * "last run failed" without fetching each automation's history (and its logs).
+ */
+const SELECT_WITH_STATUS = `
+  SELECT a.*,
+         (SELECT r.status FROM automation_runs r
+           WHERE r.automation_id = a.id
+           ORDER BY r.started_at DESC, r.rowid DESC LIMIT 1) AS last_run_status
+    FROM automations a`;
+
 function toAutomation(row: AutomationRow): Automation {
   return {
     id: row.id,
@@ -555,5 +618,6 @@ function toAutomation(row: AutomationRow): Automation {
     createdAt: row.created_at,
     lastRunAt: row.last_run_at,
     nextRunAt: row.next_run_at,
+    lastRunStatus: (row.last_run_status as RunStatus | null | undefined) ?? null,
   };
 }

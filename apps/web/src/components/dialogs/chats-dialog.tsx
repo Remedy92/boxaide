@@ -1,7 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { Archive, ChevronRight, Plus, Search, Trash2 } from "lucide-react";
+import {
+  Archive,
+  ArchiveRestore,
+  ChevronRight,
+  Plus,
+  Search,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -28,10 +35,14 @@ import { cn } from "@/lib/utils";
  * workable: the list a user scans daily is short, and the list they search
  * occasionally is complete.
  *
- * Archived rows are real rows with no messages behind them. They are drawn
- * dimmed and are not clickable, because there is nothing to open — the point of
- * keeping them is that the history does not silently lose entries when the
- * budget reclaims space.
+ * Archived rows are whole conversations the user has put away. Every message
+ * is still there, so the row opens like any other and Unarchive puts it back
+ * in the rail. Delete is the only control here that destroys anything.
+ *
+ * A row marked trimmed lost its messages to a limit rather than to a click:
+ * either its own turn cap, or the storage budget, which empties archived chats
+ * before live ones. The mark is there so an empty conversation is never a
+ * surprise.
  */
 export function ChatsDialog({
   open,
@@ -171,7 +182,7 @@ function ChatsDialogBody({
                   <span className="block text-[11px] leading-4 text-fg-tertiary">
                     {when(chat.updatedAt)} · {chat.turns}{" "}
                     {chat.turns === 1 ? "message" : "messages"}
-                    {chat.trimmed ? " · trimmed" : ""}
+                    {chat.trimmedAt ? " · trimmed" : ""}
                   </span>
                 </button>
                 <RowAction
@@ -206,22 +217,40 @@ function ChatsDialogBody({
                     )}
                   />
                   Archived · {gone.length}
-                  <span className="ml-auto">titles kept, messages dropped</span>
+                  <span className="ml-auto">put away, messages kept</span>
                 </button>
                 {showArchived &&
                   gone.map((chat) => (
                     <div
                       key={chat.id}
-                      className="group flex items-center gap-2 rounded-[var(--radius-md)] px-2 py-1.5 opacity-60"
+                      className="group flex items-center gap-2 rounded-[var(--radius-md)] px-2 py-1.5 hover:bg-surface-hover"
                     >
-                      <div className="min-w-0 flex-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          /* Opening an archived chat is the user coming back
+                             to it, so the server takes it out of the archive
+                             in the same step and the rail has it again. */
+                          void agent.openChat(chat.id);
+                          leave();
+                        }}
+                        className="min-w-0 flex-1 text-left"
+                      >
                         <span className="block truncate text-[13px] leading-[18px] text-fg">
                           {chat.title}
                         </span>
                         <span className="block text-[11px] leading-4 text-fg-tertiary">
-                          Archived {when(chat.archivedAt ?? chat.updatedAt)}
+                          Archived {when(chat.archivedAt ?? chat.updatedAt)} ·{" "}
+                          {chat.turns} {chat.turns === 1 ? "message" : "messages"}
+                          {chat.trimmedAt ? " · trimmed" : ""}
                         </span>
-                      </div>
+                      </button>
+                      <RowAction
+                        label="Unarchive this chat"
+                        onClick={() => void agent.unarchiveChat(chat.id)}
+                      >
+                        <ArchiveRestore className="size-3.5" strokeWidth={1.5} />
+                      </RowAction>
                       <RowAction
                         label="Delete this chat"
                         onClick={() => void agent.removeChat(chat.id)}
@@ -259,8 +288,8 @@ function ChatsDialogBody({
                 />
               </div>
               <p className="text-[11px] leading-4 text-fg-tertiary">
-                Past this, the oldest chats are archived: the title and date stay,
-                the messages go.
+                Past this, old chats are trimmed: the title and date stay, the
+                messages go. Archived chats are trimmed first.
               </p>
             </div>
           )}
