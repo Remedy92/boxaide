@@ -420,7 +420,12 @@ function RowAction({
           size="icon-xs"
           aria-label={label}
           onClick={onClick}
-          className="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+          className={cn(
+            "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
+            /* Same as the rail: a control that waits for a hover is a control
+               a phone never shows, and 24px is a poor thumb target. */
+            "touch:size-9 touch:opacity-100 touch:[&_svg]:size-4",
+          )}
         >
           {children}
         </Button>

@@ -225,7 +225,9 @@ function ChatRow({
       <ContextMenuTrigger asChild>
         <div
           className={cn(
-            "group/chat flex h-7 w-full items-center rounded-[var(--radius-md)] pr-1 pl-5",
+            /* Taller on a touch device: the row now carries two visible controls
+               and a finger, not a cursor, has to land on one of the three. */
+            "group/chat flex h-7 w-full items-center rounded-[var(--radius-md)] pr-1 pl-5 touch:h-11",
             "transition-colors duration-[var(--dur-fast)] hover:duration-0",
             current ? "bg-accent-subtle" : "hover:bg-surface-hover",
           )}
@@ -274,6 +276,11 @@ function ChatRow({
                 "transition-opacity duration-[var(--dur-fast)] motion-reduce:transition-none",
                 "group-hover/chat:w-auto group-hover/chat:opacity-100",
                 "group-focus-within/chat:w-auto group-focus-within/chat:opacity-100",
+                /* A hover that never comes hides these forever, and tapping the
+                   title opens the chat rather than focusing it, so neither of
+                   the two rules above can fire on a phone. There they are
+                   simply always on. */
+                "touch:w-auto touch:opacity-100",
               )}
             >
               <RowAction label="Archive this chat" onClick={archive}>
@@ -383,6 +390,9 @@ function RowAction({
           onClick={onClick}
           className={cn(
             "text-fg-tertiary",
+            /* 36px square with a 16px glyph where there is no cursor to aim
+               with. 24px is a comfortable mouse target and a poor thumb one. */
+            "touch:size-9 touch:[&_svg]:size-4",
             destructive ? "hover:text-danger" : "hover:text-fg",
           )}
         >
