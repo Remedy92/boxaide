@@ -16,7 +16,7 @@ import { useApiCtx, useSettings } from "@/lib/hooks/use-settings";
 
 /**
  * The launcher's world view: which agent CLIs exist on the server's machine,
- * which one is running, and how the last one died. Polled, not streamed — a
+ * which one is running, and how the last one died. Polled, not streamed, because a
  * launched agent changes state on the order of seconds, and the poll also
  * catches an agent that exited on its own.
  */
@@ -67,12 +67,12 @@ export function modelForStart(
  * choice while the server still offers it, then whatever is running, then the
  * first CLI on the machine this build can launch.
  *
- * Falling back to the running one matters on a browser that never picked — the
+ * Falling back to the running one matters on a browser that never picked. The
  * pane should name the agent that is actually answering, not "none". Falling
  * back again to the first installed one is what makes a send work out of the
  * box: nothing is stored until the user picks, and a send starts the pick, so
  * without a default the first question on a new machine would queue against an
- * agent nobody ever asked for. The default is not written to settings — it is
+ * agent nobody ever asked for. The default is not written to settings. It is
  * shown in the composer before the send, and an explicit pick still wins for
  * good.
  */
@@ -85,11 +85,11 @@ export function usePickedAgent(): {
   const { agentId, agentModel } = useSettings();
   const all = agents.data?.agents ?? [];
   const running = agents.data?.running ?? null;
-  const stored = all.find((a) => a.id === agentId && a.available) ?? null;
+  const stored = all.find((a) => a.id === agentId && a.installed) ?? null;
   const picked =
     stored ??
     (running ? (all.find((a) => a.id === running.id) ?? null) : null) ??
-    all.find((a) => a.available && a.supported) ??
+    all.find((a) => a.installed && a.chat.ok) ??
     null;
   return {
     picked,
@@ -117,7 +117,11 @@ export function useEnsureAgentRunning(): () => Promise<void> {
   const start = useStartLocalAgent();
   const pending = start.isPending;
   return React.useCallback(async () => {
-    if (pending || !picked || !picked.supported) return;
+    // Gated on `installed`, not on `chat.ok`. A blocked agent still gets the
+    // round trip, and the server's refusal is the only place the user reads
+    // the reason as a toast. Swallowing the send here would start nothing and
+    // say nothing.
+    if (pending || !picked || !picked.installed) return;
     const fresh = await agents.refetch();
     if (fresh.data?.running) return;
     start.mutate(
@@ -142,7 +146,7 @@ export function useEnsureAgentRunning(): () => Promise<void> {
  *
  * The request only opens Terminal on the server's machine; the login happens
  * there, and the server restarts the agent itself when it lands. So there is
- * nothing to await — the wait ends when the existing poll reports something
+ * nothing to await. The wait ends when the existing poll reports something
  * running again, which is also what ends it if the user starts the agent by
  * hand instead.
  */
@@ -151,7 +155,7 @@ export function useAgentSignIn() {
   const agents = useLocalAgents();
   const running = agents.data?.running ?? null;
   // Which exit the ask was made against, so the wait ends by itself: a launch
-  // clears `running`, and a second failure writes a new exit — either way the
+  // clears `running`, and a second failure writes a new exit. Either way the
   // state below stops matching, with no effect to unset it.
   const exitAt = agents.data?.lastExit?.at ?? "";
   const [askedFor, setAskedFor] = React.useState<string | null>(null);
@@ -164,7 +168,7 @@ export function useAgentSignIn() {
     signIn: () => signIn.mutate(),
     /** Terminal is open and nothing has come back yet. */
     waiting: !running && (signIn.isPending || askedFor === exitAt),
-    /** The server's own sentence — 501 on a machine with no Terminal to open. */
+    /** The server's own sentence. 501 on a machine with no Terminal to open. */
     error: signIn.error ? serverSentence(signIn.error) : null,
   };
 }

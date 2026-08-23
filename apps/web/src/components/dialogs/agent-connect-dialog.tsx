@@ -24,7 +24,7 @@ import { useSettings } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
 
 /**
- * "Connect your agent" — the one place that hands out configuration.
+ * "Connect your agent": the one place that hands out configuration.
  *
  * Every snippet is assembled in this browser from the server URL and token in
  * localStorage. `GET /api/agent-connect` embeds the token in a response body
@@ -38,7 +38,7 @@ import { cn } from "@/lib/utils";
  * The prompt that puts an agent into the chat loop.
  *
  * Worded for a model, not for a person: it names the three tools, says the loop
- * is a loop, and pre-empts the two ways it reliably goes wrong — answering in
+ * is a loop, and pre-empts the two ways it reliably goes wrong: answering in
  * its own terminal where the user cannot see it, and treating an empty
  * chat_await_message as a reason to stop.
  */
@@ -48,7 +48,7 @@ Loop: call chat_await_message, do the work, post the answer with chat_say, then
 call chat_await_message again. Keep going until I tell you to stop.
 
 Everything I read appears in the Boxaide window, so every answer must go through
-chat_say — do not answer here. A chat_await_message that returns no message is
+chat_say. Do not answer here. A chat_await_message that returns no message is
 normal; call it again. Use chat_activity for anything slow. Draft rather than
 send unless I ask you to send.
 
@@ -108,7 +108,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
             <DialogTitle className="title-15">Connect your agent</DialogTitle>
             <DialogDescription>
               Point any MCP client at Boxaide. It can then read, draft and send
-              from all your mailboxes — and hold a conversation with you in the
+              from all your mailboxes, and hold a conversation with you in the
               Agent view. Drafting is the default; sending needs the send tool.
             </DialogDescription>
           </DialogHeader>
@@ -261,7 +261,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
               {endpoint}
             </p>
             {/* User-triggered, never on load. A response proves this endpoint
-                answers with this token — it never means an agent is attached,
+                answers with this token. It never means an agent is attached,
                 and this panel must not say so. */}
             <Button
               type="button"
@@ -279,7 +279,7 @@ function Body({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
               {test.isSuccess && (
                 <p className="flex items-center gap-1.5 text-[12px] text-success">
                   <StatusDot tone="success" />
-                  Responded — {test.data.length} tools available
+                  Responded, {test.data.length} tools available
                 </p>
               )}
               {test.isError && (

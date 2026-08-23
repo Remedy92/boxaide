@@ -25,6 +25,7 @@ import {
   KNOWN_AGENTS,
   type AgentSpec,
 } from "../src/agent/launcher.js";
+import { capabilityOf } from "../src/agent/capability.js";
 import {
   AGENT_ACCESS_LEVELS,
   confineCommand,
@@ -133,7 +134,7 @@ describe("the macOS profile", () => {
     expect(lines[1]).toBe("(allow default)");
     expect(lines[2]).toContain(`(deny file-read* file-write* (subpath "${HOME}")`);
     // Last wins in this language, so the data directory's deny has to be the
-    // final word — that is the rule that must survive any edit above it.
+    // final word. That is the rule that must survive any edit above it.
     expect(lines.at(-1)).toContain('(deny file-read* file-write* (subpath "/opt/tools/secrets")');
     expect(lines.at(-1)).not.toContain("allow");
   });
@@ -166,7 +167,7 @@ describe("the macOS profile", () => {
   /**
    * A scheduled run's network: nothing leaves this machine except through the
    * loopback proxy. Seatbelt takes only `*` or `localhost` as an address, so
-   * "the model provider only" cannot be written here — that is why there is a
+   * "the model provider only" cannot be written here. That is why there is a
    * proxy at all (src/agent/egress.ts).
    */
   it("denies every outbound connection but loopback when asked", () => {
@@ -258,7 +259,7 @@ describe("building the command", () => {
     // Claude Code keeps its token in the keychain on macOS, not in a file. The
     // blanket home deny took the keychain with everything else, so every
     // confined turn reported "Not logged in" while the same command outside
-    // the sandbox answered — and signing in again fixed nothing, because the
+    // the sandbox answered, and signing in again fixed nothing, because the
     // login was never the missing part.
     const cmd = confineCommand({
       bin: "/usr/local/bin/claude",
@@ -286,7 +287,7 @@ describe("what each CLI declares it needs", () => {
     // The bug, at the spec level. agy is the one that surfaced it: `~/.gemini`
     // was readable, agy could not save the session it was establishing, and it
     // waited and exited with no error anybody saw. Read-only was wrong for all
-    // of them — a signed-in CLI refreshes its token and writes the new one.
+    // of them. A signed-in CLI refreshes its token and writes the new one.
     const env = { HOME: HOME };
     const ctx = {
       mcpUrl: "http://127.0.0.1:0/mcp",
@@ -301,9 +302,76 @@ describe("what each CLI declares it needs", () => {
     for (const [id, home] of Object.entries(homes)) {
       const spec = KNOWN_AGENTS.find((s) => s.id === id);
       expect(spec, id).toBeTruthy();
-      const declared = spec!.sandbox!(ctx, "/tmp/work", env);
+      const declared = spec!.sandbox!(ctx, "/tmp/work", env, "chat");
       expect(declared.write, id).toContain(home);
     }
+  });
+
+  it("denies the user's agy MCP config on a run and not on a chat launch", () => {
+    // agy merges that file into every session and has no strict-config flag,
+    // so the operating system is the only thing that can take it away. A
+    // watched chat launch keeps it: someone is there to see what it does.
+    const env = { HOME: HOME };
+    const ctx = {
+      mcpUrl: "http://127.0.0.1:0/mcp",
+      bearerToken: "t",
+      dataDir: "/tmp/data",
+    } as never;
+    const spec = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
+    const config = `${HOME}/.gemini/config/mcp_config.json`;
+
+    const run = spec.sandbox!(ctx, "/tmp/work", env, "run");
+    expect(run.deny).toContain(config);
+    expect(run.write).toContain(`${HOME}/.gemini`);
+
+    const chat = spec.sandbox!(ctx, "/tmp/work", env, "chat");
+    expect(chat.deny ?? []).not.toContain(config);
+    // The sign-in still has to be writable, or agy starts and never saves the
+    // session it establishes.
+    expect(chat.write).toContain(`${HOME}/.gemini`);
+  });
+
+  it("emits a deny for a file that does not exist yet", () => {
+    // The rule is written before the launch and the file may appear during
+    // it. Seatbelt matches the resolved path, and every temporary home on
+    // macOS is reached through a link, so an unresolved rule matches nothing
+    // while looking exactly right.
+    const home = mkdtempSync(join(tmpdir(), "sb-missing-home-"));
+    const missing = join(home, ".gemini", "config", "mcp_config.json");
+    const profile = macosProfile(home, {
+      read: [],
+      write: [home],
+      deny: [missing],
+    });
+    const expected = join(
+      realpathSync(home),
+      ".gemini",
+      "config",
+      "mcp_config.json",
+    );
+    expect(profile).toContain(
+      `(deny file-read* file-write* (subpath "${expected}"))`,
+    );
+  });
+
+  it("stops claiming a run is isolated when the launch is unconfined", () => {
+    // Off macOS `confine` builds no profile at all, so nothing denies that
+    // file and the claim would be theatre.
+    const home = mkdtempSync(join(tmpdir(), "sb-agy-home-"));
+    const spec = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
+    const ctx = {
+      mcpUrl: "http://127.0.0.1:0/mcp",
+      bearerToken: "t",
+      dataDir: "/tmp/data",
+      access: "workspace" as const,
+    } as never;
+    const cap = capabilityOf(spec, "/usr/local/bin/agy", ctx, { HOME: home }, "linux");
+    expect(cap.isolation.isolated).toBe(false);
+    expect(cap.isolation.note).toContain("only confine an agent");
+    // Nothing in the user's file reaches this Boxaide, so the run is allowed
+    // even though it is not isolated. Blocked is not the answer here; saying
+    // so is.
+    expect(cap.runs.ok).toBe(true);
   });
 });
 
@@ -398,7 +466,7 @@ describe.runIf(sandboxSupported() && !sandboxUnavailable())(
       // READ and not written. Every agent CLI here signs in by writing a token
       // down and rewriting it when it refreshes, so a confined launch started,
       // could not save the result, waited, and exited with nothing the user
-      // ever saw — the agent simply never picked the message up.
+      // ever saw. The agent simply never picked the message up.
       const cliHome = mkdtempSync(join(tmpdir(), "sb-cli-home-"));
       writeFileSync(join(cliHome, "auth.json"), '{"token":"old"}');
       const out = run(
@@ -501,6 +569,50 @@ describe.runIf(sandboxSupported() && !sandboxUnavailable())(
         const seen = await readWhenWritten(out);
         expect(seen).not.toContain("master-credential");
         expect(seen).toMatch(/not permitted|No such file/i);
+      } finally {
+        launcher.close();
+      }
+    });
+
+    it("keeps a run out of one named file and leaves its siblings alone", async () => {
+      // The whole new wiring in one test: confine() passing `kind` into
+      // spec.sandbox, the returned deny reaching confineCommand, the rule
+      // landing after the allows, and a deny path resolving the way seatbelt
+      // matches. Tests of the pieces can all pass while this is unwired.
+      const dataDir = mkdtempSync(join(tmpdir(), "sb-data-"));
+      const configDir = mkdtempSync(join(tmpdir(), "sb-usercfg-"));
+      const denied = join(configDir, "mcp_config.json");
+      writeFileSync(denied, "user-servers");
+      const sibling = join(configDir, "keep.txt");
+      writeFileSync(sibling, "sibling-readable");
+      const binDir = mkdtempSync(join(tmpdir(), "sb-bin-"));
+      writeFileSync(
+        join(binDir, "probe-agent"),
+        `#!/bin/sh\n/bin/cat ${denied} 2>&1\n/bin/cat ${sibling} 2>&1\n`,
+      );
+      spawnSync("chmod", ["755", join(binDir, "probe-agent")]);
+
+      const launcher = new AgentLauncher(
+        { mcpUrl: "http://127.0.0.1:0/mcp", bearerToken: "t", dataDir },
+        [
+          {
+            id: "probe",
+            label: "Probe",
+            bin: "probe-agent",
+            runArgs: () => [],
+            sandbox: (_ctx, _workDir, _env, kind) =>
+              kind === "run" ? { deny: [denied] } : {},
+          },
+        ],
+        { PATH: binDir, HOME: process.env.HOME },
+        [],
+      );
+      try {
+        const result = await launcher.runOnce({ runId: "denyprobe", prompt: "x" });
+        expect(result.log).not.toContain("user-servers");
+        expect(result.log).toMatch(/not permitted/i);
+        // The deny names a file, not the directory holding it.
+        expect(result.log).toContain("sibling-readable");
       } finally {
         launcher.close();
       }

@@ -1,7 +1,7 @@
 /**
  * Automation tables and queries. DDL: docs/specs/agent-platform.md.
- * Owns: automations, automation_runs. Run logs are encrypted (log_enc) —
- * agent output quotes mail content.
+ * Owns: automations, automation_runs. Run logs are encrypted (log_enc)
+ * because agent output quotes mail content.
  */
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
@@ -43,6 +43,17 @@ export type AutomationRun = {
   exitCode: number | null;
   /** Decrypted, last LOG_TAIL_LIMIT bytes only. Empty when nothing was captured. */
   log: string;
+  /**
+   * Which agent actually carried this run, and on which model. Null on a row
+   * written before these columns existed, and on a run that never started:
+   * `agentId` null together with `exitCode` null is how a reader tells a
+   * blocked run (whose log is Boxaide's own reason) from a CLI that failed.
+   *
+   * The model is a snapshot. The automation's own model can be edited after
+   * the fact, so reading it back off that row would misreport history.
+   */
+  agentId: string | null;
+  model: string | null;
 };
 
 type AutomationRow = {
@@ -67,6 +78,8 @@ type RunRow = {
   status: string;
   exit_code: number | null;
   log_enc: string | null;
+  agent_id: string | null;
+  model: string | null;
 };
 
 /** Whole captured output kept in the row; readers get the tail (see LOG_TAIL_LIMIT). */
@@ -130,10 +143,19 @@ const RUN_TIMEOUT_MS = 15 * 60 * 1000;
 /**
  * A 'running' row older than this belongs to a process that died: the launcher
  * hard-kills its own child at RUN_TIMEOUT_MS, and the grace covers the SIGKILL
- * plus the finishRun write. Younger rows are never swept — another live
+ * plus the finishRun write. Younger rows are never swept. Another live
  * process may own them.
  */
 export const RUN_STALE_MS = RUN_TIMEOUT_MS + 5 * 60 * 1000;
+
+/**
+ * Written to `agent_id` when the run never started: no CLI was spawned, so no
+ * agent carried it. It is a marker, not an id, and no registry id is empty.
+ *
+ * Null cannot carry this. Every row written before the column existed is
+ * null, so "nothing started" has to be said, not inferred from absence.
+ */
+export const NOTHING_STARTED = "";
 
 /** Appended to a run log when the sweep finalizes a row nobody finished. */
 export const STALE_RUN_NOTE =
@@ -191,7 +213,11 @@ export class AutomationStore {
         finished_at TEXT,
         status TEXT NOT NULL,
         exit_code INTEGER,
-        log_enc TEXT
+        log_enc TEXT,
+        -- Which agent and model carried the run. Empty agent_id means nothing
+        -- started; null means the row predates these columns.
+        agent_id TEXT,
+        model TEXT
       );
       CREATE INDEX IF NOT EXISTS automation_runs_by_automation
         ON automation_runs (automation_id, started_at DESC);
@@ -216,6 +242,18 @@ export class AutomationStore {
       .all() as Array<{ name: string }>;
     if (!columns.some((c) => c.name === "model")) {
       this.db.exec(`ALTER TABLE automations ADD COLUMN model TEXT`);
+    }
+
+    // Same for run rows written before the launcher reported which agent ran.
+    // Null there reads as "not recorded", which is what those rows are.
+    const runColumns = this.db
+      .prepare(`PRAGMA table_info(automation_runs)`)
+      .all() as Array<{ name: string }>;
+    if (!runColumns.some((c) => c.name === "agent_id")) {
+      this.db.exec(`ALTER TABLE automation_runs ADD COLUMN agent_id TEXT`);
+    }
+    if (!runColumns.some((c) => c.name === "model")) {
+      this.db.exec(`ALTER TABLE automation_runs ADD COLUMN model TEXT`);
     }
   }
 
@@ -311,7 +349,7 @@ export class AutomationStore {
       name: patch.name?.trim() || current.name,
       cron: patch.cron?.trim() || current.cron,
       // Empty keeps the current value, like name and cron above: create
-      // rejects an empty prompt, so update must not produce one either — a
+      // rejects an empty prompt, so update must not produce one either. A
       // run with no prompt would spawn an agent carrying only the preamble.
       prompt: patch.prompt?.trim() ? patch.prompt : current.prompt,
       agentId: patch.agentId !== undefined ? patch.agentId : current.agentId,
@@ -441,6 +479,8 @@ export class AutomationStore {
       status: "running",
       exitCode: null,
       log: "",
+      agentId: null,
+      model: null,
     };
     this.db
       .prepare(
@@ -460,7 +500,7 @@ export class AutomationStore {
    * (automation_run_now), so two processes could break spec invariant 4
    * between them. The 'running' rows are therefore the lock: sweep dead rows,
    * count live ones and insert, all in ONE transaction. Callers that get null
-   * must keep the job queued and retry — someone else holds the slot.
+   * must keep the job queued and retry. Someone else holds the slot.
    *
    * Two refusals, and the order matters. A second run of the SAME automation is
    * refused whatever the capacity: two copies of one prompt do the same work
@@ -474,11 +514,11 @@ export class AutomationStore {
     const now = opts.now ?? new Date();
     const staleMs = opts.staleMs ?? RUN_STALE_MS;
     // The floor of 1 keeps a caller that computed a limit of 0 (or a negative
-    // one) from wedging the schedule silently — it would refuse every run
+    // one) from wedging the schedule silently. It would refuse every run
     // forever with no row and no log to explain it.
     const limit = Math.max(1, Math.trunc(opts.limit ?? 1));
     // .immediate(): a deferred transaction begins read-only and only takes the
-    // write lock at the INSERT — precisely the window where the other process
+    // write lock at the INSERT, precisely the window where the other process
     // could read "there is room" and insert as well. IMMEDIATE takes the
     // write lock up front, so the counts and the insert are one atomic step
     // against every other connection to this file.
@@ -543,13 +583,25 @@ export class AutomationStore {
 
   finishRun(
     runId: string,
-    result: { status: RunStatus; exitCode: number | null; log?: string; at?: Date },
+    result: {
+      status: RunStatus;
+      exitCode: number | null;
+      log?: string;
+      at?: Date;
+      /**
+       * The registry id that ran, `NOTHING_STARTED` when nothing did, or
+       * absent when the caller does not know (which stays null).
+       */
+      agentId?: string | null;
+      model?: string | null;
+    },
   ): void {
     const log = (result.log ?? "").slice(-LOG_LIMIT);
     this.db
       .prepare(
         `UPDATE automation_runs
-            SET finished_at = ?, status = ?, exit_code = ?, log_enc = ?
+            SET finished_at = ?, status = ?, exit_code = ?, log_enc = ?,
+                agent_id = ?, model = ?
           WHERE id = ?`,
       )
       .run(
@@ -557,6 +609,8 @@ export class AutomationStore {
         result.status,
         result.exitCode,
         log ? encryptSecret(this.masterKey, log) : null,
+        result.agentId ?? null,
+        result.model ?? null,
         runId,
       );
   }
@@ -591,6 +645,8 @@ export class AutomationStore {
       log: row.log_enc
         ? decryptSecret(this.masterKey, row.log_enc).slice(-LOG_TAIL_LIMIT)
         : "",
+      agentId: row.agent_id,
+      model: row.model,
     };
   }
 }

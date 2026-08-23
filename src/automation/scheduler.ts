@@ -16,12 +16,12 @@
  *   automation prompt, pre-approved read/draft/CRM/outreach-queue tools,
  *   NEVER message_send, 15-minute timeout.
  */
-import { nextRunAfter, type AutomationStore } from "./store.js";
+import { nextRunAfter, NOTHING_STARTED, type AutomationStore } from "./store.js";
 import type { OneShotResult } from "../agent/launcher.js";
 
 /**
  * The slice of AgentLauncher the scheduler uses. Structural, so tests inject a
- * fake and never spawn a real CLI — a scheduler test that shelled out to
+ * fake and never spawn a real CLI. A scheduler test that shelled out to
  * `claude` would bill the user and hang the suite.
  */
 export type OneShotLauncher = {
@@ -59,7 +59,7 @@ export class AutomationScheduler {
     // A quit or crash mid-run leaves its row 'running' forever: stop() kills
     // the child, but SQLite closes before the close handler can persist
     // 'killed'. Sweeping at construction means the next process to start
-    // cleans up after the one that died — and, since a live 'running' row now
+    // cleans up after the one that died, and, since a live 'running' row now
     // blocks claims, an unswept row would also wedge every later run.
     this.store.sweepStaleRuns();
   }
@@ -95,8 +95,8 @@ export class AutomationScheduler {
   /**
    * Resolves once nothing is running and nothing is queued.
    *
-   * tick() and runNow() return as soon as the runs are started — that is what
-   * makes them concurrent — so anything that needs the finished result waits
+   * tick() and runNow() return as soon as the runs are started, which is what
+   * makes them concurrent, so anything that needs the finished result waits
    * here. Loops because a finishing run dispatches whatever was queued behind
    * it, which puts a new promise in flight after the first batch settles.
    */
@@ -105,7 +105,7 @@ export class AutomationScheduler {
       // Nothing is running and no dispatch is under way, so nothing can move
       // the queue: what is waiting needs a slot only another process can free,
       // or a tick that has not happened yet. Waiting here would never end, and
-      // the capacity check alone missed it — a run deferred by another process
+      // the capacity check alone missed it. A run deferred by another process
       // leaves this process with free slots it cannot use.
       if (this.inFlight.size === 0 && !this.draining) return;
       await Promise.allSettled([...this.inFlight, this.draining]);
@@ -178,7 +178,7 @@ export class AutomationScheduler {
       const id = this.queue.shift()!;
       // Awaited because the claim itself is a synchronous database write and
       // the answer decides whether the slot was taken. The run it starts is
-      // not awaited — that is the point.
+      // not awaited, and that is the point.
       const outcome = await this.startOne(id);
       // Another process holds a slot, or this automation is already running
       // somewhere. Put the job back at the head and stop dispatching: the next
@@ -244,14 +244,24 @@ export class AutomationScheduler {
         status: result.status,
         exitCode: result.exitCode,
         log: result.log,
+        // Which CLI ran it, and on which model. The model comes from the row
+        // this run was fired from, so a later edit does not rewrite history.
+        agentId: result.agentId,
+        model: automation.model,
       });
     } catch (err) {
-      // A refusal (no CLI installed, slot taken) is a failed run, recorded:
-      // an automation that silently never runs is the worst outcome here.
+      // A refusal (no CLI installed, a blocked agent, slot taken) is a failed
+      // run, recorded: an automation that silently never runs is the worst
+      // outcome here. runOnce only rejects before it spawns, so the empty
+      // agent id is the truth and the marker at once: nothing started, and
+      // the log is Boxaide's own reason rather than any CLI's output. Null
+      // would not say it, because every row written before this column
+      // existed is null too.
       this.store.finishRun(runId, {
         status: "error",
         exitCode: null,
         log: err instanceof Error ? err.message : String(err),
+        agentId: NOTHING_STARTED,
       });
     } finally {
       // next_run_at is computed from the finish time, not the due time: a run

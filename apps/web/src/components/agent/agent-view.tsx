@@ -9,6 +9,7 @@ import { AgentRunView, groupRuns } from "@/components/agent/agent-run";
 import { BrandGlyph, TechnicalDetails } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { shortAgentReason } from "@/lib/agent-copy";
 import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useAgent } from "@/lib/hooks/use-agent";
 import { useApp } from "@/lib/hooks/use-app-state";
@@ -18,13 +19,13 @@ import {
 } from "@/lib/hooks/use-local-agents";
 
 /**
- * The agent conversation — the app's first screen.
+ * The agent conversation, the app's first screen.
  *
  * Boxaide runs no model. Everything on this pane came from, or is going to, an
  * MCP client the user runs themselves; the server's only job is to hold the
  * conversation and hand messages over.
  *
- * So there is no token stream and no typing caret — an answer arrives whole.
+ * So there is no token stream and no typing caret. An answer arrives whole.
  * What IS live is the run: Boxaide hands a message to exactly one agent and
  * knows that agent has not answered yet, and it sees every mail tool that agent
  * calls in the meantime. That is what the working indicator and the step list
@@ -89,8 +90,8 @@ export function AgentView({
      sentinel, and land instantly.
 
      Both details are load-bearing. `scrollIntoView({behavior:"smooth"})` on an
-     empty div is a silent no-op in at least one Chromium build — measured, not
-     assumed — so the tail would simply stop following there. And a tail that
+     empty div is a silent no-op in at least one Chromium build (measured, not
+     assumed) so the tail would simply stop following there. And a tail that
      animates loses a race it cannot win: another turn lands mid-animation and
      the pane is already chasing a stale target. */
   const toBottom = React.useCallback(() => {
@@ -172,7 +173,7 @@ export function AgentView({
     <div className="flex h-full min-h-0 flex-col">
       <header className="relative flex h-11 shrink-0 items-center gap-2 px-3">
         {/* A 1px accent sweep along the header's base while a message is
-            claimed — the whole pane's "a run is live", still visible when the
+            claimed. The whole pane's "a run is live", still visible when the
             run itself is scrolled away. Same keyframes as the list refetch
             bar, slowed: this is a state, not a fetch. Gone entirely under
             reduced motion, where the run block's static mark carries it. */}
@@ -252,7 +253,7 @@ export function AgentView({
           className="pane-scroll h-full min-h-0 overflow-y-auto"
         >
           {/* Bottom-anchored. A short conversation belongs against the composer,
-              not stranded at the top of a tall empty pane — the gap reads as
+              not stranded at the top of a tall empty pane, where the gap reads as
               "something failed to load". `min-h-full` on the inner column is
               what lets justify-end have any effect inside a scroller. */}
           <div
@@ -290,7 +291,7 @@ export function AgentView({
                     claimed={
                       run.question !== null && agent.claimed.has(run.question.seq)
                     }
-                    /* An agent is holding a message, and it is not this one —
+                    /* An agent is holding a message, and it is not this one,
                        including one in another chat, which is the case that
                        used to read as "no agent is listening". */
                     busyElsewhere={
@@ -331,6 +332,17 @@ export function AgentView({
               <TechnicalDetails raw={agent.error} />
             </div>
           )}
+          {/* Why the picked agent will refuse, before a send goes out. Said
+              in two or three words; the server's own sentence is on the
+              tooltip, and the send still toasts it in full. */}
+          {picked?.chat.reason && (
+            <div
+              title={picked.chat.reason}
+              className="mb-2 rounded-[var(--radius-md)] border border-border-subtle bg-surface-2 px-3 py-2 text-[12px] leading-4 text-fg-secondary"
+            >
+              {shortAgentReason(picked.chat.reason)}
+            </div>
+          )}
           <AgentComposer
             onSend={send}
             sending={agent.sending}
@@ -361,8 +373,8 @@ export function AgentView({
  *
  * The two things that can be missing are named separately, because they have
  * different fixes and either can be true on its own: no mailbox connected, and
- * no agent listening. Neither blocks typing — a queued message is delivered as
- * soon as an agent arrives — so both read as guidance, not as errors.
+ * no agent listening. Neither blocks typing, because a queued message is
+ * delivered as soon as an agent arrives, so both read as guidance, not as errors.
  */
 function EmptyState({
   noMailboxes,
@@ -382,8 +394,8 @@ function EmptyState({
       <BrandGlyph size={20} className="mb-4 text-fg-tertiary" />
       <h3 className="title-15 text-fg">Talk to your agent about your mail</h3>
       <p className="mt-1.5 max-w-[52ch] text-[13px] leading-[20px] text-fg-secondary">
-        Your own agent — Claude Code, Codex, Cursor, anything that speaks MCP —
-        reads and answers here. Boxaide runs no model of its own and sends your
+        Your own agent, whether Claude Code, Codex, Cursor or anything else that
+        speaks MCP, reads and answers here. Boxaide runs no model of its own and sends your
         mail nowhere.
       </p>
 
@@ -398,7 +410,7 @@ function EmptyState({
           )}
           {!listening && (
             <Row
-              text="No agent is listening. You can still type — your message waits and is delivered as soon as one starts."
+              text="No agent is listening. You can still type. Your message waits and is delivered as soon as one starts."
               action="Connect your agent"
               icon
               onAction={onConnectAgent}

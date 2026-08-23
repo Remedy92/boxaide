@@ -20,7 +20,7 @@ import { useLocalAgents, useStopLocalAgent } from "@/lib/hooks/use-local-agents"
  * otherwise: no agent count, no "connected", no activity feed.
  *
  * What became knowable is narrower and is reported elsewhere. An agent parked
- * in `chat_await_message` is holding a request open — the Agent nav row calls
+ * in `chat_await_message` is holding a request open. The Agent nav row calls
  * that "listening", and only that. The conversation header also names the
  * CLI this process spawned (picked in the composer), which is a different
  * fact: see AgentChannel.presence.launchedAgent. Neither is "connected".
@@ -78,7 +78,7 @@ export function AgentsSection({
 /**
  * The agent in play, and only that: the one running now, or the one that just
  * died. Choosing an agent happens in the composer, next to the question it
- * will answer — a rail listing every installed CLI with a Start button was a
+ * will answer. A rail listing every installed CLI with a Start button was a
  * second place to make the same choice, and the two disagreed.
  *
  * No status dot per row. A row is here because it is running or because it
@@ -91,7 +91,7 @@ function LocalAgentList() {
   const lastExit = agents.data?.lastExit ?? null;
   const rows = (agents.data?.agents ?? []).filter(
     (a) =>
-      a.available &&
+      a.installed &&
       (running?.id === a.id ||
         agentExitedBadly(a.id, { running, lastExit })),
   );
@@ -133,7 +133,7 @@ function LocalAgentList() {
               )}
             </span>
             {signedOut && <AgentSignIn compact />}
-            {/* Confinement is not a choice offered here any more — it is on.
+            {/* Confinement is not a choice offered here any more. It is on.
                 This is the exception: the machine could not apply it, or the
                 install turned it off, and either way the reason is worth a
                 line rather than a silence. */}

@@ -1,4 +1,4 @@
-# Agent platform spec — CRM, automations, outreach
+# Agent platform spec: CRM, automations, outreach
 
 **Date:** 2026-08-13 · **Status:** accepted · **Author:** Fable (with Lucas)
 
@@ -10,7 +10,7 @@ outreach engine with human approval. All free, MIT, fully local. No sync.
 
 1. **No auto-send.** Agent-written outreach lands in the `outbox` table with
    status `pending`. Only a human, through the web UI (REST), approves. There
-   is **no MCP tool** that approves, rejects, or sends outbox rows — an agent
+   is **no MCP tool** that approves, rejects, or sends outbox rows. An agent
    must never approve its own email.
 2. **Suppression is enforced server-side.** `MailService.sendMessage` calls a
    send guard. A recipient on the suppression list fails the send with error
@@ -21,11 +21,11 @@ outreach engine with human approval. All free, MIT, fully local. No sync.
    message-derived text (subjects, snippets, bodies, notes, run logs) is
    encrypted with the master key via `encryptSecret`/`decryptSecret`
    (`src/crypto/secrets.ts`), suffix `_enc`. Contact identity fields (email,
-   name, org name/domain) stay plaintext — they are needed for UNIQUE and
+   name, org name/domain) stay plaintext, because they are needed for UNIQUE and
    search and are CRM data, not mail bodies.
 4. **Bounded concurrent automation runs.** At most `BOXAIDE_AGENT_CONCURRENCY`
    runs are alive at once (default 2, hard cap 4), and never two of the same
-   automation — a run still going when its own cron fires makes that one wait,
+   automation. A run still going when its own cron fires makes that one wait,
    while other automations proceed. The interactive chat agent has its own
    slot: it neither waits for runs nor holds them up. Each run works in its own
    directory, removed when it ends.
@@ -37,7 +37,7 @@ outreach engine with human approval. All free, MIT, fully local. No sync.
    edit another module's directory.
 7. **Contact state is derived, never asserted by an agent.** Whether someone
    was contacted, replied, or opted out is worked out from the rows written by
-   whatever performed the act — the mail sync, the outreach engine, opt-out
+   whatever performed the act: the mail sync, the outreach engine, opt-out
    detection. No tool writes it. The one exception is intent (`queued`,
    `do_not_contact`), which no past mail could imply; it is stored in
    `contact_intent`, one row per contact, replace-on-write.
@@ -49,8 +49,8 @@ outreach engine with human approval. All free, MIT, fully local. No sync.
 
 | Field | Worked out from |
 | --- | --- |
-| `lastOutboundAt` | newest `interactions.direction = 'out'`, or newest `outbox.sent_at` where status `sent` — whichever is later |
-| `firstOutboundAt` | oldest of the same two — the clock a follow-up cadence runs on |
+| `lastOutboundAt` | newest `interactions.direction = 'out'`, or newest `outbox.sent_at` where status `sent`, whichever is later |
+| `firstOutboundAt` | oldest of the same two, the clock a follow-up cadence runs on |
 | `outboundCount` | the LARGER of the two counts, never the sum: once the sync walks Sent, an engine send is also an interaction and no id ties them together |
 | `lastInboundAt` | newest `interactions.direction = 'in'` |
 | `optedOutAt` | earlier of `suppression.at` and the first `interactions.opt_out = 1` |
@@ -65,8 +65,8 @@ contact with no state at all reads `new`, never "blocked forever"; and a
 question about named contacts never falls back to a page of unrelated ones,
 however many of the names fail to resolve.
 
-Blocking governs what automated outreach may **pick**. It is not a send ban —
-only suppression is, enforced in the send guard (invariant 2) — so a human or
+Blocking governs what automated outreach may **pick**. It is not a send ban.
+Only suppression is, enforced in the send guard (invariant 2), so a human or
 an agent acting on a specific instruction can still mail a blocked contact.
 
 **Why not tags.** `contact_tags` is an unordered set with no timestamp. It
@@ -75,7 +75,7 @@ unanswerable, and a `queued` tag left behind by a crashed run skipped that
 person permanently. Tags stayed, demoted to labels: they target a selection,
 they never decide eligibility.
 
-## File map and seams (already wired — do not rewire)
+## File map and seams (already wired, do not rewire)
 
 ```
 src/crm/store.ts          CrmStore(db, masterKey)      tables + queries
@@ -234,8 +234,8 @@ Derivation rules (`CrmService.syncFromMail`):
   me.com, proton.me, protonmail.com, gmx.com, gmx.net, web.de, aol.com,
   fastmail.com, hey.com, pm.me, mail.com, msn.com, telenet.be, skynet.be).
   Create the org on first sight (name = domain without TLD, capitalized).
-- Sync runs: every 10 minutes in `serve` (timer owned by app.ts skeleton —
-  it calls `crmService.syncFromMail()`), and on demand via the
+- Sync runs: every 10 minutes in `serve` (timer owned by app.ts skeleton, which
+  calls `crmService.syncFromMail()`), and on demand via the
   `crm_sync` MCP tool and `POST /api/crm/sync`.
 
 ### AutomationStore
@@ -264,9 +264,16 @@ CREATE TABLE IF NOT EXISTS automation_runs (
   finished_at TEXT,
   status TEXT NOT NULL,           -- 'running' | 'ok' | 'error' | 'killed'
   exit_code INTEGER,
-  log_enc TEXT                    -- run log, truncated to 64 KiB, tail kept
+  log_enc TEXT,                   -- run log, truncated to 64 KiB, tail kept
+  agent_id TEXT,                  -- the launcher AgentSpec id that actually ran
+  model TEXT                      -- the model id it ran with; snapshot, not a join
 );
 ```
+
+An empty `agent_id` on an `error` row means nothing started: the log is the
+launcher's blocked reason and nothing else. Rows written before these two
+columns existed keep null in both, which reads as "not recorded", and their log
+is whatever the CLI wrote.
 
 Scheduler (`AutomationScheduler`):
 - `cron-parser` (add to root package.json dependencies) computes
@@ -281,7 +288,7 @@ Scheduler (`AutomationScheduler`):
   concurrency cap. Both counts and the insert are one IMMEDIATE transaction.
 - A drain already in progress is not restarted; one more pass is chained onto
   it so work enqueued while it was finishing is not stranded until the next
-  tick. One pass, never a loop — a run another process deferred leaves the
+  tick. One pass, never a loop. A run another process deferred leaves the
   queue non-empty with slots free here, and looping on that would retry the
   claim as fast as SQLite could answer.
 - `scheduler.idle()` resolves when nothing is running or queued, and returns
@@ -294,17 +301,22 @@ Scheduler (`AutomationScheduler`):
   same MCP wiring, but prompt = the automation's prompt plus a fixed preamble
   (below), and no chat loop. `runOnce` takes the run row's id: it keys the live
   run for `killRun(id)` and names the run's own working directory.
-- A saved runner that is no longer usable before spawn does not lose the
-  schedule. `runOnce` chooses an installed fallback, drops the original
-  runner's model id, and writes the reason plus the runner actually used into
-  the run log. Fallback preference starts with Codex because its `CODEX_HOME`
-  and MCP config isolate cleanly. Antigravity is ineligible for unattended
-  runs while `~/.gemini/config/mcp_config.json` names any global MCP server:
-  agy always merges that file and has no strict-config flag, so an unrelated
-  server can fail or hold startup before the Boxaide task begins. Watched chat
-  launches keep those user-configured integrations.
+- Run agent selection. A run keeps the agent its automation names. A saved
+  runner that cannot start fails the run with the reason on the run row;
+  nothing is swapped in. A null `agent_id` still means "first available",
+  resolved in registry order against what is installed and run capable, and
+  the id that ran is written to the run row.
+- Antigravity isolation. agy merges `~/.gemini/config/mcp_config.json` into
+  every session and has no strict-config flag. An unattended run is sandboxed
+  with a read deny on that one file, so agy sees only the Boxaide server in the
+  run's own `.agents/mcp_config.json`. A watched chat launch keeps the user's
+  servers. When the launch is unconfined (no sandbox on this platform, or
+  `BOXAIDE_AGENT_ACCESS=full`), `GET /api/agents` reports
+  `isolation.isolated: false` with the access notice, and the chat preflight
+  also applies to runs, so an agy config that reaches Boxaide refuses the run
+  instead of being ignored.
 - `close()` is final. Every spawn path checks it, including after the model
-  lookup in `start()` — shutdown clears the chat slot, so the idle check alone
+  lookup in `start()`. Shutdown clears the chat slot, so the idle check alone
   would let a launch suspended there spawn an agent nobody owns.
 - Runs do not disturb the chat agent and are not disturbed by it. The launcher
   keeps the chat slot and the run slots apart, so Start never fails because the
@@ -315,14 +327,14 @@ Scheduler (`AutomationScheduler`):
   over the same data directory may have a run in flight.
 - Grok's config home lives inside that per-run directory: its
   `trusted_folders.toml` names the working directory, so a shared home would
-  have runs untrusting each other. Claude's `CLAUDE_CONFIG_DIR` stays shared —
+  have runs untrusting each other. Claude's `CLAUDE_CONFIG_DIR` stays shared,
   it accumulates state the CLI owns, and an empty home would make every run a
-  first run — so every write into it is staged under a temporary name and
+  first run, so every write into it is staged under a temporary name and
   renamed, which is atomic.
 - Run log: a spec whose `runArgs` ask for an event stream (`claude` adds
   `--output-format stream-json --verbose`) also carries a `renderRunLine`, and
-  the log stores that rendering — session start, assistant text, `[tool]`
-  lines, result and errors — plus raw stderr, which stays raw because a crash
+  the log stores that rendering (session start, assistant text, `[tool]`
+  lines, result and errors) plus raw stderr, which stays raw because a crash
   writes plain text there. Specs without a stream store raw captured
   stdout+stderr. Either way the log is truncated to 64 KiB, tail kept: a run
   that failed says why in its last lines.
@@ -330,7 +342,7 @@ Scheduler (`AutomationScheduler`):
   run is never empty:
   - First-output watchdog (`ONESHOT_FIRST_OUTPUT_TIMEOUT_MS`, 2 min): a streaming run
     that writes no stdout at all in the window never started, so it is ended
-    early with status 'error'. First stdout disarms the timer — a healthy
+    early with status 'error'. First stdout disarms the timer. A healthy
     Claude session prints its start line within seconds, and a gap after that
     is a long tool, not a hang. A wedge after startup waits for the deadline.
     stderr does not feed it, because startup noise is not the agent speaking.
@@ -340,13 +352,13 @@ Scheduler (`AutomationScheduler`):
 - Run duration is the honest one: the launcher resolves on stream close, or
   `ONESHOT_CLOSE_GRACE_MS` (2 s) after process exit when a leftover grandchild
   still holds a pipe open. A 15-minute timeout reports about 15 minutes.
-- The `claude` CLI runs under an isolated config home — `CLAUDE_CONFIG_DIR`
-  set to `<dataDir>-agents/agent-homes/claude` — mirroring grok's isolated
+- The `claude` CLI runs under an isolated config home, `CLAUDE_CONFIG_DIR`
+  set to `<dataDir>-agents/agent-homes/claude`, mirroring grok's isolated
   `GROK_HOME`. `--strict-mcp-config` only covers MCP servers; the isolated
   home is what keeps the user's personal hooks, skills, output styles and
   subagents out of a process Boxaide is responsible for. Credentials are
   copied in per launch and auth-relevant settings keys (`env`, `apiKeyHelper`)
-  are carried over; hooks are not. Applies to chat and scheduled runs alike —
+  are carried over; hooks are not. Applies to chat and scheduled runs alike,
   the isolation is about whose config runs, not which path.
 - Run preamble (verbatim, prepended to every automation prompt):
   "You are a scheduled Boxaide automation. Do the task below using the Boxaide
@@ -356,33 +368,33 @@ Scheduler (`AutomationScheduler`):
   The shared outreach chain (`OUTREACH_CHAIN` in `src/agent/guidance.ts`) is
   appended to it, and to `DRIVEN_SYSTEM` and `KICKOFF`, so every agent gets the
   same five-step order and the same four rules whoever started it.
-- Tools for runs: the `run` scope in `src/mcp/scope.ts` — mail reads and
+- Tools for runs: the `run` scope in `src/mcp/scope.ts`: mail reads and
   drafts, all CRM tools, automation *read* tools (`automations_list`,
   `automation_runs_list`), outreach tools, calendar reads, and no chat tool at
   all. `message_send`, `meeting_create` and `meeting_cancel` are in the scope
   and perform nothing: a run may ask, the request is stored, and the user
-  approves it in the Agent view when they are next at the window — see
+  approves it in the Agent view when they are next at the window. See
   `src/agent/approvals.ts`. The scope is enforced by the MCP server against the
   token the run carries, not by the CLI's flags; a CLI that offers an allowlist
   flag is additionally given the same list.
 - Web access: the CLI's own web tools stay at the CLI's defaults; we do not
   grant or deny them (Claude's headless default allows read-only search).
 - File access: a run is confined to its own directory and its CLI's own
-  installation and credentials — `workspace` in `src/agent/sandbox.ts`. Nobody
+  installation and credentials, via `workspace` in `src/agent/sandbox.ts`. Nobody
   is watching a scheduled run and the mail it reads was written by strangers,
   so there is no per-run opt-out; `BOXAIDE_AGENT_ACCESS=full` turns it off for
   the install, and a machine with no sandbox runs unconfined and reports it.
 - Network access: a confined run reaches this machine and nothing else
   (`network: "loopback"` in `src/agent/sandbox.ts`). Its way out of the sandbox
   is the proxy in `src/agent/egress.ts`, which reads the host off the CONNECT
-  line and allows only that CLI's own provider — no TLS is terminated and no
+  line and allows only that CLI's own provider. No TLS is terminated and no
   body is read. The sandbox alone would not do it, because the launched CLIs
   run shell commands and `curl` is not ours to withhold; Seatbelt accepts only
   `*` or `localhost` as a network address, which is why the host decision lives
   in a proxy rather than in the profile.
 - Known gap, accepted deliberately: an MCP tool runs in the SERVER process,
   which is not sandboxed, so `web_fetch` reaches whatever address its argument
-  names whatever the profile above denies. A run keeps it anyway — an outreach
+  names whatever the profile above denies. A run keeps it anyway. An outreach
   agent that can only read search snippets is not the product, and what it
   costs is a targeted attack on a self-hosted single-user install. The bounded
   version, if this is ever worth closing: let a run fetch only a URL returned
@@ -391,7 +403,7 @@ Scheduler (`AutomationScheduler`):
 - What is claimed and what is not: refusals seen by the proxy are written into
   the run's log with the host wanted, capped so a loop cannot evict the log. A
   CLI that ignores the proxy variables is refused by the sandbox instead, and
-  that arrives as its own connection error — so every confined run opens its
+  that arrives as its own connection error, so every confined run opens its
   log with a line naming the boundary. `BOXAIDE_RUN_NETWORK_ALLOW` adds hosts a
   CLI turns out to need; `BOXAIDE_RUN_NETWORK=open` turns the boundary off. An
   unconfined install (`full`, or no sandbox) keeps an open network and claims
@@ -441,7 +453,7 @@ Engine (`OutreachEngine`):
   - The rules differ by field. Explicit phrases (unsubscribe, opt out,
     stop emailing/mailing/contacting) count in the sender's own words:
     for a body, the reply portion above quoted thread and the signature
-    delimiter — a quoted newsletter's "unsubscribe" footer is not this
+    delimiter. A quoted newsletter's "unsubscribe" footer is not this
     sender opting out. The bare keyword counts at the start of a body,
     and only as the whole subject after reply prefixes are stripped:
     "Re: stop" opts out, "Stop by our booth at SaaStr" does not, and
@@ -451,10 +463,10 @@ Engine (`OutreachEngine`):
   platform-installed sink (`CrmService.setOptOutSink`, wired in
   `src/platform.ts`) once per freshly flagged inbound message, with the
   address in hand; the sink suppresses ('reply-stop'). Scope: only contacts
-  outreach touched — an `outbox` row exists for that contact. Fresh rows
+  outreach touched, meaning an `outbox` row exists for that contact. Fresh rows
   only, so a message suppresses exactly once: removing a suppression through
   `DELETE /api/outreach/suppression/:email` also withdraws the stored flags
-  (`CrmStore.clearOptOutFlags`), and nothing re-reads old flags — a human
+  (`CrmStore.clearOptOutFlags`), and nothing re-reads old flags. A human
   removal stands until the contact says stop again. This design (no sweep)
   exists because a sweep over stored flags resurrects removed suppressions,
   and a contact deleted between flag and sweep takes the address with it
@@ -479,23 +491,23 @@ Engine (`OutreachEngine`):
 
 ## MCP tool surface
 
-Naming and description style follows `src/mcp/server.ts` — descriptions tell
+Naming and description style follows `src/mcp/server.ts`. Descriptions tell
 the agent when NOT to use a tool. Tools return plain objects; the shared
 handler JSON-stringifies. Every module exports `<MODULE>_TOOLS` (schema list,
 same shape as `TOOLS`) and `dispatch<Module>Tool(deps, name, args)`.
 
 CRM (`src/crm/tools.ts`):
-- `crm_sync` — derive contacts/interactions from mail now; returns counts.
-- `crm_contacts_search` { query?, tag?, limit=50 } — search name/email/org.
-- `crm_contact_get` { contactId | email } — contact + tags + notes +
+- `crm_sync`: derive contacts/interactions from mail now; returns counts.
+- `crm_contacts_search` { query?, tag?, limit=50 }: search name/email/org.
+- `crm_contact_get` { contactId | email }: contact + tags + notes +
   recent interactions (decrypted) + deals + derived `state`.
 - `crm_outreach_state` { contactIds? | emails? | query?/tag?, contactableOnly?,
-  cooldownDays=30, limit=50 } — per contact: status, `contactable`,
+  cooldownDays=30, limit=50 }: per contact: status, `contactable`,
   `blockedBy`, and the timestamps behind them. Derived, never stored; see
   "Contact state" below. Named contacts that do not resolve come back in
   `missing` rather than being dropped.
 - `crm_intent_set` { contactId, intent: 'queued' | 'do_not_contact' | 'none',
-  note? } — the stored half of contact state. One row per contact; setting
+  note? }: the stored half of contact state. One row per contact; setting
   replaces.
 - `crm_contact_upsert` { email, name?, title?, org?, tags?, source='agent' }
 - `crm_contact_delete` { contactId }
@@ -503,45 +515,45 @@ CRM (`src/crm/tools.ts`):
 - `crm_org_upsert` { name, domain? }
 - `crm_orgs_list` {}
 - `crm_interactions_list` { contactId, limit=50 }
-- `crm_pipeline_get` {} — stages with deals, board order.
+- `crm_pipeline_get` {}: stages with deals, board order.
 - `crm_deal_upsert` { dealId?, title, contactId?, orgId?, stageId?, value?, currency? }
 - `crm_deal_move` { dealId, stageId, position? }
 - `crm_deal_delete` { dealId }
 
 Automations (`src/automation/tools.ts`):
-- `automation_create` { name, cron, prompt, agentId?, model? } — description must say:
+- `automation_create` { name, cron, prompt, agentId?, model? }: description must say:
   write the prompt as instructions to a future agent run; validate cron.
 - `automation_update` { automationId, name?, cron?, prompt?, agentId?, model?,
-  enabled? } — changing `agentId` alone clears the stored model: a model id
+  enabled? }: changing `agentId` alone clears the stored model: a model id
   belongs to one CLI.
 - `automation_delete` { automationId }
 - `automations_list` {}
-- `automation_run_now` { automationId } — enqueue immediately.
-- `automation_runs_list` { automationId?, limit=20 } — includes decrypted log
+- `automation_run_now` { automationId }: enqueue immediately.
+- `automation_runs_list` { automationId?, limit=20 }: includes decrypted log
   tail (last 4 KiB) per run.
 
 Outreach (`src/outreach/tools.ts`):
 - `outbox_queue_draft` { account, to, subject, body, contactId? }
-  — description: "the ONLY way an automation or agent gets outreach toward
+  Description: "the ONLY way an automation or agent gets outreach toward
   delivery; a human reviews it in the Boxaide Outreach view before anything
   is sent."
-- `outbox_list` { status?, limit=50 } — decrypted subjects/bodies.
+- `outbox_list` { status?, limit=50 }: decrypted subjects/bodies.
 - `suppression_add` { email, reason='agent' }
 - `suppression_list` {}
 
 Deliberately absent: outbox approve/reject/send tools (invariant 1).
 
 Enrichment (`src/enrichment/tools.ts`):
-- `enrich_find_email` { orgDomain, fullName? | firstName? + lastName? } — one
+- `enrich_find_email` { orgDomain, fullName? | firstName? + lastName? }: one
   paid lookup; returns address, confidence 0 to 100, status and provider.
-- `enrich_verify_email` { email } — same shape, for an address already held.
-- `crm_contacts_import` { csv } — header line plus at most 500 rows; every
+- `enrich_verify_email` { email }: same shape, for an address already held.
+- `crm_contacts_import` { csv }: header line plus at most 500 rows; every
   skipped row comes back with its line number and reason. Contacts nobody.
 
 Research (`src/research/tools.ts`):
-- `web_search` { query, numResults=5, provider? } — ranked results with
+- `web_search` { query, numResults=5, provider? }: ranked results with
   snippets, not page text.
-- `web_fetch` { url } — one public http or https page as text.
+- `web_fetch` { url }: one public http or https page as text.
 
 Prospecting (`src/prospecting/tools.ts`):
 - `prospect_find_companies` { keywords?, name?, domains?, locations?,
@@ -597,7 +609,7 @@ check by itself, so the operator still presses Enter once, and saving a new key
 drops the old verdict rather than letting it stand.
 
 With no search connector at all, a launched CLI keeps its own web search and
-fetch instead (`LaunchContext.searchConfigured` in `src/agent/launcher.ts`).
+fetch instead (`LaunchContext.searchConfigured` in `src/agent/spec.ts`).
 Configure Exa or Parallel and the launcher goes back to stripping those tools,
 so agents search through Boxaide.
 
@@ -619,7 +631,7 @@ The day-long cache means a row held back by the daily cap is not billed twice.
 
 The agent keeps its own notes as plaintext markdown in
 `<dataDir>-agents/workdir/memory/` (`src/memory/store.ts`; the layout rule that
-keeps them out of the data directory is `src/agent/paths.ts`) — `MEMORY.md` as
+keeps them out of the data directory is `src/agent/paths.ts`): `MEMORY.md` as
 the index plus the topic files it names. Agents read and write them with their
 native file tools; the REST routes under `/api/memory` exist for a human
 editing the same files.
@@ -630,14 +642,14 @@ it opened with, and an agent handed a block frozen at launch keeps offering to
 build notes it has already written. A KICKOFF launch is sent one prompt by
 nature, so its block is the one true at launch.
 
-- **Chat and driven sessions, no `MEMORY.md` yet** — one ask-first block: the
+- **Chat and driven sessions, no `MEMORY.md` yet**: one ask-first block: the
   agent may offer, once, to skim mailbox, CRM and calendar (~15 tool calls)
   and only after the user agrees write the index plus `company.md`,
   `voice.md`, `people.md`. Every fact names its source; no passwords or keys.
-- **Chat and driven sessions, notes exist** — the index, capped at ~2000
+- **Chat and driven sessions, notes exist**: the index, capped at ~2000
   characters with the tail marked, plus the duty to keep the files current
   itself.
-- **Automation runs** — never the ask (nobody is there to consent) and never
+- **Automation runs**: never the ask (nobody is there to consent) and never
   the update duty (a run's directory is not the workdir): the capped index
   with `company.md` and `voice.md` inlined, each capped at ~1500 characters,
   inserted between the run preamble and the task. No notes stored, nothing
@@ -673,14 +685,14 @@ own words, never instructions and never text pasted out of received mail. What
 survives that is bounded by the launch's scope: sending stays a human decision
 (`src/agent/approvals.ts`).
 
-Names are narrow — `[a-z0-9][a-z0-9-]*.md`, because the name in a route path is
-joined onto a filesystem path — plus `MEMORY.md` itself, which the listing puts
+Names are narrow, `[a-z0-9][a-z0-9-]*.md`, because the name in a route path is
+joined onto a filesystem path, plus `MEMORY.md` itself, which the listing puts
 first and a person opens first. Listing and reading answer that same question,
 so no row is offered that the reader would refuse.
 
 Names answer nothing about what a name POINTS at, and the agent writes these
 files while this server reads them, unsandboxed, with rights the agent does not
-have — a `company.md` symlinked at `bearer.token` would otherwise be read by us
+have. A `company.md` symlinked at `bearer.token` would otherwise be read by us
 and pasted into the next prompt, and a save through one would truncate whatever
 it named. So every open is `O_NOFOLLOW` with a regular-file check on the handle
 itself, symlinks are skipped by the listing rather than described by their
@@ -711,10 +723,18 @@ POST `/api/outreach/outbox/:id/reject`, GET/POST `/api/outreach/suppression`,
 DELETE `/api/outreach/suppression/:email`,
 GET `/api/outreach/badge` → `{ pending: n }` (tray + badge poll this).
 
+Agents: GET `/api/agents` → `{ agents, running, lastExit }`. Every agent
+carries `installed`, `chat` and `runs` as `{ ok, reason }` (the reason is null
+exactly when `ok` is true), `isolation` as `{ isolated, note }` describing how
+Boxaide keeps that CLI off the user's own config for a run, and its `models`.
+One function, `capabilityOf` in `src/agent/capability.ts`, answers all three
+questions, so the picker, the launch refusal and the run resolver never
+disagree.
+
 Updates: GET `/api/update` → the whole `UpdateState`, POST `/api/update/check`,
 POST `/api/update/download`, POST `/api/update/install`. Every one of the four
 answers with the same state object, so the rail never derives a status of its
-own. 409 when the command does not apply — a self-hosted server cannot install,
+own. 409 when the command does not apply. A self-hosted server cannot install,
 and an update that is not downloaded cannot be started.
 
 Follow REST conventions in `src/api/routes.ts`: `errorBody` shape, limits
@@ -725,17 +745,21 @@ clamped to `MAX_LIMIT`, 404 on unknown ids.
 Extend the existing shell (`components/app-shell.tsx`, `rail`), matching its
 patterns exactly: client components, hooks in `lib/hooks` calling
 `lib/api/endpoints.ts`, view switching via `use-app-state`. New views:
-- **People** — contact list (search, tags), detail pane: identity, org, tags,
+- **People**: contact list (search, tags), detail pane: identity, org, tags,
   notes, interaction timeline, deals. Create/edit contact and note.
-- **Pipeline** — kanban board of stages; drag or button-move deals between
+- **Pipeline**: kanban board of stages; drag or button-move deals between
   stages; deal create/edit dialog.
-- **Automations** — list with enabled toggle, next/last run and its outcome,
-  run-now button, run history with log viewer. The rail row carries the
+- **Automations**: list with enabled toggle, next/last run and its outcome,
+  run-now button, run history with log viewer. A run row names the agent and
+  model that carried it; a run that never started shows its blocked reason in
+  place of the log disclosure. Both pickers list every agent, greyed out with
+  the reason it cannot chat or cannot run, and the run picker shows each
+  agent's isolation note. The rail row carries the
   `unseen` count from `/api/automations/badge` (poll every 30s), red when any
-  of those runs failed; opening the view posts `runs/seen` and clears it. Creation happens by talking to the agent —
-  the empty state says exactly that and offers to open the Agent view; no
+  of those runs failed; opening the view posts `runs/seen` and clears it. Creation happens by talking to the agent.
+  The empty state says exactly that and offers to open the Agent view; no
   create form.
-- **Outreach** — the **approval queue**:
+- **Outreach**: the **approval queue**:
   pending outbox rows with full preview, Approve / Edit / Reject; suppression
   list management. The rail shows a badge with the pending count
   (poll `/api/outreach/badge` every 30s).

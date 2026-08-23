@@ -189,7 +189,7 @@ export const CALENDAR_TOOL_NAMES: ReadonlySet<string> = new Set(
 
 /**
  * The two tools that put mail in an attendee's inbox. Split out because
- * src/agent/launcher.ts must keep them off every allowlist it builds — a
+ * src/agent/spec.ts must keep them off every allowlist it builds. A
  * scheduled run is told "never send email" and the allowlist has to make that
  * true, not merely ask for it.
  *
