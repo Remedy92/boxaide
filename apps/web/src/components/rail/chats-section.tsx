@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Archive, Plus, Trash2 } from "lucide-react";
+import { Archive, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -14,6 +14,12 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAgent } from "@/lib/hooks/use-agent";
 import { useApp } from "@/lib/hooks/use-app-state";
@@ -29,6 +35,12 @@ import { cn } from "@/lib/utils";
  * search box.
  */
 const RECENT = 5;
+
+/**
+ * The longest title the server keeps, from TITLE_CHARS in agent/channel.ts. It
+ * trims to this on save either way; stopping the typing is the honest version.
+ */
+const TITLE_CHARS = 60;
 
 /** One decimal past a megabyte is noise on a number nobody acts on. */
 export function formatBytes(bytes: number): string {
@@ -159,13 +171,18 @@ export function DeleteChatConfirm({
 }
 
 /**
- * One conversation in the rail, with its two housekeeping actions.
+ * One conversation in the rail, with its housekeeping actions.
  *
- * The actions take no width until the row is hovered or holds focus: the rail
- * is narrow, the title is what the user reads, and a pair of icons parked on
- * every row all day would compete with it. They stay in the DOM rather than
- * being mounted on hover, so Tab still reaches them. A hidden control is a
- * control a keyboard cannot use.
+ * Archive and Delete sit on the row itself, revealed on hover. They take no
+ * width until then: the rail is narrow, the title is what the user reads, and
+ * a pair of icons parked on every row all day would compete with it. They stay
+ * in the DOM rather than being mounted on hover, so Tab still reaches them. A
+ * hidden control is a control a keyboard cannot use.
+ *
+ * The right button opens the same two plus Rename, which has no room on the
+ * row and does not want one: renaming is rare, and a third icon would cost
+ * every row width to serve it. Radix opens the menu from Shift+F10 and the
+ * Menu key as well, so Rename is not mouse-only.
  */
 function ChatRow({
   chat,
@@ -180,66 +197,167 @@ function ChatRow({
   const agent = useAgent();
   const app = useApp();
   const current = chat.id === agent.chat?.id;
+  const [renaming, setRenaming] = React.useState(false);
+  const titleRef = React.useRef<HTMLButtonElement>(null);
+
+  /* Leaving the editor hands the keyboard back to the row it came from. The
+     input is gone by then, so without this focus lands on <body> and the next
+     Tab starts from the top of the page. */
+  const stopRenaming = React.useCallback(() => {
+    setRenaming(false);
+    window.setTimeout(() => titleRef.current?.focus(), 0);
+  }, []);
+
+  const archive = () => {
+    void agent.archiveChat(chat.id).then(() => {
+      toast.success("Chat archived", {
+        description: chat.title,
+        action: {
+          label: "Undo",
+          onClick: () => void agent.unarchiveChat(chat.id),
+        },
+      });
+    });
+  };
 
   return (
-    <div
-      className={cn(
-        "group/chat flex h-7 w-full items-center rounded-[var(--radius-md)] pr-1 pl-5",
-        "transition-colors duration-[var(--dur-fast)] hover:duration-0",
-        current ? "bg-accent-subtle" : "hover:bg-surface-hover",
-      )}
-    >
-      <button
-        type="button"
-        onClick={() => {
-          /* Selecting a conversation means wanting to read it: the row also
-             brings the Agent view forward, and drops the sheet or popover the
-             rail was being shown in, so one tap does the whole job. */
-          onNavigate?.();
-          app.setView("agent");
-          void agent.openChat(chat.id);
-        }}
-        aria-current={current ? "true" : undefined}
-        title={chat.title}
-        className={cn(
-          "min-w-0 flex-1 truncate py-0 pr-1 text-left text-[13px] leading-[18px]",
-          current
-            ? "font-medium text-accent"
-            : "text-fg-secondary group-hover/chat:text-fg",
-        )}
-      >
-        {chat.title}
-      </button>
-
-      <div
-        className={cn(
-          "flex w-0 items-center overflow-hidden opacity-0",
-          "transition-opacity duration-[var(--dur-fast)] motion-reduce:transition-none",
-          "group-hover/chat:w-auto group-hover/chat:opacity-100",
-          "group-focus-within/chat:w-auto group-focus-within/chat:opacity-100",
-        )}
-      >
-        <RowAction
-          label="Archive this chat"
-          onClick={() => {
-            void agent.archiveChat(chat.id).then(() => {
-              toast.success("Chat archived", {
-                description: chat.title,
-                action: {
-                  label: "Undo",
-                  onClick: () => void agent.unarchiveChat(chat.id),
-                },
-              });
-            });
-          }}
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          className={cn(
+            "group/chat flex h-7 w-full items-center rounded-[var(--radius-md)] pr-1 pl-5",
+            "transition-colors duration-[var(--dur-fast)] hover:duration-0",
+            current ? "bg-accent-subtle" : "hover:bg-surface-hover",
+          )}
         >
+          {renaming ? (
+            <RenameInput
+              title={chat.title}
+              onCancel={stopRenaming}
+              onCommit={(next) => {
+                stopRenaming();
+                if (next !== chat.title) void agent.renameChat(chat.id, next);
+              }}
+            />
+          ) : (
+            <button
+              ref={titleRef}
+              type="button"
+              onClick={() => {
+                /* Selecting a conversation means wanting to read it: the row
+                   also brings the Agent view forward, and drops the sheet or
+                   popover the rail was being shown in, so one tap does the
+                   whole job. */
+                onNavigate?.();
+                app.setView("agent");
+                void agent.openChat(chat.id);
+              }}
+              aria-current={current ? "true" : undefined}
+              title={chat.title}
+              className={cn(
+                "min-w-0 flex-1 truncate py-0 pr-1 text-left text-[13px] leading-[18px]",
+                current
+                  ? "font-medium text-accent"
+                  : "text-fg-secondary group-hover/chat:text-fg",
+              )}
+            >
+              {chat.title}
+            </button>
+          )}
+
+          {/* Nothing to reveal while the title is being edited: the two icons
+              would sit under the cursor of someone aiming at their own text. */}
+          {!renaming && (
+            <div
+              className={cn(
+                "flex w-0 items-center overflow-hidden opacity-0",
+                "transition-opacity duration-[var(--dur-fast)] motion-reduce:transition-none",
+                "group-hover/chat:w-auto group-hover/chat:opacity-100",
+                "group-focus-within/chat:w-auto group-focus-within/chat:opacity-100",
+              )}
+            >
+              <RowAction label="Archive this chat" onClick={archive}>
+                <Archive strokeWidth={1.5} />
+              </RowAction>
+              <RowAction label="Delete this chat" destructive onClick={onDelete}>
+                <Trash2 strokeWidth={1.5} />
+              </RowAction>
+            </div>
+          )}
+        </div>
+      </ContextMenuTrigger>
+
+      <ContextMenuContent className="w-48">
+        {/* A tick later: Radix returns focus to the trigger as it closes, and
+            a rename input focused in the same breath loses it again. */}
+        <ContextMenuItem
+          onSelect={() => window.setTimeout(() => setRenaming(true), 0)}
+        >
+          <Pencil strokeWidth={1.5} />
+          Rename
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={archive}>
           <Archive strokeWidth={1.5} />
-        </RowAction>
-        <RowAction label="Delete this chat" destructive onClick={onDelete}>
+          Archive
+        </ContextMenuItem>
+        <ContextMenuItem variant="destructive" onSelect={onDelete}>
           <Trash2 strokeWidth={1.5} />
-        </RowAction>
-      </div>
-    </div>
+          Delete
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+/**
+ * The title, editable in place.
+ *
+ * Enter and blur commit, Escape abandons. An empty box is not a rename: a chat
+ * with no title is a row a user cannot tell from its neighbours, so it falls
+ * back to what was there. The cap is the server's own, applied here so a long
+ * title is stopped while it is being typed rather than silently cut on save.
+ */
+function RenameInput({
+  title,
+  onCommit,
+  onCancel,
+}: {
+  title: string;
+  onCommit: (next: string) => void;
+  onCancel: () => void;
+}) {
+  /* Escape has to beat the blur it causes. Without the flag, abandoning an
+     edit saves it. */
+  const abandoned = React.useRef(false);
+
+  return (
+    <input
+      autoFocus
+      defaultValue={title}
+      maxLength={TITLE_CHARS}
+      aria-label="Chat title"
+      onFocus={(event) => event.currentTarget.select()}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          onCommit(event.currentTarget.value.trim() || title);
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          abandoned.current = true;
+          onCancel();
+        }
+      }}
+      onBlur={(event) => {
+        if (abandoned.current) return;
+        onCommit(event.currentTarget.value.trim() || title);
+      }}
+      className={cn(
+        "min-w-0 flex-1 rounded-[var(--radius-sm)] bg-surface-2 px-1 py-0",
+        "text-[13px] leading-[18px] text-fg outline-none",
+        "ring-1 ring-accent",
+      )}
+    />
   );
 }
 
