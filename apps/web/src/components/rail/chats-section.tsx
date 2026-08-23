@@ -310,14 +310,14 @@ function ChatRow({
 }
 
 /**
- * The title, editable in place.
+ * The title, editable in place. Shared with the all-chats dialog.
  *
  * Enter and blur commit, Escape abandons. An empty box is not a rename: a chat
  * with no title is a row a user cannot tell from its neighbours, so it falls
  * back to what was there. The cap is the server's own, applied here so a long
  * title is stopped while it is being typed rather than silently cut on save.
  */
-function RenameInput({
+export function RenameInput({
   title,
   onCommit,
   onCancel,

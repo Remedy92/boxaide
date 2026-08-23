@@ -5,6 +5,7 @@ import {
   Archive,
   ArchiveRestore,
   ChevronRight,
+  Pencil,
   Plus,
   Search,
   Trash2,
@@ -21,7 +22,14 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import {
   DeleteChatConfirm,
+  RenameInput,
   formatBytes,
 } from "@/components/rail/chats-section";
 import { listAgentChats } from "@/lib/api/endpoints";
@@ -159,52 +167,21 @@ function ChatsDialogBody({
               </p>
             )}
             {live.map((chat) => (
-              <div
+              <ChatRow
                 key={chat.id}
-                className={cn(
-                  "group flex items-center gap-2 rounded-[var(--radius-md)] px-2 py-1.5",
-                  chat.id === agent.chat?.id
-                    ? "bg-accent-subtle"
-                    : "hover:bg-surface-hover",
-                )}
-              >
-                <button
-                  type="button"
-                  onClick={() => {
-                    /* Same as the rail rows: picking a conversation also
-                       brings the Agent view forward. */
-                    void agent.openChat(chat.id);
-                    leave();
-                  }}
-                  className="min-w-0 flex-1 text-left"
-                >
-                  <span
-                    className={cn(
-                      "block truncate text-[13px] leading-[18px]",
-                      chat.id === agent.chat?.id ? "text-accent" : "text-fg",
-                    )}
-                  >
-                    {chat.title}
-                  </span>
-                  <span className="block text-[11px] leading-4 text-fg-tertiary">
-                    {when(chat.updatedAt)} · {chat.turns}{" "}
-                    {chat.turns === 1 ? "message" : "messages"}
-                    {chat.trimmedAt ? " · trimmed" : ""}
-                  </span>
-                </button>
-                <RowAction
-                  label="Archive this chat"
-                  onClick={() => void agent.archiveChat(chat.id)}
-                >
-                  <Archive className="size-3.5" strokeWidth={1.5} />
-                </RowAction>
-                <RowAction
-                  label="Delete this chat"
-                  onClick={() => setPendingDelete(chat)}
-                >
-                  <Trash2 className="size-3.5" strokeWidth={1.5} />
-                </RowAction>
-              </div>
+                chat={chat}
+                current={chat.id === agent.chat?.id}
+                meta={`${when(chat.updatedAt)} · ${chat.turns} ${
+                  chat.turns === 1 ? "message" : "messages"
+                }${chat.trimmedAt ? " · trimmed" : ""}`}
+                onOpen={() => {
+                  /* Same as the rail rows: picking a conversation also brings
+                     the Agent view forward. */
+                  void agent.openChat(chat.id);
+                  leave();
+                }}
+                onDelete={() => setPendingDelete(chat)}
+              />
             ))}
 
             {gone.length > 0 && (
@@ -228,43 +205,23 @@ function ChatsDialogBody({
                 </button>
                 {showArchived &&
                   gone.map((chat) => (
-                    <div
+                    <ChatRow
                       key={chat.id}
-                      className="group flex items-center gap-2 rounded-[var(--radius-md)] px-2 py-1.5 hover:bg-surface-hover"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          /* Opening an archived chat is the user coming back
-                             to it, so the server takes it out of the archive
-                             in the same step and the rail has it again. */
-                          void agent.openChat(chat.id);
-                          leave();
-                        }}
-                        className="min-w-0 flex-1 text-left"
-                      >
-                        <span className="block truncate text-[13px] leading-[18px] text-fg">
-                          {chat.title}
-                        </span>
-                        <span className="block text-[11px] leading-4 text-fg-tertiary">
-                          Archived {when(chat.archivedAt ?? chat.updatedAt)} ·{" "}
-                          {chat.turns} {chat.turns === 1 ? "message" : "messages"}
-                          {chat.trimmedAt ? " · trimmed" : ""}
-                        </span>
-                      </button>
-                      <RowAction
-                        label="Unarchive this chat"
-                        onClick={() => void agent.unarchiveChat(chat.id)}
-                      >
-                        <ArchiveRestore className="size-3.5" strokeWidth={1.5} />
-                      </RowAction>
-                      <RowAction
-                        label="Delete this chat"
-                        onClick={() => setPendingDelete(chat)}
-                      >
-                        <Trash2 className="size-3.5" strokeWidth={1.5} />
-                      </RowAction>
-                    </div>
+                      chat={chat}
+                      meta={`Archived ${when(chat.archivedAt ?? chat.updatedAt)} · ${
+                        chat.turns
+                      } ${chat.turns === 1 ? "message" : "messages"}${
+                        chat.trimmedAt ? " · trimmed" : ""
+                      }`}
+                      onOpen={() => {
+                        /* Opening an archived chat is the user coming back to
+                           it, so the server takes it out of the archive in the
+                           same step and the rail has it again. */
+                        void agent.openChat(chat.id);
+                        leave();
+                      }}
+                      onDelete={() => setPendingDelete(chat)}
+                    />
                   ))}
               </div>
             )}
@@ -308,6 +265,140 @@ function ChatsDialogBody({
         onClose={() => setPendingDelete(null)}
       />
     </Dialog>
+  );
+}
+
+/**
+ * One conversation in the list, live or archived.
+ *
+ * Archived is inferred from the chat rather than passed: a row that carries an
+ * archivedAt offers Unarchive where a live one offers Archive, and nothing
+ * else about it changes. The right button opens the same actions the row shows
+ * on hover, plus Rename, which has nowhere to sit as an icon.
+ */
+function ChatRow({
+  chat,
+  current = false,
+  meta,
+  onOpen,
+  onDelete,
+}: {
+  chat: AgentChat;
+  current?: boolean;
+  /** The second line: when it was touched, how many messages, whether trimmed. */
+  meta: string;
+  onOpen: () => void;
+  onDelete: () => void;
+}) {
+  const agent = useAgent();
+  const archived = Boolean(chat.archivedAt);
+  const [renaming, setRenaming] = React.useState(false);
+  const titleRef = React.useRef<HTMLButtonElement>(null);
+
+  /* Leaving the editor hands the keyboard back to the row it came from: the
+     input is gone by then, and focus would otherwise land on <body>. */
+  const stopRenaming = React.useCallback(() => {
+    setRenaming(false);
+    window.setTimeout(() => titleRef.current?.focus(), 0);
+  }, []);
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          className={cn(
+            "group flex items-center gap-2 rounded-[var(--radius-md)] px-2 py-1.5",
+            current ? "bg-accent-subtle" : "hover:bg-surface-hover",
+          )}
+        >
+          {renaming ? (
+            <div className="min-w-0 flex-1">
+              <RenameInput
+                title={chat.title}
+                onCancel={stopRenaming}
+                onCommit={(next) => {
+                  stopRenaming();
+                  if (next !== chat.title) void agent.renameChat(chat.id, next);
+                }}
+              />
+              <span className="block text-[11px] leading-4 text-fg-tertiary">
+                {meta}
+              </span>
+            </div>
+          ) : (
+            <button
+              ref={titleRef}
+              type="button"
+              onClick={onOpen}
+              className="min-w-0 flex-1 text-left"
+            >
+              <span
+                className={cn(
+                  "block truncate text-[13px] leading-[18px]",
+                  current ? "text-accent" : "text-fg",
+                )}
+              >
+                {chat.title}
+              </span>
+              <span className="block text-[11px] leading-4 text-fg-tertiary">
+                {meta}
+              </span>
+            </button>
+          )}
+
+          {/* Hidden mid-rename: the icons would sit under the cursor of
+              someone aiming at their own text. */}
+          {!renaming && (
+            <>
+              {archived ? (
+                <RowAction
+                  label="Unarchive this chat"
+                  onClick={() => void agent.unarchiveChat(chat.id)}
+                >
+                  <ArchiveRestore className="size-3.5" strokeWidth={1.5} />
+                </RowAction>
+              ) : (
+                <RowAction
+                  label="Archive this chat"
+                  onClick={() => void agent.archiveChat(chat.id)}
+                >
+                  <Archive className="size-3.5" strokeWidth={1.5} />
+                </RowAction>
+              )}
+              <RowAction label="Delete this chat" onClick={onDelete}>
+                <Trash2 className="size-3.5" strokeWidth={1.5} />
+              </RowAction>
+            </>
+          )}
+        </div>
+      </ContextMenuTrigger>
+
+      <ContextMenuContent className="w-48">
+        {/* A tick later: Radix returns focus to the trigger as it closes, and
+            a rename input focused in the same breath loses it again. */}
+        <ContextMenuItem
+          onSelect={() => window.setTimeout(() => setRenaming(true), 0)}
+        >
+          <Pencil strokeWidth={1.5} />
+          Rename
+        </ContextMenuItem>
+        {archived ? (
+          <ContextMenuItem onSelect={() => void agent.unarchiveChat(chat.id)}>
+            <ArchiveRestore strokeWidth={1.5} />
+            Unarchive
+          </ContextMenuItem>
+        ) : (
+          <ContextMenuItem onSelect={() => void agent.archiveChat(chat.id)}>
+            <Archive strokeWidth={1.5} />
+            Archive
+          </ContextMenuItem>
+        )}
+        <ContextMenuItem variant="destructive" onSelect={onDelete}>
+          <Trash2 strokeWidth={1.5} />
+          Delete
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
