@@ -9,12 +9,12 @@
  * the `..` walk; it did not take away an absolute path.
  *
  * So the boundary is put where the CLI cannot argue with it. One mechanism for
- * every agent, applied at every spawn, exactly as the scope is — not a per-CLI
+ * every agent, applied at every spawn, exactly as the scope is, not a per-CLI
  * flag, because two of the five offer none and the next one is unknown.
  *
  * There is one level a user can be asked about, and it is not a question they
  * are asked: `workspace` is simply on. It used to be a per-launch switch in
- * the sidebar, which was wrong twice over — the person clicking Start cannot
+ * the sidebar, which was wrong twice over. The person clicking Start cannot
  * be expected to reason about which files a CLI reads, and the switch's other
  * position was the one where an agent could read `bearer.token`. `full` stays
  * as an install-level escape (BOXAIDE_AGENT_ACCESS=full) and as what a machine
@@ -48,7 +48,7 @@
  */
 import { existsSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, relative, isAbsolute, sep } from "node:path";
+import { basename, dirname, join, relative, isAbsolute, sep } from "node:path";
 
 export type AgentAccess = "workspace" | "full";
 
@@ -88,6 +88,10 @@ export type Confinement = {
   /**
    * Denied last and unconditionally, whatever else names it. The data
    * directory: `bearer.token`, `master.key`, and the mail database.
+   *
+   * A single file is a legal entry here too. `(subpath "<file>")` matches that
+   * file and nothing beside it, which is how a run is kept out of the user's
+   * own agy MCP config while the directory holding it stays writable.
    */
   deny: string[];
   /** Absent means open, so an existing caller keeps what it had. */
@@ -104,7 +108,7 @@ const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 /**
  * The login keychain, which every confined launch may reach.
  *
- * It sits under the home, so the blanket home deny took it — and taking it is
+ * It sits under the home, so the blanket home deny took it, and taking it is
  * what made Claude Code impossible to sign in to. On macOS that CLI keeps its
  * token in the keychain rather than in a file, keyed to the config directory,
  * so a confined launch answered "Not logged in" on every turn while the same
@@ -113,7 +117,7 @@ const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
  *
  * Allowed as a directory because there is no finer unit here: one file holds
  * every item, and no profile rule can name one item inside it. What keeps the
- * other items out of reach is macOS itself — an item is released to the
+ * other items out of reach is macOS itself. An item is released to the
  * programs its own list names, and an agent CLI is not on anybody else's.
  *
  * Writable, not only readable: a CLI refreshing an expired token writes the
@@ -132,7 +136,7 @@ function keychainDir(home: string): string {
  * The two checks are not the same kind of question. Whether the platform has a
  * sandbox at all is a fact about the named platform. Whether the tool is
  * actually installed is a fact about *this* machine, and there is no way to
- * answer it for any other — so it is only asked when the platform named is the
+ * answer it for any other, so it is only asked when the platform named is the
  * one running. A caller naming another platform is asking the first question.
  */
 export function sandboxUnavailable(
@@ -152,7 +156,7 @@ export type AccessDecision = {
   access: AgentAccess;
   /**
    * Null when the agent is confined. Otherwise the sentence shown next to the
-   * running agent — never swallowed, because an unconfined launch that looks
+   * running agent. Never swallowed, because an unconfined launch that looks
    * like a confined one is the failure this module exists to prevent.
    */
   notice: string | null;
@@ -191,13 +195,13 @@ export function resolveAccess(
  * two agree on where: `~/.local/share/claude/versions/…`, `~/.grok/bin/…`,
  * `~/.bun/install/global/node_modules/…`, `~/.codex/packages/…`,
  * `~/.nvm/versions/node/…`. Denying the home outright and allowing the
- * binary's own folder back is not enough — every one of these reaches sideways
+ * binary's own folder back is not enough. Every one of these reaches sideways
  * for libraries, and a rule tuned to five layouts breaks on the sixth.
  *
  * So the whole first segment is allowed: `~/.codex`, `~/.bun`, `~/.nvm`. It is
  * coarse on purpose. What it must never allow is a segment the user's own
  * documents and keys live in, and those are not one directory deep under a
- * dotted install root — `~/.ssh`, `~/Documents` and the data directory are all
+ * dotted install root. `~/.ssh`, `~/Documents` and the data directory are all
  * still denied, because nothing the agent runs lives inside them.
  */
 export function homeRootFor(path: string, home: string): string | null {
@@ -216,8 +220,8 @@ export function homeRootFor(path: string, home: string): string | null {
 export function readRootsForBinary(bin: string, home: string): string[] {
   const seen = new Set<string>();
   // The home is matched both as given and as resolved. A link chain lands on
-  // the real path, and if the home itself is reached through a link — every
-  // temporary directory on macOS is — the two do not share a prefix and the
+  // the real path, and if the home itself is reached through a link (every
+  // temporary directory on macOS is) the two do not share a prefix and the
   // root comes back null while looking entirely correct.
   const homes = [...new Set([home, resolved(home)])];
   for (const candidate of [bin, resolved(bin)]) {
@@ -235,6 +239,23 @@ function resolved(path: string): string {
   } catch {
     return path;
   }
+}
+
+/**
+ * A path in the form seatbelt will match, even when it does not exist yet.
+ *
+ * `resolved` falls back to the raw path when realpath throws, which is
+ * harmless for a path that exists and wrong for one that does not. A rule is
+ * written before the launch and the file it names may appear during it: on
+ * macOS every temporary home is reached through a link, so the raw path
+ * matches nothing while looking exactly right. The deepest existing ancestor
+ * is resolved and the missing tail is appended to it.
+ */
+function resolvedForRule(path: string): string {
+  const direct = resolved(path);
+  if (direct !== path) return direct;
+  const parent = dirname(path);
+  return parent === path ? path : join(resolvedForRule(parent), basename(path));
 }
 
 /**
@@ -328,7 +349,7 @@ function networkLines(network: NetworkAccess | undefined): string[] {
 }
 
 function unique(paths: readonly string[]): string[] {
-  return [...new Set(paths.filter(Boolean).map(resolved))];
+  return [...new Set(paths.filter(Boolean).map(resolvedForRule))];
 }
 
 function subpath(path: string): string {
@@ -341,8 +362,8 @@ function literal(path: string): string {
 
 /**
  * A path as a profile string literal. Backslash and quote are the two
- * characters that would end the literal early, and a path may hold either —
- * a directory named `he said "no"` is legal on every filesystem here.
+ * characters that would end the literal early, and a path may hold either.
+ * A directory named `he said "no"` is legal on every filesystem here.
  */
 function sbplString(path: string): string {
   return `"${path.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
@@ -352,7 +373,7 @@ export type ConfineOptions = {
   bin: string;
   access: AgentAccess;
   /**
-   * The launch's own directory, and every other tree the CLI must own — its
+   * The launch's own directory, and every other tree the CLI must own, including its
    * config home and its credentials among them. There is deliberately no
    * read-only list beside this one: every CLI here signs in by writing
    * something down, so a "credentials it only consults" category described a

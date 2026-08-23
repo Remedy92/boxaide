@@ -1,6 +1,6 @@
 /**
  * The launcher is tested with a fake registry pointing at real spawnable
- * scripts — never at a real agent CLI, which would burn the user's account
+ * scripts, never at a real agent CLI, which would burn the user's account
  * and hang the suite.
  */
 import {
@@ -34,6 +34,7 @@ import {
   type DriveOptions,
   type OneShotResult,
 } from "../src/agent/launcher.js";
+import { capabilityOf } from "../src/agent/capability.js";
 import { renderClaudeRunLine } from "../src/agent/agent-stream.js";
 import { DRIVEN_SYSTEM, type DriverChannel } from "../src/agent/driver.js";
 import { parseTabbedModels } from "../src/agent/model-list.js";
@@ -67,7 +68,7 @@ function readRegular(path: string): string {
  * Both halves of the default script are load-bearing. `/bin/sleep` by absolute
  * path, because the launcher hands the child a PATH built from the one it was
  * given plus its well-known bin directories, and on a CI runner none of those
- * holds `sleep` — the fake agent then died instantly with 127 and raced every
+ * holds `sleep`. The fake agent then died instantly with 127 and raced every
  * test that expects it to stay up. `exec`, because otherwise the sleep is a
  * grandchild that keeps the stdio pipes open after the shell is signalled, so
  * "close" never fires and the launcher never reports the exit.
@@ -113,7 +114,7 @@ const CTX = {
   bearerToken: "t",
   dataDir: AGENT_DATA_DIR,
   // "full" so the suite describes launching, not confining, and runs the same
-  // on every platform — a workspace launch is refused off macOS by design.
+  // on every platform. A workspace launch is refused off macOS by design.
   // Confinement has its own file: test/agent-sandbox.test.ts.
   access: "full" as const,
 };
@@ -173,29 +174,45 @@ function expectStatus(
 }
 
 describe("AgentLauncher", () => {
-  it("lists availability from PATH and supported from the registry", async () => {
+  it("lists installed, chat and run capability with reasons", async () => {
     const bin = fakeBinDir("fake-agent");
     const launcher = new AgentLauncher(
       CTX,
       [...specs(), { id: "ghost", label: "Ghost", bin: "not-installed" }],
       { PATH: bin },
     );
-    expect((await launcher.list())).toEqual([
+    // Whole objects, not fields: a new capability field that nothing fills in
+    // should fail here rather than reach the UI as undefined.
+    expect(await launcher.list()).toEqual([
       {
         id: "fake",
         label: "Fake Agent",
-        available: true,
-        supported: true,
-        // No runArgs on the test spec: launchable for chat, not for a run.
-        runsAutomations: false,
+        installed: true,
+        chat: { ok: true, reason: null },
+        // No runArgs on the test spec: it can carry chat, not a run.
+        runs: { ok: false, reason: "Fake Agent cannot run automations yet" },
+        isolation: {
+          isolated: false,
+          // CTX is access "full", so the notice leads. No isolation hook on
+          // the fake spec, so Boxaide claims none.
+          note:
+            "This agent runs with full access to your files because BOXAIDE_AGENT_ACCESS=full is set on this install." +
+            " Boxaide does not isolate Fake Agent from your own config.",
+        },
         models: [],
       },
       {
         id: "ghost",
         label: "Ghost",
-        available: false,
-        supported: false,
-        runsAutomations: false,
+        installed: false,
+        chat: { ok: false, reason: "Ghost cannot be launched yet" },
+        runs: { ok: false, reason: "Ghost cannot run automations yet" },
+        isolation: {
+          isolated: false,
+          note:
+            "This agent runs with full access to your files because BOXAIDE_AGENT_ACCESS=full is set on this install." +
+            " Boxaide does not isolate Ghost from your own config.",
+        },
         models: [],
       },
     ]);
@@ -248,7 +265,7 @@ describe("AgentLauncher", () => {
           stop = opts.onStop;
           return {
             // Idempotent, as the AgentDriver contract requires, and reporting
-            // the end of its loop from inside stop() — which for an agent with
+            // the end of its loop from inside stop(), which for an agent with
             // no child is the only exit there is.
             stop: () => {
               if (stopped > 0) return;
@@ -279,7 +296,7 @@ describe("AgentLauncher", () => {
     await until(() => launcher.status().running === null);
     expect(stopped).toBe(1);
     expect(seen).toEqual(["fake", null]);
-    // Asked for, so not a crash — and no invented exit code: a loop is not a
+    // Asked for, so not a crash, and no invented exit code: a loop is not a
     // process, and the rail reads the reason.
     expect(launcher.status().lastExit).toMatchObject({
       id: "fake",
@@ -433,7 +450,7 @@ describe("AgentLauncher", () => {
       /needs the Boxaide conversation/,
     );
     expect(launcher.status().running).toBeNull();
-    expect((await launcher.list())[0].supported).toBe(true);
+    expect((await launcher.list())[0].chat.ok).toBe(true);
   });
 
   it("refuses a second agent while one runs", async () => {
@@ -567,7 +584,7 @@ exec /bin/sleep 60
   it("still launches only one agent when two starts race the model check", async () => {
     // `exec`, and an absolute sleep. The launcher's widened PATH has no
     // /usr/bin, so a bare `sleep` is not found and the fake agent would exit
-    // at once — this test needs it to stay alive. And without `exec` the
+    // at once, and this test needs it to stay alive. And without `exec` the
     // sleep is a grandchild that keeps the stdio pipes open after the shell
     // is killed, so "close" never fires and stop() never reports the exit.
     const bin = fakeBinDir(
@@ -607,7 +624,7 @@ exec /bin/sleep 60
   });
 
   it("serves a poll from an empty answer while a refresh is in flight", async () => {
-    // Lists nothing the first time, then hangs — a CLI that loses its network.
+    // Lists nothing the first time, then hangs, like a CLI that loses its network.
     const dir = tempDir();
     const bin = fakeBinDir(
       "fake-agent",
@@ -749,7 +766,7 @@ exec /bin/sleep 60
     // driver spawns one `-p` process per user turn and resumes across them.
     expect(claude.args).toBeUndefined();
     expect(claude.drive).toBeTypeOf("function");
-    // Automations are unchanged — a one-shot prompt already exits when done.
+    // Automations are unchanged. A one-shot prompt already exits when done.
     expect(claude.runArgs).toBeTypeOf("function");
   });
 
@@ -877,7 +894,7 @@ exec /bin/sleep 60
   it("keeps a model listing out of the workdir a launch writes its credential into", async () => {
     // A listing prepares with no credential. If it prepared into the shared
     // chat workdir it would overwrite a running launch's MCP config with an
-    // empty bearer — harmless when every launch wrote the same master token,
+    // empty bearer, harmless when every launch wrote the same master token,
     // not harmless now that the credential is per-launch.
     const bin = fakeBinDir(
       "fake-agent",
@@ -926,8 +943,10 @@ exec /bin/sleep 60
     launcher.close();
   });
 
-  it("falls back before spawn when a saved runner cannot run unattended", async () => {
-    const bin = fakeBinDir("fake-agent", "#!/bin/sh\necho fallback-ran\nexit 0\n");
+  it("keeps the saved runner and fails with its reason when it cannot run", async () => {
+    // No fallback. A schedule pointed at one CLI that quietly ran on another,
+    // with different tools and a different account, was the wrong answer.
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
     let primarySpawned = false;
     const launcher = new AgentLauncher(
       CTX,
@@ -940,40 +959,130 @@ exec /bin/sleep 60
             primarySpawned = true;
             return [];
           },
-          automationPreflight: () => "its global MCP server cannot be isolated",
+          preflight: () => "its Boxaide entry has to go first",
         },
-        {
-          id: "codex",
-          label: "Codex",
-          bin: "fake-agent",
-          runArgs: () => [],
-        },
+        { id: "codex", label: "Codex", bin: "fake-agent", runArgs: () => [] },
       ],
       { PATH: "" },
       [bin],
     );
+    cleanups.push(() => launcher.close());
 
     const listed = await launcher.list();
-    expect(listed.find((a) => a.id === "primary")?.runsAutomations).toBe(false);
-    expect(listed.find((a) => a.id === "codex")?.runsAutomations).toBe(true);
-
-    const result = await launcher.runOnce({
-      runId: "fallback-run",
-      agentId: "primary",
-      model: "primary-only-model",
-      prompt: "x",
+    expect(listed.find((a) => a.id === "primary")?.runs).toEqual({
+      ok: false,
+      reason: "its Boxaide entry has to go first",
     });
-    expectStatus(result, "ok");
+    expect(listed.find((a) => a.id === "codex")?.runs.ok).toBe(true);
+
+    await expect(
+      launcher.runOnce({ runId: "blocked-run", agentId: "primary", prompt: "x" }),
+    ).rejects.toThrow("its Boxaide entry has to go first");
     expect(primarySpawned).toBe(false);
-    expect(result.log).toContain("[boxaide] fallback: Primary");
-    expect(result.log).toContain("Codex ran it instead");
-    expect(result.log).toContain("fallback-ran");
-    launcher.close();
+    // Nothing was swapped in, and the slot the refused run held is back.
+    expect(launcher.runCapacity()).toBe(launcher.runLimit());
+  });
+
+  it("names the agent that ran on the result and in the log", async () => {
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
+    const launcher = new AgentLauncher(
+      CTX,
+      [
+        { id: "first", label: "First", bin: "fake-agent", runArgs: () => [] },
+        { id: "second", label: "Second", bin: "fake-agent", runArgs: () => [] },
+      ],
+      { PATH: "" },
+      [bin],
+    );
+    cleanups.push(() => launcher.close());
+
+    const result = await launcher.runOnce({ runId: "named-run", prompt: "x" });
+    expectStatus(result, "ok");
+    // Registry order, so "first available" is the same choice on every run.
+    expect(result.agentId).toBe("first");
+    expect(result.log.split("\n")[0]).toBe(
+      "[boxaide] agent: First (first), model: default",
+    );
+  });
+
+  it("reports why an agent cannot chat or cannot run", async () => {
+    const bin = fakeBinDir("fake-agent");
+    const launcher = new AgentLauncher(
+      CTX,
+      [
+        { id: "ghost", label: "Ghost", bin: "not-installed", args: () => [] },
+        { id: "chatonly", label: "Chat Only", bin: "fake-agent", args: () => [] },
+        {
+          id: "blocked",
+          label: "Blocked",
+          bin: "fake-agent",
+          args: () => [],
+          runArgs: () => [],
+          preflight: () => "remove the entry first",
+        },
+      ],
+      { PATH: bin },
+    );
+    const listed = await launcher.list();
+    const byId = (id: string) => listed.find((a) => a.id === id)!;
+
+    expect(byId("ghost").chat.reason).toBe(
+      "Ghost is not installed (no not-installed on PATH)",
+    );
+    expect(byId("ghost").runs.reason).toBe("Ghost cannot run automations yet");
+    expect(byId("chatonly").chat.ok).toBe(true);
+    expect(byId("chatonly").runs.reason).toBe(
+      "Chat Only cannot run automations yet",
+    );
+    expect(byId("blocked").chat.reason).toBe("remove the entry first");
+    expect(byId("blocked").runs.reason).toBe("remove the entry first");
+  });
+
+  it("stops claiming isolation when the install runs with full access", () => {
+    // The deny is a sandbox rule, and with BOXAIDE_AGENT_ACCESS=full no
+    // profile is built at all. A platform-only check would still report the
+    // deny as active on this machine, which is the claim this guards.
+    const spec = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
+    const home = tempDir();
+    const cap = capabilityOf(
+      spec,
+      "/usr/local/bin/agy",
+      { ...CTX, access: "full" },
+      { HOME: home },
+      "darwin",
+    );
+    expect(cap.isolation.isolated).toBe(false);
+    expect(cap.isolation.note).toContain("BOXAIDE_AGENT_ACCESS=full");
+    expect(cap.isolation.note).toContain("loads your global MCP servers");
+  });
+
+  it("applies the agy preflight to a run only when the run is not isolated", () => {
+    const spec = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
+    const home = tempDir();
+    mkdirSync(join(home, ".gemini", "config"), { recursive: true });
+    writeFileSync(
+      join(home, ".gemini", "config", "mcp_config.json"),
+      JSON.stringify({ mcpServers: { boxaide: { serverUrl: CTX.mcpUrl } } }),
+    );
+    const ctx = { ...CTX, access: "workspace" as const };
+
+    // Confined: the run provably cannot open that file, so refusing it over an
+    // entry inside would refuse every schedule forever.
+    const confined = capabilityOf(spec, "/usr/local/bin/agy", ctx, { HOME: home }, "darwin");
+    expect(confined.isolation.isolated).toBe(true);
+    expect(confined.runs.ok).toBe(true);
+    // Chat still loads the user's file, so chat is still refused.
+    expect(confined.chat.reason).toContain("Remove");
+
+    // No sandbox: the entry really does load, and the refusal is correct.
+    const open = capabilityOf(spec, "/usr/local/bin/agy", ctx, { HOME: home }, "linux");
+    expect(open.isolation.isolated).toBe(false);
+    expect(open.runs.reason).toContain("Remove");
   });
 
   it("blocks Antigravity when the user's own agy config declares a boxaide server", () => {
     // That entry wins over the one a launch writes, and it carries whatever
-    // credential the user pasted into it — so the scope Boxaide minted would
+    // credential the user pasted into it, so the scope Boxaide minted would
     // not be the scope the agent runs on.
     const spec = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
     const home = tempDir();
@@ -981,9 +1090,11 @@ exec /bin/sleep 60
     mkdirSync(configDir, { recursive: true });
     const path = join(configDir, "mcp_config.json");
 
+    // A global server that is not Boxaide's is not a reason to refuse. A run
+    // cannot read this file at all (see the isolation tests), and a watched
+    // chat launch is allowed to load the user's own servers.
     writeFileSync(path, JSON.stringify({ mcpServers: { supabase: {} } }));
     expect(spec.preflight!(CTX, { HOME: home })).toBeNull();
-    expect(spec.automationPreflight!(CTX, { HOME: home })).toContain("supabase");
 
     writeFileSync(
       path,
@@ -1013,7 +1124,6 @@ exec /bin/sleep 60
     // No file at all is the normal case and must not block a launch.
     rmSync(path);
     expect(spec.preflight!(CTX, { HOME: home })).toBeNull();
-    expect(spec.automationPreflight!(CTX, { HOME: home })).toBeNull();
   });
 
   it("launches every registered CLI, including the ones with no allowlist flag", () => {
@@ -1094,13 +1204,13 @@ exec /bin/sleep 60
     expect(mode).toBe(0o600);
   });
 
-  it("pre-approves read, draft and send — send is gated by a person, not by the flag", () => {
+  it("pre-approves read, draft and send. Send is gated by a person, not by the flag", () => {
     const args = claudeTurnArgs(CTX, { prompt: "hi", system: "s", sessionId: null });
     const allowed = args[args.indexOf("--allowedTools") + 1];
     expect(allowed).toContain("mcp__boxaide__draft_create");
     // Present on purpose. The CLI flag mirrors the scope, and the scope now
     // carries message_send because the server queues that call for the user
-    // rather than performing it — see test/mcp-scope.test.ts.
+    // rather than performing it. See test/mcp-scope.test.ts.
     expect(allowed).toContain("mcp__boxaide__message_send");
     // The agent must not inherit the user's other MCP servers.
     expect(args).toContain("--strict-mcp-config");
@@ -1163,7 +1273,7 @@ exec /bin/sleep 60
       expect(prompt(id)).toContain("./memory/");
     }
 
-    // Notes exist: the index travels instead, and the offer is gone — an
+    // Notes exist: the index travels instead, and the offer is gone. An
     // agent that already wrote its notes must not be asked to write them
     // again. The index is the agent's own file, so a plain write.
     const memory = join(`${dataDir}-agents`, "workdir", "memory");
@@ -1199,7 +1309,7 @@ exec /bin/sleep 60
     // gets none of them. See src/memory/reviews.ts.
     const memory = join(`${dataDir}-agents`, "workdir", "memory");
     mkdirSync(memory, { recursive: true });
-    const index = "- company.md — what Acme does\n";
+    const index = "- company.md, what Acme does\n";
     const company = "Acme ships boats.\n";
     writeFileSync(join(memory, "MEMORY.md"), index);
     writeFileSync(join(memory, "company.md"), company);
@@ -1207,7 +1317,7 @@ exec /bin/sleep 60
     expect(seenPrompt).toBe(`${AUTOMATION_RUN_PREAMBLE}\n\ndo the thing`);
 
     // Once a person has read them: preamble, then the notes as background, and
-    // the task still last — never the ask-first offer, which a run has nobody
+    // the task still last, never the ask-first offer, which a run has nobody
     // to answer.
     markReviewed(dataDir, "MEMORY.md", index);
     markReviewed(dataDir, "company.md", company);
@@ -1222,7 +1332,7 @@ exec /bin/sleep 60
   /**
    * A scheduled run loses the network: everything but loopback is denied by
    * the sandbox, and its way out is the allowlisting proxy. macOS only, like
-   * every other confinement assertion — off macOS a workspace launch is
+   * every other confinement assertion. Off macOS a workspace launch is
    * refused outright, which test/agent-sandbox.test.ts covers.
    */
   it.skipIf(process.platform !== "darwin")(
@@ -1258,7 +1368,7 @@ exec /bin/sleep 60
   /**
    * The review gate filters the PROMPT. It says nothing on its own about a
    * CLI that runs shell commands from a run directory two levels under the
-   * notes — so the sandbox has to say it instead, or an unreviewed note is
+   * notes, so the sandbox has to say it instead, or an unreviewed note is
    * one `cat` away from the run it was written to be kept from.
    */
   it.skipIf(process.platform !== "darwin")(
@@ -1393,7 +1503,7 @@ exec /bin/sleep 60
 
     // Users who authenticate through settings.json have no credentials file at
     // all, so `env` and `apiKeyHelper` must survive isolation. Nothing else
-    // does — hooks and statusLine are what the isolated home exists to exclude.
+    // does. Hooks and statusLine are what the isolated home exists to exclude.
     const written = prepareWith(
       JSON.stringify({
         env: { ANTHROPIC_API_KEY: "sk-test" },
@@ -1560,7 +1670,7 @@ exec /bin/sleep 60
 
 describe("one-shot automation runs", () => {
   /**
-   * A launcher over one fake CLI that carries runs. Streaming by default —
+   * A launcher over one fake CLI that carries runs. Streaming by default, because
    * `renderRunLine` is what arms the first-output watchdog, so a spec without
    * it stands in for the CLIs that print nothing until they are done.
    */
@@ -1779,9 +1889,12 @@ describe("launcher routes", () => {
     expect(body.agents.map((a: { id: string }) => a.id)).toContain("opencode");
     expect(body.agents.map((a: { id: string }) => a.id)).not.toContain("gemini");
     for (const id of ["antigravity", "opencode", "codex", "grok"]) {
-      expect(body.agents.find((a: { id: string }) => a.id === id)?.supported).toBe(
-        true,
-      );
+      // Every registered agent has a launch recipe. Whether it can chat on
+      // this machine also depends on the machine (installed, preflight),
+      // which this suite does not control.
+      expect(
+        body.agents.find((a: { id: string }) => a.id === id)?.chat.reason ?? "",
+      ).not.toContain("cannot be launched yet");
     }
 
     const unknown = await runtime.app.request("/api/agents/nope/start", {
@@ -1843,7 +1956,7 @@ describe("GUI PATH detection", () => {
       { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
       [bin], // stands in for ~/.local/bin etc.
     );
-    expect((await launcher.list())[0].available).toBe(true);
+    expect((await launcher.list())[0].installed).toBe(true);
 
     // And the launched child gets the widened PATH, not launchd's.
     const running = await launcher.start("fake");
@@ -1891,7 +2004,7 @@ describe("claude sign-in", () => {
   it("leaves nothing behind when the copy is the only file there is", () => {
     // The macOS case this was written for: the real login is in the keychain,
     // and the copied file is an expired leftover shadowing it. Deleting it is
-    // the whole repair — the CLI then finds the keychain by itself.
+    // the whole repair. The CLI then finds the keychain by itself.
     const { parentHome, home } = homes();
     credential(home, '{"stale":true}', Date.now() - 60_000);
 
@@ -1934,7 +2047,7 @@ describe("claude sign-in", () => {
     const { parentHome, home } = homes();
     credential(parentHome, '{"leftover":true}', Date.now());
 
-    // Owning nothing, the copy still happens — the Linux/file path.
+    // Owning nothing, the copy still happens. This is the Linux/file path.
     claudeCopyCredentials(parentHome, home);
     expect(existsSync(join(home, ".credentials.json"))).toBe(true);
     rmSync(join(home, ".credentials.json"));
@@ -1944,7 +2057,7 @@ describe("claude sign-in", () => {
     claudeCopyCredentials(parentHome, home);
     expect(existsSync(join(home, ".credentials.json"))).toBe(false);
 
-    // A signed-out record — /logout writes null — reopens the copy path.
+    // A signed-out record (/logout writes null) reopens the copy path.
     writeFileSync(join(home, ".claude.json"), '{"oauthAccount":null}');
     claudeCopyCredentials(parentHome, home);
     expect(existsSync(join(home, ".credentials.json"))).toBe(true);
@@ -1966,7 +2079,7 @@ describe("claude sign-in", () => {
     expect(launcher.lastModelFor("fake")).toBeNull();
     await launcher.start("fake");
     launcher.stop();
-    // Null is an answer here — the CLI's own default — and it survives the exit
+    // Null is an answer here, the CLI's own default, and it survives the exit
     // so a relaunch nobody pressed Start for restores what was picked.
     expect(launcher.lastModelFor("fake")).toBeNull();
   });

@@ -5,10 +5,12 @@ import { CircleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { asSentence } from "@/lib/agent-copy";
 import { friendlyError } from "@/lib/api/errors";
 import { formatReaderDate, isoAttr, isoTitle } from "@/lib/format/date";
 import { runStatusLabel } from "@/lib/format/automation";
 import { useAutomationRuns } from "@/lib/hooks/use-automations";
+import { useLocalAgents } from "@/lib/hooks/use-local-agents";
 import type { AutomationRun, AutomationRunStatus } from "@/lib/types";
 
 const TONE: Record<AutomationRunStatus, "success" | "danger" | "warning" | "accent"> = {
@@ -30,16 +32,33 @@ function duration(run: AutomationRun): string {
 }
 
 /**
+ * A run that never started. Its log is Boxaide's own reason, not CLI output.
+ *
+ * The empty agent id is the scheduler's marker for it, written only on the
+ * path where nothing was spawned. Null is not that marker: rows written
+ * before Boxaide recorded the agent are null too, and their log is captured
+ * CLI output that must stay behind the disclosure below.
+ */
+function blockedReason(run: AutomationRun): boolean {
+  return run.status === "error" && run.agentId === "" && run.log !== "";
+}
+
+/**
  * One automation's runs, newest first.
  *
  * The log is the agent's captured stdout and stderr: it quotes mail, which is
  * why it is encrypted at rest and why it is rendered here as text in a <pre>
- * and never as markup. It is the LAST 4 KiB the server holds — the tail, not
- * the whole run — so it is labelled as such rather than presented as complete.
+ * and never as markup. It is the LAST 4 KiB the server holds, the tail and not
+ * the whole run, so it is labelled as such rather than presented as complete.
  */
 export function RunHistory({ automationId }: { automationId: string }) {
   const runs = useAutomationRuns(automationId, true);
   const rows = runs.data ?? [];
+  // Only to turn a stored id into the label the pickers use. An id the
+  // launcher no longer knows prints as itself, which is still the truth.
+  const agents = useLocalAgents();
+  const agentLabel = (id: string) =>
+    agents.data?.agents.find((a) => a.id === id)?.label ?? id;
 
   if (runs.isError) {
     return (
@@ -110,9 +129,27 @@ export function RunHistory({ automationId }: { automationId: string }) {
                 · exit {run.exitCode}
               </span>
             )}
+            {/* Which agent really carried it, on which model. Null on rows
+                written before Boxaide recorded this, and empty on a run that
+                never started. */}
+            {run.agentId && (
+              <span className="text-[11px] leading-4 text-fg-tertiary">
+                · {agentLabel(run.agentId)}
+                {run.model ? ` · ${run.model}` : ""}
+              </span>
+            )}
           </div>
 
-          {run.log ? (
+          {/* Nothing started: the log is Boxaide's own reason, so it is shown
+              plainly. It keeps its paths and file names here, because this is
+              the one place the reader has to act on them. Any other log is
+              captured CLI output and stays inside the disclosure that carries
+              the mail warning. */}
+          {blockedReason(run) ? (
+            <p className="mt-1 text-[12px] leading-4 whitespace-pre-wrap text-danger">
+              {asSentence(run.log)}
+            </p>
+          ) : run.log ? (
             <details className="mt-1">
               <summary className="cursor-pointer text-[12px] text-fg-tertiary hover:text-fg-secondary">
                 Log
@@ -128,7 +165,7 @@ export function RunHistory({ automationId }: { automationId: string }) {
           ) : (
             <p className="mt-1 text-[12px] leading-4 text-fg-tertiary">
               {run.status === "running"
-                ? "Still running — the log is written when it finishes."
+                ? "Still running. The log is written when it finishes."
                 : "This run wrote nothing."}
             </p>
           )}

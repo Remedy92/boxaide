@@ -31,7 +31,7 @@
  * beats a dead one, and the user's next message still gets answered.
  *
  * The loop's own chat tools are absent from a driven session's allowlist (see
- * `drivenPreapprovedToolNames` in launcher.ts). Two askers on one channel is
+ * `drivenPreapprovedToolNames` in spec.ts). Two askers on one channel is
  * the double-answer hole the lease exists to close, and a sentence in a prompt
  * is not a gate. `chat_history` stays: it touches no lease, and it is how a
  * session that lost its transcript reads back what was already said.

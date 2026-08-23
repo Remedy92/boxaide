@@ -17,13 +17,13 @@ export type MailAccountMeta = {
 
 /**
  * POST /api/accounts 201 → { account: CreatedAccount }.
- * NOT MailAccountMeta — createdAt is absent. Never type this as MailAccountMeta.
+ * NOT MailAccountMeta. createdAt is absent. Never type this as MailAccountMeta.
  */
 export type CreatedAccount = { id: string; alias: string; email: string };
 
 /** Rows from GET /api/messages and GET /api/messages/search. */
 export type MailMessageSummary = {
-  id: string; // `${accountId}:${encodeURIComponent(folder)}:${uid}` — MUST be encodeURIComponent'd in a path
+  id: string; // `${accountId}:${encodeURIComponent(folder)}:${uid}`, MUST be encodeURIComponent'd in a path
   accountId: string; // the account id, never the alias
   uid: number;
   messageId?: string; // RFC Message-ID. Absent ⇒ replying in-thread is impossible.
@@ -34,7 +34,7 @@ export type MailMessageSummary = {
   date: string; // ISO 8601. Falls back to send-time "now" when the envelope has none.
   snippet: string; // ≤140 chars. May equal `subject`. Can be "".
   seen: boolean;
-  hasAttachments: boolean; // boolean only — no count, no names, no sizes, no download
+  hasAttachments: boolean; // boolean only: no count, no names, no sizes, no download
 };
 
 /** GET /api/messages/:accountId/:messageId → { message: MailMessage } */
@@ -42,7 +42,7 @@ export type MailMessage = MailMessageSummary & {
   bodyText: string; // always present, may be "", truncated at 50 000 chars
   bodyHtml?: string; // RAW UNSANITISED SENDER HTML. Hostile input. Render ONLY via <HtmlBody> (DOMPurify + sandboxed frame). NEVER dangerouslySetInnerHTML. Why: SECURITY.md, "HTML mail rendering" (§6.4.6).
   cc?: string;
-  bcc?: string; // declared but never populated on the read path — always undefined in practice
+  bcc?: string; // declared but never populated on the read path, always undefined in practice
   references?: string; // space-separated Message-ID chain
 };
 
@@ -103,11 +103,11 @@ export type MessageListResponse = {
 /**
  * POST /api/messages/:accountId/:messageId/archive → this, 200.
  * Also the body of POST …/move. 404 means the message had already left
- * `fromFolder` — another client moved it first and nothing was written.
+ * `fromFolder`. Another client moved it first and nothing was written.
  */
 export type MoveResult = {
   moved: boolean;
-  fromFolder: string; // where it came from — an undo moves it back here
+  fromFolder: string; // where it came from, and an undo moves it back here
   toFolder: string; // where it landed
   id?: string; // its new id. ABSENT on a server without UIDPLUS, so no undo.
 };
@@ -122,7 +122,7 @@ export type SendResult = { messageId: string; accepted: string[] }; // messageId
 /**
  * Body of POST /api/drafts and POST /api/drafts/:accountId/:draftId.
  *
- * Every field is optional because a draft is allowed to be half-written — that
+ * Every field is optional because a draft is allowed to be half-written, and that
  * is the whole reason it is not a SendMessageBody. The update route REPLACES
  * the draft, so anything omitted is dropped rather than merged.
  */
@@ -150,7 +150,7 @@ export type DraftRef = {
   messageId: string;
 };
 
-/** A row from GET /api/drafts?account=… — full body text included. */
+/** A row from GET /api/drafts?account=…, full body text included. */
 export type MailDraft = DraftRef & {
   to: string;
   cc?: string;
@@ -170,10 +170,10 @@ export type ConnectionTestResult = { ok: boolean; error?: string };
 /** GET /api/meta */
 export type MetaResponse = { tokenHint: string; mcpPath: string; auth: string };
 
-/** GET /health — unauthenticated */
+/** GET /health, unauthenticated */
 export type HealthResponse = { ok: true; service: "boxaide"; fixture: boolean };
 
-/** GET /api/health — authenticated */
+/** GET /api/health, authenticated */
 export type ApiHealthResponse = { ok: true; service: "boxaide"; version: string };
 
 export type AccountCredentials = {
@@ -205,11 +205,11 @@ export type AgentTurn = {
   chatId?: string;
   role: "user" | "agent" | "activity";
   text: string;
-  /** MCP client name. Best effort — see AgentChannel.noteClient on the server. */
+  /** MCP client name. Best effort. See AgentChannel.noteClient on the server. */
   agent: string | null;
   /**
    * User turns: an agent is holding this one, already answered it, or held it
-   * until it was dead-lettered. A live hold is a lease, not a permanent take —
+   * until it was dead-lettered. A live hold is a lease, not a permanent take;
    * a vanished holder gives the row back. Absent on a server built before the
    * field existed, and false on the live stream frame, which is written before
    * the hand-off. See useAgent().claimed.
@@ -229,7 +229,7 @@ export type AgentTurn = {
  * `listening` also accepts an agent that called within the last few seconds,
  * so a normal poll loop does not flicker. `launchedAgent` is the CLI this
  * process started (sidebar Start). Neither is a claim that a client is
- * "connected" — see the capabilities dialog.
+ * "connected". See the capabilities dialog.
  */
 export type AgentPresence = {
   waiting: number;
@@ -239,7 +239,7 @@ export type AgentPresence = {
   /** Registry id of the CLI Boxaide spawned. Null when nothing is launched. */
   launchedAgent: string | null;
   /**
-   * A message an agent took and has not answered yet — see AgentChannel.Work.
+   * A message an agent took and has not answered yet. See AgentChannel.Work.
    * Null whenever nothing is in flight, and on a server built before this
    * field existed, which is why every reader treats absence as "not working".
    */
@@ -324,13 +324,13 @@ export type AgentStateResponse = {
 };
 
 /* -------------------------------------------------------------------------- */
-/* CRM — contacts, orgs, notes, interactions, pipeline                        */
+/* CRM: contacts, orgs, notes, interactions, pipeline                        */
 /* -------------------------------------------------------------------------- */
 
 /**
  * Field-for-field from src/crm/store.ts. Two things are load-bearing here.
  *
- * Identity fields (email, name, org name/domain) arrive in plaintext — the spec
+ * Identity fields (email, name, org name/domain) arrive in plaintext, because the spec
  * keeps them out of the encrypted set because UNIQUE and search need them.
  * Mail-derived text (note bodies, interaction subjects and snippets) is stored
  * encrypted and decrypted by the store on the way out, so what lands here is
@@ -367,7 +367,7 @@ export type CrmInteraction = {
   id: string;
   contactId: string;
   accountId: string;
-  messageId: string; // accountId:folder:uid — NOT fetchable without the folder
+  messageId: string; // accountId:folder:uid, NOT fetchable without the folder
   direction: "in" | "out";
   at: string;
   subject: string | null; // decrypted server-side
@@ -391,7 +391,7 @@ export type CrmDeal = {
 
 /**
  * GET /api/crm/contacts/:id. The ONLY response in the CRM surface that is not
- * wrapped in a named key — routes.ts returns the detail object itself.
+ * wrapped in a named key. routes.ts returns the detail object itself.
  */
 export type CrmContactDetail = {
   contact: CrmContact;
@@ -404,18 +404,18 @@ export type CrmContactDetail = {
 /** GET /api/crm/pipeline → { stages: CrmPipelineBoard }. Stages in board order. */
 export type CrmPipelineBoard = Array<CrmPipelineStage & { deals: CrmDeal[] }>;
 
-/** POST /api/crm/sync — counts touched, not counts held. */
+/** POST /api/crm/sync: counts touched, not counts held. */
 export type CrmSyncResult = { contacts: number; interactions: number };
 
 /* -------------------------------------------------------------------------- */
-/* automations — /api/automations/*                                           */
+/* automations: /api/automations/*                                           */
 /* -------------------------------------------------------------------------- */
 
 /**
  * Field-for-field from src/automation/store.ts.
  *
  * `prompt` is user-authored instructions to a future agent run and is stored in
- * plaintext by design; run logs are NOT — they quote mail, so they are
+ * plaintext by design; run logs are NOT. They quote mail, so they are
  * encrypted at rest and arrive here already decrypted and tail-trimmed.
  */
 export type Automation = {
@@ -431,7 +431,7 @@ export type Automation = {
   enabled: boolean;
   createdAt: string;
   lastRunAt: string | null;
-  /** Null while disabled or unschedulable — never a claim that a run is due. */
+  /** Null while disabled or unschedulable. Never a claim that a run is due. */
   nextRunAt: string | null;
   /** The newest run's status; null before the first run. */
   lastRunStatus: AutomationRunStatus | null;
@@ -440,7 +440,7 @@ export type Automation = {
 export type AutomationRunStatus = "running" | "ok" | "error" | "killed";
 
 /**
- * GET /api/automations/badge — runs that finished since the Automations view
+ * GET /api/automations/badge: runs that finished since the Automations view
  * was last open, and how many of those failed. Two COUNTs and nothing else.
  */
 export type AutomationBadge = { unseen: number; failed: number };
@@ -453,12 +453,21 @@ export type AutomationRun = {
   finishedAt: string | null;
   status: AutomationRunStatus;
   exitCode: number | null;
+  /**
+   * Which agent carried this run, and on which model.
+   *
+   * `agentId` is "" when nothing started: the log is Boxaide's own reason and
+   * nothing else. It is null on a row written before Boxaide recorded them,
+   * where the log is whatever the CLI wrote.
+   */
+  agentId: string | null;
+  model: string | null;
   /** Decrypted server-side, LAST 4 KiB only. "" when nothing was captured. */
   log: string;
 };
 
 /* -------------------------------------------------------------------------- */
-/* outreach — /api/outreach/*                                                 */
+/* outreach: /api/outreach/*                                                 */
 /* -------------------------------------------------------------------------- */
 
 export type OutboxStatus =
@@ -470,7 +479,7 @@ export type OutboxStatus =
 
 /**
  * One queued outreach email. `subject` and `body` are stored encrypted and
- * arrive decrypted — mail content, rendered as TEXT and never as HTML, and
+ * arrive decrypted. Mail content, rendered as TEXT and never as HTML, and
  * never persisted by this client.
  *
  * There is no route that edits a row: the queue offers approve and reject, and
@@ -497,7 +506,7 @@ export type SuppressionRow = {
   at: string;
 };
 
-/** GET /api/outreach/badge — a COUNT of pending rows and nothing else. */
+/** GET /api/outreach/badge: a COUNT of pending rows and nothing else. */
 export type OutreachBadge = { pending: number };
 
 /**
@@ -547,13 +556,13 @@ export type ConnectorsSnapshot = {
 };
 
 /* -------------------------------------------------------------------------- */
-/* workspace memory — /api/memory                                             */
+/* workspace memory: /api/memory                                             */
 /* -------------------------------------------------------------------------- */
 
 /**
  * One markdown file in the agent's own workspace, as GET /api/memory lists it.
- * The agent owns the set — names match [a-z0-9][a-z0-9-]*\.md, MEMORY.md is
- * the index — so this UI can read and correct the rows but never create,
+ * The agent owns the set: names match [a-z0-9][a-z0-9-]*\.md and MEMORY.md is
+ * the index, so this UI can read and correct the rows but never create,
  * rename or delete them.
  */
 export type MemoryFile = {
@@ -571,14 +580,14 @@ export type MemoryFile = {
 
 export type MemoryListResponse = { files: MemoryFile[] };
 
-/** GET /api/memory/:name — the whole body, not wrapped in a key. */
+/** GET /api/memory/:name: the whole body, not wrapped in a key. */
 export type MemoryFileDetail = {
   name: string;
   content: string;
 };
 
 /**
- * GET /api/update — the whole updater state, in one object.
+ * GET /api/update: the whole updater state, in one object.
  *
  * Every command returns this same shape, so the rail never derives a state of
  * its own. `channel` decides what the card can offer: "auto" is the desktop
@@ -610,14 +619,14 @@ export type UpdateState = {
 };
 
 /* -------------------------------------------------------------------------- */
-/* calendar — /api/calendar/*                                                 */
+/* calendar: /api/calendar/*                                                 */
 /* -------------------------------------------------------------------------- */
 
 /**
  * Three providers, and they are not symmetrical. A CalDAV account is a URL, a
  * username and an app password, so the UI can create one outright. Google is an
  * OAuth handshake the server finishes after the browser has left for Google, so
- * the UI can only start it — see startGoogleCalendarAuth. `local` is the
+ * the UI can only start it. See startGoogleCalendarAuth. `local` is the
  * calendars macOS already holds: there are no credentials at all, only a system
  * permission the user grants once.
  */
@@ -638,7 +647,7 @@ export type LocalCalendarStatus = {
   /**
    * Why the local path cannot be used, written for a person to read. Set when
    * `available` is false, and also when the helper answers perfectly and macOS
-   * is simply refusing — a denial no click can clear, only System Settings.
+   * is simply refusing, a denial no click can clear, only System Settings.
    */
   reason?: string;
   access?: "notDetermined" | "restricted" | "denied" | "fullAccess" | "writeOnly" | "authorized";
@@ -668,7 +677,7 @@ export type CalendarAccountsResponse = {
 
 /**
  * A mailbox whose stored password would also open a calendar. GET
- * /api/calendar/mailboxes. No secret is in here — the password stays server
+ * /api/calendar/mailboxes. No secret is in here. The password stays server
  * side, which is the whole point of connecting by id.
  */
 export type ReusableMailbox = {
@@ -681,7 +690,7 @@ export type ReusableMailbox = {
   /**
    * Set to the name macOS shows for an account that looks like this same
    * calendar, when the Mac's calendars are connected. Present means connecting
-   * this would probably duplicate an agenda, not that it is forbidden — the
+   * this would probably duplicate an agenda, not that it is forbidden. The
    * server asks for confirmation rather than refusing.
    */
   onThisMac?: string;
@@ -715,17 +724,17 @@ export type CalendarEvent = {
 export type AgendaResponse = { events: CalendarEvent[]; errors: string[] };
 
 /**
- * GET /api/calendar/free-slots — windows nothing is booked over.
+ * GET /api/calendar/free-slots: windows nothing is booked over.
  *
  * A suggestion, not a hold: nothing is reserved, and the same slot can be
- * offered to two people. `errors` follows the agenda's rule — a calendar that
+ * offered to two people. `errors` follows the agenda's rule. A calendar that
  * did not answer is named rather than silently treated as empty, which would
  * suggest times that are in fact taken.
  */
 export type FreeSlot = { start: string; end: string };
 
 /**
- * `timeZone` is the zone the working hours were read in — the one this app
+ * `timeZone` is the zone the working hours were read in: the one this app
  * asked for, or the server's own when it asked for none. Always echoed, so the
  * suggestion strip can name the clock it is quoting rather than assume it.
  */
@@ -741,9 +750,9 @@ export type MeetingStatus = "scheduled" | "cancelled";
  * How one invited guest answered.
  *
  * "needs-action" is the resting state, not a failure: it is every guest the
- * moment the invitation goes out. The server merges two sources — a guest's
- * reply email wins where there is one, the calendar's own attendee list fills
- * in the rest — and `source` says which one this entry came from.
+ * moment the invitation goes out. The server merges two sources: a guest's
+ * reply email wins where there is one, and the calendar's own attendee list
+ * fills in the rest. `source` says which one this entry came from.
  */
 export type RsvpStatus = "accepted" | "declined" | "tentative" | "needs-action";
 
@@ -754,7 +763,7 @@ export type AttendeeResponse = {
   source: string;
 };
 
-/** A meeting BOXAIDE created — not every event on the calendar. */
+/** A meeting BOXAIDE created, not every event on the calendar. */
 export type Meeting = {
   id: string;
   uid: string;
@@ -773,7 +782,7 @@ export type Meeting = {
 /**
  * `refreshError` is the last background reply-scan's failure, or null. The
  * meetings themselves come from the server's own store and are never held up
- * by that scan, so a failure here means the responses may be behind — not that
+ * by that scan, so a failure here means the responses may be behind, not that
  * the list is wrong.
  */
 export type MeetingsResponse = {

@@ -3,11 +3,11 @@
  * this file may call `request`, and nothing anywhere may call `fetch`.
  *
  * Never called from this app:
- *   GET /api/agent-connect  — its response embeds the full bearer token; the
+ *   GET /api/agent-connect: its response embeds the full bearer token; the
  *     MCP snippet is built client-side from localStorage instead (§6.7).
  *
  * Called only with a desktop-shell capability:
- *   GET /api/local-bootstrap — exchanges a one-time fragment secret for the
+ *   GET /api/local-bootstrap: exchanges a one-time fragment secret for the
  *     persistent token. Same-origin loopback alone is intentionally not enough.
  */
 
@@ -82,8 +82,8 @@ export type Ctx = {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Unauthenticated. Sends no Authorization header, so it triggers no preflight —
- * that is what lets the UI tell "server unreachable" apart from "bad token".
+ * Unauthenticated. Sends no Authorization header, so it triggers no preflight,
+ * which is what lets the UI tell "server unreachable" apart from "bad token".
  */
 export function getHealth(ctx: Ctx): Promise<HealthResponse> {
   return request<HealthResponse>("/health", {
@@ -126,7 +126,7 @@ export function getLocalBootstrap(
   });
 }
 
-/** `tokenHint` is the first 4 characters plus an ellipsis — safe to display. */
+/** `tokenHint` is the first 4 characters plus an ellipsis, safe to display. */
 export function getMeta(ctx: Ctx): Promise<MetaResponse> {
   return request<MetaResponse>("/api/meta", {
     baseUrl: ctx.baseUrl,
@@ -164,7 +164,7 @@ export type CreateAccountBody = {
 /**
  * Performs a live IMAP login server-side, so it can take several seconds.
  * Re-POSTing an existing alias UPDATES that mailbox instead of creating a
- * second one. The 201 body is {id, alias, email} with no createdAt — refetch
+ * second one. The 201 body is {id, alias, email} with no createdAt. Refetch
  * listAccounts() for the full record.
  */
 export async function createAccount(
@@ -182,7 +182,7 @@ export async function createAccount(
 }
 
 /**
- * All 8 credential fields are required — the server applies no defaults on this
+ * All 8 credential fields are required. The server applies no defaults on this
  * route. A failed test is an HTTP 400 whose body is still {ok:false, error}, so
  * the body is read before the failure is rethrown.
  */
@@ -246,7 +246,7 @@ export type ListMessagesQuery = {
   unreadOnly?: boolean;
 };
 
-/** `unread` is only ever the literal "1" — `unread=true` is silently ignored. */
+/** `unread` is only ever the literal "1". `unread=true` is silently ignored. */
 export function listMessages(
   o: ListMessagesQuery,
   ctx: Ctx,
@@ -327,7 +327,7 @@ export function markRead(
 }
 
 /**
- * Archive one message — a move into the account's Archive mailbox, never a
+ * Archive one message: a move into the account's Archive mailbox, never a
  * delete. The result names the folder it left, which is what `moveMessage`
  * below needs to put it back.
  *
@@ -427,7 +427,7 @@ export async function sendMessage(
 /* -------------------------------------------------------------------------- */
 
 /**
- * GET /api/drafts?account=… — ONE mailbox at a time.
+ * GET /api/drafts?account=…, ONE mailbox at a time.
  *
  * `account=all` is a 400, and there is no unified draft endpoint, so the
  * unified Drafts view fans out one request per mailbox client-side and merges
@@ -465,7 +465,7 @@ export async function createDraft(
 }
 
 /**
- * POST, not PUT — the server's CORS method list is deliberately short and an
+ * POST, not PUT. The server's CORS method list is deliberately short and an
  * update is a replace-and-delete, not an idempotent write.
  *
  * It REPLACES the draft, so every field to be kept must be sent, and it returns
@@ -671,7 +671,7 @@ export function sendAgentMessage(
  * `seq` is the message the button was showing, and the server checks it: the
  * run can end and the next one be claimed between the paint and the click, and
  * `stopped` comes back false rather than killing that one instead. No `chat`
- * argument — a seq names one message across every conversation.
+ * argument, because a seq names one message across every conversation.
  */
 export function stopAgentTurn(
   seq: number,
@@ -799,7 +799,7 @@ export function streamAgent(
 }
 
 /* -------------------------------------------------------------------------- */
-/* CRM — /api/crm/*                                                           */
+/* CRM: /api/crm/*                                                           */
 /* -------------------------------------------------------------------------- */
 
 export type CrmContactsQuery = {
@@ -841,7 +841,7 @@ export type CrmContactBody = {
 };
 
 /**
- * Upsert by lowercase email — re-POSTing an address EDITS that contact rather
+ * Upsert by lowercase email. Re-POSTing an address EDITS that contact rather
  * than creating a second one, which is what makes this both "create" and
  * "edit". The route passes `force: true`, so an explicit name always wins over
  * the longest-name-seen rule that mail-derived rows follow.
@@ -860,7 +860,7 @@ export async function upsertCrmContact(
   return data.contact;
 }
 
-/** The detail body is NOT wrapped in a key — see CrmContactDetail. */
+/** The detail body is NOT wrapped in a key. See CrmContactDetail. */
 export function getCrmContact(
   contactId: string,
   ctx: Ctx,
@@ -1036,13 +1036,13 @@ export function syncCrm(ctx: Ctx): Promise<CrmSyncResult> {
 }
 
 /* -------------------------------------------------------------------------- */
-/* automations — /api/automations/*                                           */
+/* automations: /api/automations/*                                           */
 /* -------------------------------------------------------------------------- */
 
 /**
  * Deliberately absent from this file: POST /api/automations and
  * DELETE /api/automations/:id. Automations are written by talking to the agent
- * (spec: Web UI) — the UI has no create form, so it gets no create call.
+ * (spec: Web UI), so the UI has no create form and gets no create call.
  */
 export async function listAutomations(ctx: Ctx): Promise<Automation[]> {
   const data = await request<{ automations: Automation[] }>("/api/automations", {
@@ -1054,14 +1054,14 @@ export async function listAutomations(ctx: Ctx): Promise<Automation[]> {
 }
 
 /**
- * PATCH — a partial write. The UI sends only how a run happens (`enabled`,
- * `agentId`, `model`); what it does — name, cron, prompt — is the agent's to
+ * PATCH, a partial write. The UI sends only how a run happens (`enabled`,
+ * `agentId`, `model`); what it does (name, cron, prompt) is the agent's to
  * author. A bad cron or a duplicate name is a 400, not a 500.
  */
 export async function updateAutomation(
   automationId: string,
   // agentId and model take null to mean "back to the default", so an absent
-  // key and an explicit null are different requests — never collapse them.
+  // key and an explicit null are different requests. Never collapse them.
   patch: {
     enabled?: boolean;
     name?: string;
@@ -1086,7 +1086,7 @@ export async function updateAutomation(
 }
 
 /**
- * 202 {queued:true} — the run is enqueued, NOT finished. Runs are serialized
+ * 202 {queued:true}. The run is enqueued, NOT finished. Runs are serialized
  * one at a time server-side, so this can sit behind another agent for minutes.
  * Read the outcome back from the run list.
  */
@@ -1106,7 +1106,7 @@ export function runAutomationNow(
 }
 
 /** `limit` defaults to 20 server-side; each run carries the last 4 KiB of log. */
-/** GET /api/automations/badge — what the rail row shows. */
+/** GET /api/automations/badge: what the rail row shows. */
 export function getAutomationBadge(ctx: Ctx): Promise<AutomationBadge> {
   return request<AutomationBadge>("/api/automations/badge", {
     baseUrl: ctx.baseUrl,
@@ -1116,7 +1116,7 @@ export function getAutomationBadge(ctx: Ctx): Promise<AutomationBadge> {
 }
 
 /**
- * POST /api/automations/runs/seen — the Automations view is open, so every run
+ * POST /api/automations/runs/seen. The Automations view is open, so every run
  * that has finished by now has been looked at. Answers the reset badge.
  */
 export function markAutomationRunsSeen(ctx: Ctx): Promise<AutomationBadge> {
@@ -1128,7 +1128,7 @@ export function markAutomationRunsSeen(ctx: Ctx): Promise<AutomationBadge> {
   });
 }
 
-/** GET /api/automations/runs — the newest runs across every automation. */
+/** GET /api/automations/runs: the newest runs across every automation. */
 export async function listRecentAutomationRuns(
   ctx: Ctx,
   limit?: number,
@@ -1153,7 +1153,7 @@ export async function listAutomationRuns(
 }
 
 /* -------------------------------------------------------------------------- */
-/* outreach — /api/outreach/*                                                 */
+/* outreach: /api/outreach/*                                                 */
 /* -------------------------------------------------------------------------- */
 
 export async function listOutbox(
@@ -1170,7 +1170,7 @@ export async function listOutbox(
 /**
  * The human decision, and the only one there is: no MCP tool approves, rejects
  * or sends an outbox row (spec invariant 1). Approving hands the row to the
- * engine, which sends it under the per-account daily cap and the 60s gap — so a
+ * engine, which sends it under the per-account daily cap and the 60s gap, so a
  * 200 here means "approved", never "delivered".
  *
  * Only a `pending` row can be decided; anything else is a 400 from the server.
@@ -1307,13 +1307,13 @@ export async function setConnectorKey(
 }
 
 /* -------------------------------------------------------------------------- */
-/* workspace memory — /api/memory                                             */
+/* workspace memory: /api/memory                                             */
 /* -------------------------------------------------------------------------- */
 
 /**
  * The markdown notes the launched agent keeps in its own workspace
- * (`<workDir>/memory/`). The agent owns the file set — it starts and retires
- * topics as it learns — so this surface is read-and-correct only: no create,
+ * (`<workDir>/memory/`). The agent owns the file set and starts and retires
+ * topics as it learns, so this surface is read-and-correct only: no create,
  * no rename, no delete. A server built before workspace memory answers 404,
  * which the panel reads as "nothing here".
  */
@@ -1386,13 +1386,13 @@ export function reviewMemoryFile(
 }
 
 /* -------------------------------------------------------------------------- */
-/* calendar — /api/calendar/*                                                 */
+/* calendar: /api/calendar/*                                                 */
 /* -------------------------------------------------------------------------- */
 
 /**
  * The whole body, not just `accounts`: it also carries `googleRedirectUri`,
- * the URI this server hands Google. Only the server knows it — it is built from
- * the address the server bound to, which this page cannot see — and Google
+ * the URI this server hands Google. Only the server knows it, because it is built
+ * from the address the server bound to, which this page cannot see, and Google
  * rejects the sign-in unless the registered value matches it exactly.
  */
 export function listCalendarAccounts(ctx: Ctx): Promise<CalendarAccountsResponse> {
@@ -1403,7 +1403,7 @@ export function listCalendarAccounts(ctx: Ctx): Promise<CalendarAccountsResponse
   });
 }
 
-/** CalDAV only. Google is an OAuth handshake — see startGoogleCalendarAuth. */
+/** CalDAV only. Google is an OAuth handshake. See startGoogleCalendarAuth. */
 export type CalDavAccountBody = {
   alias: string;
   serverUrl: string;
@@ -1430,8 +1430,8 @@ export async function createCalDavAccount(
 
 /**
  * A live CalDAV login, server-side, so it can take seconds. A failed test may
- * come back as a 400 whose body is still {ok:false, error} — the same shape as
- * /api/accounts/test — so the body is read before the failure is rethrown.
+ * come back as a 400 whose body is still {ok:false, error}, the same shape as
+ * /api/accounts/test, so the body is read before the failure is rethrown.
  */
 export async function testCalDavAccount(
   body: CalDavAccountBody,
@@ -1482,7 +1482,7 @@ export async function deleteCalendarAccount(
 
 /**
  * Mailboxes whose stored password would also open a calendar. Read-only and
- * cheap — the server makes no network call to answer — so it is safe beside the
+ * cheap, since the server makes no network call to answer, so it is safe beside the
  * account list on every page load.
  */
 export async function listReusableMailboxes(ctx: Ctx): Promise<ReusableMailbox[]> {
@@ -1495,7 +1495,7 @@ export async function listReusableMailboxes(ctx: Ctx): Promise<ReusableMailbox[]
 
 /**
  * Connect one of them. The mailbox is named in the path and the password never
- * crosses the wire in either direction — the server already holds it.
+ * crosses the wire in either direction. The server already holds it.
  */
 export async function connectMailboxCalendar(
   mailAccountId: string,
@@ -1545,7 +1545,7 @@ export async function connectLocalCalendar(
 
 /**
  * `clientId` and `clientSecret` are omitted when the server ships its own
- * Google client — see `googleBuiltIn` on the accounts response. `alias` may be
+ * Google client. See `googleBuiltIn` on the accounts response. `alias` may be
  * empty too: the callback falls back to the Google address it learns.
  */
 export type GoogleCalendarStartBody = {
@@ -1556,7 +1556,7 @@ export type GoogleCalendarStartBody = {
 
 /**
  * Starts the handshake and returns nothing but a URL to send the person to.
- * Google redirects back to the SERVER, which finishes the setup — this page is
+ * Google redirects back to the SERVER, which finishes the setup. This page is
  * never told; it finds out by refetching the account list.
  */
 export function startGoogleCalendarAuth(
@@ -1590,7 +1590,7 @@ export function getAgenda(
  * Times nothing is booked over, for the meeting form's suggestions.
  *
  * Advisory only: nothing is held, so a slot can go stale between being offered
- * and being used. A calendar that failed to answer appears in `errors` — its
+ * and being used. A calendar that failed to answer appears in `errors`, and its
  * busy time is missing, so the suggestions may cover it.
  */
 export function getFreeSlots(
@@ -1619,7 +1619,7 @@ export function getFreeSlots(
 }
 
 /**
- * Meetings BOXAIDE created — not everything on the calendar.
+ * Meetings BOXAIDE created, not everything on the calendar.
  *
  * The whole body, not just `meetings`: `refreshError` tells the view whether
  * the guest responses beside each meeting are current.
@@ -1635,8 +1635,8 @@ export function listMeetings(ctx: Ctx): Promise<MeetingsResponse> {
 /**
  * Reads guest replies now, rather than waiting for the background scan.
  *
- * One pass over every meeting, not one meeting — the mailboxes and calendars
- * are scanned together — so the count comes back for the whole list. A
+ * One pass over every meeting, not one meeting. The mailboxes and calendars
+ * are scanned together, so the count comes back for the whole list. A
  * mailbox that could not be read is a string in `errors`, never a failure.
  */
 export function refreshMeetingResponses(ctx: Ctx): Promise<RsvpRefreshResult> {
@@ -1658,7 +1658,7 @@ export type CreateMeetingBody = {
   calendarAccountId?: string;
   mailAccountId?: string;
   includeMeetingLink?: boolean;
-  /* The zone the invitation text is written in — the times the guest reads.
+  /* The zone the invitation text is written in: the times the guest reads.
      The event itself is the absolute instants in `start` and `end`, so this
      changes the wording, never when the meeting happens. */
   timeZone?: string;
@@ -1700,7 +1700,7 @@ export function cancelMeeting(
 
 /**
  * Forget a cancelled meeting. Boxaide's own record and its recorded replies go;
- * nothing is sent and no calendar is touched. Cancelled meetings only — the
+ * nothing is sent and no calendar is touched. Cancelled meetings only. The
  * server answers 400 for anything still scheduled.
  */
 export function removeMeeting(
@@ -1740,7 +1740,7 @@ export function getUpdate(ctx: Ctx): Promise<UpdateState> {
 /**
  * `download` defaults to true on the server: a person who presses a check
  * button wants the update, not a second button. Pass false for a check the
- * user did not press — opening a page is not asking for a 100 MB transfer.
+ * user did not press. Opening a page is not asking for a 100 MB transfer.
  */
 export function checkForUpdate(
   ctx: Ctx,
@@ -1770,7 +1770,7 @@ export function downloadUpdate(ctx: Ctx): Promise<UpdateState> {
 
 /**
  * The app quits and relaunches into the new version. The reply arrives first,
- * so this resolves — and then the page it was called from goes away with it.
+ * so this resolves, and then the page it was called from goes away with it.
  */
 export function installUpdate(ctx: Ctx): Promise<UpdateState> {
   return request<UpdateState>("/api/update/install", {
@@ -1794,7 +1794,7 @@ export type McpToolsListResponse = {
 };
 
 /**
- * User-triggered only, never on load. POST /mcp is stateless — a response
+ * User-triggered only, never on load. POST /mcp is stateless. A response
  * proves the endpoint answers with this token, and nothing more. It never means
  * an agent is connected.
  */
@@ -1822,15 +1822,26 @@ function parseJson(text: string): unknown {
 
 export type LocalAgentModel = { id: string; label: string };
 
+/** `reason` is null exactly when `ok` is true. Mirrors AgentCheck. */
+export type LocalAgentCheck = { ok: boolean; reason: string | null };
+
+/**
+ * Whether Boxaide really keeps this CLI off your own config for a run, and
+ * how. The note is written for a person and is shown verbatim.
+ */
+export type LocalAgentIsolation = { isolated: boolean; note: string };
+
+/** Mirrors AgentCapability in src/agent/capability.ts. */
 export type LocalAgent = {
   id: string;
   label: string;
   /** The CLI exists on the server machine's PATH. */
-  available: boolean;
-  /** This Boxaide build knows how to launch it. */
-  supported: boolean;
-  /** It can carry a scheduled automation run, not only the chat loop. */
-  runsAutomations: boolean;
+  installed: boolean;
+  /** It can carry the watched chat loop, or why it cannot. */
+  chat: LocalAgentCheck;
+  /** It can carry a scheduled automation run, or why it cannot. */
+  runs: LocalAgentCheck;
+  isolation: LocalAgentIsolation;
   /** Models the server lets you pick from. Empty means no picker. */
   models: LocalAgentModel[];
 };
@@ -1842,7 +1853,7 @@ export type LocalAgent = {
  * `workspace` confines it to its own directory and its own CLI's files, and is
  * what every launch gets. `full` is unconfined; nothing in this app asks for
  * it, and a launch only lands there when the install set it or the machine has
- * no sandbox — in which case `accessNotice` says which.
+ * no sandbox, in which case `accessNotice` says which.
  */
 export type LocalAgentAccess = "workspace" | "full";
 
@@ -1855,7 +1866,7 @@ export type RunningLocalAgent = {
   access: LocalAgentAccess;
   /**
    * Why it is unconfined, when it is. Null on a confined launch, and absent on
-   * a server built before this field existed — both mean "say nothing".
+   * a server built before this field existed. Both mean "say nothing".
    */
   accessNotice?: string | null;
 };
@@ -1876,7 +1887,7 @@ export type LocalAgentExit = {
   at: string;
   stderrTail: string;
   /**
-   * The CLI is signed out — every answer failed for that one reason. Absent on
+   * The CLI is signed out, so every answer failed for that one reason. Absent on
    * a server built before this field existed, which reads as "not known".
    */
   authRequired?: boolean;
@@ -1922,7 +1933,7 @@ export function startLocalAgent(
  * Open the CLI's own login on the server's machine.
  *
  * 200 means Terminal was opened with the login command and the server will
- * restart the agent by itself once the login lands — nothing is returned to
+ * restart the agent by itself once the login lands. Nothing is returned to
  * wait on, so the caller watches GET /api/agents for `running` instead. A
  * machine that has no Terminal to open answers 501 with a sentence.
  */

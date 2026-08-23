@@ -126,7 +126,7 @@ const CHECK_MS = 1_600;
 
 /**
  * What the page names it connects to. Presets live in lib/constants.ts and the
- * launchable agents in src/agent/launcher.ts; these are the ones with a mark to
+ * launchable agents in src/agent/registry.ts; these are the ones with a mark to
  * draw, and the line under each row carries the rest.
  */
 const MAILBOXES = [

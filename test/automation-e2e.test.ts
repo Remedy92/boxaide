@@ -4,7 +4,7 @@
  *
  * WHAT THIS PROVES AND WHAT IT DOES NOT. The agent is scripted, not a model:
  * each test supplies the exact tool calls the automation's prompt asks for.
- * That proves the platform underneath — the scheduler serializes, the tools
+ * That proves the platform underneath: the scheduler serializes, the tools
  * dispatch, the state comes out right, a run that dies halfway cannot cause a
  * second send. It does NOT prove that a language model reads the prompt and
  * chooses those calls, and it does not touch a real mail server. Judgement and
@@ -83,12 +83,13 @@ async function harness(script: AgentScript) {
       let result: OneShotResult;
       try {
         await script(call);
-        result = { status: "ok", exitCode: 0, log: "done" };
+        result = { status: "ok", exitCode: 0, log: "done", agentId: "fake" };
       } catch (err) {
         result = {
           status: "error",
           exitCode: 1,
           log: err instanceof Error ? err.message : String(err),
+          agentId: "fake",
         };
       }
       runs.push({ prompt: opts.prompt, result });
@@ -237,7 +238,7 @@ describe("Monday outreach automation", () => {
           body: "Hello there.",
           contactId: state.contactId,
         });
-        // The human approves and the engine sends — then the run is cut off
+        // The human approves and the engine sends, then the run is cut off
         // before it can write anything else down.
         h.platform.outreachStore.decide(queued.id, "approved");
         h.platform.outreachStore.markSent(queued.id, new Date().toISOString());
@@ -288,7 +289,7 @@ describe("Monday outreach automation", () => {
 });
 
 describe("Reply triage automation", () => {
-  /** Forty replies inside the window — more than one unfiltered page. */
+  /** Forty replies inside the window, more than one unfiltered page. */
   function seedBusyDay(h: H) {
     const messages = Array.from({ length: 40 }, (_, i) => ({
       subject: `Re: proposal ${i}`,

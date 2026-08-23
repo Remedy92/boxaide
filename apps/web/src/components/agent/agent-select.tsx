@@ -14,6 +14,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { shortAgentReason } from "@/lib/agent-copy";
 import { friendlyError } from "@/lib/api/errors";
 import type { LocalAgent } from "@/lib/api/endpoints";
 import {
@@ -29,10 +30,12 @@ import { cn } from "@/lib/utils";
 /**
  * Which agent CLI answers, chosen where the question is typed.
  *
- * Only CLIs found on the server's machine are listed; ones this build cannot
- * launch yet say "soon" rather than vanishing, so an install that looks right
- * to the user is not silently missing. Picking does not start anything on its
- * own — a send does that (useEnsureAgentRunning) — with one exception below.
+ * Only CLIs found on the server's machine are listed; one that cannot carry
+ * the chat loop stays visible and greyed out with two or three plain words
+ * beside it, so an install that looks right to the user is not silently
+ * missing. The server's full sentence is on the tooltip and in the pane above
+ * the composer. Picking does not start anything on its own. A send does that
+ * (useEnsureAgentRunning), with one exception below.
  *
  * Not searchable, unlike the model select: this list is a handful of installed
  * CLIs, never the several hundred rows a model catalog can reach.
@@ -46,7 +49,7 @@ export function AgentSelect({ disabled }: { disabled?: boolean } = {}) {
   const stop = useStopLocalAgent();
   const [open, setOpen] = useState(false);
 
-  const rows = (agents.data?.agents ?? []).filter((a) => a.available);
+  const rows = (agents.data?.agents ?? []).filter((a) => a.installed);
   if (rows.length === 0) return null;
 
   const busy = start.isPending || stop.isPending;
@@ -104,7 +107,7 @@ export function AgentSelect({ disabled }: { disabled?: boolean } = {}) {
               <CommandItem
                 key={agent.id}
                 value={agent.label}
-                disabled={!agent.supported}
+                disabled={!agent.chat.ok}
                 onSelect={() => void choose(agent)}
                 className="text-[12px]"
               >
@@ -121,9 +124,14 @@ export function AgentSelect({ disabled }: { disabled?: boolean } = {}) {
                     running
                   </span>
                 )}
-                {!agent.supported && (
-                  <span className="ml-auto text-[11px] text-fg-tertiary">
-                    soon
+                {!agent.chat.ok && (
+                  <span
+                    title={agent.chat.reason ?? undefined}
+                    className="ml-auto truncate text-[11px] text-fg-tertiary"
+                  >
+                    {/* The server sets a reason whenever chat.ok is false.
+                        The default only guards a wire shape without one. */}
+                    {shortAgentReason(agent.chat.reason) ?? "Unavailable"}
                   </span>
                 )}
               </CommandItem>
