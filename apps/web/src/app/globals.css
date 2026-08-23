@@ -10,6 +10,11 @@
    prefers-color-scheme media query, which would ignore the toggle entirely. */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* A device with no hover has no way to reveal a control that waits for one.
+   Rows that hide their actions until the pointer arrives use this to show them
+   outright instead, and to give them a target a finger can hit. */
+@custom-variant touch (@media (hover: none));
+
 /* ===========================================================================
    Boxaide — near-monochrome, one accent.
 
