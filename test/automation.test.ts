@@ -356,7 +356,7 @@ describe("AutomationStore", () => {
     // Same automation and a different one: one run at a time, globally.
     expect(mcp.claimRun(a.id)).toBeNull();
     expect(mcp.claimRun(b.id)).toBeNull();
-    // The young row is untouched — the other process is really using it.
+    // The young row is untouched. The other process is really using it.
     expect(mcp.listRuns({})).toHaveLength(1);
     expect(mcp.listRuns({})[0].status).toBe("running");
 
@@ -397,7 +397,7 @@ class FakeLauncher implements OneShotLauncher {
   killed = 0;
   /** Default 1 so a test that says nothing still observes serial behaviour. */
   limit = 1;
-  result: OneShotResult = { status: "ok", exitCode: 0, log: "ran" };
+  result: OneShotResult = { status: "ok", exitCode: 0, log: "ran", agentId: "fake" };
   throwWith: Error | null = null;
   private release: (() => void) | null = null;
   private held: Promise<void> | null = null;
@@ -566,7 +566,7 @@ describe("AutomationScheduler", () => {
     expect(launcher.maxInFlight).toBe(1);
   });
 
-  it("records a refused or crashed run as an error instead of losing it", async () => {
+  it("marks the run as never started and records the blocked reason", async () => {
     const store = newStore();
     const launcher = new FakeLauncher();
     launcher.throwWith = new Error("no agent CLI is installed to run automations");
@@ -576,14 +576,45 @@ describe("AutomationScheduler", () => {
     await scheduler.tick(now);
     const [run] = store.listRuns({ automationId: a.id });
     expect(run.status).toBe("error");
+    // The empty agent id is the signal: nothing ran, so the log is Boxaide's
+    // own reason rather than any CLI's output. Null would be ambiguous, since
+    // every row written before the column existed is null.
     expect(run.exitCode).toBeNull();
+    expect(run.agentId).toBe("");
     expect(run.log).toContain("no agent CLI is installed");
+  });
+
+  it("records the agent and model that ran on the run row", async () => {
+    const store = newStore();
+    const launcher = new FakeLauncher();
+    launcher.result = { status: "ok", exitCode: 0, log: "ran", agentId: "codex" };
+    const scheduler = new AutomationScheduler(store, launcher);
+    const a = store.create({
+      name: "a",
+      cron: "0 * * * *",
+      prompt: "p",
+      agentId: "codex",
+      model: "gpt-5-codex",
+      now: past,
+    });
+
+    await scheduler.tick(now);
+    const [run] = store.listRuns({ automationId: a.id });
+    expect(run.agentId).toBe("codex");
+    // A snapshot: editing the automation's model later must not rewrite what
+    // this run actually used.
+    expect(run.model).toBe("gpt-5-codex");
   });
 
   it("reports a killed run with its status", async () => {
     const store = newStore();
     const launcher = new FakeLauncher();
-    launcher.result = { status: "killed", exitCode: null, log: "timed out" };
+    launcher.result = {
+      status: "killed",
+      exitCode: null,
+      log: "timed out",
+      agentId: "fake",
+    };
     const scheduler = new AutomationScheduler(store, launcher);
     const a = store.create({ name: "a", cron: "0 * * * *", prompt: "p", now: past });
 
@@ -778,7 +809,7 @@ describe("automation tools", () => {
 });
 
 describe("AgentLauncher.runOnce", () => {
-  // See test/agent-sandbox.test.ts — confinement is covered there, and off
+  // See test/agent-sandbox.test.ts. Confinement is covered there, and off
   // macOS a workspace launch is refused rather than silently unconfined.
   const CTX = {
     mcpUrl: "http://127.0.0.1:0/mcp",
@@ -857,7 +888,7 @@ describe("AgentLauncher.runOnce", () => {
 
   it("SIGKILLs a run that outlives its timeout", async () => {
     // Builtins only: the launcher rebuilds the child PATH from the test's
-    // fake dir plus well-known CLI dirs, none of which is /usr/bin — an
+    // fake dir plus well-known CLI dirs, none of which is /usr/bin. An
     // external `sleep` exits 127 on CI runners before the timeout fires,
     // and the run reads 'error' instead of 'killed'.
     const { specs, bin } = runSpecs("#!/bin/sh\nwhile :; do :; done\n");
@@ -871,7 +902,7 @@ describe("AgentLauncher.runOnce", () => {
   });
 
   it("runs an automation while the chat agent is up, in both orders", async () => {
-    // Builtins only — same reason as the timeout test above.
+    // Builtins only, same reason as the timeout test above.
     const { specs, bin } = runSpecs("#!/bin/sh\nwhile :; do :; done\n");
     const launcher = new AgentLauncher(CTX, specs, { PATH: bin });
     cleanups.push(() => launcher.close());
@@ -1055,8 +1086,8 @@ describe("AgentLauncher.runOnce", () => {
 
   it("holds the run slot while it validates a model, so no other run can take it", async () => {
     // The scheduler has already claimed the run row before runOnce is called,
-    // so a slot lost while the CLI is being asked for its models is not a wait
-    // — it is a fire recorded as a failed run and skipped until next time.
+    // so a slot lost while the CLI is being asked for its models is not a wait.
+    // It is a fire recorded as a failed run and skipped until next time.
     // A chat start can no longer steal it: chat has a slot of its own. What
     // still can is another run, so that is what this guards.
     // One binary, two jobs: a slow `models` listing, and an instant run. The
