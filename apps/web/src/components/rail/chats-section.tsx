@@ -95,36 +95,66 @@ export function ChatsSection({
         </p>
       )}
 
-      <AlertDialog
-        open={pendingDelete !== null}
-        onOpenChange={(next) => {
-          if (!next) setPendingDelete(null);
-        }}
-      >
-        <AlertDialogContent size="sm">
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete this chat?</AlertDialogTitle>
-            <AlertDialogDescription>
-              “{pendingDelete?.title}” and every message in it go for good.
-              Nothing undoes this. To put it away instead, archive it.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel variant="ghost">Keep it</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              onClick={() => {
-                const chat = pendingDelete;
-                setPendingDelete(null);
-                if (chat) void agent.removeChat(chat.id);
-              }}
-            >
-              Delete chat
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <DeleteChatConfirm
+        chat={pendingDelete}
+        onClose={() => setPendingDelete(null)}
+      />
     </div>
+  );
+}
+
+/**
+ * The one question asked before a conversation is destroyed.
+ *
+ * Shared with the all-chats dialog rather than written twice: the rail and the
+ * dialog delete through the same route, and two wordings for one irreversible
+ * act is how a user learns to read neither. Pass the chat to ask about, or null
+ * to keep it shut.
+ */
+export function DeleteChatConfirm({
+  chat,
+  onClose,
+}: {
+  chat: AgentChat | null;
+  onClose: () => void;
+}) {
+  const agent = useAgent();
+
+  return (
+    <AlertDialog
+      open={chat !== null}
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+    >
+      <AlertDialogContent size="sm">
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete this chat?</AlertDialogTitle>
+          <AlertDialogDescription>
+            “{chat?.title}” and every message in it go for good. Nothing
+            undoes this.{" "}
+            {/* Offering to archive a chat that is already archived reads as a
+                machine that has not looked at what it is asking about. */}
+            {chat?.archivedAt
+              ? "Archiving it kept every message. This does not."
+              : "To put it away instead, archive it."}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel variant="ghost">Keep it</AlertDialogCancel>
+          <AlertDialogAction
+            variant="destructive"
+            onClick={() => {
+              const doomed = chat;
+              onClose();
+              if (doomed) void agent.removeChat(doomed.id);
+            }}
+          >
+            Delete chat
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 

@@ -20,7 +20,10 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatBytes } from "@/components/rail/chats-section";
+import {
+  DeleteChatConfirm,
+  formatBytes,
+} from "@/components/rail/chats-section";
 import { listAgentChats } from "@/lib/api/endpoints";
 import { useAgent } from "@/lib/hooks/use-agent";
 import { useApp } from "@/lib/hooks/use-app-state";
@@ -68,6 +71,10 @@ function ChatsDialogBody({
   const [query, setQuery] = React.useState("");
   const [archived, setArchived] = React.useState<AgentChat[]>([]);
   const [showArchived, setShowArchived] = React.useState(false);
+  /* Delete is the only control on this screen that destroys anything, and it
+     sits a few pixels from the row a user came here to open. Same question the
+     rail asks, same component. */
+  const [pendingDelete, setPendingDelete] = React.useState<AgentChat | null>(null);
 
   /* Below 760px this dialog is opened from the rail sheet, which stays mounted
      behind it. Picking a chat has to take that down too, or closing the dialog
@@ -193,7 +200,7 @@ function ChatsDialogBody({
                 </RowAction>
                 <RowAction
                   label="Delete this chat"
-                  onClick={() => void agent.removeChat(chat.id)}
+                  onClick={() => setPendingDelete(chat)}
                 >
                   <Trash2 className="size-3.5" strokeWidth={1.5} />
                 </RowAction>
@@ -253,7 +260,7 @@ function ChatsDialogBody({
                       </RowAction>
                       <RowAction
                         label="Delete this chat"
-                        onClick={() => void agent.removeChat(chat.id)}
+                        onClick={() => setPendingDelete(chat)}
                       >
                         <Trash2 className="size-3.5" strokeWidth={1.5} />
                       </RowAction>
@@ -295,6 +302,11 @@ function ChatsDialogBody({
           )}
       </DialogBody>
       </DialogContent>
+
+      <DeleteChatConfirm
+        chat={pendingDelete}
+        onClose={() => setPendingDelete(null)}
+      />
     </Dialog>
   );
 }
