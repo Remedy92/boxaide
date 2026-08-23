@@ -1,11 +1,23 @@
 "use client";
 
 import * as React from "react";
-import { Plus } from "lucide-react";
+import { Archive, Plus, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAgent } from "@/lib/hooks/use-agent";
 import { useApp } from "@/lib/hooks/use-app-state";
+import type { AgentChat } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -35,9 +47,13 @@ export function ChatsSection({
   onNavigate?: () => void;
 }) {
   const agent = useAgent();
-  const app = useApp();
   const recent = agent.chats.slice(0, RECENT);
   const rest = Math.max(agent.chats.length - recent.length, 0);
+
+  /* Archiving is reversible and says so in a toast, so it happens on the click.
+     Deleting is not, and a permanent loss one pixel away from the row a user
+     meant to open has to be asked about first. */
+  const [pendingDelete, setPendingDelete] = React.useState<AgentChat | null>(null);
 
   if (agent.connection === "unsupported") return null;
 
@@ -49,36 +65,12 @@ export function ChatsSection({
         </p>
       )}
       {recent.map((chat) => (
-        <button
+        <ChatRow
           key={chat.id}
-          type="button"
-          onClick={() => {
-            /* Selecting a conversation means wanting to read it: the row also
-               brings the Agent view forward, and drops the sheet or popover the
-               rail was being shown in, so one tap does the whole job. */
-            onNavigate?.();
-            app.setView("agent");
-            void agent.openChat(chat.id);
-          }}
-          aria-current={chat.id === agent.chat?.id ? "true" : undefined}
-          title={chat.title}
-          className={cn(
-            "flex h-7 w-full items-center gap-2 rounded-[var(--radius-md)] py-0 pr-2 pl-5 text-left",
-            "transition-colors duration-[var(--dur-fast)] hover:duration-0",
-            chat.id === agent.chat?.id
-              ? "bg-accent-subtle text-accent"
-              : "text-fg-secondary hover:bg-surface-hover hover:text-fg",
-          )}
-        >
-          <span
-            className={cn(
-              "min-w-0 flex-1 truncate text-[13px] leading-[18px]",
-              chat.id === agent.chat?.id && "font-medium",
-            )}
-          >
-            {chat.title}
-          </span>
-        </button>
+          chat={chat}
+          onDelete={() => setPendingDelete(chat)}
+          onNavigate={onNavigate}
+        />
       ))}
 
       {/* Not dismissed here: the dialog opens on top, and tearing the sheet
@@ -102,7 +94,155 @@ export function ChatsSection({
           {formatBytes(agent.storage.bytes)} of {formatBytes(agent.storage.budget)}
         </p>
       )}
+
+      <AlertDialog
+        open={pendingDelete !== null}
+        onOpenChange={(next) => {
+          if (!next) setPendingDelete(null);
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this chat?</AlertDialogTitle>
+            <AlertDialogDescription>
+              “{pendingDelete?.title}” and every message in it go for good.
+              Nothing undoes this. To put it away instead, archive it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel variant="ghost">Keep it</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                const chat = pendingDelete;
+                setPendingDelete(null);
+                if (chat) void agent.removeChat(chat.id);
+              }}
+            >
+              Delete chat
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
+  );
+}
+
+/**
+ * One conversation in the rail, with its two housekeeping actions.
+ *
+ * The actions take no width until the row is hovered or holds focus: the rail
+ * is narrow, the title is what the user reads, and a pair of icons parked on
+ * every row all day would compete with it. They stay in the DOM rather than
+ * being mounted on hover, so Tab still reaches them. A hidden control is a
+ * control a keyboard cannot use.
+ */
+function ChatRow({
+  chat,
+  onDelete,
+  onNavigate,
+}: {
+  chat: AgentChat;
+  onDelete: () => void;
+  /** Dismiss whatever surface the rail is being shown in — see LeftRail. */
+  onNavigate?: () => void;
+}) {
+  const agent = useAgent();
+  const app = useApp();
+  const current = chat.id === agent.chat?.id;
+
+  return (
+    <div
+      className={cn(
+        "group/chat flex h-7 w-full items-center rounded-[var(--radius-md)] pr-1 pl-5",
+        "transition-colors duration-[var(--dur-fast)] hover:duration-0",
+        current ? "bg-accent-subtle" : "hover:bg-surface-hover",
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => {
+          /* Selecting a conversation means wanting to read it: the row also
+             brings the Agent view forward, and drops the sheet or popover the
+             rail was being shown in, so one tap does the whole job. */
+          onNavigate?.();
+          app.setView("agent");
+          void agent.openChat(chat.id);
+        }}
+        aria-current={current ? "true" : undefined}
+        title={chat.title}
+        className={cn(
+          "min-w-0 flex-1 truncate py-0 pr-1 text-left text-[13px] leading-[18px]",
+          current
+            ? "font-medium text-accent"
+            : "text-fg-secondary group-hover/chat:text-fg",
+        )}
+      >
+        {chat.title}
+      </button>
+
+      <div
+        className={cn(
+          "flex w-0 items-center overflow-hidden opacity-0",
+          "transition-opacity duration-[var(--dur-fast)] motion-reduce:transition-none",
+          "group-hover/chat:w-auto group-hover/chat:opacity-100",
+          "group-focus-within/chat:w-auto group-focus-within/chat:opacity-100",
+        )}
+      >
+        <RowAction
+          label="Archive this chat"
+          onClick={() => {
+            void agent.archiveChat(chat.id).then(() => {
+              toast.success("Chat archived", {
+                description: chat.title,
+                action: {
+                  label: "Undo",
+                  onClick: () => void agent.unarchiveChat(chat.id),
+                },
+              });
+            });
+          }}
+        >
+          <Archive strokeWidth={1.5} />
+        </RowAction>
+        <RowAction label="Delete this chat" destructive onClick={onDelete}>
+          <Trash2 strokeWidth={1.5} />
+        </RowAction>
+      </div>
+    </div>
+  );
+}
+
+function RowAction({
+  label,
+  destructive = false,
+  onClick,
+  children,
+}: {
+  label: string;
+  destructive?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label={label}
+          onClick={onClick}
+          className={cn(
+            "text-fg-tertiary",
+            destructive ? "hover:text-danger" : "hover:text-fg",
+          )}
+        >
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="right">{label}</TooltipContent>
+    </Tooltip>
   );
 }
 
