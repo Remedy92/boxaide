@@ -47,7 +47,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "better-sqlite3": "^13.0.3",
     "cron-parser": "^5.10.0",
-    "hono": "^4.13.2",
+    "hono": "^4.13.3",
     "ical.js": "^2.2.1",
     "imapflow": "^1.7.1",
     "mailparser": "^3.9.15",
@@ -63,7 +63,7 @@
     "@types/nodemailer": "^8.0.1",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "allowScripts": {
     "better-sqlite3@13.0.3": true,
