@@ -69,6 +69,13 @@ export class ClaudeDriver extends TurnDriver {
   private healed = false;
 
   constructor(protected override opts: ClaudeDriverOptions) {
+    // No turnTimeoutMs. The silence watchdog is what ends a claude turn that
+    // stalls; a cap on one that keeps talking would cut off long real work
+    // mid-tool-call, which for this CLI is ordinary and not a symptom. The
+    // known cost: past the channel's half-hour lease ceiling the pane says the
+    // message was never answered while an answer may still arrive late, and
+    // nothing here unwedges the loop until that child finishes or dies on its
+    // own. See turnTimeoutMs in turn-driver.ts.
     super(opts);
   }
 

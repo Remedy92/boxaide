@@ -75,7 +75,7 @@ const STDERR_TAIL_LIMIT = 2_048;
  * Stop asks politely first, because the CLI writes the rest of this turn's
  * transcript on the way out and that is what the next launch resumes from. But
  * the watchdog only fires on silence, so a child that ignores SIGTERM while
- * still printing would hold the loop, and therefore the launcher's `running` , 
+ * still printing would hold the loop, and therefore the launcher's `running` —
  * until Boxaide itself restarted.
  */
 const STOP_GRACE_MS = 5_000;
@@ -148,8 +148,8 @@ export type TurnDriverOptions = {
   /**
    * The loop's end: null when it was stopped, a message when it gave up. The
    * launcher has no child exit to watch for a driven agent, so this is the only
-   * exit there is. The cause carries what the pane cannot read off that message
-   *, today, whether the CLI is signed out.
+   * exit there is. The cause carries what the pane cannot read off that
+   * message — today, whether the CLI is signed out.
    */
   onStop?: (error: string | null, cause: StopCause) => void;
   /** Overridable for tests. */
@@ -162,8 +162,11 @@ export type TurnDriverOptions = {
    * Silence alone does not catch every stuck turn: a CLI that keeps narrating
    * while it gets nowhere is live by the watchdog's reading and still never
    * finishes, and the lease it holds is the pane's whole conversation. Absent
-   * means no absolute deadline, which is what a CLI with a timeout of its own
-   * wants.
+   * means no absolute deadline, which is not a neutral default: the channel's
+   * lease ceiling still ends the hold, but nothing here ends the child, and
+   * the loop stays inside the turn until the CLI finishes or dies some other
+   * way. Every driver sets one except Claude, whose reasons are its own — see
+   * claude-driver.ts.
    */
   turnTimeoutMs?: number;
   maxFailures?: number;
@@ -191,6 +194,8 @@ export abstract class TurnDriver implements AgentDriver {
    * message it was pressed on.
    */
   private runningSeq: number | null = null;
+  /** The chat `runningSeq` belongs to. Null whenever it is. */
+  private runningChat: string | null = null;
   /** A user turn the user stopped. Never handed to the model. */
   private cancelledSeq: number | null = null;
   /**
@@ -284,7 +289,10 @@ export abstract class TurnDriver implements AgentDriver {
     // than a CLI that died on its own.
     logInfo("agent.turn", "interrupt", {
       agent: this.opts.agent,
-      chat: this.loggedChat,
+      // The chat the interrupted turn belongs to, not whatever process last
+      // logged: a Stop that lands between claim and spawn would otherwise be
+      // filed under the previous turn's conversation.
+      chat: this.runningSeq === seq ? this.runningChat : null,
       seq,
       running: this.runningSeq === seq,
     });
@@ -331,8 +339,10 @@ export abstract class TurnDriver implements AgentDriver {
       },
       (turn) => {
         this.runningSeq = turn.seq;
+        this.runningChat = turn.chatId;
         return this.prompt(turn.chatId, turn.text).finally(() => {
           this.runningSeq = null;
+          this.runningChat = null;
         });
       },
     );

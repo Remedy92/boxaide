@@ -35,7 +35,6 @@
  * the one turn that never got told what it is answering.
  */
 import { agyTurnReader } from "./agent-stream.js";
-import type { StopCause } from "./driver.js";
 import {
   TurnDriver,
   type TurnDriverOptions,
@@ -49,7 +48,7 @@ import {
  * Two numbers rather than one, and in that order on purpose. agy's own timeout
  * fires first and ends the turn the tidy way: a result event naming the reason,
  * a clean exit, and a transcript the next turn can still resume. The driver's
- * deadline is a minute later and only exists for a child that ignored its own , 
+ * deadline is a minute later and only exists for a child that ignored its own —
  * it is a SIGKILL, which loses whatever the CLI had not written down yet.
  *
  * Fifteen minutes because a real inbox turn can be minutes of tool calls and a
@@ -65,14 +64,10 @@ export function agyPrintTimeoutArg(ms = AGY_PRINT_TIMEOUT_MS): string {
   return `${Math.round(ms / 1000)}s`;
 }
 
-export type AgyDriverOptions = TurnDriverOptions & {
-  onStop?: (error: string | null, cause: StopCause) => void;
-};
-
 export class AgyDriver extends TurnDriver {
   protected readonly cli = "agy";
 
-  constructor(opts: AgyDriverOptions) {
+  constructor(opts: TurnDriverOptions) {
     super({ turnTimeoutMs: AGY_TURN_DEADLINE_MS, ...opts });
   }
 

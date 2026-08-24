@@ -1019,6 +1019,11 @@ function registerAgentRoutes(
    * something is already running, since that agent takes the message anyway,
    * and a launch that refuses does not undo the requeue: the message is back
    * in the queue either way, and `startError` says why nobody picked it up.
+   *
+   * A row an agent is still working counts as retryable too. From the pane a
+   * live lease and a dropped one look alike, and pressing Retry declares this
+   * attempt over; if the holder was in fact still going, its answer arrives
+   * beside whatever answers the requeue — the user's word outranks the lease.
    */
   app.post("/api/agent/retry", async (c) => {
     const body = await c.req

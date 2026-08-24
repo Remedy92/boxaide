@@ -98,7 +98,7 @@ type Sink = {
 
 let sink: Sink | null = null;
 
-/** Where this install's logs live. Beside the data directory, not inside it. */
+/** Where this install's logs live: inside the data directory, beside its database. */
 export function logDirFor(dataDir: string): string {
   return join(dataDir, "logs");
 }
