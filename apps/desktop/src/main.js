@@ -82,6 +82,52 @@ const calendarHelperPath =
       : join(here, "..", "build", "boxaide-calendar")
     : undefined;
 
+/**
+ * The server's log module, loaded once and only when something fails.
+ *
+ * A packaged Electron app has no terminal, so every `console.error` in this
+ * file went nowhere the user could ever read. The shell writes to the same
+ * file the server does, `~/.boxaide/logs/boxaide.log`, rather than keeping a
+ * log of its own: one file is what a person is told to send, and two would
+ * mean the shell's half of a failed start sat somewhere nobody looks.
+ *
+ * A copy of the module rather than an import of the source, because the
+ * desktop tree resolves against `apps/desktop/node_modules` (see
+ * scripts/sync-server.mjs). It is loaded lazily for the same reason the server
+ * is: nothing here may block app startup, and a build that has not been synced
+ * yet must still start and still print to the console.
+ * @type {Promise<(scope: string, message: string, fields?: object) => void> | null}
+ */
+let serverLogger = null;
+
+/**
+ * Records a failure in the log file, and on the console for a dev run.
+ *
+ * Never throws and never awaits: every caller is on an error path already, and
+ * a logger that can fail the thing it is reporting on is worse than no logger.
+ * @param {string} message a short fixed phrase, not a sentence built from data
+ * @param {Record<string, string | number | boolean | null>} [fields]
+ */
+function logFailure(message, fields = {}) {
+  console.error(message, fields);
+  serverLogger ??= (async () => {
+    const [log, config] = await Promise.all([
+      import("../server/dist/log.js"),
+      import("../server/dist/config.js"),
+    ]);
+    // The same directory the server resolves, so the shell's lines land in the
+    // file the server is already writing rather than beside it.
+    log.configureLog({ dataDir: config.resolveDefaultDataDir() });
+    return log.logError;
+  })();
+  void serverLogger
+    .then((logError) => logError("desktop", message, fields))
+    .catch(() => {
+      // No compiled server to log through. The console line above is all
+      // there is, and that is the honest outcome of an unbuilt tree.
+    });
+}
+
 /** @type {BrowserWindow | null} */
 let win = null;
 /** @type {(() => Promise<void>) | null} */
@@ -188,7 +234,7 @@ if (!app.requestSingleInstanceLock()) {
         } catch (err) {
           // A staged file that has gone missing must not cost the user their
           // quit. Fall through and exit; the next check re-downloads it.
-          console.error("install on quit failed", err);
+          logFailure("install on quit failed", { error: String(err?.message ?? err) });
         }
       }
       app.exit(0);
@@ -258,7 +304,9 @@ async function shutdownServer() {
   if (!stopServer) return;
   const stop = stopServer;
   stopServer = null;
-  await stop().catch((err) => console.error("shutdown failed", err));
+  await stop().catch((err) =>
+    logFailure("shutdown failed", { error: String(err?.message ?? err) }),
+  );
 }
 
 /* ---- updates ------------------------------------------------------------- */
@@ -338,7 +386,7 @@ function createUpdateDriver() {
         try {
           autoUpdater.quitAndInstall(false, true);
         } catch (err) {
-          console.error("quit and install failed", err);
+          logFailure("quit and install failed", { error: String(err?.message ?? err) });
           app.exit(0);
         }
       });
@@ -750,7 +798,7 @@ function createTray(url) {
   if (image.isEmpty()) {
     // A Tray from an empty image is an invisible, unclickable sliver — worse
     // than no tray, because nothing says why. Shipped this once; never silent.
-    console.error(`tray icon missing or unreadable: ${trayIconPng}`);
+    logFailure("tray icon missing or unreadable", { path: trayIconPng });
     return;
   }
   image.setTemplateImage(true);
@@ -1013,7 +1061,7 @@ function createWindow(url, hash) {
 
   win.webContents.on("did-fail-load", (_event, code, description, failedUrl) => {
     if (code === -3) return; // aborted, e.g. a superseded navigation
-    console.error(`load failed ${failedUrl}: ${description} (${code})`);
+    logFailure("window load failed", { url: failedUrl, description, code });
   });
 
   if (smoke) {
@@ -1079,7 +1127,7 @@ function fatal(err) {
   const detail = busy
     ? `The port is already in use.\n\nBoxaide is probably already running — check for another Boxaide window, or a "boxaide serve" in a terminal.\n\n${message}`
     : message;
-  console.error(`boxaide could not start: ${detail}`);
+  logFailure("could not start", { error: message, portBusy: busy });
   // `showErrorBox` is modal and waits for a click, which is right in front of a
   // person and a hang in `npm run smoke`.
   if (!smoke) dialog.showErrorBox("Boxaide could not start", detail);

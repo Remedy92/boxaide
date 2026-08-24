@@ -9,13 +9,13 @@
  * of them wired to this server.
  *
  * Two launch shapes, and the difference is who owns the loop:
- *  - A KICKOFF launch (Grok, Antigravity) is one long-lived child, and the loop
+ *  - A KICKOFF launch (Grok, Codex) is one long-lived child, and the loop
  *    exists because the prompt tells the model to keep calling
  *    chat_await_message. That loop is a suggestion, and it ends when the model
  *    decides it has finished.
- *  - A driven launch (Claude Code) hands the loop to a driver in this process.
- *    See driver.ts. `spec.drive` builds it. There is no long-lived child: the
- *    driver spawns one process per turn.
+ *  - A driven launch (Claude Code, Antigravity) hands the loop to a driver in
+ *    this process. See driver.ts. `spec.drive` builds it. There is no
+ *    long-lived child: the driver spawns one process per turn.
  *
  * Security posture, decided by the user and enforced here:
  *  - Only binaries from the fixed registry in ./registry.ts are ever spawned,
@@ -48,6 +48,7 @@ import {
   egressEnv,
 } from "./egress.js";
 import { runMemoryBlock } from "./memory-context.js";
+import { configureLog, logError, logInfo } from "../log.js";
 import { memoryDir } from "../memory/store.js";
 import { fetchModels, type ModelOption } from "./model-list.js";
 import type { ScopeProfile } from "../mcp/scope.js";
@@ -483,6 +484,11 @@ export class AgentLauncher {
     runLimit?: number,
   ) {
     this.limit = runLimit ?? runConcurrencyFrom(env);
+    // The log is pointed at this install here because this is the first object
+    // in the process that both knows the data directory and has something
+    // worth writing. A `:memory:` install turns it off, which is what every
+    // test that builds one gets. See src/log.ts.
+    configureLog({ dataDir: this.ctx.dataDir });
     // A crash mid-run leaves its directory behind, and nothing else removes
     // one. Swept at construction, the same moment AutomationScheduler sweeps
     // the run rows a dead process left 'running'.
@@ -882,6 +888,14 @@ export class AgentLauncher {
       accessNotice: decided.notice,
     };
 
+    logInfo("agent.launcher", "chat launch", {
+      agent: spec.id,
+      pid: started.pid,
+      driven: spec.drive !== undefined,
+      model: model ?? null,
+      access: granted,
+    });
+
     this.child = child;
     this.running = started;
     this.lastModels.set(spec.id, model ?? null);
@@ -1134,6 +1148,14 @@ export class AgentLauncher {
     // The child holds the slot on its own now.
     this.starting.delete(opts.runId);
 
+    const runStartedAt = Date.now();
+    logInfo("agent.launcher", "run start", {
+      agent: ranAgentId,
+      runId: opts.runId,
+      pid: child.pid ?? null,
+      confined: egress !== null,
+    });
+
     return await new Promise<OneShotResult>((resolve) => {
       let done = false;
       let grace: ReturnType<typeof setTimeout> | null = null;
@@ -1165,8 +1187,20 @@ export class AgentLauncher {
         } catch {
           // Left for the sweep at the next start.
         }
+        const status = forced ?? (code === 0 ? "ok" : "error");
+        // The run log itself goes to the automation row, which is a database a
+        // failed install may not have. This line is the copy that survives on
+        // disk, and it carries no run output: identifiers, a code, a duration.
+        (status === "ok" ? logInfo : logError)("agent.launcher", "run exit", {
+          agent: ranAgentId,
+          runId: opts.runId,
+          code,
+          status,
+          refused: refused.length > 0 ? refused.join(",") : null,
+          upMs: Date.now() - runStartedAt,
+        });
         resolve({
-          status: forced ?? (code === 0 ? "ok" : "error"),
+          status,
           exitCode: code,
           log,
           agentId: ranAgentId,
@@ -1477,6 +1511,24 @@ export class AgentLauncher {
     exit: { code: number | null; reason: ExitReason; authRequired?: boolean },
   ): void {
     if (this.running?.id !== id) return;
+    // Written before the state is torn down, and written for every exit rather
+    // than only the bad ones: `lastExit` below is in memory, so without this
+    // line a restart is all it takes for the record of why an agent died to be
+    // gone. The stderr tail is redacted and capped by src/log.ts.
+    const startedAt = Date.parse(this.running.startedAt);
+    // A clean finish and a Stop the user pressed are both ordinary. Only a
+    // launch that ended some other way is worth a reader's attention.
+    const clean = exit.reason === "stopped" || (exit.reason === "exited" && exit.code === 0);
+    const level = clean ? logInfo : logError;
+    level("agent.launcher", "chat exit", {
+      agent: id,
+      pid: this.running.pid,
+      code: exit.code,
+      reason: exit.reason,
+      authRequired: exit.authRequired === true,
+      upMs: Number.isFinite(startedAt) ? Date.now() - startedAt : null,
+      stderrTail: this.stderrTail || null,
+    });
     // Everything that can call back into this method is cleared FIRST. A driver
     // is free to report the end of its loop from inside its own stop(), and that
     // arrives here as another exit for the same agent, which would recurse

@@ -18,9 +18,11 @@
  * Formats verified by running each CLI, not from documentation:
  *   claude --output-format stream-json  →  {"type":"assistant","message":
  *                                          {"content":[{"type":"tool_use",...}]}}
+ *   agy    --output-format stream-json  →  {"event":"step_update","step_update":
+ *                                          {"step_type":"tool","tool_name":...}}
  *   grok --output-format streaming-json →  {"type":"tool_call","toolName":...}
  *
- * Both also emit lines this file has no name for — hook records, token deltas,
+ * They also emit lines this file has no name for, hook records, token deltas,
  * usage totals. Those are deliberately not parsed into anything. They are still
  * proof of life, and the launcher counts them as such.
  */
@@ -60,11 +62,18 @@ function parse(line: string): unknown {
   }
 }
 
-/** What one `claude -p` process produced, folded together line by line. */
-export type ClaudeTurnOutcome = {
+/**
+ * What one driven turn's process produced, folded together line by line. One
+ * shape for every CLI driven a process per turn: both write a result event with
+ * an answer or a reason, and both name the session that turn belonged to.
+ */
+export type StreamTurnOutcome = {
   /** The `result` event's text, when the turn succeeded. */
   text: string | null;
-  /** The session id the CLI reported, on success or failure. */
+  /**
+   * The session the CLI reported, on success or failure. Claude Code calls it a
+   * session id and agy a conversation id; to a chat it is the same thing.
+   */
   sessionId: string | null;
   /** Why it failed, in a form fit for the exit the user is shown. */
   error: string | null;
@@ -96,7 +105,7 @@ export type ClaudeTurnOutcome = {
  * Null is not "nothing happened": it only means this line does not rename what
  * the agent is doing.
  */
-export function readClaudeLine(line: string, into: ClaudeTurnOutcome): string | null {
+export function readClaudeLine(line: string, into: StreamTurnOutcome): string | null {
   const event = parse(line) as {
     type?: unknown;
     subtype?: unknown;
@@ -134,7 +143,7 @@ function foldResult(
     result?: unknown;
     errors?: unknown;
   },
-  into: ClaudeTurnOutcome,
+  into: StreamTurnOutcome,
 ): void {
   if (event.is_error !== true && typeof event.result === "string") {
     const answer = event.result.trim();
@@ -212,7 +221,7 @@ const CLAUDE_AUTH_TEXT_MAX = 200;
  * for. The caller spends one silent credential repair on that reading and does
  * not try a second, so a wrong guess costs one retry and nothing else.
  */
-export function claudeAuthFailed(outcome: ClaudeTurnOutcome): boolean {
+export function claudeAuthFailed(outcome: StreamTurnOutcome): boolean {
   if (!outcome.text && outcome.error?.trim() === CLAUDE_EMPTY_SUCCESS) return true;
   if (
     outcome.text &&
@@ -232,11 +241,119 @@ export function claudeAuthFailed(outcome: ClaudeTurnOutcome): boolean {
  * both liveness and the presence label, and this owns the wire format.
  */
 export function claudeTurnReader(
-  outcome: ClaudeTurnOutcome,
+  outcome: StreamTurnOutcome,
   onLine: (tool: string | null) => void,
 ): LineFeed {
   return lineSplitter((line) => onLine(readClaudeLine(line, outcome)), {
-    maxLine: CLAUDE_RESULT_MAX_LINE,
+    maxLine: RESULT_MAX_LINE,
+  });
+}
+
+/**
+ * One Antigravity (agy) stream-json line: the tool it names, and what it adds
+ * to the turn's outcome.
+ *
+ * agy narrates a print-mode turn as three event kinds. Shapes captured from
+ * `agy -p … --output-format stream-json` (see the probe files this was written
+ * from, agy-probe-1/2/3/5.jsonl):
+ *   the opening line    → {"event":"init","conversation_id":"<uuid>",
+ *                          "init":{"model":…,"cwd":…,"tools":[…]}}
+ *   every step          → {"event":"step_update","step_update":{
+ *                          "conversation_id":"<uuid>","step_index":N,
+ *                          "state":"ACTIVE"|"DONE"|"ERROR",
+ *                          "step_type":"user_input"|"checkpoint"|
+ *                            "system_message"|"agent_response"|"tool",
+ *                          "tool_name":"list_dir", …}}
+ *   the answer          → {"event":"result","result":{
+ *                          "conversation_id":"<uuid>","status":"SUCCESS",
+ *                          "response":"<text>", …}}
+ *   a print timeout     → {"event":"result","result":{"status":"ERROR",
+ *                          "response":"","error":"timeout waiting for
+ *                          response", …}}, exit 1, nothing on stderr
+ *
+ * Only the ACTIVE tool step is read for a label: agy repeats the same step with
+ * DONE or ERROR when it finishes, and re-stamping the name as it completes says
+ * nothing new. `agent_response` steps carry the answer in `text_delta` chunks,
+ * which are deliberately not accumulated here, the result event carries the
+ * whole answer and is the one reading of it.
+ *
+ * Null is not "nothing happened": it only means this line does not rename what
+ * the agent is doing.
+ */
+export function readAgyLine(line: string, into: StreamTurnOutcome): string | null {
+  const event = parse(line) as {
+    event?: unknown;
+    conversation_id?: unknown;
+    step_update?: { state?: unknown; step_type?: unknown; tool_name?: unknown };
+    result?: { conversation_id?: unknown; status?: unknown; response?: unknown; error?: unknown };
+  } | null;
+  if (!event) return null;
+  // The id rides the top level of the init line and the inside of the others.
+  // Read from wherever it is: a turn whose id was missed is a chat that starts
+  // over from nothing on its next message.
+  const id =
+    typeof event.conversation_id === "string" && event.conversation_id
+      ? event.conversation_id
+      : typeof event.result?.conversation_id === "string"
+        ? event.result.conversation_id
+        : null;
+  if (id) into.sessionId = id;
+  if (event.event === "result") {
+    foldAgyResult(event.result ?? {}, into);
+    return null;
+  }
+  if (event.event !== "step_update") return null;
+  const step = event.step_update;
+  if (!step || step.step_type !== "tool" || step.state !== "ACTIVE") return null;
+  return typeof step.tool_name === "string" && step.tool_name
+    ? unprefix(step.tool_name)
+    : null;
+}
+
+/**
+ * The turn's own verdict, and why `status` is not what decides it.
+ *
+ * agy reports ERROR for a tool that failed anywhere in the turn, including one
+ * the model then worked around: a captured run whose first `list_dir` was
+ * refused still answered the question in full and still ended
+ * `"status":"ERROR"` with the whole answer on `response`. Reading the status
+ * first would throw that finished, paid-for answer away, re-run the turn, and
+ * eventually dead-letter the user's message. So the answer wins wherever there
+ * is one, and the error is only what is left when there is not.
+ */
+function foldAgyResult(
+  result: { status?: unknown; response?: unknown; error?: unknown },
+  into: StreamTurnOutcome,
+): void {
+  const answer = typeof result.response === "string" ? result.response.trim() : "";
+  if (answer) {
+    into.text = answer;
+    return;
+  }
+  const reported = typeof result.error === "string" ? result.error.trim() : "";
+  into.error =
+    reported ||
+    // A status of its own only when it is not the success one: "agy: SUCCESS"
+    // with nothing on it explains nothing, and the caller's own "produced no
+    // answer" is the sentence that does.
+    (typeof result.status === "string" && result.status && result.status !== "SUCCESS"
+      ? `agy: ${result.status}`
+      : null) ||
+    into.error;
+}
+
+/**
+ * The reader for one driven `agy -p` turn.
+ *
+ * `onLine` runs for every line, with the tool it named or null: the caller owns
+ * both liveness and the presence label, and this owns the wire format.
+ */
+export function agyTurnReader(
+  outcome: StreamTurnOutcome,
+  onLine: (tool: string | null) => void,
+): LineFeed {
+  return lineSplitter((line) => onLine(readAgyLine(line, outcome)), {
+    maxLine: RESULT_MAX_LINE,
   });
 }
 
@@ -357,11 +474,11 @@ const MAX_LINE = 256 * 1024;
  *
  * Presence can afford to lose a line: it costs one label. A driven turn cannot —
  * dropping the `result` event scores a finished, paid-for turn as "no answer",
- * re-runs it, and dead-letters the message. Claude's own output ceiling is
- * ~32k tokens, so this is orders of magnitude past any real result line and
- * exists only to bound the buffer.
+ * re-runs it, and dead-letters the message. The largest output ceiling either
+ * driven CLI has is ~32k tokens, so this is orders of magnitude past any real
+ * result line and exists only to bound the buffer.
  */
-const CLAUDE_RESULT_MAX_LINE = 8 * 1024 * 1024;
+const RESULT_MAX_LINE = 8 * 1024 * 1024;
 
 /** A chunk sink with an end: `flush` reads whatever arrived without a newline. */
 export type LineFeed = ((chunk: string) => void) & { flush: () => void };

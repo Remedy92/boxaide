@@ -282,13 +282,41 @@ describe("AgentChannel", () => {
       await channel.awaitUserTurn({ agent: "claude-code", timeoutMs: 1_000 });
 
       // One long tool call — a test run, a build, a big read — and stdout says
-      // nothing for the whole of it. Half an hour, not one line, still ours.
-      vi.advanceTimersByTime(30 * 60_000);
+      // nothing for the whole of it. Twenty minutes, not one line, still ours.
+      // (Only the ceiling below ends it, and this is well inside that.)
+      vi.advanceTimersByTime(20 * 60_000);
       expect(channel.presence().working).not.toBeNull();
 
       // And the answer still lands on a claim that was never taken away.
       channel.post({ role: "agent", text: "here is the plan" });
       expect(channel.presence().working).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends a lease held past the ceiling, however loud the agent is", async () => {
+    vi.useFakeTimers();
+    try {
+      const { channel } = make();
+      channel.setLaunchedAgent("claude-code");
+      const posted = channel.post({ role: "user", text: "read the whole repo" });
+      await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "claude-code" });
+
+      // The child narrates the whole time and never answers. Its output holds
+      // off the proof clock, and used to hold off everything: one question kept
+      // the queue for as long as the process felt like talking.
+      for (let n = 0; n < 31; n += 1) {
+        vi.advanceTimersByTime(60_000);
+        channel.noteAgentActivity("Read");
+      }
+
+      const presence = channel.presence();
+      expect(presence.working).toBeNull();
+      // Marked, not quietly requeued: the same agent would take it again and
+      // spend another half hour on it. The pane already has words for this one.
+      expect(presence.dropped).toEqual([posted.seq]);
+      expect(channel.history()[0].delivered).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -395,15 +423,68 @@ describe("AgentChannel", () => {
     expect(channel.presence().dropped).toEqual([]);
   });
 
-  it("hands the message back when the same agent returns unanswered", async () => {
+  it("serves the next message when the holder comes back unanswered", async () => {
+    const { channel } = make();
+    const stuck = channel.post({ role: "user", text: "the one it is stuck on" });
+    const after = channel.post({ role: "user", text: "and the one typed after" });
+    expect((await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" }))?.seq).toBe(
+      stuck.seq,
+    );
+
+    // Back in the loop without an answer. This used to hand the same message
+    // straight back, three times, then "never answered", while everything typed
+    // since waited behind it at the head of the queue.
+    const next = await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" });
+    expect(next?.seq).toBe(after.seq);
+    expect(next?.deliveryCount).toBe(1);
+
+    // And the message it walked away from is queued, not spent: still one
+    // delivery, and nothing for the pane to warn about.
+    expect(channel.history()[0].delivered).toBe(false);
+    expect(channel.history()[0].deliveryCount).toBe(1);
+    expect(channel.presence().dropped).toEqual([]);
+  });
+
+  it("lets another agent take the message the holder walked away from", async () => {
     const { channel } = make();
     channel.post({ role: "user", text: "hello" });
-    const first = await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" });
-    expect(first?.deliveryCount).toBe(1);
+    await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" });
 
-    const again = await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" });
-    expect(again?.text).toBe("hello");
-    expect(again?.deliveryCount).toBe(2);
+    // The skip is one client's. A message one agent will not answer is exactly
+    // the message another one should be offered.
+    const refused = channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" });
+    expect((await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "b" }))?.text).toBe(
+      "hello",
+    );
+    expect(await refused).toBeNull();
+    expect(channel.presence().working?.agent).toBe("b");
+  });
+
+  it("offers the message again once the holder's cooldown lapses", async () => {
+    vi.useFakeTimers();
+    try {
+      const { channel } = make();
+      const posted = channel.post({ role: "user", text: "hello" });
+      expect(
+        (await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" }))?.deliveryCount,
+      ).toBe(1);
+
+      // Nothing newer to serve, so this one waits out its own timeout rather
+      // than being handed back the message it just declined.
+      const refused = channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" });
+      vi.advanceTimersByTime(1_000);
+      expect(await refused).toBeNull();
+      expect(channel.history()[0].delivered).toBe(false);
+
+      // Half a minute on, the refusal has lapsed and this is an ordinary queued
+      // message again: the second delivery, not the fourth.
+      vi.advanceTimersByTime(30_000);
+      const again = await channel.awaitUserTurn({ timeoutMs: 1_000, agent: "a" });
+      expect(again?.seq).toBe(posted.seq);
+      expect(again?.deliveryCount).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps another agent's lease when a second agent parks", async () => {
@@ -435,6 +516,9 @@ describe("AgentChannel", () => {
       expect(
         (await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" }))?.text,
       ).toBe("once");
+      // The lease ends with nothing written: an agent that took the message and
+      // died mid-turn, which is the case the cap is for.
+      channel.releaseLease(posted.seq);
     }
     expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" })).toBeNull();
     expect(channel.history()[0].delivered).toBe(true);
@@ -529,6 +613,83 @@ describe("AgentChannel", () => {
     expect((await parked)?.text).toBe("once");
   });
 
+  it("offers one message again when the user asks for that one", async () => {
+    const { store, channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "signed-out" });
+      channel.releaseLease(posted.seq);
+    }
+    expect(channel.presence().dropped).toEqual([posted.seq]);
+
+    // The retry in the pane: this message, again, without waiting for a new
+    // agent to launch and take the whole backlog with it.
+    expect(channel.requeueTurn(posted.seq)).toBe(true);
+    expect(channel.presence().dropped).toEqual([]);
+    expect(store.listDroppedUserSeqs()).toEqual([]);
+
+    const handed = await channel.awaitUserTurn({ timeoutMs: 500, agent: "claude-code" });
+    expect(handed?.seq).toBe(posted.seq);
+    expect(handed?.deliveryCount).toBe(1);
+  });
+
+  it("wakes a parked agent when one message is put back", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      await channel.awaitUserTurn({ timeoutMs: 500, agent: "signed-out" });
+      channel.releaseLease(posted.seq);
+    }
+    const parked = channel.awaitUserTurn({ timeoutMs: 60_000, agent: "claude-code" });
+    expect(channel.presence().waiting).toBe(1);
+
+    expect(channel.requeueTurn(posted.seq)).toBe(true);
+    expect((await parked)?.text).toBe("once");
+  });
+
+  it("takes the lease off a message the user puts back", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "still going" });
+    await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    expect(channel.presence().working?.seq).toBe(posted.seq);
+
+    // The message the user gave up waiting for. Leaving the hold in memory
+    // would draw a spinner over a message sitting in the queue.
+    expect(channel.requeueTurn(posted.seq)).toBe(true);
+    expect(channel.presence().working).toBeNull();
+    const handed = await channel.awaitUserTurn({ timeoutMs: 500, agent: "b" });
+    expect(handed?.seq).toBe(posted.seq);
+    expect(handed?.deliveryCount).toBe(1);
+  });
+
+  it("refuses to put back a message that was answered, or is not there", async () => {
+    const { channel } = make();
+    const posted = channel.post({ role: "user", text: "once" });
+    const held = await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+    channel.post({ role: "agent", text: "answered", replyTo: held!.seq });
+
+    // Putting an answered question back would have a second agent answer it,
+    // which is the hole the lease exists to close.
+    expect(channel.requeueTurn(posted.seq)).toBe(false);
+    expect(channel.requeueTurn(9_999)).toBe(false);
+  });
+
+  it("refuses to put back a message older than the freshness window", () => {
+    const { store, channel } = make();
+    const stale = store.appendTurn({
+      at: new Date(Date.now() - USER_TURN_TTL_MS - 1_000).toISOString(),
+      chatId: channel.activeChat().id,
+      role: "user",
+      text: "yesterday",
+      agent: null,
+    });
+
+    // The next claim would retire it again on the spot. False is the honest
+    // answer, and it gives the caller something to tell the user.
+    expect(store.requeueUserTurn(stale.seq)).toBe(false);
+    expect(channel.requeueTurn(stale.seq)).toBe(false);
+  });
+
   it("leaves an answered message alone, and reports nothing to requeue", async () => {
     const { channel } = make();
     const posted = channel.post({ role: "user", text: "once" });
@@ -561,6 +722,7 @@ describe("AgentChannel", () => {
     const posted = channel.post({ role: "user", text: "once" });
     for (let n = 0; n < MAX_DELIVERIES - 1; n += 1) {
       await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
+      channel.releaseLease(posted.seq);
     }
 
     // The last allowed hand-off. On disk this row already looks dead-lettered,
@@ -590,10 +752,12 @@ describe("AgentChannel", () => {
     expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "b" })).toBeNull();
     expect(channel.presence().working?.agent).toBe("a");
 
-    // The holder itself returning unanswered still gives the message back.
-    const again = await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" });
-    expect(again?.text).toBe("hello");
-    expect(again?.deliveryCount).toBe(2);
+    // The holder itself returning unanswered still ends the lease, which is
+    // what nobody else's park does. The message goes back on the queue, and
+    // not straight back to the client that just walked away from it.
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: "a" })).toBeNull();
+    expect(channel.presence().working).toBeNull();
+    expect(channel.history()[0].delivered).toBe(false);
   });
 
   it("lets an unnamed holder re-take its own lease after another was named", async () => {
@@ -606,9 +770,12 @@ describe("AgentChannel", () => {
     expect(held?.deliveryCount).toBe(1);
     expect(channel.presence().working?.agent).toBeNull();
 
-    const again = await channel.awaitUserTurn({ timeoutMs: 500, agent: null });
-    expect(again?.text).toBe("hello");
-    expect(again?.deliveryCount).toBe(2);
+    // Recognised as the holder, so its own return ends the lease: the message
+    // is queued again rather than staying in flight behind a client that has
+    // moved on.
+    expect(await channel.awaitUserTurn({ timeoutMs: 500, agent: null })).toBeNull();
+    expect(channel.presence().working).toBeNull();
+    expect(channel.history()[0].delivered).toBe(false);
   });
 
   it("notifies presence subscribers when an agent parks or speaks", async () => {
@@ -966,10 +1133,13 @@ describe("chat tools over MCP", () => {
   it("marks a second hand-off of the same message as redelivered", async () => {
     const service = mail();
     const { channel } = make();
-    channel.post({ role: "user", text: "hello" });
+    const posted = channel.post({ role: "user", text: "hello" });
     expect(payload(await call(service, channel, "chat_await_message")).redelivered).toBe(
       false,
     );
+    // The agent took it and never came back. The next hand-off is the same
+    // message, and the client is told it has been out before.
+    channel.releaseLease(posted.seq);
     const again = payload(await call(service, channel, "chat_await_message"));
     expect(again.message.text).toBe("hello");
     expect(again.redelivered).toBe(true);
@@ -1253,6 +1423,89 @@ describe("agent HTTP routes", () => {
       body: JSON.stringify({ seq: "1" }),
     });
     expect(bad.status).toBe(400);
+    rt.channel.close();
+  });
+
+  it("puts a dropped message back when the pane asks to retry it", async () => {
+    const rt = build();
+    const posted = await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "answer me" }),
+    });
+    const { turn } = (await posted.json()) as { turn: { seq: number } };
+    // Every delivery burnt, which is what a signed-out CLI does to a message.
+    for (let n = 0; n < MAX_DELIVERIES; n += 1) {
+      await rt.channel.awaitUserTurn({ timeoutMs: 500, agent: "signed-out" });
+      rt.channel.releaseLease(turn.seq);
+    }
+    expect(rt.channel.presence().dropped).toEqual([turn.seq]);
+
+    // No `agent` in the body, so nothing is launched: this is the requeue.
+    const retry = await rt.app.request("/api/agent/retry", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ seq: turn.seq }),
+    });
+    expect(retry.status).toBe(200);
+    const body = (await retry.json()) as {
+      retried: boolean;
+      started: boolean;
+      startError: string | null;
+      presence: { dropped: number[] };
+    };
+    expect(body).toMatchObject({ retried: true, started: false, startError: null });
+    expect(body.presence.dropped).toEqual([]);
+
+    // Back in the queue for real: the next agent to call in is handed it.
+    const handed = await rt.channel.awaitUserTurn({ timeoutMs: 500, agent: "claude-code" });
+    expect(handed?.seq).toBe(turn.seq);
+    rt.channel.close();
+  });
+
+  it("refuses a retry the channel will not take, and a seq that is not a number", async () => {
+    const rt = build();
+    const posted = await rt.app.request("/api/agent/messages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: "already done" }),
+    });
+    const { turn } = (await posted.json()) as { turn: { seq: number; chatId: string } };
+    const held = await rt.channel.awaitUserTurn({ timeoutMs: 500, agent: "claude-code" });
+    rt.channel.answer({
+      seq: held!.seq,
+      chatId: turn.chatId,
+      text: "answered",
+      agent: "claude-code",
+    });
+
+    // Retrying an answered question would have a second agent answer it.
+    const answered = await rt.app.request("/api/agent/retry", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ seq: turn.seq }),
+    });
+    expect(answered.status).toBe(409);
+    // The pane shows this sentence, so it has to say what to do about it.
+    expect(((await answered.json()) as { error: string }).error).toContain(
+      "already answered",
+    );
+
+    const missing = await rt.app.request("/api/agent/retry", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ seq: 9_999 }),
+    });
+    expect(missing.status).toBe(409);
+
+    for (const bad of [{ seq: "1" }, {}, { seq: 1, agent: 2 }, { seq: 1, model: 2 }]) {
+      const res = await rt.app.request("/api/agent/retry", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify(bad),
+      });
+      expect(res.status).toBe(400);
+    }
     rt.channel.close();
   });
 

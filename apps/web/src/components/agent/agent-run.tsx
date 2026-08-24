@@ -2,12 +2,17 @@
 
 import * as React from "react";
 import { ChevronRight, TriangleAlert } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Markdown } from "@/lib/format/markdown";
 import { isoAttr, isoTitle } from "@/lib/format/date";
 import { displayAgentName } from "@/components/agent/agent-presence";
 import { AgentSignIn } from "@/components/agent/agent-sign-in";
-import { signedOutExit } from "@/components/rail/agent-exit";
-import { useLocalAgents } from "@/lib/hooks/use-local-agents";
+import { Button } from "@/components/ui/button";
+import { agentExitedBadly, signedOutExit } from "@/components/rail/agent-exit";
+import { retryAgentTurn } from "@/lib/api/endpoints";
+import { serverSentence } from "@/lib/api/errors";
+import { useLocalAgents, usePickedAgent } from "@/lib/hooks/use-local-agents";
+import { useApiCtx } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
 import type { AgentTurn, AgentWork } from "@/lib/types";
 import { groupRuns, type Run } from "./group-runs";
@@ -116,6 +121,7 @@ export function AgentRunView({
           changes what the user should do, so they are never merged. */}
       {unanswered && !running && run.question && (
         <Unanswered
+          turn={run.question}
           waiting={waiting}
           claimed={claimed}
           busyElsewhere={busyElsewhere}
@@ -284,53 +290,96 @@ function Steps({
 }
 
 /**
- * A question with no answer, and the three ways that happens.
+ * A question with no answer, and the four ways that happens.
  *
  * Queued is recoverable and needs nothing from the user: the message sits
  * unclaimed on disk and the next agent to call in gets it. When the one agent
- * there is happens to be answering a different message, it says that instead —
- * "waiting for an agent" beside a running agent is what made a working queue
+ * there is happens to be answering a different message, it says that instead.
+ * "Waiting for an agent" beside a running agent is what made a working queue
  * look like a broken one.
  *
- * Dropped is not. After a few failed leases the row stays claimed — no agent
- * is offered it again — so telling somebody to wait would be telling them to
- * wait for nothing.
+ * Dropped is not. After a few failed leases the row stays claimed, and no
+ * agent is offered it again, so telling somebody to wait would be telling them
+ * to wait for nothing. Retry is the way out: the message goes back in the
+ * queue and the picked agent is started for it.
  *
- * Unless the launched CLI was simply signed out, which is the one dropped
- * message that has a cause worth naming and a fix worth offering: signing in
- * restarts the agent and this message is handed over again.
+ * Crashed is the same dead end arriving earlier. The CLI died while this
+ * message was outstanding, and the pane used to answer that with "waiting for
+ * an agent" beside a process that had already exited. It names the agent, the
+ * exit code and whatever the CLI said on the way out, because a message that
+ * failed for a reason on the machine is only fixable by somebody reading that
+ * reason.
+ *
+ * Signed out is the crash with a known cause and a better fix than Retry:
+ * signing in restarts the agent, and the launch requeues this message itself.
  */
 function Unanswered({
+  turn,
   waiting,
   claimed,
   busyElsewhere,
 }: {
+  turn: AgentTurn;
   waiting: number;
   claimed: boolean;
   busyElsewhere: boolean;
 }) {
   const agents = useLocalAgents();
-  const signedOut = signedOutExit({
+  const state = {
     running: agents.data?.running ?? null,
     lastExit: agents.data?.lastExit ?? null,
-  });
+  };
+  const signedOut = signedOutExit(state);
+  const exit = state.lastExit;
+  // Only an exit that happened AFTER this question was sent says anything
+  // about it. An older crash belongs to whatever was being asked then, and
+  // hanging it under every later message would be a warning about nothing.
+  const crashed =
+    exit &&
+    agentExitedBadly(exit.id, state) &&
+    new Date(exit.at).getTime() > new Date(turn.at).getTime()
+      ? exit
+      : null;
+
+  if (signedOut && (claimed || crashed)) {
+    return (
+      <div className="space-y-2">
+        <Warning>
+          Your agent is signed out, so it could not answer. Sign in and this
+          message is handed over again.
+        </Warning>
+        <AgentSignIn className="pl-[22px]" />
+      </div>
+    );
+  }
+
+  if (crashed) {
+    const tail = crashed.stderrTail.trim();
+    return (
+      <div className="space-y-2">
+        <Warning>
+          {displayAgentName(crashed.id)} exited
+          {crashed.code === null ? "" : ` (code ${crashed.code})`}, so this
+          message was not answered.
+        </Warning>
+        {tail && (
+          <pre className="ml-[22px] max-h-40 overflow-auto rounded-[var(--radius-md)] border border-border-subtle bg-surface-0 p-2 font-mono text-[11px] leading-4 whitespace-pre-wrap text-fg-secondary">
+            {tail}
+          </pre>
+        )}
+        <Retry seq={turn.seq} className="pl-[22px]" />
+      </div>
+    );
+  }
 
   if (claimed) {
     return (
       <div className="space-y-2">
-        <p className="flex items-start gap-2 text-[12px] leading-4 text-fg-tertiary">
-          <TriangleAlert
-            aria-hidden="true"
-            className="mt-px size-3.5 shrink-0 text-warning"
-            strokeWidth={1.5}
-          />
-          <span>
-            {signedOut
-              ? "Your agent is signed out, so it could not answer — sign in and this message is handed over again."
-              : "Your agent took this one and never answered. It will not be handed over again — send it once more to try another agent."}
-          </span>
-        </p>
-        {signedOut && <AgentSignIn className="pl-[22px]" />}
+        <Warning>
+          Your agent took this one and never answered. It will not be handed
+          over again by itself.
+        </Warning>
+        <Retry seq={turn.seq} className="pl-[22px]" />
       </div>
     );
   }
@@ -347,6 +396,80 @@ function Unanswered({
           ? "Your agent is answering another message. This one is next."
           : "Waiting for an agent. This is delivered as soon as one starts."}
     </p>
+  );
+}
+
+/** One warning line, so every failure under a message is set the same way. */
+function Warning({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="flex items-start gap-2 text-[12px] leading-4 text-fg-tertiary">
+      <TriangleAlert
+        aria-hidden="true"
+        className="mt-px size-3.5 shrink-0 text-warning"
+        strokeWidth={1.5}
+      />
+      <span>{children}</span>
+    </p>
+  );
+}
+
+/**
+ * Put this one message back in the queue.
+ *
+ * The picked agent goes with the request, because the server cannot know which
+ * CLI this browser is pointed at, and a message requeued in front of a dead
+ * agent is the state the user pressed this to leave. Nothing is updated here
+ * on success: the requeue moves presence, and presence arrives on the stream
+ * the pane is already reading. The launcher poll is nudged instead, so the
+ * exit above stops being reported the moment the agent is up.
+ *
+ * The server's own sentence is shown on a refusal. A message that was answered
+ * while this was on screen, or that has aged out, cannot be retried, and
+ * silence under a button somebody just pressed is the worst answer here.
+ */
+function Retry({ seq, className }: { seq: number; className?: string }) {
+  const ctx = useApiCtx();
+  const queryClient = useQueryClient();
+  const { picked, model } = usePickedAgent();
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const retry = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await retryAgentTurn(
+        seq,
+        ctx,
+        picked?.installed ? picked.id : undefined,
+        picked?.installed ? model : undefined,
+      );
+      setError(result.startError);
+    } catch (err) {
+      setError(serverSentence(err));
+    } finally {
+      setBusy(false);
+      void queryClient.invalidateQueries({ queryKey: ["local-agents"] });
+    }
+  };
+
+  return (
+    <div className={cn("flex flex-wrap items-center gap-2", className)}>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={busy}
+        onClick={() => void retry()}
+      >
+        {busy ? "Retrying…" : "Retry"}
+      </Button>
+      {error && (
+        <span className="min-w-0 text-[12px] leading-4 text-fg-tertiary">
+          {error}
+        </span>
+      )}
+    </div>
   );
 }
 

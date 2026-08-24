@@ -1,34 +1,52 @@
 /**
- * Antigravity (agy): argv, the workspace MCP config it reads, and the two
- * guards around the user's own global MCP config.
+ * Antigravity (agy): the driven spec, argv for one turn, the workspace MCP
+ * config it reads, and the two guards around the user's own global MCP config.
+ *
+ * The chat loop is Boxaide's, not the model's, see agy-driver.ts for why the
+ * `agy -p KICKOFF` launch this replaces could not stay up.
  */
 import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { AgyDriver, agyPrintTimeoutArg } from "../agy-driver.js";
+import type { AgentDriver } from "../driver.js";
+import { chatMemoryBlock } from "../memory-context.js";
 import { parseTabbedModels, type ModelLister } from "../model-list.js";
 import { agentWorkDir } from "../paths.js";
+import type { TurnRequest } from "../turn-driver.js";
 import {
-  kickoffPrompt,
   writeSecret,
   type AgentSpec,
+  type DriveOptions,
   type LaunchContext,
 } from "../spec.js";
 
 /**
- * Antigravity (agy), headless.
+ * One driven turn of Antigravity, as a command line.
  *
- * It has no --allowedTools and no --mcp-config, which is exactly why it was
+ * agy has no server mode and no `--append-system-prompt`, so a turn is a
+ * process and the framing rides at the head of the prompt. `--conversation`
+ * carries the id the last turn reported. Exported for the driver and for tests;
+ * the launcher is the only place that decides what flags Boxaide passes to a
+ * CLI.
+ *
+ * agy has no --allowedTools and no --mcp-config, which is exactly why it was
  * listed as "not launchable" before the server learned scopes: the only way to
  * run it unattended is --dangerously-skip-permissions, and that used to mean
  * handing the master bearer to a process that would approve anything asked of
  * it. The scoped token is what makes that flag safe. "skip permissions" now
  * means "skip asking about tools the server has already decided this launch
  * may call", and the ones it may not are refused whatever the CLI approves.
+ * The driven scope is narrower still: the loop's own chat tools are not in it.
  */
-function antigravityArgs(ctx: LaunchContext, model?: string): string[] {
+export function antigravityTurnArgs(
+  ctx: LaunchContext,
+  turn: TurnRequest,
+  model?: string,
+): string[] {
   return [
     "-p",
-    kickoffPrompt(ctx),
+    antigravityPrompt(turn),
     // Without this agy does not read the .agents/ directory it is standing in,
     // and Boxaide's server is simply absent from the session. Verified
     // against agy: the same launch lists the server only when the directory is
@@ -41,8 +59,53 @@ function antigravityArgs(ctx: LaunchContext, model?: string): string[] {
     "--disable-slash-commands",
     "--output-format",
     "stream-json",
+    // Left to its default this is 5 minutes, which is what killed the launch
+    // this replaces. Named here so the number a turn is held to is one this
+    // repo chose. See AGY_PRINT_TIMEOUT_MS.
+    "--print-timeout",
+    agyPrintTimeoutArg(),
     ...(model ? ["--model", model] : []),
+    ...(turn.sessionId ? ["--conversation", turn.sessionId] : []),
   ];
+}
+
+/**
+ * The framing and the message, as one prompt.
+ *
+ * agy takes no system prompt on a print-mode run, so this is the only way to
+ * tell the model what it is answering. The framing goes first, which also means
+ * the prompt can never begin with a dash, a user message that did would
+ * otherwise be at the mercy of how agy's parser reads a flag value.
+ */
+function antigravityPrompt(turn: TurnRequest): string {
+  return `${turn.system}\n\n---\n\n${turn.prompt}`;
+}
+
+function antigravityDrive(
+  ctx: LaunchContext,
+  opts: DriveOptions,
+): AgentDriver | null {
+  // Without a channel there is nobody to drive for. `start` refuses this launch
+  // before it gets here, since an Antigravity launch is nothing but its driver.
+  if (!ctx.channel) return null;
+  return new AgyDriver({
+    channel: ctx.channel,
+    agent: "antigravity",
+    // Read per turn, not once here: the agent writes its notes during a
+    // session, and a block frozen at launch would keep saying there are none.
+    memorySystem: () => chatMemoryBlock(ctx.dataDir),
+    // The launch's command, not the bare binary: there is no long-lived child,
+    // so these per-turn spawns are the whole agent. Spawning `opts.bin` here
+    // would leave every turn outside the sandbox the launch asked for.
+    bin: opts.command.bin,
+    cwd: opts.workDir,
+    env: opts.env,
+    argsFor: (turn) => [
+      ...opts.command.prefix,
+      ...antigravityTurnArgs(ctx, turn, opts.model),
+    ],
+    onStop: opts.onStop,
+  }).start();
 }
 
 function antigravityRunArgs(
@@ -245,11 +308,15 @@ function antigravitySandbox(
 }
 
 export const ANTIGRAVITY_SPEC: AgentSpec = {
+  // No `args`: there is nothing to keep running. The driver spawns one
+  // `agy -p` per user turn and resumes the conversation across them, so the
+  // chat cannot end because a model decided it was done, or because agy's own
+  // print timeout ran out while the model waited for the user to type.
   id: "antigravity",
   label: "Antigravity",
   bin: "agy",
-  args: antigravityArgs,
   runArgs: antigravityRunArgs,
+  drive: antigravityDrive,
   listModels: ANTIGRAVITY_LISTER,
   prepare: antigravityPrepare,
   sandbox: antigravitySandbox,
