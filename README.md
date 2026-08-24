@@ -430,6 +430,26 @@ updates (`GET /api/update`, and `electron-updater` in the Mac app). The
 marketing UI at `https://boxaide.tech` is a static export and never sees your
 data. Back up `~/.boxaide` and you have backed up the store.
 
+### Logs
+
+`~/.boxaide/logs/boxaide.log`, beside the database, mode `0600`. One JSON
+object per line:
+
+```
+{"t":"2026-08-24T09:14:02.113Z","level":"error","scope":"agent.launcher","msg":"chat exit","agent":"agy","pid":48122,"code":1,"reason":"exited","authRequired":false,"upMs":1840,"stderrTail":null}
+```
+
+What goes in it is what a stuck agent leaves behind: launches and exits with
+their exit code and the tail of the child's stderr, one line per driven turn
+with its duration and the CLI's own error string, and the desktop shell's
+failures, which a packaged app has no terminal to print to. What never goes in
+it is content: no message bodies, no mail, no tool results, and any credential
+shape found in a stderr tail is masked before the line is written.
+
+It rotates at 5 MB and keeps three files (`boxaide.log`, `.1`, `.2`), so it
+costs at most 15 MB. Nothing reads it back, so deleting it is safe. An install
+with `BOXAIDE_DATA_DIR` set writes into that directory instead.
+
 ## Install options
 
 | Method | Command |

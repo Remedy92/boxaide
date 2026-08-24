@@ -1004,6 +1004,66 @@ function registerAgentRoutes(
     return c.json({ stopped: work !== null, presence: channel.presence() });
   });
 
+  /**
+   * Offer one message to an agent again.
+   *
+   * The pane's Retry, for a question that was dropped or that died with the
+   * CLI answering it. `requeueTurn` is the whole state change; 409 is it
+   * refusing, and the sentence is what the pane shows, because "nothing
+   * happened" under a button the user just pressed is the worst answer here.
+   *
+   * The launch is second and optional. A requeued message sitting in front of
+   * a dead CLI is the exact state the user pressed Retry to leave, so the
+   * agent the pane has selected is started for them, by the same call the
+   * start route makes, with the same registry check on the id. It is skipped when
+   * something is already running, since that agent takes the message anyway,
+   * and a launch that refuses does not undo the requeue: the message is back
+   * in the queue either way, and `startError` says why nobody picked it up.
+   *
+   * A row an agent is still working counts as retryable too. From the pane a
+   * live lease and a dropped one look alike, and pressing Retry declares this
+   * attempt over; if the holder was in fact still going, its answer arrives
+   * beside whatever answers the requeue — the user's word outranks the lease.
+   */
+  app.post("/api/agent/retry", async (c) => {
+    const body = await c.req
+      .json<{ seq?: unknown; agent?: unknown; model?: unknown }>()
+      .catch(() => ({}) as { seq?: unknown; agent?: unknown; model?: unknown });
+    if (typeof body.seq !== "number") {
+      return c.json({ error: "seq must be a number" }, 400);
+    }
+    if (body.agent !== undefined && typeof body.agent !== "string") {
+      return c.json({ error: "agent must be a string" }, 400);
+    }
+    if (body.model !== undefined && typeof body.model !== "string") {
+      return c.json({ error: "model must be a string" }, 400);
+    }
+    if (!channel.requeueTurn(body.seq)) {
+      return c.json(
+        {
+          error:
+            "this message cannot be sent again: it was already answered, is no longer here, or is too old",
+        },
+        409,
+      );
+    }
+
+    let started = false;
+    let startError: string | null = null;
+    if (launcher && body.agent && !launcher.status().running) {
+      try {
+        await launcher.start(body.agent, body.model);
+        started = true;
+      } catch (err) {
+        if (!(err instanceof LaunchError)) throw err;
+        // 409 is an agent that started between the check and the call, which
+        // is the outcome this wanted anyway.
+        if (err.status !== 409) startError = err.message;
+      }
+    }
+    return c.json({ retried: true, started, startError, presence: channel.presence() });
+  });
+
   app.post("/api/agent/clear", async (c) => {
     // A body is optional here: clear predates chats and older clients send
     // none, so an unreadable body means "the chat on screen is the active one".

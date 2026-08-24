@@ -686,6 +686,38 @@ export function stopAgentTurn(
   });
 }
 
+/**
+ * Puts one message back in the queue, and starts the picked agent if nothing
+ * is running.
+ *
+ * `agent` is the pane's own choice, because the server has no idea which CLI
+ * this browser is pointed at. Omitting it requeues and starts nothing, which
+ * is right when an agent is already up. A 409 means the server refused, and
+ * its sentence is the one the pane shows.
+ */
+export function retryAgentTurn(
+  seq: number,
+  ctx: Ctx,
+  agent?: string,
+  model?: string,
+): Promise<{
+  retried: boolean;
+  started: boolean;
+  startError: string | null;
+  presence: AgentPresence;
+}> {
+  const body: { seq: number; agent?: string; model?: string } = { seq };
+  if (agent) body.agent = agent;
+  if (model) body.model = model;
+  return request("/api/agent/retry", {
+    method: "POST",
+    body,
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
 /** Same `chat` rule as sendAgentMessage: clear the pane's chat, not the active one. */
 export function clearAgentConversation(
   ctx: Ctx,

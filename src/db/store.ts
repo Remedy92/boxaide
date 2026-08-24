@@ -1057,6 +1057,42 @@ export class Store {
   }
 
   /**
+   * Puts ONE unanswered user message back on the queue, and says whether a row
+   * moved.
+   *
+   * The bulk requeue above is a rule a launch applies to everything at once.
+   * This is a person pointing at a single message and asking for it again, the
+   * retry on a message the pane says was never answered, so it is narrower in
+   * what it touches and wider in what it accepts: a row still marked in flight
+   * is reset too. A lease nobody is ever going to answer looks, from the pane,
+   * exactly like a dropped one, and the user asking for that message back means
+   * the same thing either way.
+   *
+   * To zero, for the same reason the bulk reset goes to zero: the deliveries
+   * before this were spent on attempts the user has just declared failures.
+   *
+   * Answered rows are refused, because requeuing one would have a second agent
+   * answer a finished question, which is the hole the lease exists to close. So
+   * are messages older than the freshness window, which the next claim would
+   * retire again on the spot. False is a caller's cue to say why, not a silent
+   * no-op.
+   */
+  requeueUserTurn(seq: number, now: number = Date.now()): boolean {
+    const cutoff = new Date(now - USER_TURN_TTL_MS).toISOString();
+    const res = this.db
+      .prepare(
+        `UPDATE agent_turns SET delivered = 0, delivery_count = 0
+         WHERE seq = ? AND role = 'user' AND at >= ?
+           AND seq NOT IN (
+             SELECT reply_to FROM agent_turns
+             WHERE role = 'agent' AND reply_to IS NOT NULL
+           )`,
+      )
+      .run(seq, cutoff);
+    return res.changes > 0;
+  }
+
+  /**
    * Retires every queued user message that has gone stale, and says how many.
    *
    * A message with nobody listening waits on the queue, and until this existed
@@ -1107,8 +1143,17 @@ export class Store {
    * started later would otherwise work a conversation the rail does not show.
    * It is still queued: opening the chat unarchives it, and the claim after
    * that picks the message up.
+   *
+   * `skipSeq` is one message this claim must step over, and it exists for the
+   * client that has just walked away from that message: handing it straight
+   * back is a loop, and every turn of the loop spends one of its deliveries.
+   * The row stays queued and everybody else stays eligible for it. This only
+   * says "not this one, not right now".
    */
-  claimNextUserTurn(activeChatId?: string | null): StoredTurn | null {
+  claimNextUserTurn(
+    activeChatId?: string | null,
+    options: { skipSeq?: number | null } = {},
+  ): StoredTurn | null {
     const claim = this.db.transaction((): StoredTurn | null => {
       this.expireStaleUserTurns();
       const row = this.db
@@ -1117,13 +1162,14 @@ export class Store {
                   reply_to as replyTo, COALESCE(delivery_count, 0) as deliveryCount
            FROM agent_turns
            WHERE role = 'user' AND delivered = 0
+             AND seq IS NOT ?
              AND chat_id NOT IN (
                SELECT id FROM agent_chats WHERE archived_at IS NOT NULL
              )
            ORDER BY (chat_id IS NOT NULL AND chat_id = ?) DESC, seq ASC
            LIMIT 1`,
         )
-        .get(activeChatId ?? null) as TurnRow | undefined;
+        .get(options.skipSeq ?? null, activeChatId ?? null) as TurnRow | undefined;
       if (!row) return null;
       this.db
         .prepare(
@@ -1144,10 +1190,16 @@ export class Store {
    *
    * `revertAttempt` is for a claim the client never read (abort before the
    * tool result was written). That try does not count.
+   *
+   * `deadLetter` ends the message here whatever the count says. It is for the
+   * lease that ran out of time while its holder was provably alive and simply
+   * never answered: offering that one again buys another wait of the same
+   * length, so the row is marked exactly as a message nobody picked up is, and
+   * the pane asks the user whether they still want it.
    */
   unclaimUserTurn(
     seq: number,
-    options: { revertAttempt?: boolean } = {},
+    options: { revertAttempt?: boolean; deadLetter?: boolean } = {},
   ): UnclaimResult {
     return this.db.transaction((): UnclaimResult => {
       const row = this.db
@@ -1164,6 +1216,15 @@ export class Store {
         )
         .get(seq) as { hit: number } | undefined;
       if (answered) return "acked";
+      if (options.deadLetter) {
+        this.db
+          .prepare(
+            `UPDATE agent_turns SET delivered = 1, delivery_count = ?
+             WHERE seq = ?`,
+          )
+          .run(Store.MAX_DELIVERIES, seq);
+        return "dead_lettered";
+      }
       if (options.revertAttempt) {
         this.db
           .prepare(

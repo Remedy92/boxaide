@@ -197,6 +197,37 @@ const PRESENCE_WINDOW_MS = 40_000;
 const WORK_MAX_MS = 5 * 60_000;
 
 /**
+ * The longest an unanswered lease may live, whatever is proving its holder is
+ * alive.
+ *
+ * WORK_MAX_MS expires a claim nobody can show a sign of life for, and a
+ * launched agent is exempt from it: the running child process is the proof, so
+ * an agent that keeps talking on stdout holds its message for as long as it
+ * likes. Nothing sat under that exemption. A child that narrates and never
+ * answers held one question for the best part of an afternoon while every
+ * message typed since queued behind it, and the pane showed a working agent
+ * the whole time.
+ *
+ * So proof of life buys time, not the queue. Half an hour is far longer than
+ * an answer to a chat message takes and still leaves room for one long tool
+ * run to finish. Past it the lease ends and the row is marked the way a
+ * message nobody picked up is, because that is the state the pane already has
+ * words for (this was never answered, send it again) and it is true.
+ */
+const WORK_HARD_MAX_MS = 30 * 60_000;
+
+/**
+ * How long a message stays off-limits to the client that walked away from it.
+ *
+ * Long enough that a polling loop cannot spin on the same message: the hand-off
+ * poll runs four times a second, so without a pause the release and the next
+ * delivery are one round trip apart. Short enough that a question is not
+ * stranded. The skip belongs to one client, another agent may take the message
+ * throughout, and it lapses on its own.
+ */
+const REPARK_COOLDOWN_MS = 30_000;
+
+/**
  * Floor on how often a launched agent's own output may push a presence event.
  *
  * That stream is a firehose — Grok narrates its thinking one token per line —
@@ -296,7 +327,13 @@ export class AgentChannel {
   private lastAgent: string | null = null;
   private launchedAgent: string | null = null;
   /** The message an agent has taken and not yet answered. */
-  private work: (Work & { provenAt: number }) | null = null;
+  private work: (Work & { provenAt: number; heldAt: number }) | null = null;
+  /**
+   * The message a client came back from without answering, and the moment that
+   * refusal stops being honoured. See `noteRepark`.
+   */
+  private reparked: { seq: number; agent: string | null; until: number } | null =
+    null;
   /**
    * Distinct client names that have asked for a message since the launched
    * agent started. Sized, not read: see `streamSpeaksForWork`.
@@ -696,7 +733,14 @@ export class AgentChannel {
     // the agent is a minute from giving it. When the child exits, the exit
     // itself ends the claim, so nothing here has to guess.
     const held = this.work !== null && this.streamSpeaksForWork();
-    if (this.work && !held && now - this.work.provenAt > WORK_MAX_MS) {
+    if (this.work && now - this.work.heldAt > WORK_HARD_MAX_MS) {
+      // Held past the ceiling. Proof that the holder is alive is not proof that
+      // an answer is coming, and this one has had the queue to itself for long
+      // enough. See WORK_HARD_MAX_MS. It ends here, and it ends marked, so the
+      // pane says the message was never answered instead of drawing a spinner
+      // over it for the rest of the session.
+      this.releaseWork({ deadLetter: true });
+    } else if (this.work && !held && now - this.work.provenAt > WORK_MAX_MS) {
       this.releaseWork();
     }
     return {
@@ -789,6 +833,9 @@ export class AgentChannel {
    * A second agent parking does not take the open lease. The same agent
    * returning unanswered does: that is abandon, and the message goes back
    * on the queue (or to another waiter) rather than sitting delivered forever.
+   * It does not go back to the client that just abandoned it. See
+   * `noteRepark`: what that client is handed here is the next message, not the
+   * one it declined a line ago.
    */
   awaitUserTurn(
     options: {
@@ -804,7 +851,7 @@ export class AgentChannel {
     // as one name: two anonymous clients are still two agents.
     this.askers.add(agent ?? "");
     this.touch(agent);
-    if (this.sameHolder(agent)) this.releaseWork();
+    if (this.sameHolder(agent)) this.noteRepark(agent);
     if (this.closed) return Promise.resolve(null);
     if (signal?.aborted) return Promise.resolve(null);
 
@@ -812,7 +859,9 @@ export class AgentChannel {
     // screen goes first — see handOff, which is the same rule on the other
     // path, and both have to carry it or the order depends on whether an agent
     // happened to be parked when the message landed.
-    const pending = this.store.claimNextUserTurn(this.store.ensureActiveChat().id);
+    const pending = this.store.claimNextUserTurn(this.store.ensureActiveChat().id, {
+      skipSeq: this.reparkedFor(agent),
+    });
     if (pending) {
       if (signal?.aborted) {
         this.releaseLease(pending.seq, { revertAttempt: true });
@@ -905,7 +954,11 @@ export class AgentChannel {
     while (this.waiters.length > 0) {
       this.pruneAbortedWaiters();
       if (this.waiters.length === 0) break;
-      const turn = this.store.claimNextUserTurn(this.store.ensureActiveChat().id);
+      // The waiter at the front is the one about to be served, so it is that
+      // client's refusal, if it has one, that this claim has to step around.
+      const turn = this.store.claimNextUserTurn(this.store.ensureActiveChat().id, {
+        skipSeq: this.reparkedFor(this.waiters[0].agent),
+      });
       if (!turn) break;
       const waiter = this.waiters.shift();
       if (!waiter) {
@@ -934,7 +987,10 @@ export class AgentChannel {
    * this channel saying the message will never be handed over again, which is
    * the one failure retrying cannot fix.
    */
-  releaseLease(seq: number, options: { revertAttempt?: boolean } = {}): UnclaimResult {
+  releaseLease(
+    seq: number,
+    options: { revertAttempt?: boolean; deadLetter?: boolean } = {},
+  ): UnclaimResult {
     if (this.work?.seq === seq) this.work = null;
     // Closed is shutdown, and the store may already be closed with it — the same
     // reason awaitUserTurn answers null rather than reaching for a row. A driver
@@ -980,9 +1036,54 @@ export class AgentChannel {
     return work;
   }
 
-  private releaseWork(options: { revertAttempt?: boolean } = {}): void {
+  private releaseWork(
+    options: { revertAttempt?: boolean; deadLetter?: boolean } = {},
+  ): void {
     if (!this.work) return;
     this.releaseLease(this.work.seq, options);
+  }
+
+  /**
+   * The holder came back for another message without answering the one it
+   * already has.
+   *
+   * The lease ends, as it always did. What changed is where the message goes
+   * next. The release put the row back at the head of the queue and the claim
+   * on the very next line took the oldest queued row. That was the same
+   * message, with one more of its three deliveries spent, so a client that
+   * polled without answering was handed its own refusal back three times and
+   * then told the user the question had never been answered. Everything typed since waited
+   * behind it, because the row it was behind never left the front.
+   *
+   * So the seq is remembered and skipped for this client while the cooldown
+   * runs. Newer messages are served in the meantime, another agent may take it
+   * at any point, and once the cooldown lapses it is offered again like any
+   * other queued message: deliveries counted, dead-lettered in the end if
+   * nobody ever answers it. The cap still means what it was written to mean for
+   * an agent that died mid-turn. It just stops being spent by a live one.
+   */
+  private noteRepark(agent: string | null): void {
+    const seq = this.work?.seq;
+    if (seq === undefined) return;
+    // Recorded before the release, not after: releasing hands the row straight
+    // to whoever is parked, and this client may be one of them.
+    this.reparked = { seq, agent, until: Date.now() + REPARK_COOLDOWN_MS };
+    this.releaseWork();
+  }
+
+  /**
+   * The message this client walked away from, while that refusal still stands.
+   *
+   * Null for every other client. A refusal is one agent's, and a message one
+   * agent will not answer is exactly the message another one should be offered.
+   */
+  private reparkedFor(agent: string | null): number | null {
+    if (!this.reparked) return null;
+    if (Date.now() >= this.reparked.until) {
+      this.reparked = null;
+      return null;
+    }
+    return (agent ?? "") === (this.reparked.agent ?? "") ? this.reparked.seq : null;
   }
 
   /**
@@ -1019,12 +1120,19 @@ export class AgentChannel {
 
   /** One agent now holds one message. Ends at its next answer, or by expiry. */
   private beginWork(turn: Turn, agent: string | null): void {
+    // Offered again and taken. Whatever refusal was remembered about this
+    // message is spent, whoever it belonged to.
+    if (this.reparked?.seq === turn.seq) this.reparked = null;
     this.work = {
       seq: turn.seq,
       chatId: turn.chatId,
       since: new Date().toISOString(),
       // The hand-off is itself the first proof: the agent asked, and got one.
       provenAt: Date.now(),
+      // Never restarted. `provenAt` answers "is the holder alive"; this one
+      // answers "how long has this message been out", and the ceiling it feeds
+      // is worth nothing if the holder can push it back by talking.
+      heldAt: Date.now(),
       // The caller's own name, borrowed from nobody. `sameHolder` compares
       // against this, so stamping an unnamed claimant with `lastAgent` would
       // hand its lease to whoever that name belongs to.
@@ -1180,6 +1288,33 @@ export class AgentChannel {
     this.handOff();
     this.emitPresence();
     return requeued;
+  }
+
+  /**
+   * Offers ONE message again, whatever state it ended in. False when nothing
+   * moved: already answered, gone, or older than the freshness window.
+   *
+   * `requeueDropped` is this rule applied to everything at once when a new
+   * agent starts. This is a person pointing at one question in the pane and
+   * saying: again. It is the only path that puts a message back without an
+   * agent having just launched, so it does its own waking.
+   */
+  requeueTurn(seq: number): boolean {
+    const ok = this.store.requeueUserTurn(seq);
+    if (!ok) return false;
+    // Whoever was holding this is not holding it any more. Leaving the hold in
+    // memory would draw a spinner over a message sitting in the queue, and keep
+    // it out of the dropped list it may well end up in again.
+    if (this.work?.seq === seq) this.work = null;
+    // A requeue and a refusal are opposite instructions about the same row, and
+    // the newer one is the user's.
+    if (this.reparked?.seq === seq) this.reparked = null;
+    // Same reason as requeueDropped: a requeue writes no turn, so a waiter
+    // already parked would sit out its whole timeout beside a message it can
+    // have.
+    this.handOff();
+    this.emitPresence();
+    return true;
   }
 
   /** Who new agent turns are stamped as: the launched CLI, else last initialize. */

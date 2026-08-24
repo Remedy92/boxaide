@@ -7,7 +7,7 @@ import {
   readGrokEvent,
   readOpenCodeEvent,
   renderClaudeRunLine,
-  type ClaudeTurnOutcome,
+  type StreamTurnOutcome,
 } from "../src/agent/agent-stream.js";
 
 /**
@@ -16,7 +16,7 @@ import {
  * streaming-json` against a prompt that reads a file. Hand-written shapes would
  * only prove this file agrees with itself.
  */
-function outcome(): ClaudeTurnOutcome {
+function outcome(): StreamTurnOutcome {
   return { text: null, sessionId: null, error: null };
 }
 

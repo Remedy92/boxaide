@@ -34,6 +34,7 @@ import {
   type DriveOptions,
   type OneShotResult,
 } from "../src/agent/launcher.js";
+import { antigravityTurnArgs } from "../src/agent/clis/antigravity.js";
 import { capabilityOf } from "../src/agent/capability.js";
 import { renderClaudeRunLine } from "../src/agent/agent-stream.js";
 import { DRIVEN_SYSTEM, type DriverChannel } from "../src/agent/driver.js";
@@ -1267,8 +1268,10 @@ exec /bin/sleep 60
       KNOWN_AGENTS.find((s) => s.id === id)!.args!(ctx).join("\n");
 
     // No notes yet: the ask-first offer rides every chat launch, because a
-    // person is at the other end to answer it.
-    for (const id of ["grok", "antigravity", "codex"]) {
+    // person is at the other end to answer it. The driven CLIs (Claude Code,
+    // Antigravity) have no KICKOFF argv to read it off: their drivers append
+    // the same block to DRIVEN_SYSTEM per turn, which their own suites cover.
+    for (const id of ["grok", "codex"]) {
       expect(prompt(id)).toContain("want me to?");
       expect(prompt(id)).toContain("./memory/");
     }
@@ -1279,7 +1282,7 @@ exec /bin/sleep 60
     const memory = join(`${dataDir}-agents`, "workdir", "memory");
     mkdirSync(memory, { recursive: true });
     writeFileSync(join(memory, "MEMORY.md"), "# Memory\nAcme ships boats.\n");
-    for (const id of ["grok", "antigravity", "codex"]) {
+    for (const id of ["grok", "codex"]) {
       expect(prompt(id)).toContain("Acme ships boats.");
       expect(prompt(id)).not.toContain("want me to?");
     }
@@ -1578,10 +1581,12 @@ exec /bin/sleep 60
     expect(grok.args!(some)).toContain("--disable-web-search");
 
     // Antigravity, OpenCode and Codex never stripped web tools, so nothing
-    // about them changes with the connector.
+    // about them changes with the connector. Antigravity is driven, so its
+    // chat argv is a turn's, not a KICKOFF child's.
+    expect(antigravityTurnArgs(none, turn)).toEqual(antigravityTurnArgs(some, turn));
     for (const id of ["antigravity", "opencode", "codex"]) {
       const spec = KNOWN_AGENTS.find((s) => s.id === id)!;
-      expect(spec.args!(none)).toEqual(spec.args!(some));
+      if (spec.args) expect(spec.args(none)).toEqual(spec.args(some));
       expect(spec.runArgs!(none, "do the thing", "/tmp/run-dir")).toEqual(
         spec.runArgs!(some, "do the thing", "/tmp/run-dir"),
       );
