@@ -38,6 +38,7 @@ import {
   CALENDAR_SEND_TOOL_NAMES,
 } from "../calendar/tools.js";
 import {
+  ENRICHMENT_FREE_TOOL_NAMES,
   ENRICHMENT_PAID_TOOL_NAMES,
   ENRICHMENT_LOCAL_TOOL_NAMES,
 } from "../enrichment/tools.js";
@@ -158,8 +159,11 @@ export function scopeToolNames(profile: ScopeProfile): string[] {
   // them, a run included, because the cap that matters is the vendor's own
   // quota and the answers are cached for a day.
   for (const name of ENRICHMENT_PAID_TOOL_NAMES) names.add(name);
-  // Finding prospects reaches Apollo and bills the operator, so it follows the
-  // enrichment rule: every profile gets it, a scheduled run included, because
+  // Working out a domain's address pattern reads the CRM and nothing else, so
+  // there is no spend and no human to wait for: every profile gets it.
+  for (const name of ENRICHMENT_FREE_TOOL_NAMES) names.add(name);
+  // Finding prospects reaches Apollo or Hunter and bills the operator, so it
+  // follows the enrichment rule: every profile gets it, a scheduled run included, because
   // a run told to watch a market cannot do it without asking who is in that
   // market. What bounds the spend is the tool's own cap, not the profile: the
   // free search is capped per call and the paid reveal is capped harder.

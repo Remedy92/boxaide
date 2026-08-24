@@ -1,6 +1,12 @@
 /**
- * Prospecting types: the two normalised shapes an agent ever sees, and the
- * one HTTP helper the Apollo adapter calls.
+ * Prospecting types: the two normalised shapes an agent ever sees, the seam
+ * both vendors implement, and the one HTTP helper the Apollo adapter calls.
+ *
+ * Two adapters sit behind this seam. Apollo answers every question and bills
+ * per page and per revealed person; Hunter answers the domain-shaped half of
+ * them and hands the address over in the search itself. Which one answered is
+ * on every result as `provider`, because the two have different blind spots
+ * and an agent reporting a thin answer should be able to say whose it was.
  *
  * Apollo's own records are enormous and two of its endpoints disagree about
  * what a person is. A search hit carries an obfuscated last name, no address
@@ -44,6 +50,18 @@ export type ProspectCompany = {
   linkedinUrl: string | null;
   /** Apollo's own id. Pass it back as organizationIds to narrow a people search. */
   apolloOrgId: string | null;
+  /**
+   * The page this company was taken from, when it came from a web search
+   * rather than a prospect database. Its presence is the signal that this row
+   * is a search hit somebody still has to check.
+   */
+  sourceUrl?: string | null;
+  /**
+   * How many people at this company the provider holds an address for, when
+   * it says. Hunter does; Apollo does not, and leaves it undefined. Zero is a
+   * real answer and means a people search here would come back empty.
+   */
+  contactsKnown?: number | null;
 };
 
 /**
@@ -125,6 +143,8 @@ export type ProspectPerson = {
 
 /** What a company search was asked for, and what came back. */
 export type CompanySearchResult = {
+  /** Which vendor answered: "apollo" or "hunter". */
+  provider: string;
   companies: ProspectCompany[];
   /** Companies Apollo says match the filters, before the limit. */
   total: number;
@@ -139,6 +159,8 @@ export type CompanySearchResult = {
 };
 
 export type PeopleSearchResult = {
+  /** Which vendor answered: "apollo" or "hunter". */
+  provider: string;
   people: ProspectPerson[];
   total: number;
   returned: number;
@@ -167,13 +189,39 @@ export type PeopleQuery = {
 };
 
 /**
- * Deadline for one Apollo call, matching src/enrichment/types.ts.
+ * Deadline for one call to either vendor, matching src/enrichment/types.ts.
  *
- * A reveal runs one person at a time, so a vendor that accepts the connection
- * and then says nothing would otherwise hold the whole batch for Node's
- * five-minute header timeout, once per person.
+ * Both adapters loop: Apollo reveals one person at a time, Hunter searches one
+ * domain at a time. A vendor that accepts the connection and then says nothing
+ * would otherwise hold the whole batch for Node's five-minute header timeout,
+ * once per iteration.
  */
-export const APOLLO_TIMEOUT_MS = 10_000;
+export const PROSPECTING_TIMEOUT_MS = 10_000;
+
+/**
+ * One vendor that can find somebody Boxaide does not already hold.
+ *
+ * Both methods may throw, and the service does not fall through to another
+ * vendor when one does: only one provider is in force per call, chosen by
+ * which key is set. A failure here is the answer, not a first opinion.
+ */
+export interface ProspectingProvider {
+  /** Stable id, and the value of `provider` on every result it returns. */
+  readonly id: "apollo" | "hunter" | "web";
+  /**
+   * True when opening a person costs credits per person, as Apollo's reveal
+   * does. The service pulls a revealing search down to the reveal cap only
+   * for a provider that says true; Hunter's addresses arrive with the search
+   * and capping it at ten would throw away rows nobody was billed for.
+   */
+  readonly revealCostsPerPerson: boolean;
+  findCompanies(query: CompanyQuery, limit: number): Promise<CompanySearchResult>;
+  findPeople(
+    query: PeopleQuery,
+    limit: number,
+    revealLimit: number,
+  ): Promise<PeopleSearchResult>;
+}
 
 /** One Apollo reply, already read. Headers are kept for the rate-limit story. */
 export type ApolloResponse = {
@@ -195,13 +243,13 @@ export async function apolloRequest(
   init: RequestInit = {},
 ): Promise<ApolloResponse> {
   const controller = new AbortController();
-  const deadline = setTimeout(() => controller.abort(), APOLLO_TIMEOUT_MS);
+  const deadline = setTimeout(() => controller.abort(), PROSPECTING_TIMEOUT_MS);
   try {
     const res = await fetch(url, { ...init, signal: controller.signal });
     return { ok: res.ok, status: res.status, body: await res.text(), headers: res.headers };
   } catch (err) {
     if (controller.signal.aborted) {
-      throw new Error(`apollo timed out after ${APOLLO_TIMEOUT_MS / 1000}s`);
+      throw new Error(`apollo timed out after ${PROSPECTING_TIMEOUT_MS / 1000}s`);
     }
     throw err;
   } finally {

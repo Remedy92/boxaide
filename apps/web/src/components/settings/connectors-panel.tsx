@@ -98,7 +98,7 @@ function kindNote(kind: ConnectorKind, working: boolean): string {
   if (kind === "prospecting") {
     return working
       ? "Agents can search for companies and for the people who work at them, then save what they find to the CRM."
-      : "Without a key here, agents can only work with contacts you already have.";
+      : "Without a key here, agents use the Hunter key from Find email addresses if there is one: it finds companies, and the people at a domain you name, but not a job title across every company. With neither key, agents can only work with contacts you already have.";
   }
   if (kind === "enrichment") {
     return working

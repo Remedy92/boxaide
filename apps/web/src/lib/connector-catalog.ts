@@ -43,6 +43,13 @@
  * before paying for it. The alternatives at this job (People Data Labs,
  * Crustdata, ZoomInfo) start at enterprise contracts.
  *
+ * With no Apollo key at all, the Hunter key already in for addresses answers
+ * the prospecting tools instead: its Discover search finds companies for free,
+ * and its domain search returns the people at a domain with their addresses
+ * already attached. What it cannot do is the question Apollo is here for —
+ * "everyone with this title, at any company" — because Hunter searches one
+ * domain at a time. So Hunter is the floor, not a replacement.
+ *
  * ---------------------------------------------------------------------------
  * Why there is no "Connect with one click" button
  * ---------------------------------------------------------------------------
@@ -114,7 +121,8 @@ export const CATALOG: Record<string, ConnectorFacts> = {
   },
   hunter: {
     logo: "/connectors/hunter.png",
-    blurb: "Finds and verifies work email addresses from a name and a domain.",
+    blurb:
+      "Finds and verifies work email addresses from a name and a domain, and with no Apollo key it also finds companies and the people who work at them.",
     keysHref: "https://hunter.io/api-keys",
     pricingHref: "https://hunter.io/pricing",
     free: "50 lookups a month, free",

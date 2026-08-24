@@ -449,6 +449,26 @@ export class CrmStore {
     );
   }
 
+  /**
+   * Every contact whose address is at one domain, newest first.
+   *
+   * Exists for address-pattern inference, which needs the addresses a domain
+   * is already known to write and the names they belong to. searchContacts
+   * cannot answer it: its LIKE runs over the name and the org name too, so
+   * "acme.com" there also matches a person called Acme and an org whose name
+   * contains the domain, and a pattern learned from those is learned from
+   * addresses at other companies.
+   */
+  contactsAtDomain(domain: string, limit?: number): Contact[] {
+    const bare = domain.trim().toLowerCase().replace(/^@/, "");
+    if (bare === "") return [];
+    const sql = `SELECT ${CONTACT_COLUMNS}
+      FROM contacts c LEFT JOIN organizations o ON o.id = c.org_id
+      WHERE c.email LIKE ? ESCAPE '\\' COLLATE NOCASE
+      ORDER BY c.updated_at DESC LIMIT ?`;
+    return this.db.prepare(sql).all(`%@${escapeLike(bare)}`, clampLimit(limit)) as ContactRow[];
+  }
+
   /** Free-text over name, email and org name, optionally narrowed by tag. */
   searchContacts(
     opts: { query?: string; tag?: string; limit?: number } = {},

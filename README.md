@@ -258,9 +258,9 @@ The platform modules add their own tools. Full list in [Agent work platform](#ag
 | CRM | `crm_sync`, `crm_contacts_search`, `crm_contact_get`, `crm_contact_upsert`, `crm_contact_delete`, `crm_note_add`, `crm_org_upsert`, `crm_orgs_list`, `crm_interactions_list`, `crm_pipeline_get`, `crm_deal_upsert`, `crm_deal_move`, `crm_deal_delete` |
 | Automations | `automation_create`, `automation_update`, `automation_delete`, `automations_list`, `automation_run_now`, `automation_runs_list` |
 | Outreach | `outbox_queue_draft`, `outbox_list`, `suppression_add`, `suppression_list` |
-| Enrichment | `enrich_find_email`, `enrich_verify_email`, `crm_contacts_import` |
+| Enrichment | `enrich_find_email`, `enrich_verify_email`, `enrich_address_pattern`, `crm_contacts_import`. `enrich_address_pattern` is free and needs no key: it works out how a company writes its addresses from the ones you already hold, and its candidate is an unverified guess until `enrich_verify_email` says otherwise. |
 | Research | `web_search`, `web_fetch` |
-| Prospecting | `prospect_find_companies`, `prospect_find_people`. Find companies and the people who work at them, by title, seniority, location, headcount and keyword. Needs an Apollo key. |
+| Prospecting | `prospect_find_companies`, `prospect_find_people`. Find companies and the people who work at them, by title, seniority, location, headcount and keyword. Needs an Apollo key. Falls back to a Hunter key, which finds companies and the people at a domain you name but cannot search a title across every company, and then to a plain web search, which finds companies only and returns search hits rather than records. |
 
 There is **no tool that approves, rejects or sends an outbox row**. That is a human action in the web UI.
 
@@ -457,7 +457,7 @@ Each `BOXAIDE_*` name is preferred. Then `SLEY_*`, then `MAILMUX_*`.
 | `BOXAIDE_SEND_DAILY_CAP` | `50` | Approved outreach sends per account per UTC day |
 | `BOXAIDE_GOOGLE_CLIENT_ID` | empty | OAuth client for Google Calendar — see below |
 | `BOXAIDE_GOOGLE_CLIENT_SECRET` | empty | Secret for that client |
-| `BOXAIDE_HUNTER_API_KEY` | empty | Hunter key. Finds and verifies work email addresses, and checks a recipient before an approved send |
+| `BOXAIDE_HUNTER_API_KEY` | empty | Hunter key. Finds and verifies work email addresses, checks a recipient before an approved send, and answers the prospecting tools when there is no Apollo key |
 | `BOXAIDE_PROSPEO_API_KEY` | empty | Prospeo key, tried after Hunter |
 | `BOXAIDE_PARALLEL_API_KEY` | empty | Parallel key. Lets an agent search the web and read a page. Tried first: it is a seventh of Exa's price for the same search |
 | `BOXAIDE_EXA_API_KEY` | empty | Exa key. A second index for the same job, used when Parallel has no key or when a tool call names Exa |

@@ -37,6 +37,7 @@ import {
   type PeopleSearchResult,
   type ProspectCompany,
   type ProspectEmailStatus,
+  type ProspectingProvider,
   type ProspectPerson,
 } from "./types.js";
 
@@ -66,8 +67,10 @@ export const APOLLO_SENIORITIES: readonly string[] = [
   "intern",
 ];
 
-export class ApolloProvider {
-  readonly id = "apollo";
+export class ApolloProvider implements ProspectingProvider {
+  readonly id = "apollo" as const;
+  /** Apollo bills one to nine credits for each person it opens. */
+  readonly revealCostsPerPerson = true;
 
   constructor(private readonly apiKey: string) {}
 
@@ -94,6 +97,7 @@ export class ApolloProvider {
     const rows = objects(payload.organizations);
     const pagination = record(payload.pagination);
     return {
+      provider: this.id,
       companies: rows.slice(0, limit).map(normaliseCompany),
       total: numberOf(pagination.total_entries) ?? rows.length,
       returned: Math.min(rows.length, limit),
@@ -170,6 +174,7 @@ export class ApolloProvider {
     }
 
     return {
+      provider: this.id,
       people,
       total:
         numberOf(pagination.total_entries) ?? numberOf(payload.total_entries) ?? rows.length,
