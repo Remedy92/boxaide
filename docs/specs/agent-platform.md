@@ -94,7 +94,7 @@ src/enrichment/service.ts EnrichmentService            provider waterfall, cache
 src/enrichment/tools.ts   ENRICHMENT_TOOLS + dispatchEnrichmentTool
 src/research/service.ts   ResearchService              web search and one-page reads
 src/research/tools.ts     RESEARCH_TOOLS + dispatchResearchTool
-src/prospecting/service.ts ProspectingService          Apollo people and company search
+src/prospecting/service.ts ProspectingService          Apollo, Hunter or web-search discovery
 src/prospecting/tools.ts  PROSPECTING_TOOLS + dispatchProspectingTool
 ```
 
@@ -547,6 +547,15 @@ Enrichment (`src/enrichment/tools.ts`):
 - `enrich_find_email` { orgDomain, fullName? | firstName? + lastName? }: one
   paid lookup; returns address, confidence 0 to 100, status and provider.
 - `enrich_verify_email` { email }: same shape, for an address already held.
+- `enrich_address_pattern` { orgDomain, fullName? }: free and local. Reads the
+  addresses already held at that domain out of the CRM, reports every pattern
+  they follow with how many follow it, and, given a name, builds one candidate
+  address from the best of them. The candidate always carries `verified: false`
+  and a note telling the agent to check it with `enrich_verify_email` before
+  anything is queued. A person already in the CRM at that domain comes back
+  under `existing` and nothing is inferred. A domain with no named addresses,
+  or one whose mailboxes are not built from names, gets no candidate and says
+  why. Reaches nobody, so every agent profile has it, a scheduled run included.
 - `crm_contacts_import` { csv }: header line plus at most 500 rows; every
   skipped row comes back with its line number and reason. Contacts nobody.
 
@@ -570,6 +579,48 @@ Both refuse an unfiltered search before any HTTP: Apollo answers one with the
 whole database, which is a credit spent on nothing. There is no separate reveal
 tool, because revealing is a parameter of the search that produced the ids.
 
+Two vendors sit behind those tools, one in force per call and never a
+waterfall: Apollo when its key is set, Hunter otherwise, and every result says
+which on `provider`. Everything above describes Apollo. Hunter
+(`src/prospecting/hunter.ts`) answers the same two questions differently, and
+the tool descriptions carry the differences so an agent reads them before it
+spends anything rather than after:
+
+- Companies come from Hunter's Discover, which is free and returns a name, a
+  domain and `contactsKnown`, how many people there Hunter holds an address
+  for. industry, headcount, location, linkedinUrl and `apolloOrgId` are null
+  because Hunter did not say. Discover's structured filters are enums, so only
+  domains, company name and the headcount buckets are sent structured;
+  keywords and locations become Hunter's plain-language `query` and the notes
+  say that half of the filter was approximate.
+- People come from Domain Search, so `orgDomains` is required and a title-only
+  search across every company is refused before any HTTP: that is the one
+  question only Apollo answers. At most 5 domains per call, one request each,
+  and the rest are named in the notes. Every row arrives whole, name and
+  address included, so `revealed` is true, `reveal` changes nothing, and the
+  reveal cap does not pull the page down. Apollo's eleven seniority bands fold
+  into Hunter's three; `organizationIds`, `locations` and `keywords` have no
+  Hunter equivalent and the notes say they were dropped.
+
+With neither prospecting key set, a third source answers `prospect_find_companies`:
+a plain web search through whichever research key the install has
+(`src/prospecting/web.ts`, provider id `web`). Those rows are search hits and
+say so — a name and a domain lifted from one page, `sourceUrl` naming that
+page, everything else null, `total` equal to the number returned because a
+ranking cannot say how many companies exist, and the employee-count filter not
+applied at all. Search engines, social networks and reference sites are dropped,
+subdomains included; directories and listicles are kept, because for a market
+question they are often the best hit there is. `prospect_find_people` refuses on
+this provider and names the path that works instead: read the company's team
+page with `web_fetch`, then `enrich_address_pattern` and `enrich_verify_email`.
+Code here never parses people out of a page — a parser that misreads invents
+people, and the agent asking can read.
+
+`ProspectingService.providerId()` names the source a search would reach right
+now — `apollo`, `hunter`, `web` — or null when nothing is configured. The order
+is by how much each source knows, not by price: a ranking is weaker evidence
+than a database row even when the row costs a credit.
+
 A search result is a lead, not a contact. A revealed person with a real address
 carries `crmContact`, which is exactly the crm_contact_upsert arguments; one
 whose address is locked or absent carries `crmContactPendingEmail` and
@@ -580,14 +631,17 @@ Keys come from Settings > Connectors, stored encrypted in the `connectors`
 table (`src/connectors/`). The environment stays as the fallback for a headless
 install: `BOXAIDE_HUNTER_API_KEY` and `BOXAIDE_PROSPEO_API_KEY` for enrichment,
 `BOXAIDE_EXA_API_KEY` and `BOXAIDE_PARALLEL_API_KEY` for research, and
-`BOXAIDE_APOLLO_API_KEY` for prospecting. Settings beat
+`BOXAIDE_APOLLO_API_KEY` for prospecting, which also falls back to
+`BOXAIDE_HUNTER_API_KEY`. Settings beat
 the environment, and nothing is cached, so a key saved in the UI takes effect on
 the next call with no restart. With none of a module's keys set, its tools refuse
 with a message naming the screen and the variables.
 
 Apollo is its own connector kind, `prospecting`, so it sits under its own
 heading in Settings and stays out of the Hunter-then-Prospeo waterfall, which
-it is no part of.
+it is no part of. Hunter keeps its `enrichment` kind and its place in that
+waterfall: the one key now does two jobs, and moving it would take it out of
+the waterfall it leads.
 
 `GET /api/connectors` lists all five with a masked key and a source of
 `settings`, `env` or null, plus `checks`: the last verdict each provider gave

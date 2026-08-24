@@ -56,7 +56,10 @@ Outreach chain: 1 find prospects with the prospect_ tools, or import a list with
 crm_contacts_import. 2 save the company with crm_org_upsert. 3 get the address:
 on a prospect_find_people hit pass reveal true, and use enrich_find_email only
 when the reveal comes back with emailStatus 'locked' or 'absent', using the
-enrichFindEmail arguments the hit carries. 4 now save the person with
+enrichFindEmail arguments the hit carries. enrich_address_pattern is free and
+often answers first: it builds the address from ones you already hold at that
+domain, and its candidate is a guess to verify, never an address to report.
+4 now save the person with
 crm_contact_upsert, which is keyed by the address and cannot be called before
 you hold one, then check it with enrich_verify_email. 5 read up on the person
 with web_search and web_fetch so the first line is about them. 6 queue with

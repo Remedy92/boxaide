@@ -313,6 +313,37 @@ describe("CRM encryption at rest", () => {
   });
 });
 
+/**
+ * contactsAtDomain exists for address-pattern inference, and the reason it is
+ * its own query rather than a searchContacts call is asserted here: a free
+ * text search over "acme.com" also matches people and organisations whose
+ * names contain it, and a pattern learned from those is learned from
+ * addresses at other companies.
+ */
+describe("contacts at one domain", () => {
+  it("matches on the address only, never on a name that contains the domain", async () => {
+    const h = await harness();
+    h.crmStore.upsertContact({ email: "andrew.huisman@acme.com", name: "Andrew Huisman" });
+    h.crmStore.upsertContact({ email: "grace@acme.com", name: "Grace Hopper" });
+    h.crmStore.upsertContact({ email: "someone@other.com", name: "Acme.com Fan" });
+    h.crmStore.upsertContact({ email: "eve@notacme.com", name: "Eve" });
+
+    const rows = h.crmStore.contactsAtDomain("Acme.com");
+    expect(rows.map((c) => c.email).sort()).toEqual([
+      "andrew.huisman@acme.com",
+      "grace@acme.com",
+    ]);
+  });
+
+  it("takes a leading @, and answers an empty domain with nothing", async () => {
+    const h = await harness();
+    h.crmStore.upsertContact({ email: "andrew@acme.com", name: "Andrew" });
+
+    expect(h.crmStore.contactsAtDomain("@acme.com")).toHaveLength(1);
+    expect(h.crmStore.contactsAtDomain("  ")).toEqual([]);
+  });
+});
+
 describe("CRM tool dispatch", () => {
   it("exposes the fifteen tools of the spec", () => {
     expect(CRM_TOOLS.map((t) => t.name).sort()).toEqual(

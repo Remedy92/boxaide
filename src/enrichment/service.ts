@@ -22,6 +22,7 @@ import { envNamed } from "../config.js";
 import { HunterProvider } from "./hunter.js";
 import { ProspeoProvider } from "./prospeo.js";
 import { parseContactCsv, type ImportContactRow, type SkippedRow } from "./csv.js";
+import { inferAddressPattern, type KnownAddress, type PatternResult } from "./pattern.js";
 import type {
   EnrichmentProvider,
   EnrichmentResult,
@@ -58,6 +59,14 @@ const NOT_CONFIGURED = `no enrichment provider is configured. Add a key under Se
  */
 export type UpsertContact = (row: ImportContactRow) => { id: string };
 
+/**
+ * Reads back the addresses already held at one domain, with the names they
+ * belong to. Injected the same way UpsertContact is, so this module still
+ * never imports the CRM. Absent means the pattern tool has nothing to read
+ * and says so rather than guessing from nothing.
+ */
+export type AddressesAtDomain = (domain: string) => KnownAddress[];
+
 export type EnrichmentDeps = {
   /**
    * Providers in waterfall order, fixed for the life of the service. Absent
@@ -74,6 +83,7 @@ export type EnrichmentDeps = {
   /** Injection seam for tests, so a cache expiry costs no wall time. */
   now?: () => number;
   upsertContact?: UpsertContact;
+  addressesAtDomain?: AddressesAtDomain;
 };
 
 type CacheEntry = { at: number; result: EnrichmentResult };
@@ -89,6 +99,7 @@ export class EnrichmentService {
   private getKey: (providerId: string) => string | undefined;
   private now: () => number;
   private upsertContact: UpsertContact | null;
+  private addressesAtDomain: AddressesAtDomain | null;
   private cache = new Map<string, CacheEntry>();
   /**
    * Lookups already running, keyed the same way the cache is. The cache only
@@ -104,6 +115,7 @@ export class EnrichmentService {
     this.getKey = deps.getKey ?? ((id) => envNamed(envSuffixFor(id)));
     this.now = deps.now ?? Date.now;
     this.upsertContact = deps.upsertContact ?? null;
+    this.addressesAtDomain = deps.addressesAtDomain ?? null;
   }
 
   /** False when no API key is set. Every lookup refuses in that state. */
@@ -153,6 +165,32 @@ export class EnrichmentService {
     return this.waterfall(`verify:${address}`, (provider) =>
       provider.verifyEmail(address),
     );
+  }
+
+  /**
+   * What the addresses already held at one domain say about how that domain
+   * writes a mailbox, and the address that follows for one more name.
+   *
+   * Free, local, and instant: it reads the CRM and reaches nobody. That is
+   * why the tool description tells an agent to try this before it pays for a
+   * lookup, and why it works on an install with no provider key at all.
+   *
+   * What comes back is evidence and never an answer. See src/enrichment/
+   * pattern.ts for the rules that keep it that way.
+   */
+  addressPattern(domain: string, fullName?: string): PatternResult {
+    const bare = domain.trim().toLowerCase();
+    if (!bare.includes(".")) throw new Error(`not a domain: ${domain}`);
+    const known = this.addressesAtDomain ? this.addressesAtDomain(bare) : [];
+    const result = inferAddressPattern(bare, known, fullName);
+    // A candidate nobody can check is a different thing from one nobody has
+    // checked yet, and only this class knows which install it is running on.
+    if (result.candidate && !this.isConfigured()) {
+      result.notes.push(
+        `No verification provider is configured on this server, so enrich_verify_email cannot check ${result.candidate.email} either. Tell the user the address is an unverified guess and that sending to it risks a bounce, and let them decide.`,
+      );
+    }
+    return result;
   }
 
   /**

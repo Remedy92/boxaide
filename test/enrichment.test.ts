@@ -10,6 +10,9 @@ import {
 } from "../src/enrichment/csv.js";
 import {
   dispatchEnrichmentTool,
+  ENRICHMENT_FREE_TOOL_NAMES,
+  ENRICHMENT_LOCAL_TOOL_NAMES,
+  ENRICHMENT_PAID_TOOL_NAMES,
   ENRICHMENT_TOOLS,
   type EnrichmentPlatform,
 } from "../src/enrichment/tools.js";
@@ -102,16 +105,167 @@ describe("bareDomain", () => {
 });
 
 describe("enrichment tool surface", () => {
-  it("exposes exactly the three spec tools", () => {
+  it("exposes exactly the four spec tools", () => {
     expect(ENRICHMENT_TOOLS.map((t) => t.name).sort()).toEqual(
-      ["crm_contacts_import", "enrich_find_email", "enrich_verify_email"].sort(),
+      [
+        "crm_contacts_import",
+        "enrich_address_pattern",
+        "enrich_find_email",
+        "enrich_verify_email",
+      ].sort(),
     );
+  });
+
+  /**
+   * The paid set is hand-written so a new tool cannot become a free-for-all by
+   * being forgotten, and the free set is what a scheduled run is allowed to
+   * reach. A tool in neither set, or in both, is a scope bug rather than a
+   * naming one, so the sets are asserted rather than derived here too.
+   */
+  it("sorts every tool into exactly one spend group", () => {
+    for (const tool of ENRICHMENT_TOOLS) {
+      const groups = [
+        ENRICHMENT_PAID_TOOL_NAMES.has(tool.name),
+        ENRICHMENT_FREE_TOOL_NAMES.has(tool.name),
+        ENRICHMENT_LOCAL_TOOL_NAMES.has(tool.name),
+      ].filter(Boolean);
+      expect(groups).toHaveLength(1);
+    }
+    expect([...ENRICHMENT_FREE_TOOL_NAMES]).toEqual(["enrich_address_pattern"]);
   });
 
   it("closes every input schema", () => {
     for (const tool of ENRICHMENT_TOOLS) {
       expect(tool.inputSchema.additionalProperties).toBe(false);
     }
+  });
+});
+
+/**
+ * Address patterns: the free path to an address, and the one that must never
+ * be allowed to sound like a found one.
+ *
+ * Every test here is about restraint as much as inference. What the module
+ * knows is which patterns the addresses already held follow; what it must
+ * never do is present the result of applying one as a fact, or guess over an
+ * address that was there to be looked up.
+ */
+describe("address patterns", () => {
+  const ACME = [
+    { email: "andrew.huisman@acme.com", name: "Andrew Huisman" },
+    { email: "grace.hopper@acme.com", name: "Grace Hopper" },
+    { email: "info@acme.com", name: null },
+    { email: "someone.else@other.com", name: "Some One" },
+  ];
+
+  function patternService(known = ACME): EnrichmentService {
+    return new EnrichmentService({
+      providers: [],
+      addressesAtDomain: () => known,
+    });
+  }
+
+  it("learns the pattern and builds a candidate that says it is unchecked", () => {
+    const result = patternService().addressPattern("Acme.com", "Ada Lovelace");
+
+    // The address at other.com is not evidence about acme.com, and info@ has
+    // no name to learn from.
+    expect(result.addressesKnown).toBe(3);
+    expect(result.namedKnown).toBe(2);
+    expect(result.patterns[0]).toEqual({
+      id: "first.last",
+      matches: 2,
+      example: "andrew.huisman@acme.com",
+    });
+    expect(result.candidate).toEqual({
+      email: "ada.lovelace@acme.com",
+      pattern: "first.last",
+      derivedFrom: 2,
+      verified: false,
+    });
+    expect(result.notes.join(" ")).toMatch(/is a guess/);
+    expect(result.notes.join(" ")).toMatch(/enrich_verify_email before you queue/);
+  });
+
+  it("returns the real address rather than guessing at somebody it holds", () => {
+    const result = patternService().addressPattern("acme.com", "Grace Hopper");
+
+    expect(result.existing).toEqual({
+      email: "grace.hopper@acme.com",
+      name: "Grace Hopper",
+    });
+    // A guess over a held address is the worst outcome available, so there is
+    // no candidate at all rather than one that happens to agree.
+    expect(result.candidate).toBeNull();
+    expect(result.notes.join(" ")).toMatch(/already in the CRM/);
+  });
+
+  it("says one example is one example", () => {
+    const result = patternService([
+      { email: "a.huisman@acme.com", name: "Andrew Huisman" },
+    ]).addressPattern("acme.com", "Ada Lovelace");
+
+    expect(result.candidate?.derivedFrom).toBe(1);
+    expect(result.notes.join(" ")).toMatch(/coincidence/);
+  });
+
+  it("reports a split verdict rather than picking a winner quietly", () => {
+    const result = patternService([
+      { email: "andrew.huisman@acme.com", name: "Andrew Huisman" },
+      { email: "hopper@acme.com", name: "Grace Hopper" },
+    ]).addressPattern("acme.com", "Ada Lovelace");
+
+    expect(result.notes.join(" ")).toMatch(/evidence is split/);
+  });
+
+  it("invents nothing for a domain that teaches nothing", () => {
+    const empty = patternService([]).addressPattern("acme.com", "Ada Lovelace");
+    expect(empty.candidate).toBeNull();
+    expect(empty.notes.join(" ")).toMatch(/No addresses at acme.com are held yet/);
+
+    const unnamed = patternService([{ email: "info@acme.com", name: null }]).addressPattern(
+      "acme.com",
+      "Ada Lovelace",
+    );
+    expect(unnamed.candidate).toBeNull();
+    expect(unnamed.notes.join(" ")).toMatch(/none carries a name/);
+
+    const unguessable = patternService([
+      { email: "xk41@acme.com", name: "Andrew Huisman" },
+    ]).addressPattern("acme.com", "Ada Lovelace");
+    expect(unguessable.candidate).toBeNull();
+    expect(unguessable.notes.join(" ")).toMatch(/does not write mailboxes in a way that can be guessed/);
+  });
+
+  it("folds accents and punctuation the way a mail system does", () => {
+    const result = patternService([
+      { email: "renee.obrien@acme.com", name: "Renée O'Brien" },
+      { email: "andrew.huisman@acme.com", name: "Andrew Huisman" },
+    ]).addressPattern("acme.com", "José  Núñez");
+
+    expect(result.patterns[0].matches).toBe(2);
+    expect(result.candidate?.email).toBe("jose.nunez@acme.com");
+  });
+
+  it("needs no provider key, and refuses what is not a domain", () => {
+    const svc = patternService();
+    // The whole point: this answers on an install that has bought nothing.
+    expect(svc.isConfigured()).toBe(false);
+    expect(svc.addressPattern("acme.com").candidate).toBeNull();
+    expect(() => svc.addressPattern("acme")).toThrow(/not a domain/);
+  });
+
+  it("dispatches through the tool, and reaches no provider doing it", async () => {
+    const platform: EnrichmentPlatform = { enrichmentService: patternService() };
+    const calls = stubFetch(() => ({ body: {} }));
+    const result: any = await dispatchEnrichmentTool(platform, "enrich_address_pattern", {
+      orgDomain: "acme.com",
+      fullName: "Ada Lovelace",
+    });
+
+    expect(result.candidate.email).toBe("ada.lovelace@acme.com");
+    expect(result.candidate.verified).toBe(false);
+    expect(calls).toHaveLength(0);
   });
 });
 

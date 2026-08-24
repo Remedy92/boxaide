@@ -44,6 +44,14 @@ export type ToolDef = {
   };
 };
 
+/**
+ * Contacts read back per domain when learning its address pattern. A cap
+ * rather than every row: a pattern is settled by the first handful that agree,
+ * and a domain the operator holds hundreds of contacts at does not need all of
+ * them read back to say that it writes first.last.
+ */
+const ADDRESS_PATTERN_SAMPLE = 50;
+
 export type Platform = {
   crmStore: CrmStore;
   crmService: CrmService;
@@ -149,13 +157,34 @@ export function createPlatform(opts: {
       if (row.tags.length > 0) crmStore.addTags(contact.id, row.tags);
       return contact;
     },
+    // The other half of the same seam: the addresses already held at a domain,
+    // which is what an address pattern is learned from. Read-only, and the
+    // only reason enrich_address_pattern needs no vendor key at all.
+    addressesAtDomain: (domain) =>
+      crmStore
+        .contactsAtDomain(domain, ADDRESS_PATTERN_SAMPLE)
+        .map((contact) => ({ email: contact.email, name: contact.name })),
   });
   // Research reaches the public web and keeps nothing, so it needs no db, no
   // master key, and no start/stop.
   const researchService = new ResearchService({ getKey });
   // Prospecting asks a vendor who exists. Like research it keeps nothing, so
   // it needs no db, no master key, and no start/stop.
-  const prospectingService = new ProspectingService({ getKey });
+  const prospectingService = new ProspectingService({
+    getKey,
+    // The last resort when neither prospecting vendor has a key: the search
+    // the install already pays for. Prospecting is handed the callback, not
+    // the research service, so it never learns which search vendor answered.
+    search: async (query, numResults) => {
+      const answer = await researchService.search({ query, numResults });
+      return answer.results.map((hit) => ({
+        title: hit.title,
+        url: hit.url,
+        snippet: hit.snippet,
+      }));
+    },
+    searchConfigured: () => researchService.listProviders().some((p) => p.configured),
+  });
   const engine = new OutreachEngine(outreachStore, opts.mail, {
     // Deliverability check at the send chokepoint. The engine holds no
     // opinion about who does the checking: it asks this callback, and with
