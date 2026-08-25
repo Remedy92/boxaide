@@ -25,6 +25,7 @@ import {
   AUTOMATION_RUN_PREAMBLE,
   KNOWN_AGENTS,
   LaunchError,
+  ONESHOT_TIMEOUT_MS,
   claudeCopyCredentials,
   claudeHealCredentials,
   claudeTurnArgs,
@@ -1490,6 +1491,19 @@ exec /bin/sleep 60
     expect(args).toContain("--strict-mcp-config");
     const allowed = args[args.indexOf("--allowedTools") + 1];
     expect(allowed).not.toContain("chat_await_message");
+  });
+
+  it("holds an Antigravity run to Boxaide's deadline, not agy's 5-minute default", () => {
+    // agy --print-timeout defaults to 5m. A weekday outreach pass that is
+    // still working at 5:06 then exits 1 with "timeout waiting for response"
+    // while Boxaide's own one-shot budget still has ten minutes left. Chat
+    // turns already name the 15-minute budget; a run must too, and the two
+    // numbers must stay the same or a later edit reopens the cut.
+    const spec = KNOWN_AGENTS.find((s) => s.id === "antigravity")!;
+    const args = spec.runArgs!(CTX, "do the thing", "/tmp/run-dir");
+    expect(args[args.indexOf("--print-timeout") + 1]).toBe(
+      `${ONESHOT_TIMEOUT_MS / 1000}s`,
+    );
   });
 
   it("gives Claude its own config home so a run cannot load the user's setup", () => {

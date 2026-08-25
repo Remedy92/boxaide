@@ -123,6 +123,11 @@ function antigravityRunArgs(
     workDir,
     "--dangerously-skip-permissions",
     "--disable-slash-commands",
+    // Same flag, same number as a driven turn. Omit it and agy keeps 5m0s,
+    // which is what ended weekday outreach while Boxaide's 15-minute budget
+    // still had ten minutes left.
+    "--print-timeout",
+    agyPrintTimeoutArg(),
     ...(model ? ["--model", model] : []),
   ];
 }
