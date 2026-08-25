@@ -34,7 +34,12 @@
  * only the first, because a silently rotated conversation would otherwise be
  * the one turn that never got told what it is answering.
  */
-import { agyTurnReader } from "./agent-stream.js";
+import {
+  agyAuthFailed,
+  agyTurnReader,
+  isAgyAuthPrompt,
+  type StreamTurnOutcome,
+} from "./agent-stream.js";
 import {
   TurnDriver,
   type TurnDriverOptions,
@@ -79,9 +84,24 @@ export class AgyDriver extends TurnDriver {
   // one and reporting the new id, so the base's "never" is the truth here.
   // Clearing the stored session on some other error would only cost a working
   // chat its memory.
-  //
-  // No `prompt` override either: agy keeps its sign-in in ~/.gemini, which the
-  // launch cannot move and does not copy, so there is no stale credential to
-  // repair. A signed-out agy fails its turns like any other broken CLI and the
-  // loop reports that after MAX_DELIVERIES, with the CLI's own words.
+
+  protected override async prompt(chatId: string, text: string): Promise<string> {
+    const outcome = await this.takeTurn(chatId, text);
+    if (agyAuthFailed(outcome)) {
+      this.authRequired = true;
+      throw new Error(signedOutAgyMessage(outcome));
+    }
+    if (outcome.text) return outcome.text;
+    throw new Error(outcome.error ?? "agy produced no answer");
+  }
+}
+
+function signedOutAgyMessage(outcome: StreamTurnOutcome): string {
+  const said = (outcome.text ?? outcome.error ?? "").trim();
+  if (!said || isAgyAuthPrompt(said)) {
+    return process.platform === "darwin"
+      ? "antigravity is not signed in: use the Sign in button"
+      : "antigravity is not signed in: run `agy` in your terminal, then press Start";
+  }
+  return `antigravity is not signed in: ${said}`;
 }

@@ -5,9 +5,11 @@
  * The chat loop is Boxaide's, not the model's, see agy-driver.ts for why the
  * `agy -p KICKOFF` launch this replaces could not stay up.
  */
+import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isAgyAuthFailure } from "../agent-stream.js";
 import { AgyDriver, agyPrintTimeoutArg } from "../agy-driver.js";
 import type { AgentDriver } from "../driver.js";
 import { chatMemoryBlock } from "../memory-context.js";
@@ -307,6 +309,91 @@ function antigravitySandbox(
     : { write: [home] };
 }
 
+export async function probeAntigravityAuth(
+  bin: string,
+  env: NodeJS.ProcessEnv,
+  timeoutMs = 30_000,
+): Promise<
+  | { ok: true }
+  | { ok: false; authRequired: boolean; reason: string }
+> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+    let child: ReturnType<typeof spawn> | null = null;
+    const finish = (
+      result:
+        | { ok: true }
+        | { ok: false; authRequired: boolean; reason: string },
+    ) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      try {
+        child?.kill("SIGKILL");
+      } catch {}
+      resolve(result);
+    };
+
+    timer = setTimeout(() => {
+      finish({
+        ok: false,
+        authRequired: isAgyAuthFailure(output),
+        reason: isAgyAuthFailure(output)
+          ? "Antigravity needs sign-in"
+          : "Antigravity readiness check timed out",
+      });
+    }, timeoutMs);
+    timer.unref?.();
+
+    let output = "";
+    try {
+      child = spawn(bin, ["models"], {
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      finish({
+        ok: false,
+        authRequired: false,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    const onData = (chunk: string) => {
+      output = (output + chunk).slice(-8_192);
+    };
+    child.stdout?.on("data", onData);
+    child.stderr?.on("data", onData);
+
+    child.on("error", (err) =>
+      finish({ ok: false, authRequired: false, reason: err.message }),
+    );
+    child.on("close", (code) => {
+      if (code === 0) return finish({ ok: true });
+      const authRequired = isAgyAuthFailure(output);
+      finish({
+        ok: false,
+        authRequired,
+        reason: authRequired
+          ? "Antigravity needs sign-in"
+          : "Antigravity could not verify its readiness",
+      });
+    });
+  });
+}
+
+export function antigravityWarmAuth(
+  _ctx: LaunchContext,
+  bin: string,
+  env: NodeJS.ProcessEnv,
+) {
+  return probeAntigravityAuth(bin, env);
+}
+
 export const ANTIGRAVITY_SPEC: AgentSpec = {
   // No `args`: there is nothing to keep running. The driver spawns one
   // `agy -p` per user turn and resumes the conversation across them, so the
@@ -316,6 +403,7 @@ export const ANTIGRAVITY_SPEC: AgentSpec = {
   label: "Antigravity",
   bin: "agy",
   runArgs: antigravityRunArgs,
+  warmAuth: antigravityWarmAuth,
   drive: antigravityDrive,
   listModels: ANTIGRAVITY_LISTER,
   prepare: antigravityPrepare,

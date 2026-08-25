@@ -342,6 +342,53 @@ function foldAgyResult(
     into.error;
 }
 
+/** Lines that prove agy has fallen into an interactive OAuth flow. */
+const AGY_AUTH_PROMPT_PATTERNS = [
+  /accounts\.google\.com\/o\/oauth2/i,
+  /please visit the following url/i,
+  /visit the following url in your browser/i,
+  /enter (?:the )?authorization code/i,
+  /waiting for (?:authorization|authentication|oauth)/i,
+];
+
+export function isAgyAuthPrompt(text: string): boolean {
+  return AGY_AUTH_PROMPT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+const AGY_AUTH_SIGNS = [
+  ...AGY_AUTH_PROMPT_PATTERNS,
+  /silent auth failed/i,
+  /failed to refresh (?:oauth )?token/i,
+  /oauth token (?:has )?expired/i,
+  /token (?:has )?expired/i,
+  /\bunauthenticated\b/i,
+  /\binvalid_grant\b/i,
+  /not (?:logged|signed) in/i,
+  /please (?:sign in|log in|authenticate)/i,
+  /authentication (?:required|failed|error)/i,
+  /\bauth(?:entication)? required\b/i,
+  /login required/i,
+];
+
+export function isAgyAuthFailure(text: string): boolean {
+  return AGY_AUTH_SIGNS.some((sign) => sign.test(text));
+}
+
+/**
+ * Whether what a turn produced is an Antigravity authentication failure.
+ */
+export function agyAuthFailed(outcome: StreamTurnOutcome): boolean {
+  if (outcome.error && isAgyAuthFailure(outcome.error)) return true;
+  if (
+    outcome.text &&
+    outcome.text.length <= 200 &&
+    isAgyAuthPrompt(outcome.text)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * The reader for one driven `agy -p` turn.
  *

@@ -150,24 +150,31 @@ export function useEnsureAgentRunning(): () => Promise<void> {
  * running again, which is also what ends it if the user starts the agent by
  * hand instead.
  */
-export function useAgentSignIn() {
+export function useAgentSignIn(agentId?: string, relaunch = true) {
   const ctx = useApiCtx();
   const agents = useLocalAgents();
+  const { picked } = usePickedAgent();
   const running = agents.data?.running ?? null;
+  const targetId = agentId ?? agents.data?.lastExit?.id ?? picked?.id ?? "claude-code";
   // Which exit the ask was made against, so the wait ends by itself: a launch
   // clears `running`, and a second failure writes a new exit. Either way the
   // state below stops matching, with no effect to unset it.
   const exitAt = agents.data?.lastExit?.at ?? "";
   const [askedFor, setAskedFor] = React.useState<string | null>(null);
+  const [opened, setOpened] = React.useState(false);
   const signIn = useMutation({
-    mutationFn: () => signInLocalAgent(ctx),
-    onSuccess: () => setAskedFor(exitAt),
+    mutationFn: () => signInLocalAgent(ctx, targetId, relaunch),
+    onSuccess: () => {
+      setOpened(true);
+      if (relaunch) setAskedFor(exitAt);
+    },
   });
 
   return {
     signIn: () => signIn.mutate(),
     /** Terminal is open and nothing has come back yet. */
-    waiting: !running && (signIn.isPending || askedFor === exitAt),
+    waiting: relaunch && !running && (signIn.isPending || askedFor === exitAt),
+    opened,
     /** The server's own sentence. 501 on a machine with no Terminal to open. */
     error: signIn.error ? serverSentence(signIn.error) : null,
   };

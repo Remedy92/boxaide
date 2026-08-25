@@ -132,7 +132,7 @@ function LocalAgentList() {
                 </span>
               )}
             </span>
-            {signedOut && <AgentSignIn compact />}
+            {signedOut && <AgentSignIn agentId={agent.id} compact />}
             {/* Confinement is not a choice offered here any more. It is on.
                 This is the exception: the machine could not apply it, or the
                 install turned it off, and either way the reason is worth a

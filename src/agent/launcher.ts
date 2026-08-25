@@ -39,7 +39,7 @@ import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { agentRoot, agentWorkDir } from "./paths.js";
 import { capabilityOf, type AgentCapability } from "./capability.js";
-import { lineSplitter, type RenderRunLine } from "./agent-stream.js";
+import { isAgyAuthPrompt, lineSplitter, type RenderRunLine } from "./agent-stream.js";
 import type { AgentDriver, StopCause } from "./driver.js";
 import {
   allowedHostsFor,
@@ -371,6 +371,11 @@ function windowDuration(ms: number): string {
 export const ONESHOT_KILLED_NOTE =
   "[boxaide] killed: the run was stopped before it finished.";
 
+export function isPlaywrightBootstrapHost(host: string): boolean {
+  const lower = host.toLowerCase();
+  return lower.includes("playwright");
+}
+
 /**
  * What a confined run's refused connections read as in its log.
  *
@@ -384,7 +389,11 @@ export function egressRefusedNote(
   total = hosts.length,
 ): string {
   const extra = total > hosts.length ? ` (and ${total - hosts.length} more)` : "";
-  return `[boxaide] network: refused ${hosts.join(", ")}${extra}. A scheduled run reaches its model provider and Boxaide, nothing else. Add a host with BOXAIDE_RUN_NETWORK_ALLOW if the CLI needs it.`;
+  const hasPlaywright = hosts.some(isPlaywrightBootstrapHost);
+  const playwrightClarification = hasPlaywright
+    ? " (refused Playwright CDN domains are an optional upstream Antigravity browser-bootstrap attempt, not the automation task asking to browse)"
+    : "";
+  return `[boxaide] network: refused ${hosts.join(", ")}${extra}${playwrightClarification}. A scheduled run reaches its model provider and Boxaide, nothing else. Add a host with BOXAIDE_RUN_NETWORK_ALLOW if the CLI needs it.`;
 }
 
 /**
@@ -1011,6 +1020,36 @@ export class AgentLauncher {
       // close() landing inside it would otherwise be followed by a run
       // starting anyway. Same re-check start() makes for the same reason.
       this.assertClosed();
+
+      // Safely warm/verify token before starting confinement. If unauthenticated,
+      // fail fast without launching the confined child or waiting for a timeout.
+      if (spec.warmAuth) {
+        const warmed = await spec.warmAuth(
+          ctx,
+          bin,
+          this.childEnvFor(spec, this.listWorkDir(spec), ctx),
+        );
+        if (!warmed.ok) {
+          this.starting.delete(opts.runId);
+          grant?.revoke();
+          const authNote = warmed.authRequired
+            ? `[boxaide] auth-required: ${spec.label} needs sign-in. Use Sign in below or run \`${spec.bin}\` in Terminal, then run this automation again.`
+            : `[boxaide] blocked: ${warmed.reason}. Try this automation again.`;
+          logError("agent.launcher", "run readiness failed", {
+            agent: spec.id,
+            runId: opts.runId,
+            reason: warmed.reason,
+          });
+          return {
+            status: "error",
+            exitCode: 1,
+            log: `${ranNote}\n${authNote}\n`,
+            agentId: spec.id,
+          };
+        }
+      }
+      this.assertClosed();
+
       render = spec.renderRunLine;
       workDir = this.prepareWorkDir(spec, ctx, runWorkDir(ctx, opts.runId));
       // Workspace memory rides between the preamble and the task: the
@@ -1082,6 +1121,24 @@ export class AgentLauncher {
     // the watchdog is 'error', because a run that never spoke did not start.
     let forced: "killed" | "error" | null = null;
 
+    // Fast-fail if interactive OAuth is prompted during a headless run.
+    // Do not capture raw OAuth URLs or codes into the log.
+    let authRequired = false;
+    const checkAuthPrompt = (chunk: string): boolean => {
+      if (ranAgentId === "antigravity" && isAgyAuthPrompt(chunk)) {
+        if (forced === null) {
+          authRequired = true;
+          note(
+            "[boxaide] auth-required: Antigravity needs sign-in. Use Sign in below or run `agy` in Terminal, then run this automation again.",
+          );
+          forced = "error";
+          child.kill("SIGKILL");
+        }
+        return true;
+      }
+      return false;
+    };
+
     // A spec that asks its CLI for an event stream must render it: the raw
     // NDJSON is unreadable, and the run log's only audience is a person. The
     // splitter is kept so finish() can flush a killed run's partial last line.
@@ -1109,6 +1166,7 @@ export class AgentLauncher {
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
+      if (checkAuthPrompt(chunk)) return;
       // stdout only. stderr carries startup noise from things that are not the
       // session. A CLI's update check can feed a timer the agent never did.
       // First chunk is enough: mid-tool silence is healthy, so do not re-arm.
@@ -1120,7 +1178,10 @@ export class AgentLauncher {
       else capture(chunk);
     });
     // stderr stays raw whatever the spec does: a crash writes plain text here.
-    child.stderr?.on("data", capture);
+    child.stderr?.on("data", (chunk: string) => {
+      if (checkAuthPrompt(chunk)) return;
+      capture(chunk);
+    });
 
     const timer = setTimeout(() => {
       note(oneShotDeadlineNote(opts.timeoutMs ?? ONESHOT_TIMEOUT_MS));
@@ -1178,6 +1239,12 @@ export class AgentLauncher {
         const refusedTotal = egress?.refusedTotal() ?? 0;
         egress?.stop();
         if (refused.length > 0) note(egressRefusedNote(refused, refusedTotal));
+        if (authRequired) {
+          // The OAuth URL and paste-back prompt are CLI output. Keep none of
+          // it, including a URL split across stream chunks; only our safe,
+          // actionable conclusion survives in the encrypted run log.
+          log = `${ranNote}\n[boxaide] auth-required: Antigravity needs sign-in. Use Sign in below or run \`agy\` in Terminal, then run this automation again.\n`;
+        }
         // The slot is freed before the directory is removed: a failure to clean
         // up disk must not cost this launcher a run slot for the rest of the
         // process's life.

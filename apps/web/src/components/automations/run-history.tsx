@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { CircleAlert } from "lucide-react";
+import { AgentSignIn } from "@/components/agent/agent-sign-in";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -41,6 +42,14 @@ function duration(run: AutomationRun): string {
  */
 function blockedReason(run: AutomationRun): boolean {
   return run.status === "error" && run.agentId === "" && run.log !== "";
+}
+
+function antigravityAuthRequired(run: AutomationRun): boolean {
+  return (
+    run.status === "error" &&
+    run.agentId === "antigravity" &&
+    run.log.includes("[boxaide] auth-required:")
+  );
 }
 
 /**
@@ -149,6 +158,13 @@ export function RunHistory({ automationId }: { automationId: string }) {
             <p className="mt-1 text-[12px] leading-4 whitespace-pre-wrap text-danger">
               {asSentence(run.log)}
             </p>
+          ) : antigravityAuthRequired(run) ? (
+            <div className="mt-1 space-y-2">
+              <p className="text-[12px] leading-4 text-danger">
+                Antigravity needs sign-in before this automation can run.
+              </p>
+              <AgentSignIn agentId="antigravity" relaunch={false} />
+            </div>
           ) : run.log ? (
             <details className="mt-1">
               <summary className="cursor-pointer text-[12px] text-fg-tertiary hover:text-fg-secondary">

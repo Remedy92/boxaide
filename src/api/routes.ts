@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
+import { probeAntigravityAuth } from "../agent/clis/antigravity.js";
 import type { AgentChannel, Turn } from "../agent/channel.js";
 import { LaunchError, type AgentLauncher } from "../agent/launcher.js";
 import { ApprovalError, type ApprovalQueue } from "../agent/approvals.js";
@@ -1257,14 +1258,19 @@ function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
   // One watcher per server, so pressing the button twice does not leave two
   // relaunches racing for the chat slot. Held here rather than at module scope
   // because every runtime gets its own routes and its own launcher.
-  let watching: (() => void) | null = null;
+  const watching = new Map<string, () => void>();
+  const replaceWatch = (agentId: string, next: (() => void) | null) => {
+    watching.get(agentId)?.();
+    if (next) watching.set(agentId, next);
+    else watching.delete(agentId);
+  };
 
   /**
-   * Opens a terminal on `claude /login`, and relaunches the agent when the
-   * login lands.
+   * Opens a terminal on the CLI's login command (`claude /login` or `agy`),
+   * and relaunches the agent when the login lands and is confirmed.
    *
    * Signing in cannot happen inside Boxaide: it is an interactive OAuth flow
-   * with a browser and a paste-back, and `claude` runs it in its own terminal
+   * with a browser and a paste-back, and the CLI runs it in its own terminal
    * UI. What Boxaide can do is start that terminal for the user and then stop
    * making them come back — the agent they were talking to gets restarted for
    * them, on the model they had picked, and the messages the signed-out run
@@ -1274,42 +1280,79 @@ function registerLauncherRoutes(app: Hono, launcher: AgentLauncher): void {
    * "open a terminal here": the Linux answer is a guess among a dozen terminal
    * emulators, and a wrong guess is a button that silently does nothing.
    */
-  app.post("/api/agents/claude-code/signin", (c) => {
+  const handleSignIn = (c: Context, agentId: string) => {
+    const relaunch = c.req.query("relaunch") !== "false";
     if (process.platform !== "darwin") {
+      const cmd = agentId === "antigravity" ? "agy" : "claude /login";
       return c.json(
         {
-          error:
-            "opening a terminal is only wired up on macOS: run `claude /login` yourself, then press Start",
+          error: `opening a terminal is only wired up on macOS: run \`${cmd}\` yourself, then press Start`,
         },
         501,
       );
     }
-    const bin = launcher.binFor("claude-code");
-    if (!bin) {
-      return c.json({ error: "claude-code is not installed (no claude on PATH)" }, 400);
-    }
-    // The login must run against the SAME isolated home the launches use. On
-    // macOS the CLI keys its keychain entry to the config directory, so a
-    // plain `claude /login` signs the user's terminal in and leaves every
-    // launch exactly as signed out as before — a button that "works" forever.
-    const home = launcher.claudeConfigHome();
-    try {
-      // A first sign-in can predate the first launch; the CLI needs the
-      // directory to exist before it can write a login into it.
-      mkdirSync(home, { recursive: true });
-      openClaudeLogin(bin, home);
-    } catch (err) {
-      return c.json(
-        { error: `could not open Terminal: ${err instanceof Error ? err.message : String(err)}` },
-        500,
+    if (agentId === "claude-code") {
+      const bin = launcher.binFor("claude-code");
+      if (!bin) {
+        return c.json({ error: "claude-code is not installed (no claude on PATH)" }, 400);
+      }
+      // The login must run against the SAME isolated home the launches use. On
+      // macOS the CLI keys its keychain entry to the config directory, so a
+      // plain `claude /login` signs the user's terminal in and leaves every
+      // launch exactly as signed out as before — a button that "works" forever.
+      const home = launcher.claudeConfigHome();
+      try {
+        // A first sign-in can predate the first launch; the CLI needs the
+        // directory to exist before it can write a login into it.
+        mkdirSync(home, { recursive: true });
+        openClaudeLogin(bin, home);
+      } catch (err) {
+        return c.json(
+          { error: `could not open Terminal: ${err instanceof Error ? err.message : String(err)}` },
+          500,
+        );
+      }
+      // A second press replaces the watch rather than stacking one: the user is
+      // signing in once, in one terminal, and the fresh window is the one to wait
+      // on.
+      replaceWatch(
+        "claude-code",
+        watchForClaudeSignIn(launcher, claudeSignInFiles(home)),
       );
+      return c.json({ opened: true, watching: true, watchMs: SIGNIN_WATCH_MS });
     }
-    // A second press replaces the watch rather than stacking one: the user is
-    // signing in once, in one terminal, and the fresh window is the one to wait
-    // on.
-    watching?.();
-    watching = watchForClaudeSignIn(launcher, claudeSignInFiles(home));
-    return c.json({ opened: true, watching: true, watchMs: SIGNIN_WATCH_MS });
+    if (agentId === "antigravity") {
+      const bin = launcher.binFor("antigravity");
+      if (!bin) {
+        return c.json({ error: "antigravity is not installed (no agy on PATH)" }, 400);
+      }
+      try {
+        openAntigravityLogin(bin);
+      } catch (err) {
+        return c.json(
+          { error: `could not open Terminal: ${err instanceof Error ? err.message : String(err)}` },
+          500,
+        );
+      }
+      replaceWatch(
+        "antigravity",
+        relaunch ? watchForAntigravitySignIn(launcher, bin) : null,
+      );
+      return c.json({
+        opened: true,
+        watching: relaunch,
+        watchMs: relaunch ? SIGNIN_WATCH_MS : 0,
+      });
+    }
+    return c.json({ error: `unknown agent: ${agentId}` }, 400);
+  };
+
+  app.post("/api/agents/:agentId/signin", (c) => {
+    return handleSignIn(c, c.req.param("agentId"));
+  });
+
+  app.post("/api/agents/claude-code/signin", (c) => {
+    return handleSignIn(c, "claude-code");
   });
 }
 
@@ -1361,6 +1404,15 @@ export function claudeLoginScript(bin: string, configDir: string): string {
   return `tell application "Terminal"\nactivate\ndo script "${applescript}"\nend tell`;
 }
 
+/**
+ * The AppleScript that puts `agy` in front of the user to sign in interactively.
+ */
+export function antigravityLoginScript(bin: string): string {
+  const shell = shellQuote(bin);
+  const applescript = shell.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `tell application "Terminal"\nactivate\ndo script "${applescript}"\nend tell`;
+}
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -1378,6 +1430,26 @@ function openClaudeLogin(bin: string, configDir: string): void {
   child.on("error", () => {});
 }
 
+function openAntigravityLogin(bin: string): void {
+  const child = spawn("osascript", ["-e", antigravityLoginScript(bin)], {
+    stdio: "ignore",
+    detached: true,
+  });
+  child.unref();
+  child.on("error", () => {});
+}
+
+/**
+ * Checks whether Antigravity is authenticated by testing `agy models`.
+ */
+export async function verifyAntigravityAuth(
+  bin: string,
+  env: NodeJS.ProcessEnv = process.env,
+  timeoutMs = 30_000,
+): Promise<boolean> {
+  return (await probeAntigravityAuth(bin, env, timeoutMs)).ok;
+}
+
 /** What the watch needs of the launcher. Stated so a test can stand in for it. */
 type SignInLauncher = {
   chatBusy(): boolean;
@@ -1387,11 +1459,6 @@ type SignInLauncher = {
 
 /**
  * Watches for a login landing, and starts the agent when one does.
- *
- * Polls mtimes rather than fs.watch: the two paths may not exist yet — that is
- * the whole point of a first sign-in — and watching a directory for a file that
- * arrives, on two platforms' worth of atomic-rename behaviour, is more moving
- * parts than looking twice a second at two numbers.
  *
  * Returns a cancel. The timer is unref'd, so a watch nobody cancels cannot hold
  * the process open at shutdown.
@@ -1418,6 +1485,55 @@ export function watchForClaudeSignIn(
       // running — is not worth an unhandled rejection. Start is still there.
     });
   }, opts.pollMs ?? SIGNIN_POLL_MS);
+  timer.unref?.();
+  let done = false;
+  function cancel(): void {
+    if (done) return;
+    done = true;
+    clearInterval(timer);
+  }
+  return cancel;
+}
+
+export function watchForAntigravitySignIn(
+  launcher: SignInLauncher,
+  bin: string,
+  opts: {
+    pollMs?: number;
+    windowMs?: number;
+    verifier?: () => Promise<boolean>;
+  } = {},
+): () => void {
+  // Antigravity's working credential is in Keychain, so file mtimes cannot
+  // prove that login landed. Probe the CLI itself; checking stays single-flight
+  // because agy starts a loopback helper and may take several seconds.
+  const deadline = Date.now() + (opts.windowMs ?? SIGNIN_WATCH_MS);
+  const verify = opts.verifier ?? (() => verifyAntigravityAuth(bin));
+  let checking = false;
+
+  const timer = setInterval(async () => {
+    if (checking) return;
+    if (Date.now() >= deadline) {
+      cancel();
+      return;
+    }
+
+    checking = true;
+    try {
+      const ok = await verify();
+      if (!ok) {
+        checking = false;
+        return;
+      }
+      cancel();
+      if (launcher.chatBusy()) return;
+      const model = launcher.lastModelFor("antigravity");
+      void Promise.resolve(launcher.start("antigravity", model ?? undefined)).catch(() => {});
+    } catch {
+      checking = false;
+    }
+  }, opts.pollMs ?? SIGNIN_POLL_MS);
+
   timer.unref?.();
   let done = false;
   function cancel(): void {

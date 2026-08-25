@@ -249,6 +249,19 @@ export type AgentSpec = {
     model?: string,
   ) => string[];
   /**
+   * Safely warms and verifies authentication before starting confinement for a run.
+   * Runs unconfined without prompt or mail data. If the credential is expired but
+   * refreshable, refreshes it; if unauthenticated, detects auth required fast.
+   */
+  warmAuth?: (
+    ctx: LaunchContext,
+    bin: string,
+    env: NodeJS.ProcessEnv,
+  ) => Promise<
+    | { ok: true }
+    | { ok: false; authRequired: boolean; reason: string }
+  >;
+  /**
    * Extra child env, overlayed on the inherited env (and the widened PATH).
    * Grok has no --strict-mcp-config; GROK_HOME plus these flags keep the
    * process from picking up the user's other MCP servers.

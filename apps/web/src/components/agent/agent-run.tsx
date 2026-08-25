@@ -348,7 +348,7 @@ function Unanswered({
           Your agent is signed out, so it could not answer. Sign in and this
           message is handed over again.
         </Warning>
-        <AgentSignIn className="pl-[22px]" />
+        <AgentSignIn agentId={exit?.id} className="pl-[22px]" />
       </div>
     );
   }

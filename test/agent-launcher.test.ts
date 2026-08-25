@@ -1332,6 +1332,39 @@ exec /bin/sleep 60
     launcher.close();
   });
 
+  it("fails an Antigravity-style run before spawning when sign-in is required", async () => {
+    const bin = fakeBinDir("fake-agent", "#!/bin/sh\nexit 0\n");
+    let builtRun = false;
+    const launcher = new AgentLauncher(
+      CTX,
+      specs({
+        runArgs: () => {
+          builtRun = true;
+          return [];
+        },
+        warmAuth: async () => ({
+          ok: false,
+          authRequired: true,
+          reason: "Antigravity needs sign-in",
+        }),
+      }),
+      { PATH: bin },
+    );
+    cleanups.push(() => launcher.close());
+
+    const result = await launcher.runOnce({
+      runId: "auth-required",
+      agentId: "fake",
+      prompt: "do the thing",
+    });
+
+    expectStatus(result, "error");
+    expect(result.log).toContain("[boxaide] auth-required:");
+    expect(result.log).not.toContain("accounts.google.com");
+    expect(builtRun).toBe(false);
+    expect(launcher.runCapacity()).toBe(launcher.runLimit());
+  });
+
   /**
    * A scheduled run loses the network: everything but loopback is denied by
    * the sandbox, and its way out is the allowlisting proxy. macOS only, like

@@ -373,6 +373,23 @@ describe("readAgyLine", () => {
 });
 
 describe("AgyDriver", () => {
+  it("marks an OAuth failure as requiring sign-in", async () => {
+    const fake = fakeCli([{ status: "ERROR", error: "authentication failed or timed out" }]);
+    const { channel } = make();
+    const stops: Array<{ error: string | null; authRequired: boolean }> = [];
+    const driver = drive(channel, fake, {
+      maxFailures: 1,
+      onStop: (error, cause) => stops.push({ error, authRequired: cause.authRequired }),
+    });
+
+    channel.post({ role: "user", text: "read everything" });
+    await driver.done;
+
+    expect(stops).toHaveLength(1);
+    expect(stops[0]?.authRequired).toBe(true);
+    expect(stops[0]?.error).toMatch(/antigravity is not signed in/i);
+  });
+
   it("answers a user turn from the result event and carries the conversation forward", async () => {
     const fake = fakeCli([
       { conversation: "conv-1", answer: "two invoices came in" },

@@ -14,13 +14,25 @@ import { cn } from "@/lib/utils";
  * in full on hover, while the pane can give it a line of its own.
  */
 export function AgentSignIn({
+  agentId,
+  relaunch = true,
   compact = false,
   className,
 }: {
+  agentId?: string;
+  relaunch?: boolean;
   compact?: boolean;
   className?: string;
 }) {
-  const { signIn, waiting, error } = useAgentSignIn();
+  const { signIn, waiting, opened, error } = useAgentSignIn(agentId, relaunch);
+
+  if (opened && !relaunch) {
+    return (
+      <span className={cn("text-[12px] leading-4 text-fg-tertiary", className)}>
+        Finish signing in in Terminal, then run this automation again.
+      </span>
+    );
+  }
 
   if (waiting) {
     return (

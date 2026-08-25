@@ -1993,8 +1993,14 @@ export function startLocalAgent(
  * wait on, so the caller watches GET /api/agents for `running` instead. A
  * machine that has no Terminal to open answers 501 with a sentence.
  */
-export function signInLocalAgent(ctx: Ctx): Promise<Record<string, never>> {
-  return request<Record<string, never>>("/api/agents/claude-code/signin", {
+export function signInLocalAgent(
+  ctx: Ctx,
+  agentId = "claude-code",
+  relaunch = true,
+): Promise<Record<string, never>> {
+  return request<Record<string, never>>(`/api/agents/${encodeURIComponent(agentId)}/signin${
+    relaunch ? "" : "?relaunch=false"
+  }`, {
     method: "POST",
     baseUrl: ctx.baseUrl,
     token: ctx.token,
