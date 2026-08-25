@@ -23,16 +23,16 @@
     "better-sqlite3": "^13.0.3",
     "cron-parser": "^5.10.0",
     "electron-updater": "^6.6.2",
-    "hono": "^4.13.2",
+    "hono": "^4.13.3",
     "ical.js": "^2.2.1",
-    "imapflow": "^1.7.1",
+    "imapflow": "^1.7.2",
     "mailparser": "^3.9.15",
     "nodemailer": "^9.0.5",
     "tsdav": "^2.3.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "electron": "^43.4.0",
+    "electron": "^43.4.1",
     "electron-builder": "^26.15.3"
   },
   "allowScripts": {
