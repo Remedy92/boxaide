@@ -1072,9 +1072,9 @@ export function syncCrm(ctx: Ctx): Promise<CrmSyncResult> {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Deliberately absent from this file: POST /api/automations and
- * DELETE /api/automations/:id. Automations are written by talking to the agent
- * (spec: Web UI), so the UI has no create form and gets no create call.
+ * Deliberately absent from this file: POST /api/automations. Automations are
+ * written by talking to the agent (spec: Web UI), so the UI has no create form
+ * and gets no create call.
  */
 export async function listAutomations(ctx: Ctx): Promise<Automation[]> {
   const data = await request<{ automations: Automation[] }>("/api/automations", {
@@ -1083,6 +1083,30 @@ export async function listAutomations(ctx: Ctx): Promise<Automation[]> {
     signal: ctx.signal,
   });
   return data.automations;
+}
+
+/**
+ * DELETE /api/automations/:id. Removes the automation and all its run rows.
+ * 404 is normalised to {deleted: false}.
+ */
+export async function deleteAutomation(
+  automationId: string,
+  ctx: Ctx,
+): Promise<{ deleted: boolean }> {
+  try {
+    return await request<{ deleted: boolean }>(
+      `/api/automations/${encodeURIComponent(automationId)}`,
+      {
+        method: "DELETE",
+        baseUrl: ctx.baseUrl,
+        token: ctx.token,
+        signal: ctx.signal,
+      },
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return { deleted: false };
+    throw err;
+  }
 }
 
 /**

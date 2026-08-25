@@ -1,17 +1,29 @@
 "use client";
 
 import * as React from "react";
-import { ChevronDown, ChevronRight, Play } from "lucide-react";
+import { ChevronDown, ChevronRight, Play, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Spinner, StatusDot } from "@/components/atoms";
 import { AutomationAgentSelect } from "@/components/automations/automation-agent-select";
 import { RunHistory } from "@/components/automations/run-history";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { friendlyError } from "@/lib/api/errors";
 import { describeCron, runStatusLabel } from "@/lib/format/automation";
 import { formatReaderDate, isoAttr, isoTitle } from "@/lib/format/date";
 import {
+  useDeleteAutomation,
   useRunAutomationNow,
   useToggleAutomation,
 } from "@/lib/hooks/use-automations";
@@ -39,6 +51,7 @@ export function AutomationCard({ automation }: { automation: Automation }) {
   const toggle = useToggleAutomation();
   const runNow = useRunAutomationNow();
   const [showRuns, setShowRuns] = React.useState(false);
+  const [pendingDelete, setPendingDelete] = React.useState(false);
   const switchId = `automation-${automation.id}-enabled`;
 
   const setEnabled = (enabled: boolean) => {
@@ -189,11 +202,99 @@ export function AutomationCard({ automation }: { automation: Automation }) {
           )}
           Runs
         </Button>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Delete ${automation.name}`}
+              className="ml-auto text-fg-tertiary hover:text-danger"
+              onClick={() => setPendingDelete(true)}
+            >
+              <Trash2 className="size-3.5" strokeWidth={1.5} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Delete automation</TooltipContent>
+        </Tooltip>
       </div>
+
+      <DeleteAutomationConfirm
+        automation={pendingDelete ? automation : null}
+        onClose={() => setPendingDelete(false)}
+      />
 
       {/* Mounted only while open: each run row carries up to 4 KiB of decrypted
           log, and that is mail-derived text nobody asked to see. */}
       {showRuns && <RunHistory automationId={automation.id} />}
     </section>
+  );
+}
+
+/**
+ * The confirmation asked before an automation and its run history are destroyed.
+ */
+export function DeleteAutomationConfirm({
+  automation,
+  onClose,
+}: {
+  automation: Automation | null;
+  onClose: () => void;
+}) {
+  const remove = useDeleteAutomation();
+
+  const confirm = () => {
+    if (!automation) return;
+    remove.mutate(automation.id, {
+      onSuccess: (result) => {
+        onClose();
+        if (result.deleted) {
+          toast.success(`Deleted ${automation.name}`);
+        } else {
+          toast.warning(`${automation.name} was already gone`);
+        }
+      },
+      onError: (error) => {
+        toast.error("Could not delete that automation", {
+          description: friendlyError(
+            error instanceof Error ? error.message : error,
+          ),
+        });
+      },
+    });
+  };
+
+  return (
+    <AlertDialog
+      open={automation !== null}
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+    >
+      <AlertDialogContent size="sm">
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete this automation?</AlertDialogTitle>
+          <AlertDialogDescription>
+            “{automation?.name}” and its past run history will be deleted.
+            Nothing undoes this.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel variant="ghost">Keep it</AlertDialogCancel>
+          <AlertDialogAction
+            variant="destructive"
+            disabled={remove.isPending}
+            onClick={(event) => {
+              event.preventDefault();
+              confirm();
+            }}
+          >
+            {remove.isPending && <Spinner />}
+            {remove.isPending ? "Deleting…" : "Delete automation"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }

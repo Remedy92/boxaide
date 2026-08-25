@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 import {
+  deleteAutomation,
   getAutomationBadge,
   listAutomationRuns,
   listAutomations,
@@ -13,11 +14,11 @@ import {
 import { useApiCtx } from "@/lib/hooks/use-settings";
 
 /**
- * The Automations view's reads and its three writes.
+ * The Automations view's reads and its writes.
  *
  * There is no create hook: automations are authored by talking to the agent
  * (spec: Web UI), so this app can only change how a run happens — pause it,
- * run it now, choose the agent and model — and read what happened.
+ * run it now, choose the agent and model, delete it — and read what happened.
  */
 export function useAutomations(enabled = true) {
   const ctx = useApiCtx();
@@ -162,6 +163,19 @@ export function useRunAutomationNow() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["automation-runs"] });
       void queryClient.invalidateQueries({ queryKey: ["automations"] });
+    },
+  });
+}
+
+export function useDeleteAutomation() {
+  const ctx = useApiCtx();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (automationId: string) => deleteAutomation(automationId, ctx),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["automations"] });
+      void queryClient.invalidateQueries({ queryKey: ["automation-runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["automation-badge"] });
     },
   });
 }
