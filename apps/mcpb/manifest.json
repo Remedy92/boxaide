@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "boxaide",
   "display_name": "Boxaide",
-  "version": "0.2.40",
+  "version": "0.2.41",
   "description": "Your mailboxes as MCP tools — read, search, draft and send from Boxaide.",
   "long_description": "Connects Claude to the Boxaide app running on this machine. Claude can then read and search mail across every connected mailbox, write drafts, and — only when you ask — send. It also gets the chat tools that hold a conversation inside the Boxaide window, plus the CRM, automation and outreach tools the live server lists.\n\nNothing to configure: the connector finds your local Boxaide server and its access token on its own. Install the Boxaide app first, from https://github.com/Remedy92/boxaide.",
   "author": { "name": "Boxaide contributors" },
