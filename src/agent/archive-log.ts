@@ -116,6 +116,29 @@ export class ArchiveLog {
     return out.reverse();
   }
 
+  private sweepRows(sweepId: number): AgentArchiveRow[] {
+    const rows = this.store.listAgentArchives();
+    const start = rows.findIndex((r) => r.id === sweepId);
+    if (start < 0) throw new Error("that sweep is no longer on record");
+    const sweep: AgentArchiveRow[] = [rows[start]];
+    for (let i = start + 1; i < rows.length; i += 1) {
+      if (!sameRun(sweep[sweep.length - 1], rows[i])) break;
+      sweep.push(rows[i]);
+    }
+    return sweep;
+  }
+
+  /**
+   * Drops a sweep without moving anything back.
+   *
+   * The user has read the card and is happy with the messages staying where
+   * the agent put them. All rows belonging to the sweep are forgotten.
+   */
+  dismiss(sweepId: number): void {
+    const sweep = this.sweepRows(sweepId);
+    this.store.deleteAgentArchives(sweep.map((r) => r.id));
+  }
+
   /**
    * Move a whole sweep back where it came from.
    *
@@ -128,15 +151,7 @@ export class ArchiveLog {
    * leave behind a card whose only button does nothing.
    */
   async undo(sweepId: number): Promise<{ restored: number; failed: number }> {
-    const rows = this.store.listAgentArchives();
-    const start = rows.findIndex((r) => r.id === sweepId);
-    if (start < 0) throw new Error("that sweep is no longer on record");
-    const sweep: AgentArchiveRow[] = [rows[start]];
-    for (let i = start + 1; i < rows.length; i += 1) {
-      if (!sameRun(sweep[sweep.length - 1], rows[i])) break;
-      sweep.push(rows[i]);
-    }
-
+    const sweep = this.sweepRows(sweepId);
     let restored = 0;
     let failed = 0;
     const done: number[] = [];

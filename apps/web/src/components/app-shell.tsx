@@ -567,6 +567,7 @@ function Shell() {
 
       <ConnectMailboxDialog
         open={app.dialog === "connect"}
+        account={app.editAccountTarget}
         onOpenChange={(open) => (open ? undefined : app.closeDialog())}
       />
       <ComposeDialog

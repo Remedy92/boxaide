@@ -29,6 +29,7 @@ import {
 } from "@/lib/constants";
 import { useCreateAccount } from "@/lib/hooks/use-account-mutations";
 import { useAccounts } from "@/lib/hooks/use-accounts";
+import type { MailAccountMeta } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type Form = {
@@ -45,25 +46,6 @@ type Form = {
 const DEFAULT_PRESET = "gmail";
 
 /**
- * The form starts on the default preset's hosts, not blank. A checked "Gmail"
- * chip above two empty host fields claims a preset was applied when it was not.
- */
-function formForPreset(id: string): Form {
-  const preset =
-    PROVIDER_PRESETS.find((entry) => entry.id === id) ?? PROVIDER_PRESETS[0];
-  return {
-    alias: "",
-    email: "",
-    password: "",
-    username: "",
-    imapHost: preset.imapHost,
-    imapPort: String(preset.imapPort || DEFAULT_IMAP_PORT),
-    smtpHost: preset.smtpHost,
-    smtpPort: String(preset.smtpPort || DEFAULT_SMTP_PORT),
-  };
-}
-
-/**
  * Two fields and a button. Everything else — the name, the username, four host
  * and port boxes — is filled in from the address and hidden behind "More
  * settings", because the only two answers a person actually holds are their
@@ -73,19 +55,83 @@ function formForPreset(id: string): Form {
  * matching what web/app.js already sends, and `imapSecure` is always true. A
  * fifth toggle to get wrong helps nobody.
  */
+function initialFormForAccount(account?: MailAccountMeta | null): {
+  form: Form;
+  preset: string;
+  pinned: boolean;
+} {
+  if (account) {
+    const p = presetForEmail(account.email) ?? PROVIDER_PRESETS[0];
+    return {
+      form: {
+        alias: account.alias,
+        email: account.email,
+        password: "",
+        username: account.email,
+        imapHost: p.imapHost,
+        imapPort: String(p.imapPort || DEFAULT_IMAP_PORT),
+        smtpHost: p.smtpHost,
+        smtpPort: String(p.smtpPort || DEFAULT_SMTP_PORT),
+      },
+      preset: p.id,
+      pinned: true,
+    };
+  }
+  const preset =
+    PROVIDER_PRESETS.find((entry) => entry.id === DEFAULT_PRESET) ??
+    PROVIDER_PRESETS[0];
+  return {
+    form: {
+      alias: "",
+      email: "",
+      password: "",
+      username: "",
+      imapHost: preset.imapHost,
+      imapPort: String(preset.imapPort || DEFAULT_IMAP_PORT),
+      smtpHost: preset.smtpHost,
+      smtpPort: String(preset.smtpPort || DEFAULT_SMTP_PORT),
+    },
+    preset: DEFAULT_PRESET,
+    pinned: false,
+  };
+}
+
 export function ConnectMailboxDialog({
   open,
+  account,
   onOpenChange,
 }: {
   open: boolean;
+  account?: MailAccountMeta | null;
   onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      {open && (
+        <ConnectMailboxContent
+          key={account ? `edit-${account.id}` : "new"}
+          account={account}
+          onClose={() => onOpenChange(false)}
+        />
+      )}
+    </Dialog>
+  );
+}
+
+function ConnectMailboxContent({
+  account,
+  onClose,
+}: {
+  account?: MailAccountMeta | null;
+  onClose: () => void;
 }) {
   const accounts = useAccounts();
   const create = useCreateAccount();
-  const [form, setForm] = React.useState<Form>(() => formForPreset(DEFAULT_PRESET));
-  const [preset, setPreset] = React.useState(DEFAULT_PRESET);
+  const initial = React.useMemo(() => initialFormForAccount(account), [account]);
+  const [form, setForm] = React.useState<Form>(initial.form);
+  const [preset, setPreset] = React.useState(initial.preset);
   const [reveal, setReveal] = React.useState(false);
-  const [advanced, setAdvanced] = React.useState(false);
+  const [advanced, setAdvanced] = React.useState(Boolean(account && initial.preset === "other"));
   const [validation, setValidation] = React.useState<string | null>(null);
   const emailRef = React.useRef<HTMLInputElement | null>(null);
   const passwordRef = React.useRef<HTMLInputElement | null>(null);
@@ -94,7 +140,7 @@ export function ConnectMailboxDialog({
   /* A chip picked by hand keeps its hosts: a custom domain on Google Workspace,
      or Other in front of a company gateway, must survive the rest of the
      address being typed. Only the chip row sets this. */
-  const pinned = React.useRef(false);
+  const pinned = React.useRef(initial.pinned);
 
   const chosen = PROVIDER_PRESETS.find((entry) => entry.id === preset);
   /* The name that will be stored: what was typed under More settings, or the
@@ -151,16 +197,6 @@ export function ConnectMailboxDialog({
     }));
   };
 
-  const reset = () => {
-    setForm(formForPreset(DEFAULT_PRESET));
-    setPreset(DEFAULT_PRESET);
-    pinned.current = false;
-    setValidation(null);
-    setReveal(false);
-    setAdvanced(false);
-    create.reset();
-  };
-
   const credentials = () => ({
     imapHost: form.imapHost.trim(),
     imapPort: Number(form.imapPort) || DEFAULT_IMAP_PORT,
@@ -210,13 +246,13 @@ export function ConnectMailboxDialog({
 
   const onSave = () => {
     if (!requireBasics()) return;
+    const isUpdate = Boolean(account || existing);
     create.mutate(
-      { alias, email: form.email.trim(), ...credentials() },
+      { id: account?.id ?? existing?.id, alias, email: form.email.trim(), ...credentials() },
       {
         onSuccess: () => {
-          toast.success("Mailbox connected");
-          reset();
-          onOpenChange(false);
+          toast.success(isUpdate ? "Mailbox updated" : "Mailbox connected");
+          onClose();
         },
       },
     );
@@ -226,34 +262,28 @@ export function ConnectMailboxDialog({
   const presetRefs = React.useRef(new Map<string, HTMLButtonElement>());
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next) reset();
-        onOpenChange(next);
+    <DialogContent
+      className="max-w-[480px]"
+      // The bundled UI submitted on Enter from any credential field
+      // (web/app.js:560). This dialog renders no <form>, so the same
+      // affordance has to be wired explicitly or Enter does nothing.
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" || event.metaKey || event.ctrlKey) return;
+        if (!(event.target instanceof HTMLInputElement)) return;
+        event.preventDefault();
+        if (!busy) onSave();
       }}
     >
-      <DialogContent
-        className="max-w-[480px]"
-        // The bundled UI submitted on Enter from any credential field
-        // (web/app.js:560). This dialog renders no <form>, so the same
-        // affordance has to be wired explicitly or Enter does nothing.
-        onKeyDown={(event) => {
-          if (event.key !== "Enter" || event.metaKey || event.ctrlKey) return;
-          if (!(event.target instanceof HTMLInputElement)) return;
-          event.preventDefault();
-          if (!busy) onSave();
-        }}
-      >
-        <DialogHeader>
-          <DialogTitle className="title-15">
-            Connect a mailbox
-          </DialogTitle>
-          <DialogDescription>
-            Boxaide stores these credentials encrypted on your own machine and
-            never sends them anywhere else.
-          </DialogDescription>
-        </DialogHeader>
+      <DialogHeader>
+        <DialogTitle className="title-15">
+          {account ? `Update ${account.alias}` : "Connect a mailbox"}
+        </DialogTitle>
+        <DialogDescription>
+          {account
+            ? `Update credentials or change the email address for ${account.alias}.`
+            : "Boxaide stores these credentials encrypted on your own machine and never sends them anywhere else."}
+        </DialogDescription>
+      </DialogHeader>
         <DialogBody>
 
           {/* One tab stop, arrows move the selection — role="radio" without a
@@ -513,10 +543,7 @@ export function ConnectMailboxDialog({
             type="button"
             variant="ghost"
             disabled={busy}
-            onClick={() => {
-              reset();
-              onOpenChange(false);
-            }}
+            onClick={onClose}
           >
             Cancel
           </Button>
@@ -529,13 +556,12 @@ export function ConnectMailboxDialog({
             {create.isPending && <Spinner />}
             {create.isPending
               ? "Testing connection…"
-              : existing
+              : account || existing
                 ? "Update mailbox"
                 : "Connect mailbox"}
           </Button>
         </DialogFooter>
       </DialogContent>
-    </Dialog>
   );
 }
 

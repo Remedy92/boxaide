@@ -56,15 +56,26 @@ export function AgentApprovals() {
  */
 function SweepCard({ sweep }: { sweep: AgentArchiveSweep }) {
   const agent = useAgent();
-  const [busy, setBusy] = React.useState(false);
+  const [busy, setBusy] = React.useState<"undo" | "dismiss" | null>(null);
 
   // Nothing to move back means the button is not an undo any more. It still
   // has a job: clearing a card the user has read, which the same call does by
   // forgetting rows that can never be acted on.
   const dismissing = sweep.undoable === 0;
 
+  const dismiss = async () => {
+    setBusy("dismiss");
+    try {
+      await agent.dismissArchiveSweep(sweep.id);
+    } catch (err) {
+      toast.error(friendlyError(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const undo = async () => {
-    setBusy(true);
+    setBusy("undo");
     try {
       const { restored, failed } = await agent.undoArchiveSweep(sweep.id);
       if (dismissing) {
@@ -84,7 +95,7 @@ function SweepCard({ sweep }: { sweep: AgentArchiveSweep }) {
     } catch (err) {
       toast.error(friendlyError(err instanceof Error ? err.message : String(err)));
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
@@ -113,17 +124,44 @@ function SweepCard({ sweep }: { sweep: AgentArchiveSweep }) {
         </div>
       </div>
       <div className="mt-2 flex justify-end gap-1">
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          className="h-6 px-2 text-[12px]"
-          disabled={busy}
-          onClick={() => void undo()}
-        >
-          {busy && <Spinner />}
-          {dismissing ? "Dismiss" : "Move them back"}
-        </Button>
+        {dismissing ? (
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="h-6 px-2 text-[12px]"
+            disabled={busy !== null}
+            onClick={() => void dismiss()}
+          >
+            {busy === "dismiss" && <Spinner />}
+            Dismiss
+          </Button>
+        ) : (
+          <>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-[12px]"
+              disabled={busy !== null}
+              onClick={() => void dismiss()}
+            >
+              {busy === "dismiss" && <Spinner />}
+              Dismiss
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-6 px-2 text-[12px]"
+              disabled={busy !== null}
+              onClick={() => void undo()}
+            >
+              {busy === "undo" && <Spinner />}
+              Move them back
+            </Button>
+          </>
+        )}
       </div>
     </div>
   );

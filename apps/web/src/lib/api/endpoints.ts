@@ -149,6 +149,7 @@ export async function listAccounts(ctx: Ctx): Promise<MailAccountMeta[]> {
 }
 
 export type CreateAccountBody = {
+  id?: string;
   alias: string;
   email: string;
   imapHost: string;
@@ -776,6 +777,19 @@ export function undoAgentArchiveSweep(
   ctx: Ctx,
 ): Promise<{ restored: number; failed: number; sweeps: AgentArchiveSweep[] }> {
   return request(`/api/agent/archives/${id}/undo`, {
+    method: "POST",
+    baseUrl: ctx.baseUrl,
+    token: ctx.token,
+    signal: ctx.signal,
+  });
+}
+
+/** Drop a whole sweep without moving messages back. */
+export function dismissAgentArchiveSweep(
+  id: number,
+  ctx: Ctx,
+): Promise<{ sweeps: AgentArchiveSweep[] }> {
+  return request(`/api/agent/archives/${id}/dismiss`, {
     method: "POST",
     baseUrl: ctx.baseUrl,
     token: ctx.token,

@@ -1,6 +1,6 @@
 "use client";
 
-import { TriangleAlert, X } from "lucide-react";
+import { Pencil, TriangleAlert, X } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { friendlyError } from "@/lib/api/errors";
 import { useApp } from "@/lib/hooks/use-app-state";
@@ -120,7 +120,7 @@ export function AccountRow({
         </span>
       </button>
 
-      {/* Empty unless the mailbox failed. The remove control takes the slot on
+      {/* Empty unless the mailbox failed. Edit and remove controls take the slot on
           hover / focus-within either way. */}
       <span className="relative flex size-5 items-center justify-center">
         {failing && (
@@ -130,25 +130,57 @@ export function AccountRow({
                   reason: one mailbox that did not answer the last refresh is
                   the same event in both places, and it read red here and amber
                   there. Nothing is broken — the other mailboxes loaded. */}
-              <span
-                className="flex size-5 items-center justify-center text-warning group-hover:hidden group-focus-within:hidden"
+              <button
+                type="button"
+                aria-label={`Fix ${account.alias}: ${statusWords}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  app.requestEditAccount(account);
+                }}
+                className="flex size-5 items-center justify-center text-warning hover:opacity-80 group-hover:hidden group-focus-within:hidden cursor-pointer"
                 title={health.error}
               >
                 <TriangleAlert aria-hidden="true" className="size-3.5" strokeWidth={1.5} />
-                <span className="sr-only">{statusWords}</span>
-              </span>
+                <span className="sr-only">{statusWords}. Click to fix.</span>
+              </button>
             </TooltipTrigger>
-            <TooltipContent side="right">{statusWords}</TooltipContent>
+            <TooltipContent side="right">{statusWords}. Click to fix.</TooltipContent>
           </Tooltip>
         )}
-        <button
-          type="button"
-          aria-label={`Remove ${account.alias}`}
-          onClick={() => app.requestRemoveAccount(account)}
-          className="absolute hidden size-5 items-center justify-center rounded-[var(--radius-sm)] text-fg-tertiary hover:bg-surface-hover hover:text-fg group-focus-within:flex group-hover:flex"
-        >
-          <X aria-hidden="true" className="size-3.5" strokeWidth={1.5} />
-        </button>
+        <div className="absolute hidden items-center gap-0.5 group-focus-within:flex group-hover:flex">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={`Edit ${account.alias}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  app.requestEditAccount(account);
+                }}
+                className="flex size-5 items-center justify-center rounded-[var(--radius-sm)] text-fg-tertiary hover:bg-surface-hover hover:text-fg"
+              >
+                <Pencil aria-hidden="true" className="size-3" strokeWidth={1.5} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">Edit {account.alias}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={`Remove ${account.alias}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  app.requestRemoveAccount(account);
+                }}
+                className="flex size-5 items-center justify-center rounded-[var(--radius-sm)] text-fg-tertiary hover:bg-surface-hover hover:text-fg"
+              >
+                <X aria-hidden="true" className="size-3.5" strokeWidth={1.5} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">Remove {account.alias}</TooltipContent>
+          </Tooltip>
+        </div>
       </span>
     </div>
   );

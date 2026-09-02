@@ -6,6 +6,7 @@ import { envNamed } from "../config.js";
 import addressparser from "nodemailer/lib/addressparser/index.js";
 import type { Store } from "../db/store.js";
 import { canonicalEmail } from "../outreach/opt-out.js";
+import { imapErrorText } from "../provider/imap-smtp.js";
 import { MailIndexStore } from "./index-store.js";
 import type {
   AccountCredentials,
@@ -28,6 +29,7 @@ import type {
 } from "../provider/types.js";
 
 export type ConnectAccountInput = {
+  id?: string;
   alias: string;
   email: string;
   creds: AccountCredentials;
@@ -64,7 +66,7 @@ export type FolderListResult = {
 };
 
 function errText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return imapErrorText(err);
 }
 
 /**
@@ -143,14 +145,22 @@ export class MailService {
       throw new Error(test.error ?? "connection test failed");
     }
 
-    const existing = this.store.getAccount(alias);
-    const id = existing?.id ?? randomBytes(8).toString("hex");
+    const existing =
+      (input.id ? this.store.getAccount(input.id) : null) ??
+      this.store.getAccount(alias);
+    const id = existing?.id ?? input.id ?? randomBytes(8).toString("hex");
+    if (existing && existing.email.toLowerCase() !== input.email.trim().toLowerCase()) {
+      // The address changed: clear old cached messages so the new mailbox syncs clean.
+      this.index.deleteAccount(existing.id);
+    }
     this.store.upsertAccount({
       id,
       alias,
       email: input.email.trim(),
       creds: input.creds,
     });
+    // A successful connect/update clears any standing failure mark on this mailbox.
+    this.index.setLastError(id, "INBOX", null);
     const account = this.resolve(id);
     if (this.idleOn) this.watchAccount(account);
     return { id, alias, email: input.email.trim() };

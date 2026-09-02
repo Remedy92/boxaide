@@ -259,6 +259,10 @@ type AppStateValue = {
   removalTarget: MailAccountMeta | null;
   requestRemoveAccount: (account: MailAccountMeta) => void;
   clearRemovalTarget: () => void;
+  /** The mailbox being edited or reconnected in ConnectMailboxDialog. */
+  editAccountTarget: MailAccountMeta | null;
+  requestEditAccount: (account: MailAccountMeta) => void;
+  clearEditAccountTarget: () => void;
   settingsFocus: SettingsFocus;
   /** Non-null ⇒ the Connection section runs its test as it mounts. */
   settingsAutoTest: number | null;
@@ -444,6 +448,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [dialog, setDialog] = React.useState<DialogName | null>(null);
   const [palettePage, setPalettePage] = React.useState<PalettePage>("root");
   const [removalTarget, setRemovalTarget] =
+    React.useState<MailAccountMeta | null>(null);
+  const [editAccountTarget, setEditAccountTarget] =
     React.useState<MailAccountMeta | null>(null);
   const [railSheetOpen, setRailSheetOpen] = React.useState(false);
   const [settingsFocus, setSettingsFocus] = React.useState<SettingsFocus>(null);
@@ -783,6 +789,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     setPalettePage("root");
     setSettingsFocus(null);
     setSettingsAutoTest(null);
+    setEditAccountTarget(null);
   }, []);
 
   const requestRemoveAccount = React.useCallback(
@@ -790,6 +797,15 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     [],
   );
   const clearRemovalTarget = React.useCallback(() => setRemovalTarget(null), []);
+
+  const requestEditAccount = React.useCallback(
+    (account: MailAccountMeta) => {
+      setEditAccountTarget(account);
+      setDialog("connect");
+    },
+    [],
+  );
+  const clearEditAccountTarget = React.useCallback(() => setEditAccountTarget(null), []);
 
   /**
    * The selection Settings was opened over, so closing it can put the message
@@ -1038,6 +1054,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       removalTarget,
       requestRemoveAccount,
       clearRemovalTarget,
+      editAccountTarget,
+      requestEditAccount,
+      clearEditAccountTarget,
       settingsFocus,
       settingsAutoTest,
       settingsSection,
@@ -1102,6 +1121,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       removalTarget,
       requestRemoveAccount,
       clearRemovalTarget,
+      editAccountTarget,
+      requestEditAccount,
+      clearEditAccountTarget,
       settingsFocus,
       settingsAutoTest,
       settingsSection,

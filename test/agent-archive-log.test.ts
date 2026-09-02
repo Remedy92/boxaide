@@ -272,4 +272,75 @@ describe("the archive log", () => {
     });
     expect(log.sweeps()[0]).toMatchObject({ count: 1, undoable: 0 });
   });
+
+  it("dismisses a sweep without moving messages back", async () => {
+    const inbox = await mail.listMessages("personal", { limit: 5 });
+    const ids = inbox.messages.slice(0, 2).map((m) => m.id);
+    for (const id of ids) {
+      await call("message_archive", { account: "personal", messageId: id });
+    }
+    const [sweep] = log.sweeps();
+    expect(sweep.count).toBe(2);
+
+    log.dismiss(sweep.id);
+    // The sweep card is gone.
+    expect(log.sweeps()).toHaveLength(0);
+
+    // Messages stay archived where the agent put them.
+    const inInbox = await mail.listMessages("personal", { folder: "INBOX", limit: 20 });
+    expect(inInbox.messages.map((m) => m.id)).not.toContain(ids[0]);
+    expect(inInbox.messages.map((m) => m.id)).not.toContain(ids[1]);
+  });
+
+  it("dismisses a sweep over HTTP", async () => {
+    const TOKEN = "test-token-abcdefghijklmnop";
+    const rt = createRuntime({
+      dataDir: ":memory:",
+      masterKey: randomBytes(32),
+      bearerToken: TOKEN,
+      host: "127.0.0.1",
+      port: 0,
+      fixtureMode: true,
+      allowedOrigins: [],
+      store: new Store(randomBytes(32), ":memory:"),
+      provider: new FixtureProvider(),
+    });
+    const headers = {
+      Authorization: `Bearer ${TOKEN}`,
+      "Content-Type": "application/json",
+    };
+    await rt.app.request("/api/accounts", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        alias: "personal",
+        email: "you@personal.test",
+        username: "you@personal.test",
+        password: "ok",
+        imapHost: "fixture",
+        smtpHost: "fixture",
+      }),
+    });
+
+    rt.platform.archiveLog!.record({
+      accountId: "personal",
+      messageId: "m1",
+      fromFolder: "INBOX",
+      toFolder: "Archive",
+      agent: "claude",
+      chatId: null,
+    });
+
+    const [sweep] = rt.platform.archiveLog!.sweeps();
+    expect(sweep).toBeDefined();
+
+    const dismissed = await rt.app.request(
+      `/api/agent/archives/${sweep.id}/dismiss`,
+      { method: "POST", headers },
+    );
+    expect(dismissed.status).toBe(200);
+    expect(await dismissed.json()).toEqual({ sweeps: [] });
+    expect(rt.platform.archiveLog!.sweeps()).toHaveLength(0);
+    rt.store.close();
+  });
 });

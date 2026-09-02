@@ -310,5 +310,37 @@ describe("MailService survives corrupted account credentials row (P0)", () => {
     expect(res.messages.map((m) => m.subject)).toEqual(["Good mail"]);
     expect(res.errors.map((e) => e.account)).toEqual(["corrupt"]);
   });
+
+  it("reconnecting or updating an existing account clears last_error and purges cache on email change", async () => {
+    const store = new Store(randomBytes(32), ":memory:");
+    const provider = new FixtureProvider();
+    const mail = new MailService(store, provider);
+
+    const acc = await mail.connectAccount({
+      alias: "work",
+      email: "old@work.com",
+      creds: { ...baseCreds, auth: { kind: "password", user: "old@work.com", pass: "ok" } },
+    });
+
+    // Simulate an error on the mailbox
+    mail["index"].setLastError(acc.id, "INBOX", "Command failed");
+    expect(mail["index"].getState(acc.id, "INBOX")?.lastError).toBe("Command failed");
+
+    // Updating credentials with the same alias and a new email
+    const updated = await mail.connectAccount({
+      id: acc.id,
+      alias: "work",
+      email: "new@work.com",
+      creds: { ...baseCreds, auth: { kind: "password", user: "new@work.com", pass: "newpass" } },
+    });
+
+    expect(updated.id).toBe(acc.id);
+    expect(updated.email).toBe("new@work.com");
+    // Verifies last_error was cleared
+    expect(mail["index"].getState(acc.id, "INBOX")?.lastError).toBeNull();
+
+    const stored = store.getAccount(acc.id);
+    expect(stored?.email).toBe("new@work.com");
+  });
 });
 

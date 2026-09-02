@@ -2,6 +2,8 @@
 
 import { Button } from "@/components/ui/button";
 import { friendlyError } from "@/lib/api/errors";
+import { useApp } from "@/lib/hooks/use-app-state";
+import { useAccounts } from "@/lib/hooks/use-accounts";
 import type { AccountError } from "@/lib/types";
 
 /**
@@ -23,9 +25,20 @@ export function AccountErrorBanner({
   total: number;
   onRetry: () => void;
 }) {
+  const app = useApp();
+  const accounts = useAccounts();
   const failing = errors.length > 0;
   const loaded = Math.max(total - errors.length, 0);
   const raw = errors.map((entry) => `${entry.account}: ${entry.error}`).join("\n");
+
+  const onFix = (accountAlias: string) => {
+    const acc = (accounts.data ?? []).find((a) => a.alias === accountAlias);
+    if (acc) {
+      app.requestEditAccount(acc);
+    } else {
+      app.openDialog("connect");
+    }
+  };
 
   // The live region is mounted whether or not it has content. A region created
   // in the same commit as its first content is not announced by most AT — and
@@ -60,6 +73,18 @@ export function AccountErrorBanner({
           >
             Retry
           </Button>
+          {errors.map((entry) => (
+            <Button
+              key={`fix-${entry.account}`}
+              type="button"
+              variant="link"
+              size="sm"
+              className="ml-2 h-4 px-0 text-warning underline font-medium"
+              onClick={() => onFix(entry.account)}
+            >
+              Fix {entry.account}
+            </Button>
+          ))}
         </>
       )}
     </div>

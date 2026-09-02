@@ -47,6 +47,7 @@ type ConnectCredentialFields = {
 };
 
 type ConnectAccountBody = ConnectCredentialFields & {
+  id?: string;
   alias: string;
   email: string;
 };
@@ -428,6 +429,7 @@ export function createApi(
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
     try {
       const account = await mail.connectAccount({
+        id: body.id,
         alias: body.alias,
         email: body.email,
         creds: parsed.creds,
@@ -851,6 +853,21 @@ function registerAgentRoutes(
     try {
       const result = await archiveLog.undo(id);
       return c.json({ ...result, sweeps: archiveLog.sweeps() });
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        404,
+      );
+    }
+  });
+
+  app.post("/api/agent/archives/:id/dismiss", (c) => {
+    if (!archiveLog) return c.json({ error: "not available" }, 404);
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id)) return c.json({ error: "bad sweep id" }, 400);
+    try {
+      archiveLog.dismiss(id);
+      return c.json({ sweeps: archiveLog.sweeps() });
     } catch (err) {
       return c.json(
         { error: err instanceof Error ? err.message : String(err) },

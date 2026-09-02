@@ -16,6 +16,7 @@ import {
   streamAgent,
   unarchiveAgentChat,
   undoAgentArchiveSweep,
+  dismissAgentArchiveSweep,
   type AgentApproval,
   type AgentArchiveSweep,
 } from "@/lib/api/endpoints";
@@ -144,6 +145,8 @@ export type AgentConversation = {
   archiveSweeps: AgentArchiveSweep[];
   /** Moves one sweep back. Resolves with what actually made it. */
   undoArchiveSweep: (id: number) => Promise<{ restored: number; failed: number }>;
+  /** Drops a sweep without moving messages back. */
+  dismissArchiveSweep: (id: number) => Promise<void>;
 };
 
 /**
@@ -557,6 +560,14 @@ function AgentSession({
     [ctx],
   );
 
+  const dismissArchiveSweep = React.useCallback(
+    async (id: number) => {
+      const result = await dismissAgentArchiveSweep(id, ctx);
+      setArchiveSweeps(result.sweeps);
+    },
+    [ctx],
+  );
+
   const value = React.useMemo<AgentConversation>(
     () => ({
       turns,
@@ -582,6 +593,7 @@ function AgentSession({
       decideApproval,
       archiveSweeps,
       undoArchiveSweep,
+      dismissArchiveSweep,
     }),
     [
       turns,
@@ -607,6 +619,7 @@ function AgentSession({
       decideApproval,
       archiveSweeps,
       undoArchiveSweep,
+      dismissArchiveSweep,
     ],
   );
 

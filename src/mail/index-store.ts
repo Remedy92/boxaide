@@ -271,9 +271,15 @@ export class MailIndexStore {
   setLastError(accountId: string, folder: string, error: string | null): void {
     this.db
       .prepare(
-        `UPDATE mailbox_state SET last_error = ? WHERE account_id = ? AND folder = ?`,
+        `INSERT INTO mailbox_state (
+           account_id, folder, uidvalidity, highest_modseq, uidnext,
+           exists_count, dirty, synced_at, last_error, covered_since
+         ) VALUES (
+           ?, ?, 0, null, null, 0, 0, null, ?, null
+         )
+         ON CONFLICT(account_id, folder) DO UPDATE SET last_error = excluded.last_error`,
       )
-      .run(error, accountId, folder);
+      .run(accountId, folder, error);
   }
 
   listMessages(opts: {

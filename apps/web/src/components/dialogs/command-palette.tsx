@@ -13,6 +13,7 @@ import {
   Inbox,
   Mail,
   MailOpen,
+  Pencil,
   PenLine,
   Plug,
   Plus,
@@ -383,6 +384,13 @@ function Palette({
       icon: <Plus />,
       action: () => app.openDialog("connect"),
     },
+    ...list.map((account) => ({
+      id: `edit-${account.id}`,
+      group: "Mailboxes",
+      label: `Edit ${account.alias} mailbox…`,
+      icon: <Pencil />,
+      action: () => app.requestEditAccount(account),
+    })),
 
     {
       id: "settings",
