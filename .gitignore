@@ -56,6 +56,9 @@ apps/desktop/server/
 .claude/*
 !.claude/settings.json
 
+# Local Opencode config: personal tool permissions, never shared.
+opencode.json
+
 # Local build stamp and personal agent workflows. The name follows the
 # product; the two older ones are kept so an old checkout stays clean.
 apps/web/.boxaide-export
