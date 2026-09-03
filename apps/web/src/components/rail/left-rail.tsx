@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { WorkingMark } from "@/components/agent/agent-run";
 import { AccountRow, type AccountHealth } from "@/components/rail/account-row";
-import { AgentsSection } from "@/components/rail/agents-section";
+import { AgentsSection, RunningAgentRow } from "@/components/rail/agents-section";
 import { BrandMark } from "@/components/rail/brand-mark";
 import { ChatsSection, NewChatButton } from "@/components/rail/chats-section";
 import { FolderList } from "@/components/rail/folder-list";
@@ -216,6 +216,11 @@ export function LeftRail({
             ) : undefined
           }
         />
+        {/* The running agent sits directly under the row that opens its
+            conversation, with its Stop: ending a run must never require
+            finding and opening the Agents section at the bottom of the rail.
+            Setup and crashed agents stay down there. */}
+        <RunningAgentRow />
       </div>
 
       {/* The conversation list, directly under the row that opens it. Five
